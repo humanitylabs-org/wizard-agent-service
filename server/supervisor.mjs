@@ -17,7 +17,7 @@ const text = (value, max, field, optional = false) => {
 }
 const terminal = run => ['completed', 'failed', 'cancelled', 'interrupted'].includes(run?.status)
 const uid = prefix => `${prefix}_${randomUUID()}`
-// Wizard thread titles are "Project · Feature" within 32 characters. The service shortens, never a model;
+// Fixed Supervisor workflow labels fit within 32 characters; these are not automatic rename rules.
 // report/build titles (60 chars) stay intact in the ledger, only the thread label is fitted.
 export const THREAD_TITLE_MAX = 32
 const PREFIX = 'Supervisor · '
@@ -37,14 +37,14 @@ function fitTopic(topic, room) {
 export function supervisorThreadTitle(topic) {
   return PREFIX + (fitTopic(topic, THREAD_TITLE_MAX - PREFIX.length) || 'Review')
 }
-/** Builder briefs may carry their own "Project · Feature" title; fit it to the same 32-character rule. */
+/** Fit explicit builder/workflow labels; automatic project naming uses thread-titles.mjs. */
 export function builderThreadTitle(title) {
   const t = String(title ?? '').replace(/\s+/g, ' ').trim()
   if (/^supervisor\s*[·:]/iu.test(t) || !t.includes(' · ')) return supervisorThreadTitle(t)
   const [project, ...rest] = t.split(' · ')
   const p = project.trim().slice(0, 16)
-  const feature = fitTopic(rest.join(' · '), THREAD_TITLE_MAX - p.length - 3)
-  return feature ? `${p} · ${feature}` : supervisorThreadTitle(t)
+  const area = fitTopic(rest.join(' · '), THREAD_TITLE_MAX - p.length - 3)
+  return area ? `${p} · ${area}` : supervisorThreadTitle(t)
 }
 const PRIVATE = 'Supervisor refuses private or siloed agents (privacy-seal exemption); nothing was shared.'
 export { PRIVATE as SUPERVISOR_PRIVATE_REFUSAL }

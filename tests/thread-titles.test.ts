@@ -5,7 +5,9 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { STATUS_INSTRUCTIONS, parseStatus } from '../server/thread-status.mjs'
-import { ANCHOR_SECONDS, ThreadTitleStore, looksLikeSentence, normalizeTitle, titleContextLine, titleToApply } from '../server/thread-titles.mjs'
+import { ANCHOR_SECONDS, TITLE_INSTRUCTIONS, ThreadTitleStore, looksLikeSentence, normalizeTitle, titleContextLine, titleToApply } from '../server/thread-titles.mjs'
+import { kinds, scene } from '../qa/agent-parity/fixture.mjs'
+import { serverChecks } from '../qa/agent-parity/server-checks.mjs'
 import { WIZARD_RUN_INSTRUCTIONS, createWizardServer, listen } from '../server/service.mjs'
 
 const directories: string[] = []
@@ -18,50 +20,56 @@ const tempDir = async () => { const d = await mkdtemp(join(tmpdir(), 'wizard-tit
 const tag = (value: object) => `Reply.\n\n[WIZARD_STATUS_V1]${JSON.stringify(value)}[/WIZARD_STATUS_V1]`
 
 describe('title format', () => {
-  it('compacts proposals into a short Project · Feature label', () => {
-    expect(normalizeTitle('DeFleur - Captions')).toBe('DeFleur · Captions')
-    expect(normalizeTitle('Wizard OS: Thread titles.')).toBe('Wizard OS · Thread titles')
-    expect(normalizeTitle('"DeFleur — House style"')).toBe('DeFleur · House style')
+  it('compacts proposals into a short project label', () => {
+    expect(normalizeTitle('Wizard OS - Desktop')).toBe('Wizard OS · Desktop')
+    expect(normalizeTitle('Wizard OS: Phone app.')).toBe('Wizard OS · Phone app')
+    expect(normalizeTitle('"Wizard OS — Voice"')).toBe('Wizard OS · Voice')
     expect(normalizeTitle('  ')).toBe('')
-    const long = normalizeTitle('Wizard OS · An extremely long feature name that keeps going and going')
-    expect(long.length).toBeLessThanOrEqual(40)
+    const long = normalizeTitle('Wizard OS · An extremely long project name that keeps going and going')
+    expect(long.length).toBeLessThanOrEqual(32)
     expect(long.endsWith(' ')).toBe(false)
   })
 
   it('knows a sentence title from a label', () => {
     expect(looksLikeSentence('Review 0xMovez post on X')).toBe(true)
     expect(looksLikeSentence('Send voice note with text and images together')).toBe(true)
-    expect(looksLikeSentence('DeFleur · Captions')).toBe(false)
+    expect(looksLikeSentence('Wizard OS · Desktop')).toBe(false)
     expect(looksLikeSentence('Wizard Topics')).toBe(false)
   })
 
-  it('asks the agent for a title in the status line and to keep it unless the work changed', () => {
-    expect(STATUS_INSTRUCTIONS).toContain('"title":"Wizard OS · Desks"')
+  it('asks the agent for a title in the status line and to keep it unless the project changed', () => {
+    expect(STATUS_INSTRUCTIONS).toContain('"title":"Wizard OS · Desktop"')
     expect(STATUS_INSTRUCTIONS).toContain('Return the thread\'s current title exactly')
-    expect(WIZARD_RUN_INSTRUCTIONS).toContain('Project · Feature')
+    expect(WIZARD_RUN_INSTRUCTIONS).toContain('project-level label')
     expect(WIZARD_RUN_INSTRUCTIONS).toContain("hand that tab over with the Browser app's handoff tool")
-    expect(parseStatus(tag({ state: 'done', ask: 'Shipped', subject: 'DeFleur', title: 'DeFleur - Captions' }))).toEqual({ state: 'done', ask: 'Shipped', subject: 'DeFleur', title: 'DeFleur · Captions' })
+    expect(parseStatus(tag({ state: 'done', ask: 'Shipped', subject: 'DeFleur', title: 'Wizard OS - Desktop' }))).toEqual({ state: 'done', ask: 'Shipped', subject: 'DeFleur', title: 'Wizard OS · Desktop' })
     expect(parseStatus(tag({ state: 'done', ask: 'Shipped' }))).toEqual({ state: 'done', ask: 'Shipped' })
   })
 
-  // James: an old, finished feature must not keep naming a thread that now works on other features
-  // of the same app ("Messenger · Composer paste" while the thread built zoom, file sending, Select…).
-  it('renames a thread whose title names a finished feature while new features of the same app are built', () => {
-    expect(STATUS_INSTRUCTIONS).toContain('even inside the same app')
-    expect(STATUS_INSTRUCTIONS).toContain('a title naming a feature that is finished while the thread now works on others is outdated')
-    expect(STATUS_INSTRUCTIONS).not.toContain('Give a new title only when')
-    expect(titleToApply({ currentTitle: 'Messenger · Composer paste', proposed: 'Messenger · Chats features', record: { locked: false, appliedFor: null }, assistantAt: 1 })).toBe('Messenger · Chats features')
-    // The owner's own rename still wins.
-    expect(titleToApply({ currentTitle: 'Messenger · Composer paste', proposed: 'Messenger · Chats features', record: { locked: true, appliedFor: null }, assistantAt: 1 })).toBe('')
+  it('names the project home, broadens legacy features once and never narrows a project for a sub-ask', () => {
+    expect(TITLE_INSTRUCTIONS).toContain('project-level label')
+    expect(TITLE_INSTRUCTIONS).toContain('one to four words and at most 32 characters')
+    expect(TITLE_INSTRUCTIONS).toContain('only when the project itself changes')
+    expect(TITLE_INSTRUCTIONS).toContain('one-time broadening')
+    expect(TITLE_INSTRUCTIONS).not.toContain('or to a different feature')
+    expect(TITLE_INSTRUCTIONS).not.toContain('the project, then the feature')
+    expect(TITLE_INSTRUCTIONS).not.toContain('Messenger · Chats features')
+    const decide = (currentTitle: string, proposed: string, locked = false) => titleToApply({ currentTitle, proposed, record: { locked, appliedFor: null }, assistantAt: 1 })
+    expect(decide('Messenger', 'Messenger · Settings buttons')).toBe('')
+    expect(decide('Messenger #2', 'Messenger · Composer paste')).toBe('')
+    expect(decide('Messenger · Composer paste', 'Messenger')).toBe('Messenger')
+    expect(decide('Messenger · Composer paste', 'Messenger', true)).toBe('')
+    expect(decide('Messenger', 'Video Editor')).toBe('Video Editor')
+    expect(decide('Wizard OS · Desktop', 'Wizard OS · Phone app')).toBe('Wizard OS · Phone app')
   })
 })
 
 describe('when a title changes', () => {
-  it('renames only on a different project or feature, once per reply, never over a lock', () => {
-    expect((titleToApply as any)({ currentTitle: 'DeFleur · Captions', proposed: 'DeFleur · Captions', record: null, assistantAt: 1 })).toBe('')
-    expect((titleToApply as any)({ currentTitle: 'DeFleur · Captions', proposed: 'deFleur · captions', record: null, assistantAt: 1 })).toBe('')
-    expect((titleToApply as any)({ currentTitle: 'DeFleur · Captions #2', proposed: 'DeFleur · Captions', record: null, assistantAt: 1 })).toBe('')
-    expect((titleToApply as any)({ currentTitle: 'Review 0xMovez post on X', proposed: 'DeFleur · Video pipeline', record: null, assistantAt: 1 })).toBe('DeFleur · Video pipeline')
+  it('renames only on a different project, once per reply, never over a lock', () => {
+    expect((titleToApply as any)({ currentTitle: 'Wizard OS · Desktop', proposed: 'Wizard OS · Desktop', record: null, assistantAt: 1 })).toBe('')
+    expect((titleToApply as any)({ currentTitle: 'Wizard OS · Desktop', proposed: 'wizard os · desktop', record: null, assistantAt: 1 })).toBe('')
+    expect((titleToApply as any)({ currentTitle: 'Wizard OS · Desktop #2', proposed: 'Wizard OS · Desktop', record: null, assistantAt: 1 })).toBe('')
+    expect((titleToApply as any)({ currentTitle: 'Review 0xMovez post on X', proposed: 'DeFleur', record: null, assistantAt: 1 })).toBe('DeFleur')
     expect((titleToApply as any)({ currentTitle: 'A', proposed: 'B project', record: { locked: true }, assistantAt: 1 })).toBe('')
     expect((titleToApply as any)({ currentTitle: 'A', proposed: 'B project', record: { appliedFor: 7 }, assistantAt: 7 })).toBe('')
   })
@@ -75,17 +83,17 @@ describe('when a title changes', () => {
     expect(store.visibleHistory('s1')).toEqual([])
     // Days later the work moves: the thread marks where.
     now += 2 * 86400
-    store.recordRename('s1', { from: 'Wizard OS · Voice notes', to: 'DeFleur · Captions', by: 'agent', assistantAt: 2 })
+    store.recordRename('s1', { from: 'Wizard OS · Voice notes', to: 'Wizard OS · Desktop', by: 'agent', assistantAt: 2 })
     expect(store.visibleHistory('s1').map((r: any) => r.from)).toEqual(['Wizard OS · Voice notes'])
-    expect(new ThreadTitleStore(path).get('s1')?.title).toBe('DeFleur · Captions')
+    expect(new ThreadTitleStore(path).get('s1')?.title).toBe('Wizard OS · Desktop')
     // James renames: locked.
-    store.recordRename('s1', { from: 'DeFleur · Captions', to: 'Captions', by: 'you' })
+    store.recordRename('s1', { from: 'Wizard OS · Desktop', to: 'Captions', by: 'you' })
     expect(store.get('s1')?.locked).toBe(true)
     expect(ANCHOR_SECONDS).toBe(1800)
   })
 
   it('tells each run what the thread is called', () => {
-    expect(titleContextLine('DeFleur · Captions', {})).toContain('“DeFleur · Captions”')
+    expect(titleContextLine('Wizard OS · Desktop', {})).toContain('“Wizard OS · Desktop”')
     const locked = titleContextLine('Captions', { locked: true })
     expect(locked).toContain('“Captions”, and that title is fixed')
     expect(locked).not.toMatch(/James|himself|herself/u)
@@ -105,7 +113,7 @@ describe('the Agent Service applies titles through Hermes', () => {
     `)
     state.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?)').run('wizard_t1', now - startedAgo, 'Review 0xMovez post on X', titleSource)
     state.close()
-    const reply = { title: 'DeFleur · Video pipeline' }
+    const reply = { title: 'DeFleur' }
     const patches: Array<{ id: string, body: any }> = []
     const runs: any[] = []
     const upstream = createServer(async (req, res) => {
@@ -163,11 +171,11 @@ describe('the Agent Service applies titles through Hermes', () => {
   it('renames a sentence-titled thread from the status line once, then marks it in the thread only', async () => {
     const { list, patches } = await fixture()
     await list(); await settle()
-    expect(patches).toEqual([{ id: 'wizard_t1', body: { title: 'DeFleur · Video pipeline' } }])
+    expect(patches).toEqual([{ id: 'wizard_t1', body: { title: 'DeFleur' } }])
     const row = await list(); await settle()
-    expect(row.title).toBe('DeFleur · Video pipeline')
+    expect(row.title).toBe('DeFleur')
     expect(row.wizard_title_was).toBeUndefined()
-    expect(row.wizard_title_renames).toEqual([expect.objectContaining({ from: 'Review 0xMovez post on X', to: 'DeFleur · Video pipeline', by: 'agent' })])
+    expect(row.wizard_title_renames).toEqual([expect.objectContaining({ from: 'Review 0xMovez post on X', to: 'DeFleur', by: 'agent' })])
     expect(patches).toHaveLength(1)
   })
 
@@ -189,4 +197,18 @@ describe('the Agent Service applies titles through Hermes', () => {
     expect(sent.ok).toBe(true)
     expect(String(runs[0].instructions)).toContain('This thread is currently titled “Review 0xMovez post on X”.')
   })
+})
+
+// Real Service HTTP routes; disposable synthetic runtimes, never existing owner agents.
+describe('project-title runtime parity', () => {
+  for (const kind of kinds) {
+    it(`delivers and applies the same project rule on ${kind}`, async () => {
+      const s = await scene(kind)
+      try {
+        const created = await s.request('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: 'wizard_parity', source: 'wizard-mobile' }) })
+        expect(created.status).toBe(201)
+        await serverChecks['automatic-titles'](s)
+      } finally { await s.close() }
+    })
+  }
 })

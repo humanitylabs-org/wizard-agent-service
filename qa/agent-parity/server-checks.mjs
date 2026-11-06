@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { TITLE_INSTRUCTIONS } from '../../server/thread-titles.mjs'
 import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -732,17 +733,27 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
   'automatic-titles': async s => {
     const row = s.sessions.get('wizard_parity'); row.hidden = false
     const add = title => row.messages.push({ role: 'assistant', content: `Synthetic answer\n[WIZARD_STATUS_V1] ${JSON.stringify({ state: 'done', ask: 'Synthetic outcome', title, subject: 'Parity QA' })}[/WIZARD_STATUS_V1]`, timestamp: Date.now() / 1000 + row.messages.length })
-    add('Parity · Titles')
-    await s.request('/api/sessions?view=list')
-    // Main applies canonical title proposals asynchronously; routed PATCH completes during projection.
-    for (let n = 0; n < 30 && row.title !== 'Parity · Titles'; n++) await new Promise(resolve => setTimeout(resolve, 20))
-    assert.equal(row.title, 'Parity · Titles')
+    const project = async (proposal, expected) => {
+      add(proposal)
+      await s.request('/api/sessions?view=list')
+      // Main applies canonical proposals asynchronously; routed PATCH completes during projection.
+      for (let n = 0; n < 30 && row.title !== expected; n++) await new Promise(resolve => setTimeout(resolve, 20))
+      // Also let an incorrectly accepted narrowing finish before asserting stability.
+      await new Promise(resolve => setTimeout(resolve, 30))
+      assert.equal(row.title, expected, `${s.kind}: ${proposal}`)
+    }
+    await project('Messenger · Composer paste', 'Messenger · Composer paste')
+    await project('Messenger', 'Messenger') // one-time legacy broadening
+    await project('Messenger · Settings buttons', 'Messenger') // not a project change
     await s.restart()
-    assert.equal((await (await s.request('/api/sessions?view=list')).json()).data[0].title, 'Parity · Titles')
-    const rename = await s.request('/api/sessions/wizard_parity', { ...post({ title: 'Owner · Chosen' }), method: 'PATCH' }); assert.equal(rename.status, 200)
-    add('Must Not Replace')
-    await s.request('/api/sessions?view=list'); await new Promise(resolve => setTimeout(resolve, 30))
-    assert.equal(row.title, 'Owner · Chosen')
+    assert.equal((await (await s.request('/api/sessions?view=list')).json()).data[0].title, 'Messenger')
+    await admit(s, { input: 'Synthetic next feature in the same project' })
+    assert.ok(sent(s).instructions.includes(TITLE_INSTRUCTIONS), `${s.kind}: actual upstream run gets the shared project rule`)
+    assert.ok(sent(s).instructions.includes('This thread is currently titled “Messenger”.'))
+    assert.ok(!sent(s).instructions.includes('or to a different feature'))
+    await project('Video Editor', 'Video Editor') // genuine project move
+    const rename = await s.request('/api/sessions/wizard_parity', { ...post({ title: 'Owner chosen' }), method: 'PATCH' }); assert.equal(rename.status, 200)
+    await project('Must Not Replace', 'Owner chosen')
   },
   'subjects': async s => {
     const row = s.sessions.get('wizard_parity'); row.hidden = false
