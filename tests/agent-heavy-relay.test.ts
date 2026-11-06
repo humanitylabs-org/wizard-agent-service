@@ -128,7 +128,9 @@ it.each(['host-profile', 'container', 'restricted'])('preserves heavy authority 
   s.states.originDone = true; s.states.workerDone = true
   await s.heavy.queue.tick()
   const posted = s.posts.find(p => p.headers.get('idempotency-key') === `wizard-heavy-${receipt.job_id}`)!
-  expect(posted.body.input).toContain('within the original authorization')
+  expect(posted.body.input).toContain("thread's five-failed-run limit, including failures in your own tests/harness")
+  expect(posted.body.input).toContain('If product behaviour already passed, ship it and report rather than repairing test scaffolding.')
+  expect(posted.body.input).toContain('After five failed runs, stop and report what works and the blocker.')
   expect(posted.body.input).toContain('Preserve explicit owner approval gates; new scope still needs authorization.')
   expect(posted.body.require_model_lock).toBe(true)
 })
