@@ -1407,6 +1407,16 @@
       "policy_exemptions": []
     },
     {
+      "id": "chat-tweak-card",
+      "description": "A reply carrying [WIZARD_TWEAK_V1] shows Settings › Look's own live switch for that tweak in the message, for main and routed threads; the marker never shows as text in the thread, copy, streaming answer or Chats list preview.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/chat-tweak-card.test.mjs: the same history and list rows for main, host-profile, container and restricted threads parse to the same tweak ids, render the same switch card bound to current WosExperience state, and strip the marker from the full-list preview; a tap toggles the device's Look once. In this repo tests/session-list-view.node.mjs proves the slim Chats list preview strips the marker (complete and cut off) for all four kinds. The Service passes the marker through history unchanged for every kind. Synthetic source-executed evidence; browser cells in wizard-ux/tests/qa-chat-tweak-card.cjs.",
+      "source_refs": ["wizard-ux/web/core/chat-kit.js", "wizard-ux/web/core/chats.js", "wizard-ux/web/core/settings.js", "wizard-ux/web/live.js", "server/session-list-view.mjs"],
+      "reference_tests": ["wizard-ux/tests/chat-tweak-card.test.mjs", "wizard-ux/tests/qa-chat-tweak-card.cjs", "tests/session-list-view.node.mjs"],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "synced-list-ops",
       "description": "Shared Chats lists (Spaces and their members, subject order, pins) keep every device's and agent's change for main and routed threads: edits are item operations applied atomically by the service, never a device's whole cached list, so a stale or simultaneous device cannot drop another's edit.",
       "layer": "ux",
