@@ -22,7 +22,7 @@ const ITEM_ID = /^[a-z0-9][a-z0-9-]{0,39}$/u
 const THREAD_ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/u
 const STATE_ALIASES = { needs: 'needs_you', needsyou: 'needs_you', waiting: 'needs_you', working: 'running', in_progress: 'running', inprogress: 'running', complete: 'done', completed: 'done', finished: 'done', broken: 'blocked', failed: 'blocked' }
 
-export const ITEMS_INSTRUCTIONS = `Thread tracker is on for this owner. Add an "items" array to the same final WIZARD_STATUS_V1 JSON listing every separate ask this reply covers or changes (at most ${MAX_ITEMS_PER_REPLY}), each {"id","title","state"}: id is a short lowercase slug (letters, digits, hyphens) that you reuse in every later reply about the same ask, so the tracker updates that ask instead of adding another; title is at most 40 characters of plain words the owner would recognise; state is running (you are still working on it, for example background work started), needs_you (the owner must decide, approve, try or do one thing), done (finished and verified), or blocked (broken or stuck on something outside both of you). An ask is anything the owner asked for in this thread, including mid-turn additions and plain questions: a question you answer is an ask in state done. Every reply that answers, starts, finishes or changes an ask must list it, even a quick answer; an ask the owner raised that is not yet listed must be added (in the reply that handles it, or as running if it is still waiting). If there are more than ${MAX_ITEMS_PER_REPLY} asks to list, list the open asks first (running, needs_you or blocked); asks answered earlier need not be repeated. List only asks this reply starts or changes, plus any unlisted open asks. Leave items out only for pure conversation with no ask.`
+export const ITEMS_INSTRUCTIONS = `Thread tracker is on for this owner. Add an "items" array to the same final WIZARD_STATUS_V1 JSON listing every separate ask this reply covers or changes (at most ${MAX_ITEMS_PER_REPLY}), each {"id","title","state"}: id is a short lowercase slug (letters, digits, hyphens) that you reuse in every later reply about the same ask, so the tracker updates that ask instead of adding another; title is at most 40 characters of plain words the owner would recognise; state is running (you are still working on it, for example background work started), needs_you (the owner must decide, approve, try or do one thing), done (finished and verified), or blocked (broken or stuck on something outside both of you). An ask is anything the owner asked for in this thread, including mid-turn additions and plain questions: a question you answer is an ask in state done. Every reply that answers, starts, finishes or changes an ask must list it, even a quick answer; an ask the owner raised that is not yet listed must be added (in the reply that handles it, or as running if it is still waiting). If there are more than ${MAX_ITEMS_PER_REPLY} asks to list, list the open asks first (running, needs_you or blocked); asks answered earlier need not be repeated. List only asks this reply starts or changes, plus any unlisted open asks. Leave items out only for pure conversation with no ask. An item is needs_you only when there is one specific thing for the owner to do; its title and optional ask text must name that action (for example, 'Reply resend to send it'); optional follow-ups are done. Include an optional ask field with the specific action when its title alone is not enough.`
 
 const clip = (value, max) => {
   const text = String(value ?? '').replace(/\s+/gu, ' ').trim()
@@ -40,7 +40,8 @@ export function normalizeItems(value) {
     const state = ITEM_STATES.has(key) ? key : STATE_ALIASES[key] ?? ''
     const title = clip(raw.title, 40)
     if (!ITEM_ID.test(id) || !state || !title) continue
-    byId.set(id, { id, title, state }) // the last mention of an id inside one reply wins
+    const ask = clip(raw.ask || raw.summary, 280)
+    byId.set(id, { id, title, state, ...(ask ? { ask } : {}) }) // the last mention of an id inside one reply wins
   }
   return [...byId.values()]
 }
@@ -64,7 +65,7 @@ const keyOf = (agent, thread) => `${agent || 'hermes'}/${thread}`
 // Read projection only: custody stays per ask id. Unknown/malformed anchors never coalesce.
 const anchorKey = value => typeof value === 'string' && value.trim() ? value
   : typeof value === 'number' && Number.isFinite(value) ? String(value) : null
-const itemKind = (item, seenFor) => seenFor(item) && (item.state === 'done' || (item.state === 'needs_you' && item.try)) ? 'acknowledged'
+const itemKind = (item, seenFor) => seenFor(item) && (item.state === 'done' || item.state === 'needs_you') ? 'acknowledged'
   : item.state === 'done' ? 'done_unseen' : item.state === 'blocked' ? 'blocked' : item.state === 'needs_you' ? 'needs_you' : 'running'
 const urgency = { blocked: 0, needs_you: 1, running: 2, done_unseen: 3, acknowledged: 4 }
 export const groupItems = (items, seenFor = item => item.seen_at >= item.updated_at) => {
@@ -123,13 +124,13 @@ export class ThreadItemStore {
     for (const item of valid) {
       const old = current.items[item.id]
       const mid = messageId == null || messageId === '' ? null : String(messageId).slice(0, 128)
-      const record = { id: item.id, title: item.title, state: item.state, ...(item.state === 'needs_you' && tryIt ? { try: true } : {}), message_id: mid, at: when }
+      const record = { id: item.id, title: item.title, state: item.state, ...(item.ask ? { ask: item.ask } : {}), ...(item.state === 'needs_you' && tryIt ? { try: true } : {}), message_id: mid, at: when }
       if (!old) {
         current.items[item.id] = { ...record, created_at: when, updated_at: when, seen_at: 0 }
         changed = true
       } else if (when > old.at) {
         // A restatement of an unchanged ask is not an update: it keeps its anchor and its Seen mark.
-        if (old.state === item.state && old.title === item.title) continue
+        if (old.state === item.state && old.title === item.title && (old.ask || '') === (item.ask || '')) continue
         current.items[item.id] = { ...record, created_at: old.created_at, updated_at: when, seen_at: old.seen_at || 0 }
         changed = true
       } else if (when === old.at && mid && old.message_id !== mid) {
@@ -178,17 +179,22 @@ export class ThreadItemStore {
   }
 
   /** Mark asks seen (the owner's ✓). Unknown ids are ignored; a later update to the ask makes it unseen again. */
-  markSeen(agent, thread, ids) {
+  markSeen(agent, thread, ids, { versioned = false } = {}) {
     const record = this.data.threads[keyOf(agent, thread)]
-    if (!record || !Array.isArray(ids)) return false
-    const at = this.now()
+    if (!Array.isArray(ids)) return versioned ? [] : false
+    const at = this.now(), results = []
     let changed = false
-    for (const id of ids.slice(0, MAX_ITEMS_PER_THREAD)) {
-      const item = typeof id === 'string' ? record.items[id] : null
-      if (item && !(item.seen_at >= item.updated_at)) { item.seen_at = Math.max(at, item.updated_at); changed = true }
+    // Compare and mutate synchronously, with no await between version validation and
+    // the atomic ledger replacement. A delayed client cannot acknowledge a new reply.
+    for (const entry of ids.slice(0, MAX_ITEMS_PER_THREAD)) {
+      const id = versioned ? entry?.id : entry
+      const item = typeof id === 'string' ? record?.items[id] : null
+      const matches = item && (!versioned || Number.isFinite(entry?.updated_at) && item.updated_at === entry.updated_at)
+      if (versioned && typeof id === 'string') results.push({ id, status: matches ? 'acknowledged' : 'stale' })
+      if (matches && !(item.seen_at >= item.updated_at)) { item.seen_at = Math.max(at, item.updated_at); changed = true }
     }
     if (changed) this.#save()
-    return changed
+    return versioned ? results : changed
   }
 
   /** What the agent is told about this thread's tracker, so it reuses ids instead of inventing new ones. */
