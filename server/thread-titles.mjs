@@ -1,10 +1,9 @@
-// Thread titles: short "Project · Feature" names that stay put until the work really changes.
+// Thread titles: broad project homes, stable across every sub-ask, feature and fix.
 //
 // The agent proposes a title in its hidden status line ([WIZARD_STATUS_V1] {..., "title": ...}) and is
-// told to repeat the current title exactly unless the thread moved to a different project or feature.
+// told to repeat the current title exactly unless the project itself changes (or a legacy title needs broadening).
 // The Agent Service applies a changed proposal once per final reply through Hermes's own session PATCH,
-// so Hermes stays the canonical title. Every rename is remembered here so the chat list can show
-// "was: <old title>" for a few days and the thread can say "Renamed from …".
+// so Hermes stays the canonical title. Every rename is remembered for the in-thread "Renamed from …" note.
 //
 // A title the owner sets (a rename from a Wizard client, or any user-authority title Hermes holds
 // that the agent did not write) locks the thread: the agent's proposals are ignored from then on.
@@ -14,7 +13,7 @@ import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { migrateOptionalJson, atomicStoreWrite, qualifyRawThreadRecords } from './thread-reference.mjs'
 
-export const TITLE_MAX = 40
+export const TITLE_MAX = 32
 // A title that was on screen for less than this before being replaced was never a recognition anchor
 // (typically the opener's sentence title, replaced by the first final reply), so the thread marks no rename.
 export const ANCHOR_SECONDS = 30 * 60
@@ -22,7 +21,7 @@ const HISTORY_MAX = 8
 const ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/
 const LEADING_VERB = /^(?:review|reviewing|fix|fixing|build|building|send|sending|make|making|add|adding|create|creating|update|updating|check|checking|find|finding|help|helping|investigate|investigating|explore|exploring|discuss|discussing|plan|planning|set up|setting up|setup|write|writing)\s+/iu
 
-export const TITLE_INSTRUCTIONS = 'title names the thread on the chat list: the project, then the feature or piece of work, written "Project · Feature" in two to four words and at most 32 characters (for example "DeFleur · Captions" or "Wizard OS · Thread titles"). It is a label, never a sentence: no leading verb such as Review, Fix, Build or Send, no trailing period, no emoji. Return the thread\'s current title exactly while the latest request is still the work it names; progress, fixes and refinements of that work never change it. Give a new title when the thread has moved to a different project or to a different feature, even inside the same app: a title naming a feature that is finished while the thread now works on others is outdated, so name the current feature or what the recent features share (for example "Messenger · Chats features"). Also give a new title when the current title is a sentence or does not follow this form.'
+export const TITLE_INSTRUCTIONS = "title names the thread on the chat list: a broad project-level label for the home where the owner can keep all related work, in one to four words and at most 32 characters. Name one app (\"Messenger\", \"Video Editor\", \"DeFleur\"), one long-lived surface of a bigger product (\"Wizard OS · Desktop\", \"Wizard OS · Phone app\", \"Wizard OS · Voice\"), or one sustained project or life area (\"TSR podcast\", \"Tokyo trip\"). Use \" · \" only for a long-lived surface or area of a bigger product, never for a feature, fix, bug, ask or task: not \"Messenger · Settings buttons\" or \"Wizard OS · Thread tracker\". It is a label, never a sentence: no leading verb such as Review, Fix, Build or Send, no trailing period, no emoji. Return the thread's current title exactly as long as the work still belongs to that project, however many sub-asks, features or fixes pass through. Give a new title only when the project itself changes. Exception: a title naming a single feature, fix or sub-task is outdated; replace it once with its project as a one-time broadening, not with another feature. Also replace a sentence title with its project label. Owner-set titles stay fixed."
 
 const squash = (value) => String(value ?? '').replace(/[\u0000-\u001f\u007f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/gu, '').replace(/\s+/gu, ' ').trim()
 
@@ -30,7 +29,7 @@ const squash = (value) => String(value ?? '').replace(/[\u0000-\u001f\u007f\u200
 export function normalizeTitle(value) {
   let title = squash(value).replace(/^["'“”‘’`]+|["'“”‘’`]+$/gu, '').replace(/[.!?。]+$/u, '').trim()
   if (!title) return ''
-  // "Project - Feature" / "Project: Feature" / "Project — Feature" → "Project · Feature"
+  // Normalize legacy separators; their meaning is governed by the project-level instructions.
   title = title.replace(/\s+(?:[-–—|:]|·|•)\s+/gu, ' · ').replace(/^([^·:]{2,24}):\s+/u, '$1 · ')
   if (title.length > TITLE_MAX) {
     const cut = title.slice(0, TITLE_MAX + 1)
@@ -47,7 +46,7 @@ export function looksLikeSentence(title) {
   const text = squash(title)
   if (!text) return true
   if (LEADING_VERB.test(text)) return true
-  return text.split(' ').length > 6 && !text.includes('·')
+  return text.replace(/\s*#\d+$/u, '').split(/\s+/u).filter(word => word !== '·').length > 4
 }
 
 export function readSessionTitle(sessionDbPath, sessionId) {
@@ -75,8 +74,8 @@ export function titleContextLine(current, record) {
   const title = squash(current)
   // No person's name here: this line reaches every owner's agent, and a fixed title may come from code (onboarding).
   if (record?.locked) return `This thread is titled “${title}”, and that title is fixed: put exactly that in the status line's title.`
-  if (!title) return 'This thread has no title yet: give one in the status line.'
-  return `This thread is currently titled “${title}”.`
+  if (!title) return 'This thread has no title yet: give its broad project label in the status line.'
+  return `This thread is currently titled “${title}”. Keep it exactly for all work in this project; rename only for a different project, or broaden a legacy feature/sentence title once to its project.`
 }
 
 const validEntry = (entry) => entry && typeof entry.from === 'string' && typeof entry.to === 'string'
@@ -176,6 +175,12 @@ export function titleToApply({ currentTitle, proposed, record, assistantAt }) {
   if (assistantAt !== null && assistantAt !== undefined && record?.appliedFor === assistantAt) return ''
   const next = normalizeTitle(proposed)
   if (!next || next.length < 3) return ''
-  if (titleKey(next) === titleKey(currentTitle)) return ''
+  const currentKey = titleKey(currentTitle)
+  const nextKey = titleKey(next)
+  if (nextKey === currentKey) return ''
+  // A narrower proposal is not evidence of a project change. Keep the existing home
+  // even if the model drifts into Project · Feature (including suffixed canonical titles).
+  // Semantic project changes and legacy broadening remain the shared prompt's job.
+  if (currentKey && nextKey.startsWith(`${currentKey} · `)) return ''
   return next
 }

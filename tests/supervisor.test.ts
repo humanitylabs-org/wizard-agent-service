@@ -20,28 +20,23 @@ function fixture(extra = {}) {
 afterEach(async () => { for (const s of services.splice(0)) await s.close(); for (const r of roots.splice(0)) rmSync(r, { recursive: true, force: true }) })
 
 describe('Supervisor thread titles', () => {
-  it('review thread titles are Supervisor · <topic> within 32 characters', async () => {
-    const fits = (t: string) => { expect(t.startsWith('Supervisor · ')).toBe(true); expect(t.length).toBeLessThanOrEqual(32) }
-    expect(supervisorThreadTitle('Shared names: Supervisor, Reporter, Maintenance')).toBe('Supervisor · Shared names')
-    const long = supervisorThreadTitle('Review thread titles too long'); fits(long)
-    expect(long).toBe('Supervisor · Review thread') // whole words, no trailing stop word, no ellipsis
-    const word = supervisorThreadTitle('x'.repeat(60)); fits(word); expect(word).toBe('Supervisor · ' + 'x'.repeat(19))
-    expect(supervisorThreadTitle('')).toBe('Supervisor · Review')
-    expect(supervisorThreadTitle('Supervisor: titles of the')).toBe('Supervisor · titles')
-    expect(builderThreadTitle('Supervisor · Short thread titles for every review')).toBe('Supervisor · Short thread titles')
-    const plain = builderThreadTitle('Fix the review thread title length rule'); fits(plain); expect(plain).not.toMatch(/\s(the|of|to|for)$/)
-    const own = builderThreadTitle('Wizard OS · Supervisor thread titles within limit')
-    expect(own).toBe('Wizard OS · Supervisor thread'); expect(own.length).toBeLessThanOrEqual(32)
+  it('uses the Supervisor project without turning report topics into thread features', async () => {
+    for (const topic of ['Shared names: Supervisor, Reporter, Maintenance', 'Review thread titles too long', 'x'.repeat(60), '', 'Supervisor: titles of the']) {
+      expect(supervisorThreadTitle(topic)).toBe('Supervisor')
+    }
+    expect(builderThreadTitle('Supervisor · Short thread titles for every review')).toBe('Supervisor')
+    expect(builderThreadTitle('Fix the review thread title length rule')).toBe('Supervisor')
+    expect(builderThreadTitle('Messenger')).toBe('Messenger')
+    expect(builderThreadTitle('Wizard OS · Desktop')).toBe('Wizard OS · Desktop')
     const f = fixture()
     f.s.call('report', { ...feedback(), title: 'Shared names: Supervisor, Reporter, Maintenance' }, worker())
     await f.s.tick()
     const opened = f.sent.filter(o => o.createThread)
-    expect(opened).toHaveLength(1); fits(opened[0].title); expect(opened[0].title).toBe('Supervisor · Shared names')
-    expect(f.s.reportBy(f.review().report).title).toBe('Shared names: Supervisor, Reporter, Maintenance') // ledger keeps the full title
+    expect(opened).toHaveLength(1); expect(opened[0].title).toBe('Supervisor')
+    expect(f.s.reportBy(f.review().report).title).toBe('Shared names: Supervisor, Reporter, Maintenance')
     f.s.call('build', { title: 'Supervisor · Review thread titles too long for the list', brief: 'Fit titles.' }, f.reviewCaller())
     await f.s.tick()
-    const builder = f.sent.filter(o => o.createThread)[1]
-    fits(builder.title); expect(builder.title).toBe('Supervisor · Review thread')
+    expect(f.sent.filter(o => o.createThread)[1].title).toBe('Supervisor')
     expect(JSON.parse(f.s.rows('builds')[0].data).title).toBe('Supervisor · Review thread titles too long for the list')
   })
 })
