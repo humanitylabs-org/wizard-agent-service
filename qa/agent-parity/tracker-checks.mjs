@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { post, scene } from './fixture.mjs'
+import { ITEMS_INSTRUCTIONS } from '../../server/thread-items.mjs'
 
 // Thread tracker (owner tweak, off by default), proved on every runtime kind: the reply's asks reach the
 // ledger, the reply row never shows them, a quote reply tells the agent what it answers, and with the tweak
@@ -21,6 +22,7 @@ const read = async s => {
 const counts = async s => (await (await s.raw('/wizard/v1/thread-items/counts')).json()).threads
 const items = async s => (await s.raw(`/wizard/v1/thread-items?thread=wizard_parity&agent=${s.id || 'hermes'}`)).json()
 const sentInput = s => JSON.stringify(s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body.input)
+const sentInstructions = s => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body.instructions || ''
 
 export const trackerChecks = {
   'thread-tracker': async s => {
@@ -40,6 +42,12 @@ export const trackerChecks = {
     assert.equal(groupSeen.status, 200)
     assert.deepEqual((await counts(s))[key(s)], { needs_you: 0, running: 0, done_unseen: 0, blocked: 0, acknowledged: 1, total: 1 })
     const sent = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: quote(logo.message_id) })); assert.equal(sent.status, 202)
+    const instructions = sentInstructions(s)
+    assert.ok(instructions.includes(ITEMS_INSTRUCTIONS), `${s.kind}: the actual upstream run receives the full tracker contract`)
+    for (const rule of ['Every reply that answers, starts, finishes or changes an ask must list it, even a quick answer', 'a question you answer is an ask in state done', 'mid-turn additions', 'at most 16', 'list the open asks first', 'asks answered earlier need not be repeated']) {
+      assert.ok(instructions.includes(rule), `${s.kind}: missing mandatory rule: ${rule}`)
+    }
+    assert.ok(!instructions.includes('Optionally add'), 'listing asks is mandatory')
     assert.match(sentInput(s), /Replying to an earlier message about “Pick a logo”: \\"Which logo\?\\"/)
     // A run that finishes while its thread is closed still lists its asks (no history read opens the thread)
     const other = await s.request('/api/sessions', post({ id: 'wizard_done', source: 'wizard-mobile', hidden: true })); assert.equal(other.status, 201)
@@ -51,16 +59,20 @@ export const trackerChecks = {
     let doneCounts
     for (let i = 0; i < 40; i++) { doneCounts = (await counts(s))[`${s.id || 'hermes'}/wizard_done`]; if (doneCounts) break; await new Promise(r => setTimeout(r, 25)) }
     assert.equal(doneCounts?.total, 1, 'a completed reply counts once without opening its thread')
-    const off = await scene(s.kind, { threadTracker: false })
-    try {
-      await prime(off)
-      await read(off)
-      assert.deepEqual(await counts(off), {}, 'off: nothing is recorded or shown')
-      assert.deepEqual((await items(off)).items, [])
-      const seenOff = await off.raw('/wizard/v1/thread-items/seen', { ...post({ thread: 'wizard_parity', agent: off.id || 'hermes', ids: ['logo'] }) })
-      assert.equal(seenOff.status, 200); assert.deepEqual((await seenOff.json()).items, [])
-      const plain = await off.request('/v1/runs', post({ session_id: 'wizard_parity', input: quote('a1') })); assert.equal(plain.status, 202)
-      assert.ok(!sentInput(off).includes('Replying to an earlier message'), 'off: the quote reaches the agent exactly as the owner sent it')
-    } finally { await off.close() }
+    for (const setting of [false, undefined]) {
+      const off = await scene(s.kind, setting === undefined ? {} : { threadTracker: setting })
+      try {
+        await prime(off)
+        await read(off)
+        assert.deepEqual(await counts(off), {}, 'off: nothing is recorded or shown')
+        assert.deepEqual((await items(off)).items, [])
+        const seenOff = await off.raw('/wizard/v1/thread-items/seen', { ...post({ thread: 'wizard_parity', agent: off.id || 'hermes', ids: ['logo'] }) })
+        assert.equal(seenOff.status, 200); assert.deepEqual((await seenOff.json()).items, [])
+        const plain = await off.request('/v1/runs', post({ session_id: 'wizard_parity', input: quote('a1') })); assert.equal(plain.status, 202)
+        assert.ok(!sentInstructions(off).includes('Thread tracker'), 'off or absent: no tracker instructions reach the runtime')
+        assert.ok(!sentInstructions(off).includes('"items"'), 'off or absent: no items contract reaches the runtime')
+        assert.ok(!sentInput(off).includes('Replying to an earlier message'), 'off: the quote reaches the agent exactly as the owner sent it')
+      } finally { await off.close() }
+    }
   },
 }
