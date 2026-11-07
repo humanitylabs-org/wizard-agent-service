@@ -24,7 +24,7 @@ export async function withServer(path,fn,opts={}) {
   res.setHeader('content-type','application/json')
   if(req.url==='/v1/capabilities'){await opts.capability?.();res.end('{}');return}
   if(req.method==='POST'&&req.url==='/v1/runs'){let text='';for await(const c of req)text+=c;launches++;bodies.push({body:JSON.parse(text),headers:req.headers});res.writeHead(202);res.end(JSON.stringify({run_id:'actual_review',status:'running'}));return}
-  res.end(JSON.stringify({run_id:'actual_review',status:'completed'}))
+  res.end(JSON.stringify({run_id:'actual_review',status:opts.upstreamRunStatus?.(req.url)??'completed'}))
  })
  await listen(upstream)
  const make=()=>createWizardServer({hermesStatePath:path,sessionDbPath:path,hermesKey:'test-only',upstreamOrigin:`http://127.0.0.1:${upstream.address().port}`,requireAccess:false,joinedDelegation:'off',followThrough:false,...opts})
