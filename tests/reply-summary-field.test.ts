@@ -132,4 +132,52 @@ describe('reply summary on Wizard history rows', () => {
     expect(bodies[1].instructions).toContain('at most 300 characters')
     expect(bodies[1].instructions).not.toContain('at most 140 characters')
   })
+  it('an Operator worker (the reply the owner reads) carries the chosen ask budget', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'reply-summary-operator-'))
+    directories.push(directory)
+    updateUiPreferences(join(directory, 'ui-preferences.json'), { replySummary: { on: true, start: 'collapsed', length: 'line' } })
+    let workerSessionId = ''
+    const runs: any[] = []
+    const upstream = createServer(async (req, res) => {
+      const url = new URL(req.url ?? '/', 'http://fixture.local')
+      const chunks: Buffer[] = []
+      for await (const chunk of req) chunks.push(Buffer.from(chunk))
+      const body = chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}
+      res.setHeader('Content-Type', 'application/json')
+      const detail = url.pathname.match(/^\/api\/sessions\/([^/]+)$/)
+      if (req.method === 'GET' && detail) { res.writeHead(404).end('{}'); return }
+      if (req.method === 'POST' && url.pathname === '/api/sessions') { workerSessionId = body.id; res.writeHead(201).end(JSON.stringify({ session: { id: workerSessionId } })); return }
+      if (req.method === 'PATCH' && detail) { res.end('{}'); return }
+      if (req.method === 'POST' && (url.pathname === '/v1/runs' || url.pathname.endsWith('/chat/stream'))) {
+        runs.push(body)
+        const worker = body.session_id === workerSessionId
+        res.writeHead(202).end(JSON.stringify({ run_id: worker ? 'worker-run' : 'ack-run', session_id: body.session_id, status: 'running' })); return
+      }
+      if (req.method === 'GET' && url.pathname.startsWith('/v1/runs/')) { res.end(JSON.stringify({ run_id: url.pathname.split('/').pop(), status: 'running' })); return }
+      if (req.method === 'GET' && url.pathname.startsWith('/api/sessions')) { res.end(JSON.stringify({ data: [] })); return }
+      res.writeHead(404).end('{}')
+    })
+    servers.push(upstream)
+    const upstreamAddress = await listen(upstream)
+    const proxy = createWizardServer({ requireJoinedDelegationCapability: false, upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`, hermesKey: 'fixture-server-key', requireAccess: false,
+      wizardOsHome: directory,
+      operatorWorkerModel: 'glm-5-3', operatorWorkerStatePath: join(directory, 'workers.json'), runQueueStatePath: join(directory, 'queue.sqlite3'),
+      runQueueMaxActive: 2, runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true })
+    servers.push(proxy)
+    const address = await listen(proxy)
+    const admitted = await fetch(`http://127.0.0.1:${address.port}/wizard/operator/v1/runs`, { method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'operator-ask-budget' },
+      body: JSON.stringify({ session_id: 'wizardop_user_ask_budget', input: 'Research this fully.' }) })
+    expect(admitted.status).toBeLessThan(300)
+    const { run_id } = await admitted.json()
+    // Reading the public run lets the queue dispatch it (same path the shell polls).
+    for (let i = 0; i < 50 && !(workerSessionId && runs.some(r => r.session_id === workerSessionId)); i++) {
+      await fetch(`http://127.0.0.1:${address.port}/wizard/operator/v1/runs/${encodeURIComponent(run_id)}`)
+      await new Promise(r => setTimeout(r, 20))
+    }
+    const worker = runs.find(r => r.session_id === workerSessionId)
+    expect(worker?.provider).toBe('custom:tinfoil-operator')
+    expect(worker.instructions).toContain('at most 80 characters')
+    expect(worker.instructions).not.toContain('at most 140 characters')
+  })
 })

@@ -3545,7 +3545,8 @@ function buildWizardServer(options, lifetime) {
       provider: 'custom:tinfoil-operator',
       require_model_lock: true,
       model_options: { reasoning_effort: 'max' },
-      instructions: [runInstructions({ join: true, response_style: readSettings(settingsPath).settings.response_style }), appProvenanceRunNote(appCatalog())].join('\n\n'),
+      // The worker writes the owner-visible reply (projectOperatorMessages), so it carries the short-answer ask budget too.
+      instructions: [withAskMax(runInstructions({ join: true, response_style: readSettings(settingsPath).settings.response_style }), askMaxNow()), appProvenanceRunNote(appCatalog())].join('\n\n'),
       ...runContractFields(await assertJoinedDelegationCapability()),
     })
     if (durableIdentity) workerBody = runQueue.freezeWorkerDispatchBody(durableIdentity, workerBody)
