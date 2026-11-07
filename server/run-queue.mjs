@@ -793,7 +793,7 @@ export class DurableRunQueue {
     // Never wait on a whole tick: it may be waiting on Hermes. Answer from the saved queue instead.
     let timer
     const fresh = await Promise.race([
-      this.tick(false).then(() => true, () => true),
+      this.tick(false).then(() => true, () => false), // a failed refresh is not fresh
       new Promise((done) => { timer = setTimeout(done, waitMs, false); timer.unref?.() }),
     ])
     clearTimeout(timer)

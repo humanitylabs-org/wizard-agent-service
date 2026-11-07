@@ -35,6 +35,7 @@ export async function scene(kind, serverOptions = {}) {
   const osHome = join(root, 'os'), folder = join(osHome, 'agents', id)
   mkdirSync(folder, { recursive: true })
   const seen = [], sessions = new Map(), runs = new Map(), keys = new Map(), placed = []
+  const heldAdmissions = new Map() // session id -> promise: Hermes is slow to accept this thread's next run
   const hermesHome = join(root, 'hermes')
   const agentHome = kind === 'host-profile' ? join(hermesHome, 'profiles', 'parity-profile') : kind === 'main' ? join(root, 'main-home') : join(folder, 'home')
   mkdirSync(agentHome, { recursive: true })
@@ -148,6 +149,7 @@ export async function scene(kind, serverOptions = {}) {
       return json(200, { session: row })
     }
     if (path === '/v1/runs' && req.method === 'POST') {
+      await heldAdmissions.get(body.session_id)
       const key = req.headers['idempotency-key']
       if (key && keys.has(key)) return json(202, keys.get(key), { 'Idempotency-Replayed': 'true' })
       if ([...runs.values()].some(r=>r.session_id===body.session_id&&r.status==='running')) return json(409,{error:'session_busy'})
@@ -264,6 +266,8 @@ export async function scene(kind, serverOptions = {}) {
         req.on('error', reject); req.end(body)
       })
     },
+    // Hold Hermes' answer to POST /v1/runs for one thread until the returned release() is called.
+    holdAdmissions: sessionId => { let release; heldAdmissions.set(sessionId, new Promise(done => { release = done })); return () => { heldAdmissions.delete(sessionId); release() } },
     raw: (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...owner, Connection: 'close', ...init.headers } }),
     upload: (bytes, filename, mime) => fetch(`${base}/wizard/files/upload`, { method: 'POST', headers: { ...owner, 'Content-Type': 'application/octet-stream', 'X-Wizard-Mime': mime, 'X-Wizard-Filename': filename }, body: bytes }),
     restart: async () => { await closeServer(wizard); await start() },

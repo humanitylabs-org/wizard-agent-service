@@ -94,6 +94,15 @@ describe('a slow Hermes admission', () => {
     expect(summary).toMatchObject({ active: 1, queue_stale: true })
   })
 
+  it('a queue refresh that fails is reported as stale, not fresh', async () => {
+    const queue = new DurableRunQueue({ statePath: await statePath(), pollIntervalMs: 0, summaryWaitMs: 50,
+      activeSessionIds: async () => [], canDispatch: () => true,
+      launch: async () => { throw new Error('unused') }, lookup: async () => ({}) })
+    queues.push(queue)
+    queue.tick = async () => { throw new Error('refresh failed') }
+    expect(await within(1_000, queue.summary())).toMatchObject({ queue_stale: true, active: 0 })
+  })
+
   it('a hanging launch does not stop other queue refreshes or other messages from sending', async () => {
     const io = transport('slow')
     const queue = new DurableRunQueue({ statePath: await statePath(), pollIntervalMs: 0, launchWaitMs: 50,

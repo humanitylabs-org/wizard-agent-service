@@ -645,6 +645,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "slow-admission",
+      "description": "Hermes is slow to accept a new run",
+      "layer": "server",
+      "how_to_test": "Hold the synthetic runtime's POST /v1/runs for one thread; assert the admission still returns at once, another thread's message is sent, /wizard/health answers within 1.5 s, and after release the held message reaches the runtime exactly once.",
+      "source_refs": [
+        "server/run-queue.mjs",
+        "server/routed-run-queue.mjs"
+      ],
+      "reference_tests": [
+        "tests/run-queue-slow-launch.test.ts"
+      ],
+      "fixture": "slow-admission",
+      "policy_exemptions": []
+    },
+    {
       "id": "pending-steer-replay",
       "description": "Replay a steer the run accepted but never consumed",
       "layer": "server",
