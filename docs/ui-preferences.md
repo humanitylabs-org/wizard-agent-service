@@ -22,11 +22,11 @@ arrays at the root, wrong types and invalid values are rejected (400). Send
 - `replySummary`: optional `{on,start?,length?}` for the shell's short-answer view. `on` is boolean;
   `start` is `collapsed` or `expanded`; `length` is `line`, `sentences` or `paragraph`. Unknown nested
   keys are rejected. Absent stays absent: reopening the view reads the box before saving its choice.
-  This accepts the existing shell contract only; it does not change reply generation or enable the view.
+  While `on`, `length` sets the status ask's character budget in run instructions (80, 140, 300;
+  `thread-status.mjs` `askMaxFor`); the chat list still clips at 140. Off or absent, replies are unchanged.
 - `subjectOrder`: at most 60 unique strings, each at most 120 characters without control
   characters. Default: empty (natural order).
 
-- `replySummary`: optional `{on, start?, length?}` from the shell's short-answer-first view: `on` (boolean, true while a device wears it), `start` `collapsed`|`expanded`, `length` `line`|`sentences`|`paragraph`. While `on`, `length` sets the status ask's character budget in run instructions (80, 140, 300; `thread-status.mjs` `askMaxFor`); the chat list still clips at 140. Absent by default.
 - `pinnedChats`: at most 300 unique canonical thread ids (`[A-Za-z0-9._:-]{1,180}`). Default: empty.
 - `spaces`: at most 50 owner-created `{id,name,threads,createdAt}` records, unique by id.
   `id`: `[a-z0-9-]{1,48}`; `name`: 1–60 characters, nonblank and without controls;
