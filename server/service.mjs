@@ -1024,6 +1024,30 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null) {
   return changed ? Buffer.from(JSON.stringify(payload)) : result
 }
 
+// A brand-new thread's first message waits in the run queue until a slot frees, so Hermes has no session yet and
+// answers 404 to its history. The thread is real (the list shows it Working): serve the owner's queued turns as
+// normal user messages instead. A session with no queue rows at all is genuinely unknown and keeps its 404.
+export function queuedOwnerHistory(runQueue, sessionId) {
+  if (!runQueue || typeof sessionId !== 'string' || !sessionId) return null
+  let records
+  try { records = typeof runQueue.queuedForSession === 'function' ? runQueue.queuedForSession('direct', sessionId) : [] } catch { return null }
+  if (!Array.isArray(records) || !records.length) return null
+  const retried = new Set(records.map((record) => record?.retrySourceId).filter(Boolean))
+  const data = []
+  for (const record of records) {
+    let body = null
+    try { body = JSON.parse(String(record?.body ?? '{}')) } catch { /* unreadable body */ }
+    const input = visibleInputText(body?.input).trim()
+    const at = Number(record?.createdAt)
+    const owner = !body?._wizard_background_recovery && Boolean(input)
+      && (Array.isArray(body?.input) || (typeof body?.input === 'string' && !MACHINE_INPUT.test(input)))
+    if (!owner || !Number.isFinite(at)) continue
+    if (SUPERSEDED_STATUSES.has(String(record?.status ?? '')) && retried.has(record?.publicRunId)) continue
+    data.push({ id: `queue-${record.publicRunId}`, session_id: sessionId, role: 'user', timestamp: at, content: input })
+  }
+  return Buffer.from(JSON.stringify({ object: 'list', session_id: sessionId, data, pagination: { limit: 500, offset: 0, order: 'oldest', returned: data.length } }))
+}
+
 function restoreDurableScreenshots(result, runQueue, sessionId) {
   if (!runQueue || typeof sessionId !== 'string' || !sessionId || !result.includes(DURABLE_SCREENSHOT_MARKER)) return result
   let payload
@@ -6819,6 +6843,7 @@ function buildWizardServer(options, lifetime) {
           })
           return
         }
+        let responseStatus = upstream.status
         let result = Buffer.from(await upstream.arrayBuffer())
         if (queuedProxyRecord && request.method === 'POST' && /\/(resolve-unknown|approval|clarify|stop)$/.test(upstreamPath)) await runQueue.tick(true)
         if (upstream.ok && request.method === 'POST' && /^\/api\/sessions\/[^/]+\/model$/.test(upstreamPath)) {
@@ -7003,6 +7028,10 @@ function buildWizardServer(options, lifetime) {
         }
         if (contentType.includes('application/json')) {
           const messageHistory = request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)
+          if (messageHistory && !operator && url.searchParams.get('view') === 'wizard' && upstream.status === 404) {
+            const queued = queuedOwnerHistory(runQueue, decodeURIComponent(upstreamPath.split('/')[3]))
+            if (queued) { result = queued; responseStatus = 200 }
+          }
           if (messageHistory && !operator && url.searchParams.get('view') === 'wizard') {
             result = restoreOwnerTurns(result, runQueue, decodeURIComponent(upstreamPath.split('/')[3]), ownerTurnRowMeta)
             result = projectProviderSignInHistory(result, runQueue?.latestForSession(decodeURIComponent(upstreamPath.split('/')[3])), url.searchParams)
@@ -7034,7 +7063,7 @@ function buildWizardServer(options, lifetime) {
         if (upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions' && url.searchParams.get('view') === 'list') {
           result = Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), url.searchParams.get('q'))))
         }
-        response.writeHead(upstream.status, { ...responseHeaders, 'Content-Length': result.length })
+        response.writeHead(responseStatus, { ...responseHeaders, 'Content-Length': result.length })
         response.end(result)
         if (chatPhotos && upstream.ok && !operator && ((request.method === 'POST' && upstreamPath === '/v1/runs') || /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath))) chatPhotos.kick(request.method === 'GET' ? 'delivered_history' : 'accepted_main')
         return
