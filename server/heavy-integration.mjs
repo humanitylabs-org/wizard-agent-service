@@ -5,7 +5,7 @@ import { queueRequestHash } from './run-queue.mjs'
 import { createAgentHeavyRelay } from './agent-heavy-relay.mjs'
 import { isAgentIngress, principalOf } from './principals.mjs'
 import { isHumanRequest } from './helper-continuation.mjs'
-import { FOLLOWUP_FAILURE_GUIDANCE } from './delegation-receipts.mjs'
+import { FOLLOWUP_FAILURE_GUIDANCE, outstandingBackgroundDelegation } from './delegation-receipts.mjs'
 import { createReadOnlySqlite, preparedRead } from './read-only-sqlite.mjs'
 
 export const HEAVY_KIND = 'external-heavy'
@@ -17,10 +17,33 @@ export const HEAVY_FOLLOWUP_GUIDANCE = 'Check the receipt before claiming comple
 const fail = (message, status) => Object.assign(new Error(message), { status })
 const terminal = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 
+// Hermes 0.22.7 persists every canonical /v1/runs admission, the owner's own
+// messages included, as display_kind=internal_notification with a submission_id
+// in display_metadata; a gateway self-injected wake carries none. The HTTP history
+// omits display_metadata, so the ids of submitted rows come from the read-only
+// state.db by primary key, across the thread's compression descendants (Hermes may store
+// a new owner row in a descendant while root history still returns it). Only ids
+// that the canonical history itself returned are looked up. A submitted row is judged
+// by its text, as before 0.22.7.
+export function submittedRowIds(db, sessionId, ids) {
+  if (!db || !ids.length) return new Set()
+  try {
+    const rows = preparedRead(db, `WITH RECURSIVE lineage(id) AS (
+        SELECT id FROM sessions WHERE id = ?
+        UNION SELECT sessions.id FROM sessions JOIN lineage ON sessions.parent_session_id = lineage.id)
+      SELECT id, display_metadata FROM messages WHERE session_id IN (SELECT id FROM lineage) AND role='user'
+      AND display_kind='internal_notification' AND id IN (SELECT value FROM json_each(?))`).all(sessionId, JSON.stringify(ids))
+    return new Set(rows.filter(row => {
+      try { const id = JSON.parse(row.display_metadata || 'null')?.submission_id; return typeof id === 'string' && id.length > 0 }
+      catch { return false }
+    }).map(row => Number(row.id)))
+  } catch { return new Set() }
+}
+
 // Canonical display history includes compaction archives, but not rewound/deleted
 // turns. Do not use include_inactive or fall back to a summary/origin-body guess.
 // Hermes caps this endpoint at 500 and returns each latest page oldest-first.
-export async function heavyRequestWatermark(request, sessionId) {
+export async function heavyRequestWatermark(request, sessionId, { submitted = () => new Set() } = {}) {
   const limit = 500
   const base = `/api/sessions/${encodeURIComponent(sessionId)}/messages?order=latest&limit=${limit}&include_compacted=true`
   const fingerprint = rows => createHash('sha256').update(JSON.stringify(rows.map(
@@ -46,7 +69,10 @@ export async function heavyRequestWatermark(request, sessionId) {
       if (seen.has(row.id)) throw fail('history changed during pagination', 503)
       seen.add(row.id)
     }
-    const row = rows.slice().reverse().find(r => isHumanRequest(r) && !String(r.content).startsWith(HEAVY_PREFIX))
+    const ids = submitted(rows.filter(r => r.role === 'user' && r.display_kind === 'internal_notification').map(r => r.id))
+    const human = r => isHumanRequest(r) || (r.display_kind === 'internal_notification' && ids.has(r.id)
+      && isHumanRequest({ ...r, display_kind: null }))
+    const row = rows.slice().reverse().find(r => human(r) && !String(r.content).startsWith(HEAVY_PREFIX))
     if (row) {
       // Offset pages are not a snapshot: a new correction (or history rewrite)
       // during the scan must not allow us to return an older request as latest.
@@ -72,12 +98,21 @@ export function createHeavyIntegration({ options, queue, request, hermesStatePat
       return preparedRead(db, 'SELECT parent_session_id FROM sessions WHERE id = ?').get(sessionId)?.parent_session_id || sessionId
     } catch { throw fail('session lineage unavailable', 503) }
   }
+  // A background helper outlives its parent's turn. Its authority is the canonical
+  // child row plus the parent's outstanding async delegation, both read from Hermes.
+  const backgroundDelegation = callerSessionId => {
+    const db = sessions.get()
+    if (!db) return null
+    try { return outstandingBackgroundDelegation(db, callerSessionId) }
+    catch { throw fail('session lineage unavailable', 503) }
+  }
   const routeFrom = (body, runtime) => {
     const model = body.model || runtime?.model
     const provider = body.provider || runtime?.requested?.provider || runtime?.provider
     return model && provider && provider !== 'custom' ? { model, provider, require_model_lock: true } : null
   }
-  const watermark = sessionId => heavyRequestWatermark(request, sessionId)
+  const watermark = sessionId => heavyRequestWatermark(request, sessionId,
+    { submitted: ids => submittedRowIds(sessions.get(), sessionId, ids) })
   let heavy
   const admissionFences = new Map()
   const invalidate = sessionId => {
@@ -125,6 +160,10 @@ export function createHeavyIntegration({ options, queue, request, hermesStatePat
   const sameGeneration = (latest, job) => {
     const origin = queue.get(job.origin)
     const root = generation(origin)
+    // A background helper's own completion delivery belongs to the request
+    // generation it submitted from; it is not a newer owner scope.
+    if (root && job.delegation_id && latest?.sessionId === job.sessionId && !latest.continuation?.kind
+      && latest.continuation?.delegationId === job.delegation_id) return true
     // Cancellation of a sibling invalidates that sibling, not the active
     // owner's authorization. Source ancestry must stay valid; the latest row
     // is used only to identify whether a newer unrelated request exists.
@@ -228,10 +267,16 @@ export function createHeavyIntegration({ options, queue, request, hermesStatePat
       const sessionId = owningSession(callerSessionId)
       if (path === '/wizard/internal/heavy/submit') {
         if (!isAutomaticAgentAllowed('hermes')) throw fail('recovery agent is not automatic', 409)
-        const origin = eligibleOwner(sessionId)
+        const live = eligibleOwner(sessionId)
         // A queued sibling is not a new scope; an unrelated queued request is.
-        // Helpers borrow only their canonical parent's live direct owner.
-        // Never infer an idle/operator origin or substitute a model.
+        // Helpers borrow their canonical parent's live direct owner. With the
+        // parent idle, only a tracked background delegation of that parent may
+        // borrow its latest terminal direct run. Never substitute a model.
+        const delegation = !live && sessionId !== callerSessionId && !mutationOwner(sessionId)
+          ? backgroundDelegation(callerSessionId) : null
+        const idle = delegation?.sessionId === sessionId ? queue.latestForSession(sessionId) : null
+        const origin = live || (idle?.runtime === 'direct' && ['completed', 'failed', 'interrupted'].includes(idle.status)
+          && (idle.agent_id ?? 'hermes') === 'hermes' && generation(idle) ? idle : null)
         if (!origin) throw fail('no mutation-owning direct run', 409)
         const fence = admissionFences.get(sessionId)
         const body = JSON.parse(origin.body)
@@ -240,11 +285,16 @@ export function createHeavyIntegration({ options, queue, request, hermesStatePat
         const observed = origin.upstreamRunId ? await request(`/v1/runs/${encodeURIComponent(origin.upstreamRunId)}`) : null
         const runtime = observed?.runtime || origin.payload?.runtime
         const route = routeFrom(body, runtime)
+        // An idle origin's route is final; without its snapshot there is no resume.
+        if (!live && !route) throw fail('no mutation-owning direct run', 409)
         const mark = await watermark(sessionId)
         if (admissionFences.get(sessionId) !== fence || !isAutomaticAgentAllowed('hermes')
           || owningSession(callerSessionId) !== sessionId
-          || eligibleOwner(sessionId)?.publicRunId !== origin.publicRunId) throw fail('origin changed', 409)
-        return view(heavy.submit({ sessionId, origin: origin.publicRunId, key: value.key, spec: value.spec, route, watermark: mark }))
+          || (live ? eligibleOwner(sessionId)?.publicRunId !== origin.publicRunId
+            : mutationOwner(sessionId) || queue.latestForSession(sessionId)?.publicRunId !== origin.publicRunId
+              || backgroundDelegation(callerSessionId)?.delegationId !== delegation.delegationId)) throw fail('origin changed', 409)
+        return view(heavy.submit({ sessionId, origin: origin.publicRunId, key: value.key, spec: value.spec, route, watermark: mark,
+          ...(live ? {} : { delegationId: delegation.delegationId }) }))
       }
       const job = heavy.get(value.job_id)
       if (!job || (job.agent_id ?? 'hermes') !== 'hermes' || job.sessionId !== sessionId) throw fail('job not found', 404)

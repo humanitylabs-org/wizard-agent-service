@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { resolveThreadSection, projectOpenAskSession, threadBackground } from '../server/open-ask.mjs'
+import { resolveThreadSection, projectOpenAskSession, threadBackground, liveWorker } from '../server/open-ask.mjs'
 import { readHermesSessionTruth } from '../server/session-truth.mjs'
 import { latestVisibleSessionMessages, createWizardServer, listen } from '../server/service.mjs'
 import { listRow } from '../server/session-list-view.mjs'
@@ -187,4 +187,60 @@ test('owner-stopped, cancelled and expired runs keep their terminal status while
     assert.equal(row.status, status)
     assert.equal(row.wizard_waiting_on, undefined)
   }
+})
+
+// James, 7 Nov 2026 ('Wizard OS · Chats #2'): a false interrupted run left the thread in
+// Errors/Needs you while two helpers it had dispatched were still running. A running worker
+// keeps any thread in Working, including after an errored run; the error status stays.
+test('errored last run with a running helper or heavy job stays Working and keeps its status', () => {
+  const fyi = [reply({ state: 'fyi', ask: 'Two fixes are being built' })]
+  for (const status of ['interrupted', 'failed', 'cancelled', 'expired']) {
+    for (const live of ['helper', 'heavy']) {
+      const row = projectOpenAskSession({ id: 'err', status }, { replies: fyi, background: live, lastUserAt: 10, live })
+      assert.equal(row.status, status, 'the error card keeps its status')
+      assert.equal(row.wizard_background, live)
+      assert.equal(listRow(row).background, live)
+    }
+    // A saved result the agent has not answered is not a running worker.
+    const idle = projectOpenAskSession({ id: 'err', status, wizard_background: 'helper' }, { replies: fyi, background: 'helper', lastUserAt: 10 })
+    assert.equal(idle.status, status)
+    assert.equal(idle.wizard_background, undefined)
+  }
+  assert.equal(liveWorker({ helpersRunning: 2 }), 'helper')
+  assert.equal(liveWorker({ helperStatus: { phase: 'running', pending: 1 } }), 'helper')
+  assert.equal(liveWorker({ heavyPending: true }), 'heavy')
+  for (const truth of [{}, { helperResultUnanswered: true }, { helperStatus: { phase: 'stalled', pending: 0, returned: 2 } },
+    { helperStatus: { phase: 'uncertain', pending: 1 } }, { supervisorPending: true }]) assert.equal(liveWorker(truth), '', JSON.stringify(truth))
+})
+for (const [name, status, helper, expected] of [
+  ['interrupted + running helper -> Working', 'interrupted', 'running', { status: 'interrupted', background: 'helper' }],
+  ['failed + running helper -> Working', 'failed', 'running', { status: 'failed', background: 'helper' }],
+  ['interrupted + no helper -> not Working', 'interrupted', null, { status: 'interrupted' }],
+  ['interrupted + stalled finished helper -> not Working', 'interrupted', 'stalled', { status: 'interrupted' }],
+  ['fyi + running helper -> Working', 'completed', 'running', { status: 'running', waitingOn: 'helper' }],
+]) test(`real main HTTP and slim list: ${name}`, async () => {
+  const root = mkdtempSync(join(tmpdir(), 'open-ask-err-')), path = join(root, 'state.db'), db = new DatabaseSync(path)
+  const now = Date.now() / 1000, sid = 'wizard_err_fixture'
+  db.exec(`CREATE TABLE sessions(id TEXT PRIMARY KEY,started_at REAL,model TEXT,model_config TEXT);
+    CREATE TABLE session_turn_leases(conversation_id TEXT,expires_at REAL);
+    CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT,timestamp REAL,active INT DEFAULT 1,display_kind TEXT,tool_calls TEXT,finish_reason TEXT DEFAULT 'stop');
+    CREATE TABLE async_delegations(delegation_id TEXT PRIMARY KEY,origin_session_id TEXT,parent_session_id TEXT,origin_ui_session_id TEXT,state TEXT,dispatched_at REAL,completed_at REAL,task_json TEXT,delivery_state TEXT,result_json TEXT);`)
+  db.prepare('INSERT INTO sessions(id,started_at) VALUES(?,?)').run(sid, now - 3000)
+  const add = (role, content, at) => db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)').run(sid, role, content, at)
+  add('user', 'Fix my missing messages and the slow Archive', now - 2900)
+  add('assistant', 'Both fixes are running now in two helpers.\n[WIZARD_STATUS_V1]{"state":"fyi","ask":"Two fixes are being built"}[/WIZARD_STATUS_V1]', now - 2800)
+  if (helper === 'running') db.prepare('INSERT INTO async_delegations VALUES(?,?,?,?,?,?,?,?,?,?)').run('deleg_two', sid, null, '', 'running', now - 2810, null, '{"goals":["Fix A","Fix B"]}', 'pending', '{}')
+  if (helper === 'stalled') db.prepare('INSERT INTO async_delegations VALUES(?,?,?,?,?,?,?,?,?,?)').run('deleg_two', sid, null, '', 'completed', now - 2810, now - 1200, '{"goals":["Fix A"]}', 'pending', '{}')
+  const server = createWizardServer({ requireAccess: false, hermesKey: 'synthetic-only', hermesStatePath: path, sessionDbPath: path, followThrough: false, archivedSessionReader: () => [], fetchImpl: async url => new Response(JSON.stringify(String(url).includes('/api/sessions?') ? { data: [{ id: sid, title: 'Wizard OS · Chats', source: 'wizard-mobile', status }] } : { data: [] }), { headers: { 'content-type': 'application/json' } }) })
+  try {
+    await listen(server)
+    const response = await fetch(`http://127.0.0.1:${server.address().port}/wizard/hermes/api/sessions?limit=10`)
+    assert.equal(response.status, 200)
+    const row = (await response.json()).data.find(r => r.id === sid)
+    assert.equal(row.status, expected.status)
+    assert.equal(row.wizard_background, expected.background)
+    assert.equal(row.wizard_waiting_on, expected.waitingOn)
+    const slim = listRow(row)
+    assert.equal(slim.background, expected.background)
+  } finally { if (server.listening) await new Promise(r => server.close(r)); db.close(); rmSync(root, { recursive: true, force: true }) }
 })

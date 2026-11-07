@@ -184,7 +184,7 @@ export class DurableHeavyQueue {
     if (job) this.save({ ...job, completion_delivered_at: job.completion_delivered_at || Date.now() })
   }
   // Synchronous durable receipt: no SSH, history, or model request on this path.
-  submit({ sessionId, origin, key, spec, route = {}, routeState, watermark, agent_id = 'hermes', activeLimit = Infinity }) {
+  submit({ sessionId, origin, key, spec, route = {}, routeState, watermark, agent_id = 'hermes', activeLimit = Infinity, delegationId }) {
     if (!validAgentId(agent_id)) throw fail('invalid heavy agent')
     if (!sessionId || !origin || typeof key !== 'string' || !/^[a-zA-Z0-9._:-]{1,128}$/.test(key)) throw fail('invalid heavy identity')
     const host = heavyHost(spec)
@@ -209,6 +209,7 @@ export class DurableHeavyQueue {
       state: 'queued', reason: 'resource_queue', created_at: Date.now(), cancel_requested: false,
       remote_ack: false, resume: '', continuation_invalidated: false, receipt: null,
       ...(routeState ? { route_state: routeState } : {}),
+      ...(delegationId ? { delegation_id: delegationId } : {}),
       ...(routeState === 'unavailable' ? { continuation_reason: 'origin_route_unavailable',
         continuation_invalidated: true, resume: 'suppressed' } : {}) }
     this.rowsDirty = true
