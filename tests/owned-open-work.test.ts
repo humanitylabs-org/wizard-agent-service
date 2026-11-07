@@ -562,6 +562,21 @@ describe('owned-work evidence memo', () => {
     b.read('wizard_owned'); b.read('wizard_owned')
     expect(b.stats()).toMatchObject({ hits: 0, transcriptReads: 2, size: 0 })
   })
+  it('a replaced state.db never serves the old database\'s memoized evidence', async () => {
+    const { createOwnedOpenWorkReader } = await import('../server/owned-open-work-follow-through.mjs')
+    const { renameSync } = await import('node:fs')
+    const f = thread(); f.db.exec('UPDATE messages SET timestamp = timestamp - 600')
+    const memo = createOwnedOpenWorkReader(f.path); cleanup.push(() => memo.close())
+    expect(memo.read('wizard_owned')?.items).toHaveLength(1)
+    // Same session, same row count, ids and revision; only the reply's content differs.
+    const g = thread(); g.db.exec(`UPDATE messages SET timestamp = timestamp - 600;
+      UPDATE sessions SET transcript_revision = 0`)
+    g.db.prepare("UPDATE messages SET content='Done. Nothing is still open.' WHERE role='assistant'").run()
+    g.db.exec('UPDATE sessions SET transcript_revision = 0')
+    renameSync(g.path, f.path) // atomic replacement: a new inode at the same path
+    expect(memo.read('wizard_owned')).toEqual(readOwnedOpenWork(f.path, 'wizard_owned'))
+    expect(memo.stats().hits).toBe(0)
+  })
   it('the memo is bounded', async () => {
     const { createOwnedOpenWorkReader } = await import('../server/owned-open-work-follow-through.mjs')
     const f = thread()

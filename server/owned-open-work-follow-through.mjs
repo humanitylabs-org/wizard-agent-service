@@ -70,8 +70,9 @@ export const readNonHoldingFollowUps = (path, sessionId) => new Set(readOwnedOpe
 // function of that session's rows, so it is reused while a cheap covering-index revision holds:
 // any append, delete, rewind/undo/compaction (active flip) or in-place rewrite (Hermes's
 // transcript_revision trigger) moves it. Without that trigger, or within FRESH_SECONDS of the
-// newest row (Hermes stamps a turn's display_kind in place right after it lands), nothing is
-// memoized and every read is a fresh one, exactly as before. One read-only handle serves all rows.
+// newest row (Hermes's only display_kind rewrite is the post-turn stamp right after a turn lands,
+// and the trigger does not cover display_kind), nothing is memoized and every read is fresh,
+// exactly as before. One read-only handle serves all rows; a reopened handle empties the memo.
 export const OWNED_WORK_MEMO_MAX = 1000
 const FRESH_SECONDS = 120
 function ownedWorkRevision(db, sessionId, nowSeconds) {
@@ -91,10 +92,13 @@ export function createOwnedOpenWorkReader(path, { max = OWNED_WORK_MEMO_MAX, now
   const handle = path ? createReadOnlySqlite(path) : null
   const memo = new Map()
   const stats = { reads: 0, hits: 0, transcriptReads: 0 }
+  let memoDb = null
   const read = sessionId => {
     if (!handle || !sessionId) return null
     stats.reads++
     const db = handle.get()
+    // A replaced/restored state.db reopens the handle; its sessions share nothing with the old memo.
+    if (db !== memoDb) { memo.clear(); memoDb = db }
     if (!db) return null
     let open = false
     try {
