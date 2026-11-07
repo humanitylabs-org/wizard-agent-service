@@ -879,12 +879,14 @@ function durableScreenshotCandidate(record) {
 //      before Hermes stamps the row; the API history omits both ids above).
 // Hermes 0.22.7 returns some owner rows as the multipart list (or its Python repr) with its own "[System: ...]" notice
 // appended: the repr is replaced with the queued input text and the notice part is dropped. Owner turns (list-shaped input) whose Hermes row is missing entirely (compaction,
-// lineage) are restored from the queue as synthetic user rows. Machine strings never become owner turns by this path.
+// lineage) are restored from the queue as synthetic user rows. Machine-tagged strings never become owner turns.
 const OWNER_TURN_WINDOW_SECONDS = 24 * 3600
 const SUPERSEDED_STATUSES = new Set(['interrupted', 'failed', 'cancelled', 'canceled'])
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'canceled', 'interrupted'])
 // Hermes re-renders attachments in a row's text (markers, paths), so long messages match on their opening words.
 const sameTurnText = (left, right) => left === right || (left.length >= 60 && right.length >= 60 && left.slice(0, 60) === right.slice(0, 60))
+// Unambiguous machine-tagged inputs the Service itself queues (follow-through, heavy, scheduler, reporter, relays).
+const MACHINE_INPUT = /^\[(?:Wizard\b|reporter\]|Relayed by\b|ASYNC\b|System\b)/i
 const PYTHON_REPR_PARTS = /^\s*\[\{'(?:text|type)':/
 export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null) {
   if (!runQueue || typeof sessionId !== 'string' || !sessionId) return result
@@ -901,14 +903,13 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null) {
     // The owner's app sends list-shaped input (or a plain sentence typed in older builds); every machine message
     // (follow-through, heavy, scheduler, reporter) is a bracketed string and never an owner turn.
     const listShaped = Array.isArray(body?.input)
-    const owner = !body?._wizard_background_recovery && Boolean(input) && (listShaped || (typeof body?.input === 'string' && !input.startsWith('[')))
+    const owner = !body?._wizard_background_recovery && Boolean(input) && (listShaped || (typeof body?.input === 'string' && !MACHINE_INPUT.test(input)))
     if ((input || id) && owner && Number.isFinite(at)) pending.push({ input, at, id, run, owner, listShaped, status: String(record?.status ?? ''), publicRunId: String(record?.publicRunId ?? ''), used: false })
   }
-  // An interrupted/failed attempt that the owner's identical message later replaced is the same message: show it once.
-  for (const p of pending) {
-    p.superseded = SUPERSEDED_STATUSES.has(p.status) && p.input
-      && pending.some((q) => q !== p && q.input === p.input && q.at > p.at && q.at - p.at <= OWNER_TURN_WINDOW_SECONDS)
-  }
+  // An interrupted/failed attempt that a later queued run retried (the queue records the retry source) is the same
+  // message: show it once, through the retry.
+  const retried = new Set((Array.isArray(records) ? records : []).map((record) => record?.retrySourceId).filter(Boolean))
+  for (const p of pending) p.superseded = SUPERSEDED_STATUSES.has(p.status) && retried.has(p.publicRunId)
   if (!pending.length) return result
   if (!result.includes('internal_notification') && !pending.some((p) => p.listShaped && !p.superseded)) return result
   let payload
@@ -924,6 +925,15 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null) {
   const lookupIds = userRows.filter((row) => row.display_kind === 'internal_notification' && Number.isInteger(row.id)).map((row) => row.id)
   if (typeof rowMeta === 'function' && lookupIds.length) {
     try { const found = rowMeta(sessionId, lookupIds); if (found instanceof Map) metaById = found } catch { /* fall back to text matching */ }
+  }
+  // Rows Hermes already shows as normal user messages (older Hermes) claim their queued turn first, so an
+  // internal copy of the same turn is not restored beside them.
+  for (const row of userRows) {
+    if (row.display_kind && row.display_kind !== 'final') continue
+    const text = visibleInputText(row.content).trim()
+    const at = Number(row.timestamp ?? row.created_at)
+    const seen = pending.find((p) => !p.used && p.input && sameTurnText(p.input, text) && Number.isFinite(at) && at >= p.at - 5 && at - p.at <= OWNER_TURN_WINDOW_SECONDS)
+    if (seen) seen.used = true
   }
   const strongClaim = (row) => {
     const meta = metaById.get(row.id)
@@ -970,14 +980,6 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null) {
     return rest
   }
   for (const key of collections) payload[key] = payload[key].map(fix)
-  // Non-internal user rows that already show a queued turn (older Hermes) are not restored a second time.
-  for (const row of userRows) {
-    if (row.display_kind && row.display_kind !== 'final') continue
-    const text = visibleInputText(row.content).trim()
-    const at = Number(row.timestamp ?? row.created_at)
-    const seen = pending.find((p) => !p.used && p.input && sameTurnText(p.input, text) && Number.isFinite(at) && at >= p.at - 5 && at - p.at <= OWNER_TURN_WINDOW_SECONDS)
-    if (seen) seen.used = true
-  }
   // Owner turns whose Hermes rows are gone entirely.
   if (Array.isArray(payload.data)) {
     const stamped = payload.data

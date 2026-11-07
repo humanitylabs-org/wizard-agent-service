@@ -12,7 +12,7 @@ const rec = (publicRunId: string, upstreamRunId: string, createdAt: number, body
 })
 const records = [
   rec('wizardq_a', 'run_554f', 1794036341.929, listBody('This is broken, please fix' + chips), 'interrupted'),
-  rec('wizardq_b', 'run_f5f2', 1794037203.545, listBody('This is broken, please fix' + chips), 'completed', 'adm-b'),
+  { ...rec('wizardq_b', 'run_f5f2', 1794037203.545, listBody('This is broken, please fix' + chips), 'completed', 'adm-b'), retrySourceId: 'wizardq_a' },
   rec('wizardq_c', 'run_2e98', 1794038717.469, '{"input":"[Wizard follow-through] Recovered helper receipt deleg_3d7accbb"}'),
   rec('wizardq_d', 'run_13f5', 1794056159.504, listBody('Why am I not seeing any of my messages in my chats? Please fix.' + chips), 'completed', 'adm-d'),
   rec('wizardq_e', 'run_0000', 1794030000.1, listBody('Please check the old thing' + chips), 'completed'),
@@ -96,5 +96,45 @@ describe('restoreOwnerTurns: no duplicates beside rows Hermes already shows', ()
       { id: 2, session_id: SID, role: 'assistant', timestamp: 1794060100, content: 'ok' },
     ] }
     expect(run(payload, q).map((r) => r.id)).toEqual([1, 2])
+  })
+})
+
+describe('restoreOwnerTurns: review findings', () => {
+  const long = 'A long owner message about the broken chats screen and what I expect to see afterwards, with details.'
+  it('keeps one copy when a visible row and an internal copy of the same turn are both on the page', () => {
+    const q = { admittedForSession: () => [rec('wizardq_x', 'run_x', 1794060000, listBody(long + chips))] }
+    const payload = { pagination: { limit: 500, offset: 0, order: 'latest', returned: 3 }, data: [
+      { id: 1, session_id: SID, role: 'user', timestamp: 1794060000.2, content: long },
+      { id: 2, session_id: SID, role: 'user', display_kind: 'internal_notification', timestamp: 1794060000.3, content: long },
+      { id: 3, session_id: SID, role: 'assistant', timestamp: 1794060100, content: 'ok' },
+    ] }
+    const out = run(payload, q)
+    expect(out.filter((r) => r.role === 'user' && !r.display_kind)).toHaveLength(1)
+  })
+  it('only hides an earlier attempt that a later run names as its retry source', () => {
+    const q = { admittedForSession: () => [
+      rec('wizardq_1', 'run_1', 1794060000, listBody('please look at the other thing now ok, thanks a lot friend'), 'interrupted'),
+      rec('wizardq_2', 'run_2', 1794060500, listBody('please look at the other thing now ok, thanks a lot friend'), 'completed'),
+    ] }
+    const payload = { pagination: { limit: 500, offset: 0, order: 'latest', returned: 3 }, data: [
+      { id: 1, session_id: SID, role: 'user', display_kind: 'internal_notification', timestamp: 1794060000.5, content: 'please look at the other thing now ok, thanks a lot friend' },
+      { id: 2, session_id: SID, role: 'user', display_kind: 'internal_notification', timestamp: 1794060500.5, content: 'please look at the other thing now ok, thanks a lot friend' },
+      { id: 3, session_id: SID, role: 'assistant', timestamp: 1794060600, content: 'ok' },
+    ] }
+    expect(run(payload, q).filter((r) => r.role === 'user' && !r.display_kind).map((r) => r.id)).toEqual([1, 2])
+  })
+  it('restores a legacy plain-string owner message that starts with a bracket, but not machine-tagged ones', () => {
+    const q = { admittedForSession: () => [
+      rec('wizardq_1', 'run_1', 1794060000, JSON.stringify({ input: '[Question] can you check this?' })),
+      rec('wizardq_2', 'run_2', 1794060100, JSON.stringify({ input: '[Wizard follow-through] Recovered helper receipt' })),
+    ] }
+    const payload = { pagination: { limit: 500, offset: 0, order: 'latest', returned: 3 }, data: [
+      { id: 1, session_id: SID, role: 'user', display_kind: 'internal_notification', timestamp: 1794060000.5, content: '[Question] can you check this?' },
+      { id: 2, session_id: SID, role: 'user', display_kind: 'internal_notification', timestamp: 1794060100.5, content: '[Wizard follow-through] Recovered helper receipt' },
+      { id: 3, session_id: SID, role: 'assistant', timestamp: 1794060600, content: 'ok' },
+    ] }
+    const out = run(payload, q)
+    expect(out.find((r) => r.id === 1)!.display_kind).toBeUndefined()
+    expect(out.find((r) => r.id === 2)!.display_kind).toBe('internal_notification')
   })
 })
