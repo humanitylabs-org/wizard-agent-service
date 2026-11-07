@@ -1031,7 +1031,8 @@ export function queuedOwnerHistory(runQueue, sessionId) {
   if (!runQueue || typeof sessionId !== 'string' || !sessionId) return null
   let records
   try { records = typeof runQueue.queuedForSession === 'function' ? runQueue.queuedForSession('direct', sessionId) : [] } catch { return null }
-  if (!Array.isArray(records) || !records.length) return null
+  // Only a thread with a send still waiting is "not yet"; a session whose rows are all finished was removed from Hermes.
+  if (!Array.isArray(records) || !records.some((record) => !TERMINAL_STATUSES.has(String(record?.status ?? '')))) return null
   const retried = new Set(records.map((record) => record?.retrySourceId).filter(Boolean))
   const data = []
   for (const record of records) {
@@ -2956,7 +2957,7 @@ function buildWizardServer(options, lifetime) {
   const providerRecoveryOptions = { providerSignInReady, providerFailureDismissed,
     providerAccessRecovery: options.providerAccessRecovery ?? process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
     providerAccessWindowSeconds: options.providerAccessWindowSeconds }
-  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, queuedHistory: queuedOwnerHistory, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
     decorateDispatch: (agentId, sessionId, body) => {
       const note = heavyNotices(agentId, sessionId)
       return note && !String(body.instructions || '').includes(note) ? { ...body, instructions: [body.instructions, note].filter(Boolean).join('\n') } : body

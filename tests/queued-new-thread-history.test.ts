@@ -6,9 +6,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen, queuedOwnerHistory } from '../server/service.mjs'
 
-// Real shape (7 Nov 2026): a brand-new voice-note thread whose first message waited in the run queue for ~28 min.
-// Hermes had no session yet, so GET /api/sessions/<id>/messages answered 404 and the shell said
-// "This thread is no longer here". The thread is real: its queued owner turn must be served instead.
+// Shape: a brand-new thread whose first message waits in the run queue. Hermes has no session yet, so
+// GET /api/sessions/<id>/messages answers 404 and the shell said "This thread is no longer here". The thread is real:
+// its queued owner turn must be served instead. All text and ids below are synthetic.
 const servers: ReturnType<typeof createServer>[] = []
 const dirs: string[] = []
 afterEach(async () => {
@@ -63,9 +63,9 @@ describe('history of a thread whose first message is still queued', () => {
     }).then((r) => r.json())
 
     // One other thread holds the only slot, so the new thread's first message waits with waiting_reason "capacity".
-    expect((await admit('wizard_1794036340706_7a4a6d366ae1', 'busy', 'working')).status).toBe('running')
-    const SID = 'wizard_1794059002425_da1966b95ef0'
-    const queued = await admit(SID, 'voice-1', 'Can we stop the automatic summaries?')
+    expect((await admit('wizard_1700000000002_bbbbbbbbbbbb', 'busy', 'working')).status).toBe('running')
+    const SID = 'wizard_1700000000001_aaaaaaaaaaaa'
+    const queued = await admit(SID, 'voice-1', 'Synthetic first message')
     expect(JSON.stringify(queued)).toContain('queued')
 
     const res = await history(origin, SID)
@@ -73,7 +73,7 @@ describe('history of a thread whose first message is still queued', () => {
     const body = await res.json()
     const users = body.data.filter((r: any) => r.role === 'user')
     expect(users).toHaveLength(1)
-    expect(users[0]).toMatchObject({ session_id: SID, content: 'Can we stop the automatic summaries?' })
+    expect(users[0]).toMatchObject({ session_id: SID, content: 'Synthetic first message' })
     expect(users[0].display_kind).toBeUndefined()
 
     // A machine-tagged input queued for a session never becomes an owner bubble, but the thread still opens (200, empty).
@@ -88,26 +88,57 @@ describe('history of a thread whose first message is still queued', () => {
 })
 
 describe('queuedOwnerHistory (real queue row shapes)', () => {
-  const SID = 'wizard_1794059002425_da1966b95ef0'
-  // Row copied from the live queue: string input with a voice-file block, direct runtime, queued for capacity.
-  const voice = 'I am not sure what the orb notes are.\n\n[WIZARD_FILES_V1]\n[{"id":"drop_b116d5b06aca4f819f1cca899f4e30dd","filename":"wizard-voice-2026-11-07T13-43-34-206Z.webm","mime":"audio/webm","bytes":280247}]'
-  const rec = (publicRunId: string, input: unknown, extra: object = {}) => ({ publicRunId, sessionId: SID, status: 'queued', upstreamRunId: '', createdAt: 1794059006.955, body: JSON.stringify({ session_id: SID, input, ...extra }), payload: {}, ...extra })
+  const SID = 'wizard_1700000000001_aaaaaaaaaaaa'
+  // Structural shape of a queued voice-note row: string input with a file block, direct runtime, queued for capacity.
+  const voice = 'Synthetic spoken words.\n\n[WIZARD_FILES_V1]\n[{"id":"drop_00000000000000000000000000000000","filename":"voice.webm","mime":"audio/webm","bytes":1}]'
+  const rec = (publicRunId: string, input: unknown, extra: object = {}) => ({ publicRunId, sessionId: SID, status: 'queued', upstreamRunId: '', createdAt: 1700000000.5, body: JSON.stringify({ session_id: SID, input, ...extra }), payload: {}, ...extra })
   const queue = (rows: object[]) => ({ queuedForSession: (runtime: string, sid: string) => (runtime === 'direct' && sid === SID ? rows : []) })
 
   it('turns queued owner rows into user messages and drops machine strings', () => {
     const out = JSON.parse(queuedOwnerHistory(queue([
-      rec('wizardq_1eefa5e56ee4441394a9eda52356a866', voice),
+      rec('wizardq_00000000000000000000000000000001', voice),
       rec('wizardq_2', '[Wizard follow-through] Recovered helper receipt deleg_3d7accbb'),
       rec('wizardq_3', [{ role: 'user', content: [{ type: 'text', text: 'second message' }] }]),
     ]), SID)!.toString())
     expect(out.data.map((r: any) => [r.role, r.content])).toEqual([['user', voice], ['user', 'second message']])
-    expect(out.data[0]).toMatchObject({ id: 'queue-wizardq_1eefa5e56ee4441394a9eda52356a866', session_id: SID, timestamp: 1794059006.955 })
+    expect(out.data[0]).toMatchObject({ id: 'queue-wizardq_00000000000000000000000000000001', session_id: SID, timestamp: 1700000000.5 })
   })
   it('shows a retried attempt once, and returns null for a session with no queue rows', () => {
     const a = rec('wizardq_a', 'same words', { status: 'interrupted' })
     const b = rec('wizardq_b', 'same words', { retrySourceId: 'wizardq_a' })
     expect(JSON.parse(queuedOwnerHistory(queue([a, b]), SID)!.toString()).data).toHaveLength(1)
     expect(queuedOwnerHistory(queue([]), SID)).toBeNull()
+    // A deleted session whose rows are all finished stays 404: the fallback needs a send still waiting.
+    expect(queuedOwnerHistory(queue([rec('wizardq_d', 'old words', { status: 'completed', upstreamRunId: 'run_x' })]), SID)).toBeNull()
     expect(queuedOwnerHistory(null, SID)).toBeNull()
+  })
+})
+
+describe('routed agents (host-profile, container, restricted share createRoutedQueues)', () => {
+  it.each(['host-profile', 'container', 'restricted'])('%s agent: queued first message is served, unknown thread keeps its 404', async (_kind) => {
+    const { mkdtempSync, rmSync } = await import('node:fs')
+    const { createRoutedQueues } = await import('../server/routed-run-queue.mjs')
+    const root = mkdtempSync(join(tmpdir(), 'routed-queued-history-'))
+    const agent = { id: `fixture-${_kind}`, model: { provider: 'local', model: 'fixture-model' } }
+    const disposers: Array<() => Promise<void>> = []
+    const registry = { agentsDir: root, list: () => [], apiKey: () => 'fixture-runtime-key',
+      fetchAgent: async (_a: any, path: string, init: any = {}) => {
+        if (init.method === 'POST') return Response.json({ run_id: 'fixture-run', status: 'running' }, { status: 202 })
+        if (path.startsWith('/api/sessions/') && path.includes('/messages')) return Response.json({ error: { code: 'session_not_found' } }, { status: 404 })
+        if (path.startsWith('/api/sessions/')) return Response.json({ session: { model: 'fixture-model' } })
+        return Response.json({ run_id: 'fixture-run', status: 'running' })
+      } }
+    try {
+      const queues = createRoutedQueues({ registry, queuedHistory: queuedOwnerHistory, own: (f: any) => disposers.push(f), pollIntervalMs: 0, maxActive: 1 })
+      const post = (sid: string, key: string, input: string) => queues.fetch(agent, '/v1/runs', { method: 'POST', headers: { 'Idempotency-Key': key }, body: JSON.stringify({ session_id: sid, input, model: 'fixture-model' }) })
+      await post('wizard_1700000000003_cccccccccccc', 'busy', 'holds the only slot')
+      const queued = await (await post('wizard_1700000000004_dddddddddddd', 'first', 'Synthetic routed first message')).json()
+      expect(JSON.stringify(queued)).toContain('queued')
+      const read = await queues.fetch(agent, '/api/sessions/wizard_1700000000004_dddddddddddd/messages?order=oldest&limit=500')
+      expect(read.status).toBe(200)
+      expect((await read.json()).data.map((r: any) => [r.role, r.content])).toEqual([['user', 'Synthetic routed first message']])
+      const unknown = await queues.fetch(agent, '/api/sessions/wizard_1700000000009_eeeeeeeeeeee/messages?order=oldest&limit=500')
+      expect(unknown.status).toBe(404)
+    } finally { for (const dispose of disposers) await dispose(); rmSync(root, { recursive: true, force: true }) }
   })
 })

@@ -8,7 +8,7 @@ import { readSteerResentHttp } from './hermes-http-readers.mjs'
 import { normalizeProviderPreflightFailure, projectProviderSignInHistory, projectProviderSignInEvent } from './run-provider-failure.mjs'
 const terminal = new Set(['completed','failed','cancelled','interrupted'])
 const json = (status, payload) => new Response(JSON.stringify(payload),{status,headers:{'Content-Type':'application/json'}})
-export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxActive = 8, onStatus, onDispatch, decorateDispatch, providerAccessRecovery = false, providerAccessWindowSeconds, providerFailureDismissed, providerSignInReady = null }) {
+export function createRoutedQueues({ registry, queuedHistory, own, pollIntervalMs = 1500, maxActive = 8, onStatus, onDispatch, decorateDispatch, providerAccessRecovery = false, providerAccessWindowSeconds, providerFailureDismissed, providerSignInReady = null }) {
   const entries = new Map()
   const get = async agent => {
     if (!entries.has(agent.id)) {
@@ -59,6 +59,12 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
       if (method === 'GET' && /^\/api\/sessions\/[^/]+(?:\/messages)?$/.test(parsed.pathname)) {
         const upstream = await registry.fetchAgent(agent,path,init)
         if (!upstream.ok) {
+          if (upstream.status === 404 && parsed.pathname.endsWith('/messages') && typeof queuedHistory === 'function'
+              && (entries.has(agent.id) || existsSync(join(registry.agentsDir, agent.id, 'wizard-run-queue.sqlite3')))) {
+            // A first message still waiting in this agent's queue: Hermes has no session yet, but the thread is real.
+            const {queue} = await get(agent), pending = queuedHistory(queue, decodeURIComponent(parsed.pathname.split('/')[3]))
+            if (pending) return new Response(pending, { status: 200, headers: { 'Content-Type': 'application/json' } })
+          }
           if (upstream.status !== 404 || parsed.pathname.endsWith('/messages')) return upstream
           const {queue} = await get(agent), saved = queue.savedRetry(decodeURIComponent(parsed.pathname.split('/')[3]))
           if (!saved) return upstream
