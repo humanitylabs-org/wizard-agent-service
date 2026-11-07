@@ -5,7 +5,7 @@ import { queueRequestHash } from './run-queue.mjs'
 import { createAgentHeavyRelay } from './agent-heavy-relay.mjs'
 import { isAgentIngress, principalOf } from './principals.mjs'
 import { isHumanRequest } from './helper-continuation.mjs'
-import { FOLLOWUP_FAILURE_GUIDANCE } from './delegation-receipts.mjs'
+import { FOLLOWUP_FAILURE_GUIDANCE, outstandingBackgroundDelegation } from './delegation-receipts.mjs'
 import { createReadOnlySqlite, preparedRead } from './read-only-sqlite.mjs'
 
 export const HEAVY_KIND = 'external-heavy'
@@ -72,6 +72,14 @@ export function createHeavyIntegration({ options, queue, request, hermesStatePat
       return preparedRead(db, 'SELECT parent_session_id FROM sessions WHERE id = ?').get(sessionId)?.parent_session_id || sessionId
     } catch { throw fail('session lineage unavailable', 503) }
   }
+  // A background helper outlives its parent's turn. Its authority is the canonical
+  // child row plus the parent's outstanding async delegation, both read from Hermes.
+  const backgroundDelegation = callerSessionId => {
+    const db = sessions.get()
+    if (!db) return null
+    try { return outstandingBackgroundDelegation(db, callerSessionId) }
+    catch { throw fail('session lineage unavailable', 503) }
+  }
   const routeFrom = (body, runtime) => {
     const model = body.model || runtime?.model
     const provider = body.provider || runtime?.requested?.provider || runtime?.provider
@@ -125,6 +133,10 @@ export function createHeavyIntegration({ options, queue, request, hermesStatePat
   const sameGeneration = (latest, job) => {
     const origin = queue.get(job.origin)
     const root = generation(origin)
+    // A background helper's own completion delivery belongs to the request
+    // generation it submitted from; it is not a newer owner scope.
+    if (root && job.delegation_id && latest?.sessionId === job.sessionId && !latest.continuation?.kind
+      && latest.continuation?.delegationId === job.delegation_id) return true
     // Cancellation of a sibling invalidates that sibling, not the active
     // owner's authorization. Source ancestry must stay valid; the latest row
     // is used only to identify whether a newer unrelated request exists.
@@ -228,10 +240,16 @@ export function createHeavyIntegration({ options, queue, request, hermesStatePat
       const sessionId = owningSession(callerSessionId)
       if (path === '/wizard/internal/heavy/submit') {
         if (!isAutomaticAgentAllowed('hermes')) throw fail('recovery agent is not automatic', 409)
-        const origin = eligibleOwner(sessionId)
+        const live = eligibleOwner(sessionId)
         // A queued sibling is not a new scope; an unrelated queued request is.
-        // Helpers borrow only their canonical parent's live direct owner.
-        // Never infer an idle/operator origin or substitute a model.
+        // Helpers borrow their canonical parent's live direct owner. With the
+        // parent idle, only a tracked background delegation of that parent may
+        // borrow its latest terminal direct run. Never substitute a model.
+        const delegation = !live && sessionId !== callerSessionId && !mutationOwner(sessionId)
+          ? backgroundDelegation(callerSessionId) : null
+        const idle = delegation?.sessionId === sessionId ? queue.latestForSession(sessionId) : null
+        const origin = live || (idle?.runtime === 'direct' && ['completed', 'failed', 'interrupted'].includes(idle.status)
+          && (idle.agent_id ?? 'hermes') === 'hermes' && generation(idle) ? idle : null)
         if (!origin) throw fail('no mutation-owning direct run', 409)
         const fence = admissionFences.get(sessionId)
         const body = JSON.parse(origin.body)
@@ -240,11 +258,16 @@ export function createHeavyIntegration({ options, queue, request, hermesStatePat
         const observed = origin.upstreamRunId ? await request(`/v1/runs/${encodeURIComponent(origin.upstreamRunId)}`) : null
         const runtime = observed?.runtime || origin.payload?.runtime
         const route = routeFrom(body, runtime)
+        // An idle origin's route is final; without its snapshot there is no resume.
+        if (!live && !route) throw fail('no mutation-owning direct run', 409)
         const mark = await watermark(sessionId)
         if (admissionFences.get(sessionId) !== fence || !isAutomaticAgentAllowed('hermes')
           || owningSession(callerSessionId) !== sessionId
-          || eligibleOwner(sessionId)?.publicRunId !== origin.publicRunId) throw fail('origin changed', 409)
-        return view(heavy.submit({ sessionId, origin: origin.publicRunId, key: value.key, spec: value.spec, route, watermark: mark }))
+          || (live ? eligibleOwner(sessionId)?.publicRunId !== origin.publicRunId
+            : mutationOwner(sessionId) || queue.latestForSession(sessionId)?.publicRunId !== origin.publicRunId
+              || backgroundDelegation(callerSessionId)?.delegationId !== delegation.delegationId)) throw fail('origin changed', 409)
+        return view(heavy.submit({ sessionId, origin: origin.publicRunId, key: value.key, spec: value.spec, route, watermark: mark,
+          ...(live ? {} : { delegationId: delegation.delegationId }) }))
       }
       const job = heavy.get(value.job_id)
       if (!job || (job.agent_id ?? 'hermes') !== 'hermes' || job.sessionId !== sessionId) throw fail('job not found', 404)
