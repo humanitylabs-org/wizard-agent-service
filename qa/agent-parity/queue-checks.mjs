@@ -90,7 +90,36 @@ async function pendingSteer(s) {
   for(let i=0;i<10;i++) { await s.request(`/v1/runs/${a.run_id}`); await new Promise(r=>setTimeout(r,20)) }
   assert.equal(s.runs.size,2,'a restart must never replay the steer twice')
 }
+// Hermes can take minutes to accept one new run. While it does, that message stays saved and is sent once,
+// another thread's message is still sent, and health still answers at once.
+async function slowAdmission(s) {
+  const release = s.holdAdmissions('wizard_parity_slow')
+  const safety = setTimeout(release, 5000) // a regression fails below instead of hanging the matrix
+  let a
+  try {
+    const started = performance.now()
+    const slow = await s.request('/v1/runs', post({session_id:'wizard_parity_slow',input:'Synthetic turn Hermes is slow to accept',model:'fixture-model',provider:'anthropic'}))
+    assert.equal(slow.status,202); a = await slow.json()
+    assert.ok(performance.now()-started < 2500, `${s.kind}: admission must not wait for Hermes to accept the run`)
+    const other = await s.request('/v1/runs', post({session_id:'wizard_parity',input:'Synthetic turn in another thread',model:'fixture-model',provider:'anthropic'}))
+    assert.equal(other.status,202); const b = await other.json()
+    for (let i=0;i<50&&![...s.runs.values()].some(r=>r.session_id==='wizard_parity');i++) { await s.request(`/v1/runs/${b.run_id}`); await new Promise(r=>setTimeout(r,20)) }
+    assert.ok([...s.runs.values()].some(r=>r.session_id==='wizard_parity'), `${s.kind}: another thread's message must send while one admission waits`)
+    const healthStarted = performance.now()
+    const health = await fetch(`${s.origin()}/wizard/health`)
+    assert.equal(health.status,200)
+    assert.ok(performance.now()-healthStarted < 1500, `${s.kind}: health must answer while an admission waits`)
+    if (s.kind==='main') assert.equal((await health.json()).queue.launching,1)
+    assert.equal((await s.request(`/v1/runs/${a.run_id}`)).status,200)
+  } finally { clearTimeout(safety); release() }
+  for (let i=0;i<100&&![...s.runs.values()].some(r=>r.session_id==='wizard_parity_slow');i++) { await s.request(`/v1/runs/${a.run_id}`); await new Promise(r=>setTimeout(r,20)) }
+  assert.ok([...s.runs.values()].some(r=>r.session_id==='wizard_parity_slow'), `${s.kind}: the slow message is sent once Hermes answers`)
+  const sends = s.seen.filter(r=>r.method==='POST'&&r.path.endsWith('/v1/runs')&&r.body?.session_id==='wizard_parity_slow')
+  assert.equal(sends.length,1,`${s.kind}: the slow message must reach Hermes exactly once`)
+  for (const run of s.runs.values()) Object.assign(run,{status:'completed',output:'Synthetic cleanup'})
+}
 export const queueChecks = {
+ 'slow-admission': slowAdmission,
  'pending-steer-replay': pendingSteer,
  'queue-busy': s=>exercise(s),
  'queue-restart': s=>exercise(s,true),

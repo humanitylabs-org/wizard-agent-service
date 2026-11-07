@@ -2962,6 +2962,7 @@ function buildWizardServer(options, lifetime) {
     providerAccessRecovery: options.providerAccessRecovery ?? process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
     providerAccessWindowSeconds: options.providerAccessWindowSeconds }
   const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, queuedHistory: queuedOwnerHistory, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
+    ...(options.runQueueLaunchWaitMs !== undefined ? { launchWaitMs: Number(options.runQueueLaunchWaitMs) } : {}),
     decorateDispatch: (agentId, sessionId, body) => {
       const note = heavyNotices(agentId, sessionId)
       return note && !String(body.instructions || '').includes(note) ? { ...body, instructions: [body.instructions, note].filter(Boolean).join('\n') } : body
@@ -3956,6 +3957,7 @@ function buildWizardServer(options, lifetime) {
       reservedInteractive: Number(options.runQueueInteractiveReserve ?? Math.min(2, maxActive - 1)),
       pollIntervalMs: Number(options.runQueuePollIntervalMs ?? 1_500),
       retryDelayMs: Number(options.runQueueRetryDelayMs ?? 2_000),
+      ...(options.runQueueLaunchWaitMs !== undefined ? { launchWaitMs: Number(options.runQueueLaunchWaitMs) } : {}),
       activeSessionIds: activeSessionReader,
       canDispatch: dispatchHealthReader,
       launch: queueHermesAdmission,
@@ -6044,6 +6046,9 @@ function buildWizardServer(options, lifetime) {
       }
 
       if (url.pathname === '/wizard/health' && request.method === 'GET') {
+        // Health answers within about a second whatever Hermes is doing: the queue summary never waits on
+        // a Hermes launch (it reports queue_stale and launch_waiting_s instead) and runs beside this probe.
+        const queueSummary = runQueue ? runQueue.summary().catch(() => null) : Promise.resolve(null)
         const controller = new AbortController()
         const timer = setTimeout(() => controller.abort(), 800)
         let reachable = false
@@ -6053,7 +6058,8 @@ function buildWizardServer(options, lifetime) {
           await upstream.body?.cancel().catch(() => undefined)
         } catch { reachable = false }
         finally { clearTimeout(timer) }
-        const queue = runQueue ? { ...await runQueue.summary(), ...(heavyWork ? { heavy: heavyWork.summary() } : {}) } : undefined
+        const summary = await queueSummary
+        const queue = runQueue ? { ...(summary ?? { queue_stale: true }), ...(heavyWork ? { heavy: heavyWork.summary() } : {}) } : undefined
         sendJson(response, 200, { status: 'ok', upstream_reachable: reachable, ...(queue ? { queue } : {}) })
         return
       }

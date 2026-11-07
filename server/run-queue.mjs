@@ -156,6 +156,13 @@ export class DurableRunQueue {
     providerAccessRecovery = false,
     providerAccessWindowSeconds = 6 * 3600,
     providerFailureDismissed = () => false,
+    // Hermes can take minutes to accept one new run (7 Nov 2026: POST /v1/runs took 658-1201 s while
+    // every other Hermes read stayed fast). A tick waits at most launchWaitMs in total for launches;
+    // a slower launch keeps going in the background, holds its thread and slot, and is never re-sent
+    // while it is in flight. summary() waits at most summaryWaitMs for a tick so health always answers.
+    launchWaitMs = 3_000,
+    summaryWaitMs = 500,
+    slowLaunchSeconds = 20,
   }) {
     if (!statePath) throw new Error('Wizard run queue state path is required')
     if (!Number.isSafeInteger(maxActive) || maxActive < 1 || maxActive > 64) throw new Error('Wizard run queue capacity is invalid')
@@ -189,6 +196,10 @@ export class DurableRunQueue {
     this.leaselessSince = new Map()
     this.refreshedAt = new Map()  // run id -> last lookup time; the 0.7 s throttle no longer relies on updated_at
     this.refreshing = new Map() // status polls share only this run's lookup, never the global tick
+    this.launches = new Map() // run id -> { promise, startedAt }: one in-flight Hermes admission per run
+    this.launchWaitMs = Math.max(0, Number.isFinite(Number(launchWaitMs)) ? Number(launchWaitMs) : 3_000)
+    this.summaryWaitMs = Math.max(0, Number.isFinite(Number(summaryWaitMs)) ? Number(summaryWaitMs) : 500)
+    this.slowLaunchSeconds = Math.max(1, Number(slowLaunchSeconds) || 20)
     // Retain only preview text and the provider hint, never attachment-bearing requests.
     this.projectionInputs = new Map()
     this.timer = null
@@ -307,8 +318,9 @@ export class DurableRunQueue {
     if (this.closePromise) return this.closePromise
     this.quiesce()
     // With no in-flight work preserve synchronous close for existing callers.
-    if (!this.tickPromise && !this.refreshing.size) { this.database.close(); return this.closePromise = Promise.resolve() }
-    return this.closePromise = Promise.allSettled([this.tickPromise, ...this.refreshing.values()]).then(() => this.database.close())
+    if (!this.tickPromise && !this.refreshing.size && !this.launches.size) { this.database.close(); return this.closePromise = Promise.resolve() }
+    return this.closePromise = Promise.allSettled([this.tickPromise, ...this.refreshing.values(), ...[...this.launches.values()].map(launch => launch.promise)])
+      .then(() => this.database.close())
   }
 
   _record(row) {
@@ -762,8 +774,29 @@ export class DurableRunQueue {
     return rows.length === 1 ? this._record(rows[0]) : null
   }
 
-  async summary() {
-    await this.tick(false)
+  // Launches Hermes has not answered yet. launch_waiting_s is the oldest one's wait: a large value
+  // means Hermes is slow to accept new messages (they are saved and will send), not that Wizard is down.
+  launchState() {
+    const now = nowSeconds()
+    const rows = this._rows("status = 'launching' AND upstream_run_id = ''")
+    let oldest = 0
+    for (const record of rows) {
+      const inFlight = this.launches.get(record.publicRunId)
+      const started = inFlight ? inFlight.startedAt / 1000 : record.updatedAt
+      oldest = Math.max(oldest, now - started)
+    }
+    const waiting = Math.max(0, Math.round(oldest))
+    return { launching: rows.length, launch_waiting_s: waiting, hermes_slow_to_accept: rows.length > 0 && oldest >= this.slowLaunchSeconds }
+  }
+
+  async summary({ waitMs = this.summaryWaitMs } = {}) {
+    // Never wait on a whole tick: it may be waiting on Hermes. Answer from the saved queue instead.
+    let timer
+    const fresh = await Promise.race([
+      this.tick(false).then(() => true, () => false), // a failed refresh is not fresh
+      new Promise((done) => { timer = setTimeout(done, waitMs, false); timer.unref?.() }),
+    ])
+    clearTimeout(timer)
     let external = []
     let livenessAvailable = true
     try { external = await this.activeSessionIds() }
@@ -784,6 +817,8 @@ export class DurableRunQueue {
       lane: 'interactive',
       interactive_reserved: this.reservedInteractive,
       provider_waiting: this._rows("status = 'queued' AND waiting_reason = 'provider_busy'").length,
+      queue_stale: !fresh,
+      ...this.launchState(),
     }
   }
 
@@ -1102,7 +1137,35 @@ export class DurableRunQueue {
     }
   }
 
-  async _launch(record) {
+  // One admission per run at a time. A second caller (a later tick, a status read) shares the
+  // in-flight request instead of sending the same message to Hermes again.
+  _launch(record) {
+    const id = record.publicRunId
+    const inFlight = this.launches.get(id)
+    if (inFlight) return inFlight.promise
+    const entry = { promise: null, startedAt: Date.now() }
+    this.launches.set(id, entry)
+    entry.promise = this._launchOnce(record).finally(() => { if (this.launches.get(id) === entry) this.launches.delete(id) })
+    entry.promise.catch(() => undefined) // a launch left running in the background must not crash the service
+    return entry.promise
+  }
+
+  // Wait for a launch only while this tick's launch budget lasts. A launch Hermes has not answered by
+  // then keeps running in the background (its row stays `launching`, holding its thread and a slot)
+  // and the tick moves on, so status refresh and every other queued message keep going.
+  async _launchWithin(record, deadline) {
+    if (this.launches.has(record.publicRunId)) return this.get(record.publicRunId) ?? record
+    const work = this._launch(record)
+    const remaining = deadline - performance.now()
+    const pending = Symbol('pending')
+    let timer
+    const outcome = await Promise.race([work,
+      new Promise((done) => { timer = setTimeout(done, Math.max(0, remaining), pending); timer.unref?.() })])
+    clearTimeout(timer)
+    return outcome === pending ? (this.get(record.publicRunId) ?? record) : outcome
+  }
+
+  async _launchOnce(record) {
     const fresh = this.get(record.publicRunId)
     if (!fresh || !['queued', 'launching'].includes(fresh.status)) return fresh ?? record
     if (fresh.upstreamRunId) return this._refresh(fresh, true)
@@ -1193,9 +1256,10 @@ export class DurableRunQueue {
   async _tick(force) {
     // The status is stored after the request body, so a plain scan follows every saved body's
     // overflow pages each 1.5 s. Select the identities through the (status, …) index instead.
+    const launchDeadline = performance.now() + this.launchWaitMs
     let activeRows = this._rows("public_run_id IN (SELECT public_run_id FROM wizard_run_queue INDEXED BY wizard_run_queue_fifo WHERE status NOT IN ('queued','completed','failed','cancelled','interrupted'))")
     for (const record of activeRows) {
-      if (record.status === 'launching' && !record.upstreamRunId) await this._launch(record)
+      if (record.status === 'launching' && !record.upstreamRunId) await this._launchWithin(record, launchDeadline)
       else await this._refresh(record, force)
     }
     await this._resumeDiagnosedSignIns()
@@ -1260,7 +1324,7 @@ export class DurableRunQueue {
         if (record.retrySourceId) blockedRecoveryProviders.add(recoveryProvider)
         continue
       }
-      const launched = await this._launch(record)
+      const launched = await this._launchWithin(record, launchDeadline)
       if (ACTIVE.has(launched.status)) activeSessions.add(launched.sessionId)
       if (launched.status === 'unknown') fenced.add(launched.sessionId)
     }
