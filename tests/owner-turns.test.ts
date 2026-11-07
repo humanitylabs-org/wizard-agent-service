@@ -24,7 +24,7 @@ describe('restoreOwnerTurns (Hermes 0.22.5 api_server admissions)', () => {
       { id: 37, session_id: SID, role: 'assistant', content: 'Hi! What can I help with?' },
     ] }
     expect(run(live, ['adm-owner'])[0].display_kind).toBeUndefined()
-    const late = { data: [{ ...live.data[0], timestamp: 1792826187.9 + 600 }] }
+    const late = { data: [{ ...live.data[0], timestamp: 1792826187.9 + 90000 }] }
     expect(run(late, ['adm-owner'])[0].display_kind).toBe('internal_notification')
     const other = { data: [{ ...live.data[0], content: 'something else' }] }
     expect(run(other, ['adm-owner'])[0].display_kind).toBe('internal_notification')
