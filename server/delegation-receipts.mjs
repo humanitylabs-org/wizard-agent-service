@@ -136,8 +136,9 @@ export function readUndeliveredHelperReceipts(path, {now=Date.now(),maxAgeSecond
   } catch{return []}finally{if (!suppliedDb) db?.close()}
 }
 // The running background delegation that launched this canonical Hermes child, from Hermes'
-// own records only: the child row names its parent and delegate marker, and the parent's
-// newest outstanding async delegation dispatched before the child started is the launcher.
+// own records only: the child row names its parent and delegate marker, and its kickoff
+// message is one of that delegation's goals. Hermes stores no child id on the delegation,
+// so overlapping candidates that cannot be told apart fail closed rather than guess.
 // Same 6 h horizon as the helpers-running projection: a lost helper keeps no authority.
 export function outstandingBackgroundDelegation(db, childSessionId, now=Date.now()) {
   const sessionColumns=new Set(preparedRead(db, 'PRAGMA table_info(sessions)').all().map(r=>r.name))
@@ -146,17 +147,26 @@ export function outstandingBackgroundDelegation(db, childSessionId, now=Date.now
   if(!exists) return null
   const columns=new Set(preparedRead(db, 'PRAGMA table_info(async_delegations)').all().map(r=>r.name))
   const origins=['origin_session_id','parent_session_id','origin_ui_session_id'].filter(k=>columns.has(k))
-  if(!origins.length || !['delegation_id','state','dispatched_at','completed_at'].every(k=>columns.has(k))) return null
+  if(!origins.length || !['delegation_id','state','dispatched_at','completed_at','task_json'].every(k=>columns.has(k))) return null
   const child=preparedRead(db, 'SELECT parent_session_id,source,started_at,ended_at,model_config FROM sessions WHERE id=?').get(childSessionId)
   const parent=String(child?.parent_session_id||'')
   if(!parent || child.source!=='subagent' || child.ended_at!=null || !Number.isFinite(Number(child.started_at))) return null
   let config; try { config=JSON.parse(child.model_config||'{}') } catch { return null }
   if(config?._delegate_from!==parent) return null
+  // Compaction may deactivate the kickoff row, never renumber it: the first id is the kickoff.
+  const kickoff=String(preparedRead(db, "SELECT content FROM messages WHERE session_id=? AND role='user' ORDER BY id LIMIT 1").get(childSessionId)?.content||'')
+  if(!kickoff.trim()) return null
   const origin=`COALESCE(${origins.map(k=>`NULLIF(${k},'')`).join(',')},'')`
-  const row=preparedRead(db, `SELECT delegation_id FROM async_delegations WHERE ${origin}=?
+  const rows=preparedRead(db, `SELECT delegation_id,task_json FROM async_delegations WHERE ${origin}=?
     AND state IN ('running','stalling','finalizing') AND completed_at IS NULL AND dispatched_at>? AND dispatched_at<=?
-    ORDER BY dispatched_at DESC LIMIT 1`).get(parent, now/1000-6*3600, Number(child.started_at)+30)
-  return row?.delegation_id ? { delegationId: String(row.delegation_id), sessionId: parent } : null
+    ORDER BY dispatched_at DESC LIMIT 33`).all(parent, now/1000-6*3600, Number(child.started_at)+30)
+  const matches=rows.filter(row => {
+    let goals; try { goals=JSON.parse(row.task_json||'{}')?.goals } catch { return false }
+    // Attachments are appended after the goal text in the kickoff message.
+    return Array.isArray(goals) && goals.some(goal => typeof goal==='string' && goal.trim() && kickoff.startsWith(goal))
+  })
+  return rows.length<33 && matches.length===1 && matches[0].delegation_id
+    ? { delegationId: String(matches[0].delegation_id), sessionId: parent } : null
 }
 export function findIdleUndeliveredHelperReceipts(path,options={}) {
   return readUndeliveredHelperReceipts(path,options).filter(r=>continuationAllowed(path,r.sessionId,r.delegationId,options.now??Date.now()))
