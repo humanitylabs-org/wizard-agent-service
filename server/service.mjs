@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
 import { createDevices, devicesTool } from './devices.mjs'
-import { projectOpenAskSession, threadBackground, replyEpoch } from './open-ask.mjs'
+import { projectOpenAskSession, threadBackground, liveWorker, ENDED_WITH_ERROR, replyEpoch } from './open-ask.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, createHermesSessionTruthReader, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, directRunStamps, heavyJobStamps, listCacheMode, mergeStamps, projectListSlices, createJoinedListCheck } from './session-list-cache.mjs'
@@ -691,6 +691,10 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               && !['failed', 'interrupted', 'waiting_for_approval'].includes(String(projected.status ?? ''))) {
               projected.status = 'running'
               projected.wizard_waiting_on = 'helper'
+            } else if (ENDED_WITH_ERROR.has(String(projected.status ?? '')) && liveWorker(truth)) {
+              // The last run ended in an error, but a helper is still running: keep the
+              // error status (and its card) while the row stays in Working until it stops.
+              projected.wizard_background = liveWorker(truth)
             }
             if (ACTIVE_RUN_STATUSES.has(projected.status) && !projected.wizard_assigned_at) {
               projected.wizard_assigned_at = Number(projected.wizard_last_user_at) || Number(truth?.lastUserAt) || undefined
@@ -2968,7 +2972,7 @@ function buildWizardServer(options, lifetime) {
       truth.supervisorPending = !!evidence?.supervisorPending
       return projectOpenAskSession(row, { replies: truth.replies?.length ? truth.replies : replies, inFlight: !!truth.active,
         lastUserAt: Math.max(replyEpoch(truth.lastUserAt), replyEpoch(lastUserAt)),
-        background: threadBackground(truth), heavyPending: !!truth.heavyPending })
+        background: threadBackground(truth), heavyPending: !!truth.heavyPending, live: liveWorker(truth) })
     },
     acknowledgeHeavyNotices,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
@@ -4413,7 +4417,7 @@ function buildWizardServer(options, lifetime) {
               if (!replies) return session
               return projectOpenAskSession(session, { replies, inFlight: !!truth.active,
                 lastUserAt: Math.max(replyEpoch(truth?.lastUserAt), replyEpoch(messages?.lastUser?.created_at)),
-                background: threadBackground(truth), heavyPending: !!truth?.heavyPending })
+                background: threadBackground(truth), heavyPending: !!truth?.heavyPending, live: liveWorker(truth) })
             })
             result = Buffer.from(JSON.stringify(payload))
           }

@@ -12,6 +12,14 @@ export function replyEpoch(value) {
 export const threadBackground = truth => truth?.heavyPending ? 'heavy'
   : truth?.helpersRunning || truth?.helperResultUnanswered || truth?.supervisorPending
     || truth?.helperStatus && (truth.helperStatus.phase !== 'held' || truth.helperStatus.pending > 0 || truth.helperStatus.returned > 0) ? 'helper' : ''
+// A worker that is actually executing right now: a helper still running (6 h-capped
+// helpersRunning, or a live helper-status phase with pending helpers) or a pending heavy job.
+// Narrower than threadBackground: an unanswered result or a stalled helper is not running.
+export const liveWorker = truth => truth?.heavyPending ? 'heavy'
+  : truth?.helpersRunning > 0 || truth?.helperStatus?.phase === 'running' && truth.helperStatus.pending > 0 ? 'helper' : ''
+// Terminal run states whose thread still belongs in Working while a worker runs (James,
+// 7 Nov 2026: Ready only when everything has stopped). The status and its error card stay.
+export const ENDED_WITH_ERROR = new Set(['failed', 'interrupted', 'cancelled', 'expired'])
 
 // Replies are visible final assistant replies only, in arrival order (oldest first).
 // A timestamp must use the same epoch-seconds clock as lastUserAt. Keep unmarked
@@ -37,11 +45,17 @@ export function resolveThreadSection({ replies = [], lastUserAt = 0, background 
 
 // Shared by main and routed runtimes, including slim list windows. Do not turn
 // errors, stop requests or native approval gates into an ordinary Ready row.
-export function projectOpenAskSession(session, { replies, lastUserAt, background = '', heavyPending = background === 'heavy', inFlight = false } = {}) {
+export function projectOpenAskSession(session, { replies, lastUserAt, background = '', heavyPending = background === 'heavy', inFlight = false, live = '' } = {}) {
   const decision = resolveThreadSection({ replies, lastUserAt, background, heavyPending })
   const row = { ...session }
   delete row.wizard_background
-  if (['failed', 'interrupted', 'cancelled', 'expired', 'waiting_for_approval', 'stopping'].includes(row.status)) return row
+  // An errored last run keeps its status (the thread's error card), but a worker that is
+  // still running keeps the row in Working via wizard_background, not in Ready/Errors.
+  if (ENDED_WITH_ERROR.has(row.status)) {
+    if (live === 'helper' || live === 'heavy') row.wizard_background = live
+    return row
+  }
+  if (['waiting_for_approval', 'stopping'].includes(row.status)) return row
   // A live lease also owns execution when no API run has been admitted.
   if (inFlight && !row.wizard_run_id && row.status !== 'queued') return row
   // Admitted owner input can still be outside history. Keep the live release's
