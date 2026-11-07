@@ -1,3 +1,4 @@
+import { createSpeedMeter } from './speed-meter.mjs'
 import { accessSync, appendFileSync, closeSync, constants as fsConstants, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
@@ -13,11 +14,12 @@ import { execFile } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
-import { projectOpenAskSession, threadBackground, replyEpoch } from './open-ask.mjs'
 import { createDevices, devicesTool } from './devices.mjs'
+import { projectOpenAskSession, threadBackground, replyEpoch } from './open-ask.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
-import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
-import { createHybridProjector, createSharedSnapshot, diffProjectedRows, listCacheMode, mergeStamps } from './session-list-cache.mjs'
+import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, createHermesSessionTruthReader, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { createHybridProjector, createSharedSnapshot, diffProjectedRows, directRunStamps, heavyJobStamps, listCacheMode, mergeStamps, projectListSlices, createJoinedListCheck } from './session-list-cache.mjs'
+import { createListEvidenceLane } from './list-evidence-lane.mjs'
 import { agentReadablePaths, projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
@@ -28,7 +30,7 @@ import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, fullStatusAsk, askMaxFor, withAskMax, guardHeavyStatus, replyAppId, projectStatusMarkers } from './thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, fullStatusAsk, askMaxFor, withAskMax, createHeavyStatusGuard, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
@@ -43,20 +45,21 @@ import { bootstrapPayload, readApps, readSettings, normalizeSettings, recordResp
 import { readUiPreferences, updateUiPreferences, patchUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
+import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
 import { projectOwnedOpenWork } from './owned-open-work.mjs'
-import { createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND, readNonHoldingFollowUps } from './owned-open-work-follow-through.mjs'
+import { readNonHoldingFollowUps, createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND } from './owned-open-work-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { PAGES_FOLDER, PagesError, createPages, servePage } from './pages.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
-import { pendingHeavyJobs } from './heavy-wait.mjs'
-import { readSupervisorBuildWaits, readSupervisorWaitRevision, readSupervisorWaitStamps } from './supervisor-wait.mjs'
+import { heavyJobsForSession, pendingHeavyJobs } from './heavy-wait.mjs'
+import { readSupervisorBuildWaits, readSupervisorWaitRevision } from './supervisor-wait.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
 import { createPhotoProjection, createChatPhotoReconciler, readPhotoBytes } from './chat-photo-projection.mjs'
@@ -77,11 +80,13 @@ import { SystemJobs, SystemdJobTimers, systemJobsSocket, handleSystemJobsApi } f
 import { serviceLifetime } from './service-lifetime.mjs'
 import { onboardingTools } from './onboarding.mjs'
 import { followUpThreadNote, followUpTool } from './follow-ups.mjs'
+import { agentReachOutTools, reachOutNote } from './agent-reach-out.mjs'
 import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, projectFollowUps, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { handleAgentNotesApi } from './agent-notes-http.mjs'
 import { loadAgentSessionRows, projectProfileSessions, decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { placeAgentFiles } from './agent-files.mjs'
+import { createIncognito, isIncognitoPath } from './incognito.mjs'
 import { AgentChatInputs } from './agent-chat-inputs.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
@@ -97,8 +102,9 @@ export const BODY_LIMIT = 12 * 1024 * 1024
 export const TAILNET_INGRESS = Symbol('wizard.tailnetIngress')
 export const WIZARD_FILE_UPLOAD_LIMIT = 64 * 1024 * 1024
 export const WIZARD_VOICE_UPLOAD_LIMIT = 32 * 1024 * 1024
-// Eight composer files plus the retained microphone recording.
-const WIZARD_FILE_LIMIT = 9
+// No per-message file COUNT cap (James, 6 Nov 2026: "don't impose arbitrary limits on the user"). The real limits
+// are per-file upload size (WIZARD_FILE_UPLOAD_LIMIT / WIZARD_VOICE_UPLOAD_LIMIT) and the inline-image byte budget
+// below; images past that budget reach the agent as trusted paths with a vision_analyze note.
 const WIZARD_AGENT_IMAGE_LIMIT = 5 * 1024 * 1024
 // Non-image files the agent sends with MEDIA: (APKs, PDFs, archives, audio, video).
 const WIZARD_AGENT_FILE_LIMIT = 256 * 1024 * 1024
@@ -159,7 +165,7 @@ This is a same-profile private-Operator experience pilot. Describe it accurately
 // the Own reply style leaves them out so the owner's existing agent keeps its own habits.
 const WIZARD_CLIENT_INTRO = 'You are serving the user through Wizard, a first-party mobile client for their Hermes Agent.'
 const WIZARD_STYLE_INTRO = 'Apply the same intelligence, depth, tool use, source grounding, and verification you would in their primary Hermes surface. Scale the response to the request: answer a simple ask directly; give deep investigations, reports, and builds the full structured treatment they require.'
-const WIZARD_CLIENT_FACTS = `Wizard renders Markdown (code fences, lists, tables, headings). Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients. Whether and how much to format is up to your own persona. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. ${WIZARD_CHAT_MEDIA_INSTRUCTIONS} Look: when the user asks to change how Wizard looks ("change my skin", colours, fonts, spacing), edit only their My skin, the folder Skins/My skin/ in their Files (Files app tools): skin.css for style (legacy Skins/My skin.css still works), optional skin.js for the skin hook API, which Wizard layers on top of whichever skin they picked and which no update overwrites; never edit the built-in skins (Nebula, Grove, Tide, Ember, Signal, Dark, Light, Landscapes). CSS: no @import or outside URLs; skin.js: export default function setup(api), use only the skin hook API, and after EVERY edit the owner must tap Turn on in Settings > Look for that exact SHA-256 on this device. Agents cannot approve scripts or write wos.myskin.js.ok; target html[data-skin] for every skin or html[data-skin="<id>"] for one; an empty file restores the skin exactly; they reload Wizard to see it.`
+const WIZARD_CLIENT_FACTS = `Wizard renders Markdown (code fences, lists, tables, headings). Ignore any generic API-server note telling you to reply in plain text without Markdown: that default is for unknown clients. Only that plain-text line is overridden; the same note's ask to keep replies brief and conversational, not a document, still applies. Whether and how much to format is up to your own persona. Links: give Wizard pages as relative links (/app-path/) so they open beside the chat; when your own browser needs the user (CAPTCHA, login, code), hand that tab over with the Browser app's handoff tool and send its link; a site that needs the user's own accounts gets a normal https link, which opens in their browser. ${WIZARD_CHAT_MEDIA_INSTRUCTIONS} Look: when the user asks to change how Wizard looks ("change my skin", colours, fonts, spacing), edit only their My skin, the folder Skins/My skin/ in their Files (Files app tools): skin.css for style (legacy Skins/My skin.css still works), optional skin.js for the skin hook API, which Wizard layers on top of whichever skin they picked and which no update overwrites; never edit the built-in skins (Nebula, Grove, Tide, Ember, Signal, Dark, Light, Landscapes). CSS: no @import or outside URLs; skin.js: export default function setup(api), use only the skin hook API, and after EVERY edit the owner must tap Turn on in Settings > Look for that exact SHA-256 on this device. Agents cannot approve scripts or write wos.myskin.js.ok; target html[data-skin] for every skin or html[data-skin="<id>"] for one; an empty file restores the skin exactly; they reload Wizard to see it.`
 const WIZARD_OUTCOME_OWNERSHIP = 'The originating Wizard run owns the requested outcome through verified completion. Keep working until every named requirement is satisfied. Delegated workers and software lanes are internal implementation mechanisms, never the user-facing deliverable. Join any delegated work in this run, inspect its result, finish integration or release work, and verify the real target before giving one final answer. A dispatch, submission, review, or promise that another process will finish and notify the user is progress only.'
 const WIZARD_FINISH_SHAPE = 'Finish with one self-contained, user-facing response: briefly recover the original request, distinguish shipped work from staged work, state the verified result, and give the one remaining action or decision. Treat worker completions, test logs, and automatic retry nudges as internal evidence for continuing the task. Keep routine progress in the work log; any final or attention-worthy update must make sense to someone opening the thread cold. If progress genuinely requires the user, external access, or an unavailable dependency, name that exact blocker and preserve the completed work. For images and attachments, inspect the source and answer the underlying request rather than merely describing it.'
 
@@ -554,13 +560,6 @@ function newestRun(runs, sessionId) {
     .sort((left, right) => Number(right.createdAt ?? right.updatedAt ?? 0) - Number(left.createdAt ?? left.updatedAt ?? 0))[0]
 }
 
-function staleAgainstCanonicalReply(run, truth, trustActiveTruth) {
-  if (run?.status === 'unknown') return false
-  const startedAt = Number(run?.createdAt ?? 0)
-  const terminalAt = Number(truth?.lastAssistantAt ?? 0)
-  const latestRequestAt = Number(truth?.lastUserAt ?? 0)
-  return Boolean(trustActiveTruth && truth && !truth.active && startedAt > 0 && terminalAt >= startedAt && terminalAt > latestRequestAt)
-}
 
 function filterSessionList(result, operator, records = [], directRuns = [], externalRuns = [], sessionTruth = new Map(), helmActivities = [], trustActiveTruth = false, dismissedFailures = null) {
   try {
@@ -588,15 +587,11 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
           if (!operator) {
             const externallyAdmitted = session.id.startsWith(EXTERNAL_WIZARD_SESSION_PREFIX)
             const latestDirect = newestRun(directRuns, session.id)
-            const directCandidate = newestActiveRun(directRuns, session.id)
-            const direct = staleAgainstCanonicalReply(directCandidate, truth, trustActiveTruth) ? undefined : directCandidate
+            const direct = newestActiveRun(directRuns, session.id)
             // /v1/runs owns execution lifecycle truth. Turn leases fence transcript
             // writes; they are not guaranteed to remain present for every live API run.
-            const externalCandidate = externalRuns.find((run) =>
+            const external = externalRuns.find((run) =>
               run.sessionId === session.id && PROJECTED_RUN_STATUSES.has(run.status))
-            const external = staleAgainstCanonicalReply(externalCandidate, truth, trustActiveTruth)
-              ? undefined
-              : externalCandidate
             const helm = helmActivities
               .filter((activity) => activity.sessionId === session.id)
               .sort((left, right) => right.createdAt - left.createdAt)[0]
@@ -859,7 +854,7 @@ function durableScreenshotCandidate(record) {
       continue
     }
     const image = durableInlineImage(part)
-    if (!image || images.length >= WIZARD_FILE_LIMIT || totalBytes + image.bytes > WIZARD_AGENT_IMAGE_LIMIT) return null
+    if (!image || totalBytes + image.bytes > WIZARD_AGENT_IMAGE_LIMIT) return null
     images.push({ type: image.type, image_url: image.image_url })
     text.push(DURABLE_SCREENSHOT_MARKER)
     totalBytes += image.bytes
@@ -1023,7 +1018,7 @@ export function projectWizardFileMarkers(result, userMessagesOnly = false) {
         try {
           const files = JSON.parse(raw)
           if (!Array.isArray(files)) return ''
-          const safe = files.slice(0, WIZARD_FILE_LIMIT).map(safeAttachment)
+          const safe = files.map(safeAttachment)
           return `[WIZARD_FILE_CHIPS_V1]\n${JSON.stringify(safe)}\n[/WIZARD_FILE_CHIPS_V1]`
         } catch { return '' }
       })
@@ -1468,6 +1463,40 @@ export function historyQuestion(args, content) {
   return text ? { text, choices: historyQuestionChoices(first.choices), state: 'waiting' } : null
 }
 
+// Hermes can coalesce a completed helper notification and the next owner send into
+// one user row. The helper's final transcript footer is its structural boundary;
+// never discard the owner tail merely because the row starts with an internal marker.
+function ownerTailAfterDelegation(message) {
+  if ((message?.role ?? message?.author) !== 'user') return message
+  const text = runContextText(message.content ?? '')
+  if (!text.trimStart().startsWith('[ASYNC DELEGATION BATCH COMPLETE')) return message
+  const headers = [...text.matchAll(/^--- [✓✗] TASK (\d+)\/(\d+):[^\n]*\(status=[^\n]+\) ---$/gm)]
+  const last = headers.at(-1)
+  if (!last || last[1] !== last[2]) return message
+  const footers = [...text.matchAll(/^Full live transcript \(complete tool\/assistant trace\): [^\r\n]+\r?\n\r?\n/gm)]
+  const footer = footers.at(-1)
+  if (!footer || footer.index < last.index + last[0].length) return message
+  const tail = text.slice(footer.index + footer[0].length).trim()
+  if (!tail || legacyInternalHistoryMessage({ role: 'user', content: tail }) || /^--- [✓✗] TASK /m.test(tail)) return message
+  // Display-only: stored content and provider input remain byte-for-byte intact.
+  // Slice text at the boundary without flattening away the owner's inline media.
+  let content = tail
+  if (Array.isArray(message.content)) {
+    const boundary = footer.index + footer[0].length
+    let offset = 0, texts = 0
+    content = []
+    for (const part of message.content) {
+      if (part && ['text', 'input_text'].includes(part.type) && typeof part.text === 'string') {
+        if (texts++) offset++ // runContextText joins text parts with one newline
+        const end = offset + part.text.length
+        if (end > boundary) content.push({ ...part, text: part.text.slice(Math.max(0, boundary - offset)) })
+        offset = end
+      } else if (offset >= boundary) content.push(part)
+    }
+  }
+  return { ...message, content, display_content: content, display_kind: null }
+}
+
 export function projectWizardMessageHistory(result, sourceResult = result) {
   const slimCall = (call, index) => {
     const item = call && typeof call === 'object' && !Array.isArray(call) ? call : {}
@@ -1487,7 +1516,7 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
     const role = message.role ?? message.author
     if (typeof role !== 'string') return message
     const projected = {}
-    for (const key of ['id', 'message_id', 'session_id', 'role', 'author', 'timestamp', 'created_at', 'display_kind', 'display_content', 'tool_call_id']) {
+    for (const key of ['id', 'message_id', 'session_id', 'role', 'author', 'timestamp', 'created_at', 'display_kind', 'display_content', 'tool_call_id', 'client_message_id', 'wizard_client_message_id']) {
       if (Object.hasOwn(message, key)) projected[key] = message[key]
     }
     const runContext = historyRunContext(sourceMessage)
@@ -1568,7 +1597,7 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
   const visit = (value, source = value) => {
     if (Array.isArray(value)) {
       const seen = new Set()
-      const sourceOf = (item, index) => source?.[index] ?? item
+      const sourceOf = (item, index) => ownerTailAfterDelegation(source?.[index] ?? item)
       const firstByKey = new Map()
       value.forEach((item, index) => {
         const key = replayKey(sourceOf(item, index))
@@ -1583,6 +1612,7 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
             .sort((a, b) => b.length - a.length)
         : []
       return value.flatMap((item, index) => {
+        item = ownerTailAfterDelegation(item)
         const sourceItem = sourceOf(item, index)
         if (repeated.has(index)) {
           const earlier = sourceOf(value[firstByKey.get(replayKey(sourceItem))], firstByKey.get(replayKey(sourceItem)))
@@ -1608,6 +1638,8 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
       })
     }
     if (!value || typeof value !== 'object') return value
+    value = ownerTailAfterDelegation(value)
+    source = ownerTailAfterDelegation(source)
     if (legacyInternalHistoryMessage(value) && !historyRunContext(source)) return null
     if (typeof (value.role ?? value.author) === 'string') return slimMessage(value, source)
     const projected = { ...value }
@@ -1645,7 +1677,7 @@ function recoverProjectedFileChips(input) {
     if (typeof value === 'string') return value.replace(PROJECTED_FILE_CHIPS, (_marker, raw) => {
       let files
       try { files = JSON.parse(raw) } catch { throw Object.assign(new Error('invalid projected file chips'), { status: 400 }) }
-      if (!Array.isArray(files) || !files.length || files.length > WIZARD_FILE_LIMIT
+      if (!Array.isArray(files) || !files.length
         || files.some(file => !file || typeof file !== 'object' || Array.isArray(file) || typeof file.id !== 'string' || !FILE_ID.test(file.id))) {
         throw Object.assign(new Error('invalid projected file chips'), { status: 400 })
       }
@@ -1733,7 +1765,7 @@ export async function prepareRunBody(body, resolveFiles, includeNativeImages = f
   const recovered = recoverProjectedFileChips(value.input)
   const declared = Object.hasOwn(value, 'wizard_file_ids')
   if (!declared && !recovered.ids.length) return { body, trustedPaths: [] }
-  if (declared && (!Array.isArray(value.wizard_file_ids) || value.wizard_file_ids.length > WIZARD_FILE_LIMIT)) {
+  if (declared && !Array.isArray(value.wizard_file_ids)) {
     throw Object.assign(new Error('invalid file ids'), { status: 400 })
   }
   const declaredIds = declared ? [...new Set(value.wizard_file_ids)] : []
@@ -1742,7 +1774,6 @@ export async function prepareRunBody(body, resolveFiles, includeNativeImages = f
     throw Object.assign(new Error('invalid file ids'), { status: 400 })
   }
   const ids = [...new Set([...declaredIds, ...recovered.ids])]
-  if (ids.length > WIZARD_FILE_LIMIT) throw Object.assign(new Error('invalid file ids'), { status: 400 })
   value.input = recovered.input
   delete value.wizard_file_ids
   if (!ids.length) return { body: Buffer.from(JSON.stringify(value)), trustedPaths: [] }
@@ -2006,7 +2037,7 @@ export function routedMediaPaths(result, containerRoot = '/opt/data') {
     else if (value && typeof value === 'object') Object.values(value).forEach(walk)
   }
   try { walk(JSON.parse(Buffer.isBuffer(result) ? result.toString('utf8') : String(result))) } catch { return [] }
-  return [...found].slice(0, 16)
+  return [...found]
 }
 
 export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = [], imageResolver = null, scoped = false) {
@@ -2611,13 +2642,15 @@ function buildWizardServer(options, lifetime) {
   // wizard_remind / wizard_tips on the gateway (server/onboarding.mjs); bound once the scheduler exists below.
   let onboarding = null
   let followUps = null
+  // wizard_start_thread / wizard_schedule for routed agents (server/agent-reach-out.mjs); bound with the scheduler.
+  let reachOut = null
   let spacesTools = null
   let supervisorTools = null
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
       builtins: {
-        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId)],
-        call: async (name, args, agentId) => (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
+        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(reachOut?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId)],
+        call: async (name, args, agentId) => (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await reachOut?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
       },
       agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
@@ -2656,6 +2689,7 @@ function buildWizardServer(options, lifetime) {
     mainHome: options.hermesHome || process.env.HERMES_HOME || join(homedir(), '.hermes'),
     agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath, mainOrigin: upstreamOrigin, mainUpstreamOrigin: upstreamOrigin, mainKey: hermesKey,
     isBindingTarget: id => appBindings?.list().some(binding => binding.agent === id && !binding.is_default),
+    appRuntimeGrantsPath: options.appRuntimeGrantsPath,
     upstreamMode: options.agentUpstreamMode, upstreamHost: options.agentUpstreamHost,
     basePort: options.agentBasePort, image: options.agentImage, tinfoilUrl: options.agentTinfoilUrl,
     contextLength: options.agentContextLength,
@@ -2734,11 +2768,11 @@ function buildWizardServer(options, lifetime) {
     return null
   }
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
-  const heavyStatus = (agentId, sessionId, status, jobs = heavyWork?.queue.rows()) => guardHeavyStatus(status, {
-    agentId, sessionId, jobs,
-    nonHoldingIds: agentId === 'hermes' && status?.state === 'done' && jobs?.some(job => (job.sessionId ?? job.session_id) === sessionId)
-      ? readNonHoldingFollowUps(hermesStatePath, sessionId) : new Set(),
-    isDelivered: job => {
+  // Only this thread's jobs are read, and only for done/check. Callers projecting a list pass one
+  // snapshot for all rows; the done-row follow-up evidence is read only when the thread owns a job.
+  const heavyStatus = createHeavyStatusGuard({ rows: () => heavyWork?.queue.rows(),
+    nonHolding: (_agentId, sessionId) => readNonHoldingFollowUps(hermesStatePath, sessionId),
+    isDelivered: (agentId, sessionId, job) => {
       if (agentId === 'hermes') return Boolean(runQueue?.get(job.resume)?.upstreamRunId)
       const run = agents?.runThread(agentId, job.resume)
       return run?.session_id === sessionId && run?.heavy_origin === job.origin
@@ -2747,7 +2781,7 @@ function buildWizardServer(options, lifetime) {
   const heavyNotices = (agentId, sessionId) => heavyWork?.queue.noticeContext(agentId, sessionId) || ''
   const acknowledgeHeavyNotices = (agentId, sessionId, body) => heavyWork?.queue.acknowledgeNotices(agentId, sessionId, body)
   const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling,
-    heavyStatus, heavyNotices }) : null
+    heavyStatus, heavyNotices, trackerNote: (agentId, id) => trackerNote(agentId, id) }) : null
   const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   const providerFailureDismissed = record => dismissedFailureStore.isDismissedAfter(record.sessionId, record.createdAt * 1000, record.agent_id)
     || dismissedFailureStore.isDismissed(record.sessionId, record.publicRunId, record.agent_id)
@@ -2764,17 +2798,36 @@ function buildWizardServer(options, lifetime) {
       const note = heavyNotices(agentId, sessionId)
       return note && !String(body.instructions || '').includes(note) ? { ...body, instructions: [body.instructions, note].filter(Boolean).join('\n') } : body
     }, onDispatch: acknowledgeHeavyNotices, onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
+  const routedOpenAskEvidence = (agent, ids) => {
+    const home = routedAgentMedia(agent)?.home
+    const path = home ? join(home, 'state.db') : ''
+    const wanted = [...new Set((ids ?? []).filter(id => typeof id === 'string' && id))]
+    const evidence = new Map(wanted.map(id => [id, { truth: undefined, helperStatus: undefined, supervisorPending: false }]))
+    const now = Date.now()
+    // Same 100-thread batches as the main list (readers cap at 200; helper evidence caps per batch).
+    for (let at = 0; at < wanted.length; at += 100) {
+      const batch = wanted.slice(at, at + 100)
+      for (const [id, truth] of readHermesSessionTruth(path, batch, now / 1000)) if (evidence.has(id)) evidence.get(id).truth = truth
+      for (const [id, status] of readHelperStatuses(path, batch, { now })) if (evidence.has(id)) evidence.get(id).helperStatus = status
+      for (const id of readSupervisorBuildWaits(options.supervisorStatePath, path, batch, now, { includeOwnerGates: true }).keys()) if (evidence.has(id)) evidence.get(id).supervisorPending = true
+    }
+    // One heavy-ledger snapshot for the whole list as well.
+    evidence.heavyJobs = heavyWork?.queue.rows()
+    return evidence
+  }
   const agentCtx = agents ? {
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
-    projectOpenAsk: (agent, row, replies, lastUserAt) => {
-      const home = routedAgentMedia(agent)?.home
-      const path = home ? join(home, 'state.db') : ''
-      const truth = readHermesSessionTruth(path, [row.id]).get(row.id) ?? {}
-      truth.helperStatus = readHelperStatuses(path, [row.id]).get(row.id)
-      truth.heavyPending = heavyStatus(agent.id, row.id, { state: 'done', ask: 'pending' })?.state === 'fyi'
-      truth.supervisorPending = readSupervisorBuildWaits(options.supervisorStatePath, path, [row.id], Date.now(), { includeOwnerGates: true }).has(row.id)
-      return projectOpenAskSession(row, { replies: truth.replies?.length ? truth.replies : replies,
+    // One read of the agent's state.db per 100 listed threads, not three opens per row:
+    // projectProfileSessions prepares this once per list and passes it to projectOpenAsk.
+    prepareOpenAsk: (agent, ids) => routedOpenAskEvidence(agent, ids),
+    projectOpenAsk: (agent, row, replies, lastUserAt, prepared) => {
+      const evidence = prepared?.get(row.id) ?? routedOpenAskEvidence(agent, [row.id]).get(row.id)
+      const truth = { ...(evidence?.truth ?? {}) }
+      truth.helperStatus = evidence?.helperStatus
+      truth.heavyPending = heavyStatus(agent.id, row.id, { state: 'done', ask: 'pending' }, prepared?.heavyJobs)?.state === 'fyi'
+      truth.supervisorPending = !!evidence?.supervisorPending
+      return projectOpenAskSession(row, { replies: truth.replies?.length ? truth.replies : replies, inFlight: !!truth.active,
         lastUserAt: Math.max(replyEpoch(truth.lastUserAt), replyEpoch(lastUserAt)),
         background: threadBackground(truth), heavyPending: !!truth.heavyPending })
     },
@@ -2787,10 +2840,14 @@ function buildWizardServer(options, lifetime) {
       if (candidate) agentChatInputs.note(agent.id, sessionId, runId, body, candidate.admittedAt)
     },
     forgetAgentInput: (agent, sessionId) => agentChatInputs.forget(agent.id, sessionId),
+    ingestThreadItems: (agentId, sessionId, result) => trackerOn() ? ingestHistory(threadItems, agentId, sessionId, result, parseStatus) : 0,
+    expandReplyTo: (agentId, sessionId, input) => trackerOn() ? expandReplyToInput(input, id => threadItems.titleOf(agentId, sessionId, id)) : input,
+    trackerOn: () => trackerOn(),
     responseStyle: () => readSettings(settingsPath).settings.response_style,
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
+    incognitoAvailable: agent => Boolean(agentRuntime?.incognitoStart && agent.privacy === 'private' && agent.model?.provider === 'tinfoil' && agent.runtime?.kind === 'container' && !agents.agentRestricted?.(agent.id) && !agent.imported),
     projectFollowUps: (result, agentId) => projectFollowUps(result, scheduler, { agent: agentId }),
-    followUpNote: (sessionId) => (scheduler?.running() && bridge ? followUpThreadNote(sessionId) : ''),
+    followUpNote: (sessionId) => (scheduler?.running() && bridge ? [followUpThreadNote(sessionId), reachOutNote()].filter(Boolean).join(' ') : ''),
     scheduleRunEventFilter: (agentId, runId) => scheduler?.hasRun(agentId, runId) ? scheduledRunEvents() : null,
     projectAgentHistory: async (result, agent, sessionId = '') => {
       // Restore from this exact pair's accepted input receipts, not main history.
@@ -2818,6 +2875,7 @@ function buildWizardServer(options, lifetime) {
     prepareAgentRun: (agent, body) => prepareRunBody(body, resolveFiles, agentModelSeesImages(agent) ? true : agentVisionHelper(agent) ? 'text-only-helper' : 'text-only', files => placeAgentFiles(agent, files, agentRuntime)),
     deliveryToken: options.agentDeliveryToken ?? '',
     deliver: async (agent, payload) => {
+      if (agent.id !== MAIN_AGENT_ID && agent.runtime.kind === 'external') throw new AgentError(409, 'external_agent_read_only', 'agent.runtime')
       if (agent.runtime.kind === 'profile') throw new AgentError(409, 'profile_agent_read_only', 'agent.runtime')
       if (!agentRuntime?.deliver) throw new AgentError(503, 'runtime_unavailable', 'agent.runtime')
       try { return await agentRuntime.deliver(agent.id, payload) } catch (error) { throw new AgentError(502, String(error?.code || 'delivery_failed'), 'agent.delivery') }
@@ -3075,6 +3133,29 @@ function buildWizardServer(options, lifetime) {
   // The subject each thread was last served with, so the next run can be told to keep it.
   const servedSubjects = new Map()
   const threadSeenStore = new ThreadSeenStore(options.threadSeenStatePath ? resolve(String(options.threadSeenStatePath)) : '')
+  // Thread tracker (owner tweak, off by default): the per-thread ledger of asks, and the gate for telling agents about it.
+  const threadItems = new ThreadItemStore(options.threadItemsStatePath ? resolve(String(options.threadItemsStatePath)) : '')
+  let trackerRead = { at: 0, on: false }
+  const trackerOn = () => {
+    if (typeof options.threadTracker === 'boolean') return options.threadTracker
+    if (Date.now() - trackerRead.at < 3000) return trackerRead.on
+    let on = false
+    try { on = trackerEnabled(pages?.read('wizard-look', 'look.json')?.text) } catch { on = false }
+    trackerRead = { at: Date.now(), on }
+    return on
+  }
+  const trackerNote = (agent, thread) => trackerOn() ? [ITEMS_INSTRUCTIONS, threadItems.runNote(agent, thread)].filter(Boolean).join('\n') : ''
+  // A finished run that listed asks: read its real reply row back so the ledger anchors on the message id.
+  const itemsInFlight = new Set()
+  const noteRunItems = (sessionId, output) => {
+    if (!trackerOn()) return
+    if (typeof sessionId !== 'string' || !sessionId || itemsInFlight.has(sessionId) || typeof output !== 'string' || !output.includes('"items"')) return
+    if (!parseStatus(output)?.items) return
+    itemsInFlight.add(sessionId)
+    hermesJson(`/api/sessions/${encodeURIComponent(sessionId)}/messages?order=latest&limit=12`)
+      .then(page => ingestHistory(threadItems, 'hermes', sessionId, Buffer.from(JSON.stringify(page)), parseStatus))
+      .catch(() => undefined).finally(() => itemsInFlight.delete(sessionId))
+  }
   if (operatorWorkerStatePath && existsSync(operatorWorkerStatePath)) {
     migrateJson(operatorWorkerStatePath, rows => rows.map(row => ({ ...row, agent_id: row.agent_id ?? MAIN_AGENT_ID, session_id: row.session_id ?? row.operatorSessionId, worker_agent_id: row.worker_agent_id ?? MAIN_AGENT_ID })))
     try {
@@ -3512,13 +3593,8 @@ function buildWizardServer(options, lifetime) {
   const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
   let runQueue = null
   let heavyWork = null
-  // One heavy-queue read per second at most: every list batch asks which threads wait on a job.
-  let heavyRowsAt = 0, heavyRowsCache = []
-  const heavyJobRows = () => {
-    if (!heavyWork?.queue?.rows) return []
-    if (Date.now() - heavyRowsAt > 1000) { heavyRowsCache = heavyWork.queue.rows(); heavyRowsAt = Date.now() }
-    return heavyRowsCache
-  }
+  // The queue owns the data-version snapshot; every projection sees writes immediately.
+  const heavyJobRows = () => heavyWork?.queue.rows() ?? []
   let backgroundResults = null
   let runQueueReady = Promise.resolve()
   if (runQueueStatePath) {
@@ -3664,7 +3740,7 @@ function buildWizardServer(options, lifetime) {
     }
     const lookupQueuedRun = async (record) => {
       const payload = await hermesJson(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)
-      if (payload.status === 'completed') { chatPhotos?.kick('completed_assistant'); if (record.runtime !== 'operator') spaceFiling.apply('hermes', record.sessionId, parseStatus(payload.output)) }
+      if (payload.status === 'completed') { chatPhotos?.kick('completed_assistant'); if (record.runtime !== 'operator') { spaceFiling.apply('hermes', record.sessionId, parseStatus(payload.output)); noteRunItems(record.sessionId, payload.output) } }
       let capacityStatus = payload.status
       let workerRunId = record.workerRunId
       if (record.runtime === 'operator' && workerRunId) {
@@ -3748,15 +3824,19 @@ function buildWizardServer(options, lifetime) {
     lifetime.own(() => runQueue.close(), () => runQueue.quiesce())
   }
 
+  const listTruthReader = createHermesSessionTruthReader(hermesStatePath)
+  lifetime.own(() => listTruthReader.close())
+  const listEvidenceLane = createListEvidenceLane({ hermesStatePath, enabled: options.listEvidenceWorker !== false })
+  lifetime.own(() => listEvidenceLane.close(), () => listEvidenceLane.close())
   if (runQueue) backgroundResults = createBackgroundResults({
     request: (path, init) => hermesJson(path, init, true), sessionDbPath: hermesStatePath, queue: () => runQueue,
     now: options.backgroundResultsNow ?? Date.now,
     refreshMs: options.backgroundResultsRefreshMs ?? 15_000,
-    busy: options.backgroundResultsBusyReader ?? (id => readHermesSessionTruth(hermesStatePath, [id]).get(id)?.active === true),
+    busy: options.backgroundResultsBusyReader ?? (id => listTruthReader.busy(id)),
   })
   // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
   // restart is relaunched by the first tick and must be validated, not cancelled.
-  heavyWork = createHeavyIntegration({ options, queue: runQueue, registry: agents,
+  heavyWork = createHeavyIntegration({ options, queue: runQueue, registry: agents, hermesStatePath,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
     isAutomaticAgentAllowed: id => agents?.read(id)?.role !== 'recovery', request: async path => {
     try { return await hermesJson(path, { signal: AbortSignal.timeout(3000) }, true) }
@@ -3829,7 +3909,7 @@ function buildWizardServer(options, lifetime) {
   }
   if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
 
-  const listWindowPage = createListWindows({ archiveDays: () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays })
+  const listWindowPage = createListWindows({ reuseSelections: true, archiveDays: () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays })
   const canonicalSessionPage = async (operator, searchParams, request) => {
     if (!canonicalSessionReader) return null
     if (!operator && (searchParams.get('window') === 'archive-50' || searchParams.has('q'))) {
@@ -3853,7 +3933,9 @@ function buildWizardServer(options, lifetime) {
       }
       return listWindowPage({ params: searchParams, scope, dispositions: threadDispositionStore.get(scope), load: async () => {
         if (!searchParams.get('q') && listCache.mode() === 'on') {
-          try { return await listCache.served() }
+          // The window selector normalizes into separate objects and never mutates
+          // these rows. Keep identity so its selection can be shared across polls.
+          try { return await listCache.served(true) }
           catch (error) { listCache.fellBack(error) }
         }
         const q = searchParams.get('q')
@@ -3967,8 +4049,8 @@ function buildWizardServer(options, lifetime) {
   // Appended to every direct run: the thread's current title and the owner's subject list.
   const runTitleNote = (sessionId) => {
     const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes')].filter(Boolean).join('\n')
-    if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote].filter(Boolean).join('\n')
-    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId)].filter(Boolean).join('\n')
+    if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote, trackerNote('hermes', '')].filter(Boolean).join('\n')
+    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId)].filter(Boolean).join('\n')
   }
   const patchHermesTitle = async (sessionId, title) => {
     for (const candidate of [title, `${title} #2`, `${title} #3`, `${title} #4`]) {
@@ -4031,13 +4113,14 @@ function buildWizardServer(options, lifetime) {
       return Buffer.from(JSON.stringify(payload))
     } catch { return result }
   }
-  const enrichSessionListMessages = async (result, operator, sessionTruth = null) => {
+  const enrichSessionListMessages = async (result, operator, sessionTruth = null, previewOffset = 0) => {
     try {
       const payload = JSON.parse(result.toString('utf8'))
       const collections = sessionListCollections(payload)
       for (const key of collections) payload[key] = await Promise.all(payload[key].map(async (session, index) => {
         try {
-          if (index >= SESSION_LIST_PREVIEW_LIMIT) return backfillFromList(session, operator, sessionTruth)
+          const position = Array.isArray(previewOffset) ? previewOffset[index] : previewOffset + index
+          if (position >= SESSION_LIST_PREVIEW_LIMIT) return backfillFromList(session, operator, sessionTruth)
           const explicitlyEmpty = session?.message_count !== undefined && session.message_count !== null && Number(session.message_count) === 0
           if (!isHumanSession(session, operator) || typeof session?.id !== 'string' || session.id.length > 256 || explicitlyEmpty) return session
           const records = operator ? [...operatorWorkers.values()].filter((record) => record.operatorSessionId === session.id) : []
@@ -4096,11 +4179,17 @@ function buildWizardServer(options, lifetime) {
   // The same truth projection runs in bounded 100-row batches for windows and legacy pages.
   // Core: everything per thread up to app provenance. Shared decoration (titles, subjects, agent)
   // reads only in-memory stores and runs on every served list, cached rows included.
-  const projectSessionListCore = async (result, operator, canonicalPage, firstPage) => {
+  const projectionSlices = { slices: 0, total_ms: 0, max_ms: 0 }
+  const recordProjectionSlice = at => {
+    const ms = performance.now() - at
+    projectionSlices.slices++; projectionSlices.total_ms += ms; projectionSlices.max_ms = Math.max(projectionSlices.max_ms, ms)
+  }
+  const projectSessionListCore = async (result, operator, canonicalPage, firstPage, previewOffset = 0, includePendingFirstSend = true) => {
+    let sliceStarted = performance.now()
           result = canonicalPage
             ? result
             : mergeArchivedSessions(result, archivedSessionReader())
-          if (!operator && runQueue && firstPage) {
+          if (!operator && runQueue && firstPage && includePendingFirstSend) {
             try {
               const candidates = runQueue.recentUnfinishedSessionIds(Date.now() / 1000 - 7 * 86400)
               result = mergeArchivedSessions(result, pendingFirstSendReader(candidates))
@@ -4113,35 +4202,27 @@ function buildWizardServer(options, lifetime) {
             // out of Working merely because its request is more than five minutes old.
             ? readWizardAssistantRunReferences(inboxDbPath, listedSessionIds)
             : undefined
+          recordProjectionSlice(sliceStarted)
           const [helmActivities, externalRuns] = operator
             ? [[], []]
             : await Promise.all([
                 readHelmActivities(),
                 readExternalAssistantRuns(listedSessionIds, recentExternalReferences),
               ])
-          const sessionTruth = readHermesSessionTruth(hermesStatePath, listedSessionIds)
-          // One queue read per batch: both consumers below need the same newest-run projection.
+          sliceStarted = performance.now()
+          // SQLite transcript/helper/supervisor reads belong to the presentation
+          // lane, not the HTTP loop. Queue/direct/external runs remain controller-
+          // owned immutable snapshots; only their active ids cross the boundary.
+          const heavyJobs = heavyWork?.queue.rows() ?? []
           const queueProjections = runQueue?.latestProjections(listedSessionIds) ?? []
-          const helperStatuses = readHelperStatuses(hermesStatePath, listedSessionIds, { activeSessionIds: new Set([...queueProjections, ...directRuns.values(), ...externalRuns].filter(r=>ACTIVE_RUN_STATUSES.has(r.status)).map(r=>r.sessionId)) })
-          for (const [id, helperStatus] of helperStatuses) { const t=sessionTruth.get(id); if(t) t.helperStatus=helperStatus }
-          if (!operator) {
-            // A thread whose own Thales job is still owed stays in Working, not Ready.
-            try {
-              const followUps = new Map()
-              const holdingJobs = heavyJobRows().filter(job => {
-                const id = job.sessionId ?? job.session_id
-                if ((job.agent_id ?? 'hermes') !== 'hermes' || !listedSessionIds.includes(id)) return true
-                if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(hermesStatePath, id))
-                return !followUps.get(id).has(job.job_id ?? job.id)
-              })
-              for (const [id] of pendingHeavyJobs(holdingJobs, listedSessionIds)) {
-                const t = sessionTruth.get(id); if (t) t.heavyPending = true
-              }
-            } catch { /* heavy queue unreadable: no wait projection */ }
-          }
-          if (!operator) for (const [id] of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, listedSessionIds, Date.now(), { includeOwnerGates: true })) {
-            const t = sessionTruth.get(id); if (t) t.supervisorPending = true
-          }
+          const wanted = new Set(listedSessionIds)
+          recordProjectionSlice(sliceStarted)
+          const { sessionTruth, followUps } = await listEvidenceLane.read({ ids: listedSessionIds,
+            activeSessionIds: [...queueProjections, ...directRuns.values(), ...externalRuns].filter(r => ACTIVE_RUN_STATUSES.has(r.status)).map(r => r.sessionId),
+            heavyJobs: heavyJobs.filter(job => wanted.has(job.sessionId ?? job.session_id)),
+            supervisorStatePath: options.supervisorStatePath, operator, now: Date.now() })
+          sliceStarted = performance.now()
+          const nonHoldingFor = id => followUps.get(id) ?? new Set()
           result = filterSessionList(
             result,
             operator,
@@ -4153,17 +4234,32 @@ function buildWizardServer(options, lifetime) {
             Boolean(canonicalPage),
             dismissedFailureStore,
           )
-          if (!operator) result = await decorateReconnectRows(result)
-          if (backgroundResults) {
-            try { result = await backgroundResults.project(result) }
-            catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
+          if (!operator) {
+            const work = decorateReconnectRows(result); recordProjectionSlice(sliceStarted)
+            result = await work; sliceStarted = performance.now()
           }
-          result = firstPage ? await enrichSessionListMessages(result, operator, sessionTruth) : backfillSessionList(result, operator, sessionTruth)
+          if (backgroundResults) {
+            try {
+              const work = backgroundResults.project(result, options.backgroundResultsBusyReader ? undefined : sessionTruth)
+              recordProjectionSlice(sliceStarted); result = await work
+            }
+            catch { /* recovery discovery is optional: unavailable history must not break ordinary Chats */ }
+            sliceStarted = performance.now()
+          }
+          const enriched = firstPage ? enrichSessionListMessages(result, operator, sessionTruth, previewOffset) : backfillSessionList(result, operator, sessionTruth)
+          recordProjectionSlice(sliceStarted); result = await enriched; sliceStarted = performance.now()
           if (!operator) {
             const payload = JSON.parse(result.toString('utf8'))
             for (const key of sessionListCollections(payload)) payload[key] = payload[key].map(session => {
               const truth = sessionTruth.get(session.id) ?? {}
-              if (heavyStatus('hermes', session.id, { state: 'done', ask: 'pending' })?.state === 'fyi') truth.heavyPending = true
+              const ownJobs = heavyJobsForSession(heavyJobs, 'hermes', session.id)
+              // Delivered history cannot change this guard. Only a still-owed
+              // result needs fresh optional-follow-up evidence in this later phase.
+              if (heavyStatus('hermes', session.id, { state: 'check', ask: 'pending' }, ownJobs)?.state === 'fyi') {
+                const nonHolding = nonHoldingFor(session.id)
+                const holdingJobs = ownJobs.filter(job => !nonHolding.has(job.job_id ?? job.id))
+                if (heavyStatus('hermes', session.id, { state: 'check', ask: 'pending' }, holdingJobs)?.state === 'fyi') truth.heavyPending = true
+              }
               const messages = sessionMessageCache.get(`direct:${session.id}`)?.messages
               const useTruth = truth?.replies && replyEpoch(truth.lastAssistantAt) >= replyEpoch(messages?.latestAssistantAt ?? 0)
               let replies = useTruth ? truth.replies : messages?.replies
@@ -4172,16 +4268,18 @@ function buildWizardServer(options, lifetime) {
                 replies = [...replies.slice(0, -1), { ...replies.at(-1), status: session.wizard_attention }]
               }
               if (!replies) return session
-              return projectOpenAskSession(session, { replies,
+              return projectOpenAskSession(session, { replies, inFlight: !!truth.active,
                 lastUserAt: Math.max(replyEpoch(truth?.lastUserAt), replyEpoch(messages?.lastUser?.created_at)),
                 background: threadBackground(truth), heavyPending: !!truth?.heavyPending })
             })
             result = Buffer.from(JSON.stringify(payload))
           }
           result = projectSessionAppProvenance(result, sessionTruth, new Set(appCatalog().map(app => app.id)))
+    recordProjectionSlice(sliceStarted)
     return result
   }
   const decorateSessionList = (result, operator) => {
+    const sliceStarted = performance.now()
           result = decorateSessionTitles(result, operator)
           if (!operator) result = projectFollowUps(result, scheduler, { agent: 'main' })
           if (agents && !operator) {
@@ -4189,6 +4287,7 @@ function buildWizardServer(options, lifetime) {
             result = decorateThreadAgent(result, row => { ids.push(row.id); return agents.threadAgent(MAIN_AGENT_ID) })
             agents.observeSessions(MAIN_AGENT_ID, ids)
           }
+    recordProjectionSlice(sliceStarted)
     return result
   }
   const projectSessionList = async (result, operator, canonicalPage, firstPage) =>
@@ -4207,7 +4306,7 @@ function buildWizardServer(options, lifetime) {
     let messageMark = Number.NaN
     let lastFallbackLogAt = 0
     const stats = { mode: configured, builds: 0, resets: 0, fallbacks: 0, checks: 0, check_differences: 0, check_live_differences: 0,
-      last_build_ms: 0, last_projected: 0, last_cached: 0, last_hot: 0, last_check_ms: 0, last_check_at: null, disabled: '' }
+      last_build_ms: 0, head_ms: 0, hot_ms: 0, head_reused: 0, head_projected: 0, head_blocked: {}, head_extras: 0, last_projected: 0, last_cached: 0, last_hot: 0, last_check_ms: 0, last_check_at: null, disabled: '' }
     const projector = createHybridProjector()
     const snapshot = createSharedSnapshot({ staleMs: Number(options.listCacheStaleMs ?? 20_000) })
     const alarm = (kind, detail) => {
@@ -4216,8 +4315,18 @@ function buildWizardServer(options, lifetime) {
       if (listCacheAlarmPath) try { appendFileSync(listCacheAlarmPath, JSON.stringify(entry) + '\n', { mode: 0o600 }) } catch { /* log line above remains */ }
     }
     const humanSessions = async () => (await loadCanonicalSessions()).filter((session) => isHumanSession(session, false))
-    const projectBatch = async (sessions, firstPage) =>
-      JSON.parse((await projectSessionListCore(Buffer.from(JSON.stringify({ data: sessions })), false, true, firstPage)).toString('utf8')).data
+    const projectSlice = async (sessions, firstPage, previewOffset, includePendingFirstSend = true) =>
+      JSON.parse((await projectSessionListCore(Buffer.from(JSON.stringify({ data: sessions })), false, true, firstPage, previewOffset, includePendingFirstSend)).toString('utf8')).data
+    const projectBatch = (sessions, firstPage, previewOffset = 0, includePendingFirstSend = true) =>
+      projectListSlices(sessions, (batch, first, offset) => projectSlice(batch, first, offset, includePendingFirstSend), firstPage, 20, previewOffset)
+    // Owner-controlled global inputs read by the direct core. Titles/pins/model are in
+    // raw canonical rows; subjects, spaces, agent metadata and follow-ups are decorated
+    // on every snapshot build. Operator workers are read only for operator lists.
+    // Keep the broad owner revision for snapshot freshness, NOT per-row invalidation.
+    const headContext = () => JSON.stringify([
+      appCatalog().map(app => app.id).sort(),
+      [...dismissedFailureStore.dismissals].filter(([, record]) => record.agent_id === 'hermes').sort(([a], [b]) => a.localeCompare(b)),
+    ])
     const decorate = (rows) => JSON.parse(decorateSessionList(Buffer.from(JSON.stringify({ data: rows })), false).toString('utf8')).data
     const fullCore = async (all) => {
       const rows = []
@@ -4247,19 +4356,44 @@ function buildWizardServer(options, lifetime) {
       for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
       for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
       for (const id of pendingHeavyJobs(heavyJobRows(), recent).keys()) hot.add(id)
-      for (const id of readSupervisorBuildWaits(options.supervisorStatePath, hermesStatePath, [...recent]).keys()) hot.add(id)
+      const supervisorSignals = await listEvidenceLane.read({ kind: 'signals', ids: [...recent],
+        supervisorStatePath: options.supervisorStatePath, now: Date.now() })
+      for (const id of supervisorSignals.supervisorWaitIds) hot.add(id)
       // Queue rows per thread: catches a finished run or a retention prune on an archive thread.
-      const stamps = mergeStamps(mergeStamps(runQueue?.sessionStamps() ?? new Map(), backgroundResults?.stamps()), readSupervisorWaitStamps(options.supervisorStatePath))
-      return { hot, warm, stamps, reset: delta.roots === null, mark: delta.maxId }
+      const stamps = mergeStamps(mergeStamps(mergeStamps(runQueue?.sessionStamps() ?? new Map(), backgroundResults?.stamps()), supervisorSignals.supervisorStamps),
+        directRunStamps(directRuns.values()))
+      // One cheap per-thread signature over the queue-owned immutable snapshot.
+      // Delivery/resume can change without a new Hermes message or run transition.
+      const heavyStamps = heavyJobStamps(heavyJobRows())
+      const combinedStamps = mergeStamps(stamps, heavyStamps)
+      return { hot, warm, stamps: combinedStamps, reset: delta.roots === null, mark: delta.maxId }
     }
-    const buildHybrid = async () => {
+    const buildHybrid = () => lifetime.track(buildHybridCore())
+    const buildHybridCore = async () => {
       const started = performance.now()
       const all = await humanSessions()
       const { hot, warm, stamps, reset, mark } = await hotIds()
       if (reset) { projector.clear(); stats.resets++ }
-      const result = await projector.project({ sessions: all, hot, warm, stamps, epoch: 'direct', projectBatch })
+      // Legacy enrichment appends pending first-send rows once, after the 100-row head batch.
+      // Project those exceptions fresh, separately from cacheable canonical rows, keeping
+      // their order and preview positions.
+      let reuseHead = true, pending = []
+      try { if (runQueue) pending = pendingFirstSendReader(runQueue.recentUnfinishedSessionIds(Date.now() / 1000 - 7 * 86400)) } catch { reuseHead = false }
+      const projectHeadExtras = async () => {
+        const extras = new Map()
+        if (pending.length) {
+          const head = all.slice(0, 100)
+          const known = new Set(head.map(session => session.id))
+          const appended = pending.filter(session => !known.has(session.id))
+          if (appended.length) extras.set(head.length, await projectBatch(appended, true, head.length, false))
+        }
+        return extras
+      }
+      const result = await projector.project({ sessions: all, hot, warm, stamps, epoch: 'direct', headContext: headContext(), reuseHead,
+        projectBatch: (batch, first, offset) => projectBatch(batch, first, offset, !reuseHead), projectHeadExtras })
       messageMark = mark
       Object.assign(stats, { builds: stats.builds + 1, last_build_ms: Math.round(performance.now() - started),
+        head_ms: Math.round(result.head_ms), hot_ms: Math.round(result.hot_ms), head_reused: result.head_reused, head_projected: result.head_projected, head_blocked: result.head_blocked, head_extras: result.head_extras,
         last_projected: result.projected, last_cached: result.cached, last_hot: hot.size, last_warm: warm.size })
       return result
     }
@@ -4268,7 +4402,7 @@ function buildWizardServer(options, lifetime) {
     // A disabled cache keeps checking: it was serving the full rebuild on every poll forever, which
     // saturated the service (Chats list 12 s, a thread open ~5 s). A clean check that compared real
     // cached rows turns it back on.
-    const check = async () => {
+    const checkCore = async () => {
       if (!canonicalSessionReader || configured === 'off') return null
       const started = performance.now()
       const all = await humanSessions()
@@ -4293,10 +4427,13 @@ function buildWizardServer(options, lifetime) {
       }
       return { faults, differences }
     }
+    // Timer and diagnostic callers join the same self-check. Slow checks must
+    // not multiply full transcript projections on the shared HTTP loop.
+    const check = createJoinedListCheck(() => lifetime.track(checkCore()))
     return {
       mode: () => (disabled ? 'off' : configured),
       touch: () => { localRevision++ },
-      stats: () => ({ ...stats, cache_rows: projector.size(), snapshot_age_ms: snapshot.age() }),
+      stats: () => ({ ...stats, cache_rows: projector.size(), snapshot_age_ms: snapshot.age(), evidence: listEvidenceLane.stats(), projection_slices: { ...projectionSlices } }),
       check,
       searchSnapshot: async () => {
         const cached = snapshot.peek()
@@ -4306,9 +4443,9 @@ function buildWizardServer(options, lifetime) {
         }
         return snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
       },
-      served: async () => {
+      served: async (shared = false) => {
         const rows = await snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
-        return rows.map((row) => ({ ...row }))
+        return shared ? rows : rows.map((row) => ({ ...row }))
       },
       fellBack: (error) => {
         stats.fallbacks++
@@ -4316,7 +4453,9 @@ function buildWizardServer(options, lifetime) {
         messageMark = Number.NaN
         if (Date.now() - lastFallbackLogAt > 60_000) { lastFallbackLogAt = Date.now(); console.log(`[list-cache] fell back to the full rebuild: ${error?.message ?? error}`) }
       },
-      timerMs: Number(options.listCacheCheckMs) || (configured === 'shadow' ? 2 * 60_000 : 10 * 60_000),
+      // Keep the independent full oracle and explicit check endpoint intact.
+      // Normal operation audits every 30 minutes; shadow rollout remains 2 minutes.
+      timerMs: Number(options.listCacheCheckMs) || (configured === 'shadow' ? 2 * 60_000 : 30 * 60_000),
     }
   })()
 
@@ -4333,7 +4472,7 @@ function buildWizardServer(options, lifetime) {
 
   const safeQueuedRunPayload = (record, raw = false) => {
     const value = runQueue.publicPayload(record)
-    if (value.status === 'completed' && record.runtime !== 'operator') spaceFiling.apply('hermes', record.sessionId, parseStatus(value.output))
+    if (value.status === 'completed' && record.runtime !== 'operator') { spaceFiling.apply('hermes', record.sessionId, parseStatus(value.output)); noteRunItems(record.sessionId, value.output) }
     return safeQueueValue(value, record, raw)
   }
   const sendQueuedRun = (response, status, record, headers = {}, raw = false) => sendJson(response, status, safeQueuedRunPayload(record, raw), headers)
@@ -4783,6 +4922,12 @@ function buildWizardServer(options, lifetime) {
   followUps = scheduler ? followUpTool({ scheduler, running: () => scheduler.running(), mainAgent: GATEWAY_MAIN_AGENT,
     // A routed agent watches only a thread it has accepted (its pin). Main keeps its own unpinned history.
     ownsThread: (agentId, sessionId) => agentId === GATEWAY_MAIN_AGENT || Boolean(agents?.pinnedAgents(sessionId)?.includes(agentId)) }) : null
+  // Same ownership rule, but routed agents only: the main agent never reaches these tools (it has its plugin), so
+  // a routed agent cannot target a main thread and a private agent's jobs and threads stay its own.
+  reachOut = scheduler ? agentReachOutTools({ scheduler, running: () => scheduler.running(), mainAgent: GATEWAY_MAIN_AGENT,
+    timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
+    now: options.schedulerNow ?? Date.now,
+    ownsThread: (agentId, sessionId) => agentId !== GATEWAY_MAIN_AGENT && Boolean(agents?.pinnedAgents(sessionId)?.includes(agentId)) }) : null
   const uploadStatePath = options.uploadStatePath ? resolve(String(options.uploadStatePath)) : ''
   // Uploads with a destination (the Files app) land in the owner's user-files root (user-files.mjs).
   let userFiles = null
@@ -4936,6 +5081,7 @@ function buildWizardServer(options, lifetime) {
   const withoutHiddenSeen = (request, state) => !state || typeof state !== 'object' || !state.threads || typeof state.threads !== 'object'
     ? state : { ...state, threads: withoutHiddenSessions(request, state.threads) }
   const sideAgent = (request, sessionId, explicit = '') => {
+    if (typeof sessionId === 'string' && /(?:^|[:/])incog_/u.test(sessionId)) throw new AgentError(410, 'incognito_closed', 'incognito')
     if (!agents) { if (explicit && explicit !== MAIN_AGENT_ID) throw new AgentError(404, 'not_found', 'agent.id'); return MAIN_AGENT_ID }
     if (explicit) {
       const agent = agents?.read(explicit)
@@ -4992,9 +5138,23 @@ function buildWizardServer(options, lifetime) {
     })) }
   }
 
+  const incognito = createIncognito({ registry: agents, runtime: agentRuntime, fetchImpl: rawFetchImpl,
+    upstreamHost: options.agentUpstreamHost || '',
+    proxyContext: { sendJson, isAllowedProxyRequest, secretGuard, mainSecrets: agentCtx?.mainSecrets || [],
+      readJson: async request => {
+        if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) throw new AgentError(415, 'json_required', 'incognito')
+        const value = parseJsonBody(await readBoundedBody(request, 70_000))
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AgentError(400, 'invalid_request', 'incognito')
+        return value
+      } },
+  })
+  lifetime.own(() => incognito.close(), () => incognito.close())
   const standardRetrievalRate = new Map()
+  const speedMeter = createSpeedMeter()
+  lifetime.own(() => speedMeter.close(), () => speedMeter.close())
   const server = createServer(async (request, response) => {
-    if (lifetime.closing) { sendJson(response, 503, { error: 'service_unavailable' }); return }
+    const meterDone = speedMeter.begin(request)
+    if (lifetime.closing) { try { sendJson(response, 503, { error: 'service_unavailable' }) } finally { meterDone() }; return }
     const requestDone = lifetime.request()
     const tailnetIngress = request[TAILNET_INGRESS] === true
     const requireAccess = tailnetIngress || baseRequireAccess
@@ -5002,7 +5162,11 @@ function buildWizardServer(options, lifetime) {
     // The enrolled tailnet owner IS the box owner: when the box-local listener implies the owner (no access
     // check), the phone shares the computer's account scope so Done/Defer and seen state stay in sync.
     const accountScope = (claims) => (baseRequireAccess ? wizardAccountScope(claims) : 'wizard-account-local')
-    if (request.method !== 'GET' && request.method !== 'HEAD') listCache.touch()
+    // A durable idempotency replay admits no work. Delay invalidation for this
+    // route until its outcome is known; real admissions still expire the snapshot.
+    const deferredListTouch = request.method === 'POST' && request.url === '/wizard/hermes/v1/runs'
+    let readOnlyRunReplay = false
+    if (request.method !== 'GET' && request.method !== 'HEAD' && !deferredListTouch) listCache.touch()
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       // A sandboxed page (/pages/, an opaque origin) or any other opaque-origin document never reaches the
@@ -5033,6 +5197,10 @@ function buildWizardServer(options, lifetime) {
           await proxyShellStatic(request, response, tailnetShellOrigin, url)
           return
         }
+      }
+      if (isIncognitoPath(url.pathname)) {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (await incognito.handle(url, request, response)) return
       }
       // One narrow diagnostics exception to the static-only shell proxy, after the same owner gates.
       if (request.method === 'POST' && [uxPrefix, '/wizard-os-home/', '/wizard-ux/'].some(prefix => url.pathname === `${prefix}api/diagnostics/scroll-capture`)) {
@@ -5113,7 +5281,7 @@ function buildWizardServer(options, lifetime) {
       }
       if (url.pathname === '/wizard/list-cache' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        sendJson(response, 200, listCache.stats())
+        sendJson(response, 200, { ...listCache.stats(), speed: speedMeter.stats() })
         return
       }
       if (url.pathname === '/wizard/background-results' && request.method === 'GET') {
@@ -5289,6 +5457,40 @@ function buildWizardServer(options, lifetime) {
         if (!source) { sendJson(response, 404, { error: 'run_not_found' }); return }
         const child = runQueue.byIdempotencyKey(source.runtime, 'wizard-saved-retry-' + source.publicRunId)
         sendJson(response, 200, { status: child?.status || source.status, resent: !!child, sent: child?.status === 'completed' })
+        return
+      }
+      if (url.pathname === '/wizard/v1/thread-items' || url.pathname === '/wizard/v1/thread-items/counts' || url.pathname === '/wizard/v1/thread-items/seen') {
+        // Thread tracker ledger: owner only, read by every device so phone and desktop agree.
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        const seen = url.pathname.endsWith('/seen'), counts = url.pathname.endsWith('/counts')
+        if (request.method !== (seen ? 'POST' : 'GET')) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: seen ? 'POST' : 'GET' }); return }
+        if (seen && request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_site_write' }); return }
+        // Tweak off (or never on): the stored ledger is invisible and untouched. Opting out hides it at once.
+        if (!trackerOn()) {
+          if (counts) { sendJson(response, 200, { threads: {} }, { 'Cache-Control': 'no-store' }); return }
+          if (seen) { try { await readBoundedBody(request, 16 * 1024) } catch {} }
+          const t = url.searchParams.get('thread') || ''
+          sendJson(response, 200, { thread: t, agent: url.searchParams.get('agent') || 'hermes', items: [], counts: countItems([]) }, { 'Cache-Control': 'no-store' }); return
+        }
+        if (counts) { sendJson(response, 200, { threads: threadItems.allCounts() }, { 'Cache-Control': 'no-store' }); return }
+        let thread = url.searchParams.get('thread') || '', agent = url.searchParams.get('agent') || ''
+        let ids = [], versioned = false
+        if (seen) {
+          if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
+          let input
+          try { input = JSON.parse((await readBoundedBody(request, 16 * 1024)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+          thread = typeof input?.thread === 'string' ? input.thread : ''; agent = typeof input?.agent === 'string' ? input.agent : ''
+          // New clients include both fields for rolling upgrades. Presence of items
+          // selects strict version validation, never a fallback to blanket ids.
+          versioned = Object.hasOwn(input || {}, 'items')
+          ids = versioned ? (Array.isArray(input.items) ? input.items.slice(0, 40) : [])
+            : Array.isArray(input?.ids) ? input.ids.filter(id => typeof id === 'string').slice(0, 40) : []
+        }
+        agent ||= 'hermes'
+        if (!/^[a-z][a-z0-9-]{0,30}$/u.test(agent) || !/^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/u.test(thread)) { sendJson(response, 400, { error: 'invalid_thread' }); return }
+        const results = seen ? threadItems.markSeen(agent, thread, ids, { versioned }) : undefined
+        sendJson(response, 200, { thread, agent, items: threadItems.list(agent, thread), counts: threadItems.counts(agent, thread), ...(seen && versioned ? { results } : {}) }, { 'Cache-Control': 'no-store' })
         return
       }
       if (url.pathname === '/wizard/v1/ui-preferences' || url.pathname === '/wizard/v1/ui-preferences/seed') {
@@ -6257,7 +6459,7 @@ function buildWizardServer(options, lifetime) {
           return
         }
         if (queuedProxyRecord && request.method === 'GET' && !queuedPath[2]) {
-          await runQueue.tick(true)
+          await runQueue.refreshRun(queuedProxyRecord.publicRunId)
           sendQueuedRun(response, 200, runQueue.get(queuedProxyRecord.publicRunId), {}, scheduleRawRead(request))
           return
         }
@@ -6320,7 +6522,7 @@ function buildWizardServer(options, lifetime) {
         }
         if (queuedProxyRecord && queuedPath[2] === 'steer' && !queuedProxyRecord.upstreamRunId) {
           const prepared = await prepareRunBody(body, resolveFiles, true)
-          const guidance = parseJsonBody(prepared.body).input
+          const guidance = trackerOn() ? expandReplyToInput(parseJsonBody(prepared.body).input, id => threadItems.titleOf('hermes', queuedProxyRecord.sessionId, id)) : parseJsonBody(prepared.body).input
           const updated = await runQueue.appendGuidance(
             queuedProxyRecord.publicRunId, guidance, prepared.trustedPaths)
           sendJson(response, 202, { accepted: true, run_id: updated.publicRunId, status: 'queued', queue_position: runQueue.publicPayload(updated).queue_position })
@@ -6365,6 +6567,7 @@ function buildWizardServer(options, lifetime) {
             const replay = runQueue.replay(runtime, sessionId, idempotencyKey, requestHash)
             if (replay) {
               sendQueuedRun(response, 202, replay, { 'Idempotency-Replayed': 'true' })
+              readOnlyRunReplay = true
               return
             }
             queuedAdmission = { runtime, sessionId, idempotencyKey, requestHash, recoveryAuthorized: agents?.read(MAIN_AGENT_ID)?.role === 'recovery' && principal.kind === 'owner',
@@ -6380,6 +6583,12 @@ function buildWizardServer(options, lifetime) {
           body = prepared.body
           trustedPaths = prepared.trustedPaths
           audioPaths = prepared.audioPaths ?? []
+          if (trackerOn() && body.includes('WIZARD_REPLY_TO_V1')) {
+            // Quote reply: tell the agent, in plain words, which message and ask the owner is answering.
+            const value = parseJsonBody(body)
+            const thread = typeof value.session_id === 'string' ? value.session_id : (queuedProxyRecord?.sessionId || '')
+            if (value.input !== undefined) body = Buffer.from(JSON.stringify({ ...value, input: expandReplyToInput(value.input, id => threadItems.titleOf('hermes', thread, id)) }))
+          }
         }
         if (queuedAdmission) {
           // Android retains a voice note until it is acknowledged and re-uploads the
@@ -6510,7 +6719,7 @@ function buildWizardServer(options, lifetime) {
             const tracked = directRuns.get(runId)
             const completedRun = JSON.parse(result.toString('utf8'))
             const status = completedRun.status
-            if (!ACTIVE_RUN_STATUSES.has(status)) spaceFiling.apply('hermes', completedRun.session_id || tracked?.sessionId, parseStatus(completedRun.output))
+            if (!ACTIVE_RUN_STATUSES.has(status)) { spaceFiling.apply('hermes', completedRun.session_id || tracked?.sessionId, parseStatus(completedRun.output)); if (status === 'completed') noteRunItems(completedRun.session_id || tracked?.sessionId, completedRun.output) }
             if (tracked && ACTIVE_RUN_STATUSES.has(status)) directRuns.set(runId, { ...tracked, status })
             else if (tracked) {
               directRuns.delete(runId)
@@ -6660,6 +6869,7 @@ function buildWizardServer(options, lifetime) {
           // only for startup excerpts, so omissions are flagged without changing
           // the existing marker/media/shareability projection order.
           const historySource = result
+          if (messageHistory && !operator && trackerOn()) ingestHistory(threadItems, 'hermes', decodeURIComponent(upstreamPath.split('/')[3]), result, parseStatus)
           result = projectWizardFileMarkers(result, messageHistory)
           const scheduleRaw = !messageHistory && scheduleRawRead(request)
           if ((messageHistory || /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) && !scheduleRaw) result = projectStatusMarkers(result)
@@ -6701,7 +6911,7 @@ function buildWizardServer(options, lifetime) {
         // get the shell's own policy rather than the legacy client's.
         const headers = {
           ...staticHeaders(file), 'Content-Length': details.size, 'Cache-Control': 'no-cache',
-          'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data:; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+          'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' blob: data: https://derp1.tailscale.com/generate_204; media-src 'self' blob:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
           'X-Robots-Tag': 'noindex, nofollow',
         }
         // Nested UX app documents are same-origin shell frames; the outer shell is never frameable.
@@ -6759,7 +6969,10 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, error.status, { error: error.message === 'agent_sandbox_unavailable' ? 'agent_sandbox_unavailable' : names[error.status] })
       } else if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' })
       else response.destroy()
-    } finally { requestDone() }
+    } finally {
+      if (deferredListTouch && !readOnlyRunReplay) listCache.touch()
+      meterDone(); requestDone()
+    }
   })
   server.phoneSetup = phoneSetup
   if (chatPhotos) {
@@ -6837,9 +7050,9 @@ function buildWizardServer(options, lifetime) {
     lifetime.own(() => agentSockets.close(), () => agentSockets.close())
   } else server.agentSocketsReady = Promise.resolve()
   if (canonicalSessionReader && listCache.mode() !== 'off') {
-    const listCacheTimer = setInterval(() => { void listCache.check().catch((error) => console.log(`[list-cache] check failed: ${error?.message ?? error}`)) }, listCache.timerMs)
+    const listCacheTimer = setInterval(() => { if (!lifetime.closing) void listCache.check().catch((error) => console.log(`[list-cache] check failed: ${error?.message ?? error}`)) }, listCache.timerMs)
     listCacheTimer.unref?.()
-    server.on('close', () => clearInterval(listCacheTimer))
+    lifetime.own(() => clearInterval(listCacheTimer), () => clearInterval(listCacheTimer))
   }
   return server
 }

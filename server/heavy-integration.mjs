@@ -5,11 +5,13 @@ import { queueRequestHash } from './run-queue.mjs'
 import { createAgentHeavyRelay } from './agent-heavy-relay.mjs'
 import { isAgentIngress, principalOf } from './principals.mjs'
 import { isHumanRequest } from './helper-continuation.mjs'
+import { FOLLOWUP_FAILURE_GUIDANCE } from './delegation-receipts.mjs'
+import { createReadOnlySqlite, preparedRead } from './read-only-sqlite.mjs'
 
 export const HEAVY_KIND = 'external-heavy'
 export const HEAVY_PREFIX = '[Wizard heavy-work completion]'
 export const HEAVY_FOLLOWUP_GUIDANCE = 'Check the receipt before claiming completion; do not blindly duplicate the job. '
-  + 'Continue necessary repairs and follow-up checks within the original authorization without asking for another go. '
+  + FOLLOWUP_FAILURE_GUIDANCE + ' '
   + 'Do not loop on an unchanged failure or rerun ambiguous side effects; stop with evidence when progress needs a decision. '
   + 'Preserve explicit owner approval gates; new scope still needs authorization.'
 const fail = (message, status) => Object.assign(new Error(message), { status })
@@ -56,10 +58,20 @@ export async function heavyRequestWatermark(request, sessionId) {
   throw fail('human request history scan exhausted', 503)
 }
 
-export function createHeavyIntegration({ options, queue, request, isAutomaticAgentAllowed = () => true, registry, fetchAgent }) {
+export function createHeavyIntegration({ options, queue, request, hermesStatePath, isAutomaticAgentAllowed = () => true, registry, fetchAgent }) {
   const token = options.heavyToken
   if (!options.heavyStatePath || !token || !queue) return null
   if (typeof token !== 'string' || token.length < 32) throw new Error('heavy token must contain at least 32 characters')
+  const sessions = createReadOnlySqlite(hermesStatePath)
+  // Only canonical Hermes lineage may delegate admission to a parent. Never trust
+  // a caller-supplied parent id, infer one from history, or select an idle run.
+  const owningSession = sessionId => {
+    const db = sessions.get()
+    if (!db) return sessionId
+    try {
+      return preparedRead(db, 'SELECT parent_session_id FROM sessions WHERE id = ?').get(sessionId)?.parent_session_id || sessionId
+    } catch { throw fail('session lineage unavailable', 503) }
+  }
   const routeFrom = (body, runtime) => {
     const model = body.model || runtime?.model
     const provider = body.provider || runtime?.requested?.provider || runtime?.provider
@@ -189,7 +201,7 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
     handleAgent: (req, path, value) => agentRelay.handle(req, path, value),
     stopAgentSession: (id, session, cancel) => agentRelay.stopSession(id, session, cancel),
     start: () => heavy.start(),
-    close: () => heavy.close(),
+    close: async () => { try { await heavy.close() } finally { sessions.close() } },
     summary: () => heavy.summary(),
     supersede: invalidate,
     stopSession: id => {
@@ -211,13 +223,15 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
       const supplied = String(req.headers.authorization || '').replace(/^Bearer /, '')
       if (supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))
         || req.headers.origin || req.headers['sec-fetch-site']) throw fail('heavy access denied', 403)
-      const sessionId = value.session_id
-      if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) throw fail('session required', 400)
+      const callerSessionId = value.session_id
+      if (typeof callerSessionId !== 'string' || !callerSessionId || callerSessionId.length > 512) throw fail('session required', 400)
+      const sessionId = owningSession(callerSessionId)
       if (path === '/wizard/internal/heavy/submit') {
         if (!isAutomaticAgentAllowed('hermes')) throw fail('recovery agent is not automatic', 409)
         const origin = eligibleOwner(sessionId)
         // A queued sibling is not a new scope; an unrelated queued request is.
-        // Never infer an idle/helper-child/operator origin or substitute a model.
+        // Helpers borrow only their canonical parent's live direct owner.
+        // Never infer an idle/operator origin or substitute a model.
         if (!origin) throw fail('no mutation-owning direct run', 409)
         const fence = admissionFences.get(sessionId)
         const body = JSON.parse(origin.body)
@@ -228,6 +242,7 @@ export function createHeavyIntegration({ options, queue, request, isAutomaticAge
         const route = routeFrom(body, runtime)
         const mark = await watermark(sessionId)
         if (admissionFences.get(sessionId) !== fence || !isAutomaticAgentAllowed('hermes')
+          || owningSession(callerSessionId) !== sessionId
           || eligibleOwner(sessionId)?.publicRunId !== origin.publicRunId) throw fail('origin changed', 409)
         return view(heavy.submit({ sessionId, origin: origin.publicRunId, key: value.key, spec: value.spec, route, watermark: mark }))
       }

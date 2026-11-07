@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
+import { TITLE_INSTRUCTIONS } from '../../server/thread-titles.mjs'
 import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { DatabaseSync } from 'node:sqlite'
 import { post, png, scene } from './fixture.mjs'
 import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
@@ -47,6 +49,128 @@ const finishedRunLeavesWorking = async (s, fresh = true) => {
 const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].flatMap(match => JSON.parse(match[1]).items || [])
 
 export const serverChecks = {
+  'in-flight-notice': async outer => {
+    const path = join(outer.root, 'in-flight-heavy.db')
+    const s = await scene(outer.kind, { heavyStatePath: path, heavyToken: 'synthetic-in-flight-notice-token', heavyPollIntervalMs: 3_600_000,
+      heavyTransport: async () => { throw Error('synthetic fixture never contacts workers') } })
+    const db = new DatabaseSync(path), sid = 'wizard_parity', now = Date.now() / 1000
+    try {
+      s.sessions.set(sid, { id: sid, source: 'wizard-mobile', title: 'Synthetic · Notice', created_at: now - 3000, messages: [] })
+      const admitted = await s.request('/v1/runs', post({ session_id: sid, input: 'Synthetic long tool request' }))
+      assert.equal(admitted.status, 202)
+      const id = (await admitted.json()).run_id
+      db.prepare('INSERT INTO heavy_jobs(id,session,origin,key,hash,data,agent_id) VALUES(?,?,?,?,?,?,?)').run('notice_work', sid, 'synthetic', 'notice_key', 'hash', JSON.stringify({ job_id: 'notice_work', sessionId: sid, agent_id: s.id, state: 'running', created_at: Date.now() }), s.id)
+      const row = s.sessions.get(sid)
+      const notice = at => ({ role: 'assistant', timestamp: at, content: 'Synthetic update notice\n[WIZARD_STATUS_V1]{"state":"needs_you","ask":"Restart the update in Console","subject":"Parity QA"}[/WIZARD_STATUS_V1]' })
+      row.messages.push(notice(now + 10))
+      const check = async active => {
+        for (const query of ['?limit=100', '?view=list&window=archive-50']) {
+          const r = await s.request('/api/sessions' + query); assert.equal(r.status, 200)
+          const listed = (await r.json()).data.find(x => x.id === sid)
+          assert.equal(ACTIVE.has(listed.status), active, JSON.stringify(listed))
+          if (active) { assert.ok(listed.runId || listed.wizard_run_id); assert.equal(listed.background ?? listed.wizard_background, undefined) }
+        }
+      }
+      await check(true) // queued owner message has not landed in transcript yet
+      row.messages.push({ role: 'user', content: 'Synthetic message during the live tool', display_kind: 'steer', timestamp: now + 20 })
+      await check(true)
+      row.messages.push(notice(now + 30)); await check(true)
+      const run = [...s.runs.values()].at(-1)
+      Object.assign(run, { status: 'completed', output: 'Synthetic finished reply', updated_at: now + 40 })
+      const ended = await s.request('/v1/runs/' + id); assert.equal((await ended.json()).status, 'completed')
+      await check(false)
+    } finally { db.close(); await s.close() }
+  },
+  'coalesced-owner-history': async s => {
+    const row = s.sessions.get('wizard_parity')
+    const human = 'Synthetic voice report: focus moved but the dialog stayed closed.'
+    const helper = '[ASYNC DELEGATION BATCH COMPLETE — synthetic]\nPrivate helper instructions\n\n--- ✓ TASK 1/1: Synthetic private task (status=completed) ---\nPrivate result\nFull live transcript (complete tool/assistant trace): /private/synthetic.log'
+    const chip = '[WIZARD_FILE_CHIPS_V1]\n[{"id":"drop_synthetic","filename":"voice.webm","mime":"audio/webm"}]\n[/WIZARD_FILE_CHIPS_V1]'
+    const media = { type: 'image_url', image_url: { url: `data:image/png;base64,${png.toString('base64')}` } }
+    row.messages = [
+      { id: 'helper-only', role: 'user', content: helper, timestamp: 100 },
+      { id: 'owner-voice', role: 'user', client_message_id: 'synthetic-client', content: [{ type: 'text', text: helper + '\n\n' + human + '\n\n' + chip }, media], timestamp: 101 },
+      { id: 'reply', role: 'assistant', content: 'Synthetic answer', timestamp: 102 },
+    ]
+    const before = JSON.stringify(row.messages), requests = s.seen.length
+    const output = await history(s)
+    assert.deepEqual(output.map(r => r.id), ['owner-voice', 'reply'])
+    assert.equal(output[0].client_message_id, 'synthetic-client')
+    assert.equal(output[0].timestamp, 101)
+    assert.equal(output[0].content[0].text, human + '\n\n' + chip)
+    assert.deepEqual(output[0].content[1], media)
+    assert.deepEqual(output[0].display_content, output[0].content)
+    assert.ok(!JSON.stringify(output).includes('Private helper'))
+    assert.ok(!JSON.stringify(output).includes('/private/'))
+    assert.equal(JSON.stringify(row.messages), before)
+    assert.ok(!s.seen.slice(requests).some(r => r.method === 'POST'), 'history reads admit no runs')
+  },
+  'reply-summary-preferences': async s => {
+    // The shell uses one owner/box preference route even while a routed chat is open.
+    // Read each kind's real transcript route too: no preference write may admit a run
+    // or change the routed transcript. Restricted fixtures retain their Unix ingress.
+    const file = join(s.root, 'os', 'ui-preferences.json')
+    const stored = { compact: true, futureShellKey: { keep: true } }
+    writeFileSync(file, JSON.stringify(stored) + '\n')
+    const read = async () => { const r = await s.raw('/wizard/v1/ui-preferences'); assert.equal(r.status, 200); return r.json() }
+    const put = value => s.raw('/wizard/v1/ui-preferences', { ...post(value), method: 'PUT' })
+    const before = await history(s)
+    const sends = () => s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path)).length
+    const admitted = sends()
+    assert.equal(Object.hasOwn(await read(), 'replySummary'), false, 'absent stays absent on every kind')
+    const replySummary = { on: true, start: 'expanded', length: 'paragraph' }
+    assert.equal((await put({ replySummary })).status, 200)
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), { ...stored, replySummary })
+    await s.restart()
+    assert.deepEqual((await read()).replySummary, replySummary, 'reopen reads the persisted choice')
+    const saved = readFileSync(file, 'utf8')
+    assert.equal((await put({ replySummary: { on: true, length: 'bad' }, compact: false })).status, 400)
+    assert.equal(readFileSync(file, 'utf8'), saved, 'invalid preference cannot partially write')
+    assert.deepEqual(await history(s), before, 'main and routed transcripts remain unchanged')
+    assert.equal(sends(), admitted, 'reopening preferences never generates a reply')
+  },
+  'head-row-owner-write-parity': async s => {
+    if (s.kind === 'main') {
+      const db = new DatabaseSync(join(s.root, 'hermes-state.db'))
+      try { db.exec("ALTER TABLE sessions ADD COLUMN last_activity_description TEXT DEFAULT ''") } finally { db.close() }
+    }
+    const row = s.sessions.get('wizard_parity')
+    Object.assign(row, { hidden: false, title: 'Synthetic cache parity' })
+    row.messages.push({ role: 'user', content: 'Synthetic cache request', timestamp: Date.now() / 1000 - 2 },
+      { role: 'assistant', content: 'Synthetic result.\n[WIZARD_STATUS_V1]{"state":"done","ask":"Synthetic result"}[/WIZARD_STATUS_V1]', timestamp: Date.now() / 1000 - 1 })
+    const listed = async title => {
+      let last = []
+      for (let attempt = 0; attempt < 40; attempt++) {
+        // Refresh the fixture's HTTP canonical census before the window snapshot:
+        // it was seeded in memory after startup's intentionally empty census.
+        if (s.kind === 'main') await (await s.request('/api/sessions?limit=100')).json()
+        const response = await s.request('/api/sessions?view=list&window=archive-50&limit=100')
+        assert.equal(response.status, 200)
+        const data = (await response.json()).data
+        last = data
+        const item = data.find(value => value.id === row.id)
+        if (item?.title === title) return data
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+      assert.fail(`${s.kind}: ${title} did not reach the projected list: ${JSON.stringify(last)}`)
+    }
+    const before = await listed(row.title)
+    for (let i = 0; i < 8; i++) {
+      const response = await fetch(`${s.origin()}/wizard/thread-seen`, { method: 'PUT',
+        headers: { ...s.ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify({ initializedAt: Date.now(), threads: {} }) })
+      assert.equal(response.status, 200)
+    }
+    assert.deepEqual(await listed(row.title), before, 'unrelated owner writes preserve every row field on every runtime')
+    if (s.kind === 'main') {
+      const stats = await (await fetch(`${s.origin()}/wizard/list-cache`, { headers: s.ownerHeaders })).json()
+      assert(stats.head_reused > 0, JSON.stringify(stats))
+      assert.equal(stats.fallbacks, 0)
+    }
+    const renamed = await s.request(`/api/sessions/${row.id}`, { ...post({ title: 'Synthetic owner rename' }), method: 'PATCH' })
+    assert.equal(renamed.status, 200)
+    const after = (await listed('Synthetic owner rename')).find(value => value.id === row.id)
+    assert.equal(after.title, 'Synthetic owner rename', 'row-affecting owner writes remain immediately visible')
+  },
   'owned-open-work': async s => {
     await admit(s, { input: 'Synthetic approved backend fix' })
     assert.equal(sent(s).instructions.includes(OWNED_OPEN_WORK_INSTRUCTIONS), false, 'persona-owned follow-up style is never imposed at any runtime HTTP boundary')
@@ -173,6 +297,8 @@ export const serverChecks = {
       assert.ok(own.includes(STATUS_PROTOCOL_INSTRUCTIONS), `${s.kind}: ${style} keeps the status protocol`)
       for (const rule of [FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, 'Briefly restate', 'The reply itself ends with the same ask']) assert.ok(!own.includes(rule), `${s.kind}: ${style} drops style rule ${rule.slice(0, 40)}`)
       assert.ok(own.includes('Wizard renders Markdown') && own.includes('SOUL.md in your home'), `${s.kind}: Wizard facts and persona pointer reach upstream`)
+      // The Markdown override is scoped: stock Hermes' own brevity default survives it on every agent kind.
+      assert.ok(own.includes('Only that plain-text line is overridden') && own.includes('keep replies brief and conversational, not a document, still applies'), `${s.kind}: ${style} keeps the runtime's brevity default`)
     }
   },
   'chats-spaces': async s => {
@@ -301,6 +427,41 @@ export const serverChecks = {
     assert.deepEqual(await served(), png)
     writeFileSync(join(scratch, 'screenshot.png'), Buffer.concat([png.subarray(0, 8), Buffer.from('REWRITTEN')]), { flag: 'r+' })
     assert.deepEqual(await served(), png, 'rewriting the source in place never changes an earlier chat message')
+  },
+  'bring-my-data': async s => {
+    // The owner drops exports into Files through the Service; the wizard-os bring_data tool, run with THIS runtime's
+    // own home, archives chats into the owner's Files and installs picked skills only into this agent's home.
+    const files = join(s.root, 'files')
+    const make = `import io,json,sys,zipfile
+b=io.BytesIO(); z=zipfile.ZipFile(b,'w')
+if sys.argv[1]=='chatgpt':
+  m={'r':{'id':'r','message':None,'parent':None,'children':['u']},'u':{'id':'u','parent':'r','children':['a'],'message':{'author':{'role':'user'},'create_time':1700000000,'content':{'content_type':'text','parts':['PARITY_IMPORT_QUESTION']}}},'a':{'id':'a','parent':'u','children':[],'message':{'author':{'role':'assistant'},'create_time':1700000001,'recipient':'all','content':{'content_type':'text','parts':['PARITY_IMPORT_ANSWER']}}}}
+  z.writestr('conversations.json',json.dumps([{'title':'Parity import','create_time':1700000000,'update_time':1700000001,'mapping':m,'current_node':'a','conversation_id':'parity-conv'}]))
+else:
+  z.writestr('memories/USER.md','Parity owner fact.'); z.writestr('skills/parity-skill/SKILL.md','---\\nname: parity-skill\\ndescription: Synthetic.\\n---\\n'); z.writestr('.env','KEY=parity-runtime-secret')
+z.close(); sys.stdout.buffer.write(b.getvalue())`
+    const exportZip = kind => execFileSync('python3', ['-c', make, kind])
+    const tool = args => JSON.parse(execFileSync('python3', ['-c', "import importlib.util,json,sys\nspec=importlib.util.spec_from_file_location('bd',sys.argv[1]);m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)\nprint(m.handle(json.loads(sys.argv[2])))", join(pluginRoot, 'bring_data.py'), JSON.stringify(args)],
+      { encoding: 'utf8', env: { ...process.env, HERMES_HOME: s.agentHome, WIZARD_FILES_ROOT: files } }))
+    const dropped = async (kind, name) => {
+      const r = await s.upload(exportZip(kind), name, 'application/zip'); assert.equal(r.status, 201)
+      const id = (await r.json()).file.id
+      return JSON.parse(readFileSync(join(s.root, 'media.json'))).files.find(f => f.id === id).rel
+    }
+    const scan = tool({ action: 'scan', path: await dropped('chatgpt', 'chatgpt-export.zip') })
+    assert.equal(scan.success, true, JSON.stringify(scan)); assert.equal(scan.kind, 'chatgpt'); assert.equal(scan.counts.chats, 1)
+    assert.ok(existsSync(join(s.agentHome, 'cache/bring-data/imports.json')), 'scan record lives in this agent home')
+    assert.equal(tool({ action: 'archive', import_id: scan.import_id }).chats_written, 1)
+    const index = readFileSync(join(files, 'Imported/ChatGPT/Index.md'), 'utf8')
+    const rel = index.match(/\(<(Chats\/[^>]+)>\)/)[1]
+    const chat = readFileSync(join(files, 'Imported/ChatGPT', rel), 'utf8')
+    assert.ok(chat.includes('PARITY_IMPORT_QUESTION') && chat.includes('PARITY_IMPORT_ANSWER'), 'archived chat is in the owner Files')
+    const hermes = tool({ action: 'scan', path: await dropped('hermes', 'hermes-backup.zip') })
+    assert.deepEqual(hermes.new_skills.map(x => x.name), ['parity-skill'])
+    assert.deepEqual(tool({ action: 'skills', import_id: hermes.import_id, names: ['parity-skill'] }).installed.map(x => x.name), ['parity-skill'])
+    assert.ok(existsSync(join(s.agentHome, 'skills/imported/parity-skill/SKILL.md')), 'skill lands in this agent home')
+    assert.ok(!existsSync(join(files, 'skills')), 'nothing agent-side is written into Files')
+    assert.ok(!JSON.stringify([scan, hermes]).includes('parity-runtime-secret'))
   },
   'download-links': async s => {
     await serverChecks['assistant-media'](s)
@@ -484,6 +645,22 @@ export const serverChecks = {
     }
     install([parityQa, app]); await s.restart()
     const text = await kernel()
+    // Inspect the real gateway handler's initialize output on EACH runtime transport,
+    // not renderKernel() or a source-text assertion. Upstream Hermes remains synthetic.
+    const assertRules = value => {
+      assert.equal(typeof value, 'string', `${s.kind}: gateway kernel instructions`)
+      const lines = value.split('\n')
+      for (const rule of [
+        'Never ask the owner what an installed app can answer: call its tools first; if missing, search tools again or retry once. Never guess from old chats or call app URLs.',
+        'Answer from the source of truth: owning app for data, live checks for box state, release records for what shipped. Say none found only after checking. Report tool errors.',
+      ]) assert.ok(lines.includes(rule), `${s.kind}: gateway delivers exact app-first/source/error rule: ${rule}`)
+      assert.ok(value.includes('Use registered exact names only.'), `${s.kind}: registered exact tool names, not invented names`)
+      assert.ok(!value.includes('If it is not in your tool list, run it with tool_call and that exact name.'), `${s.kind}: no speculative tool-name instruction`)
+      assert.ok(value.includes('3. For ordinary app use:'), `${s.kind}: ordinary-app safety step survives`)
+      assert.ok(value.indexOf('Never ask the owner') > value.indexOf('3. For ordinary app use:'))
+      if (value.includes('Jobs on this box:')) assert.ok(value.indexOf('Report tool errors.') < value.indexOf('Jobs on this box:'))
+    }
+    assertRules(text)
     if (s.kind === 'main') {
       assert.ok(existsSync(pointer), 'main agent gets the job pointer skill')
       assert.match(readFileSync(pointer, 'utf8'), /Synthetic Video: load its skill `parity-video` with skill_view first/u)
@@ -495,6 +672,7 @@ export const serverChecks = {
     }
     install([parityQa]); await s.restart()
     const after = await kernel()
+    assertRules(after)
     assert.ok(!existsSync(join(skills, 'wizard-job-short-form-video')), 'uninstall removes the pointer')
     assert.doesNotMatch(after, /Synthetic Video/u)
   },
@@ -555,17 +733,27 @@ export const serverChecks = {
   'automatic-titles': async s => {
     const row = s.sessions.get('wizard_parity'); row.hidden = false
     const add = title => row.messages.push({ role: 'assistant', content: `Synthetic answer\n[WIZARD_STATUS_V1] ${JSON.stringify({ state: 'done', ask: 'Synthetic outcome', title, subject: 'Parity QA' })}[/WIZARD_STATUS_V1]`, timestamp: Date.now() / 1000 + row.messages.length })
-    add('Parity · Titles')
-    await s.request('/api/sessions?view=list')
-    // Main applies canonical title proposals asynchronously; routed PATCH completes during projection.
-    for (let n = 0; n < 30 && row.title !== 'Parity · Titles'; n++) await new Promise(resolve => setTimeout(resolve, 20))
-    assert.equal(row.title, 'Parity · Titles')
+    const project = async (proposal, expected) => {
+      add(proposal)
+      await s.request('/api/sessions?view=list')
+      // Main applies canonical proposals asynchronously; routed PATCH completes during projection.
+      for (let n = 0; n < 30 && row.title !== expected; n++) await new Promise(resolve => setTimeout(resolve, 20))
+      // Also let an incorrectly accepted narrowing finish before asserting stability.
+      await new Promise(resolve => setTimeout(resolve, 30))
+      assert.equal(row.title, expected, `${s.kind}: ${proposal}`)
+    }
+    await project('Messenger · Composer paste', 'Messenger · Composer paste')
+    await project('Messenger', 'Messenger') // one-time legacy broadening
+    await project('Messenger · Settings buttons', 'Messenger') // not a project change
     await s.restart()
-    assert.equal((await (await s.request('/api/sessions?view=list')).json()).data[0].title, 'Parity · Titles')
-    const rename = await s.request('/api/sessions/wizard_parity', { ...post({ title: 'Owner · Chosen' }), method: 'PATCH' }); assert.equal(rename.status, 200)
-    add('Must Not Replace')
-    await s.request('/api/sessions?view=list'); await new Promise(resolve => setTimeout(resolve, 30))
-    assert.equal(row.title, 'Owner · Chosen')
+    assert.equal((await (await s.request('/api/sessions?view=list')).json()).data[0].title, 'Messenger')
+    await admit(s, { input: 'Synthetic next feature in the same project' })
+    assert.ok(sent(s).instructions.includes(TITLE_INSTRUCTIONS), `${s.kind}: actual upstream run gets the shared project rule`)
+    assert.ok(sent(s).instructions.includes('This thread is currently titled “Messenger”.'))
+    assert.ok(!sent(s).instructions.includes('or to a different feature'))
+    await project('Video Editor', 'Video Editor') // genuine project move
+    const rename = await s.request('/api/sessions/wizard_parity', { ...post({ title: 'Owner chosen' }), method: 'PATCH' }); assert.equal(rename.status, 200)
+    await project('Must Not Replace', 'Owner chosen')
   },
   'subjects': async s => {
     const row = s.sessions.get('wizard_parity'); row.hidden = false

@@ -1,5 +1,6 @@
 import { it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { runInNewContext } from 'node:vm'
 
 it('inline-image parity cannot pass before the viewer and Back assertions', () => {
   const source = readFileSync(new URL('../qa/agent-parity/browser.mjs', import.meta.url), 'utf8')
@@ -15,4 +16,63 @@ it('inline-image parity cannot pass before the viewer and Back assertions', () =
   expect(pass).toBeGreaterThan(thread)
   expect(source).toContain("assert.equal(inlineThread,'wizard_parity')")
   expect(source).toContain("assert.equal(await page.evaluate(win=>__wos.wins[win]?.thread,inlineWindow),inlineThread,'Back keeps the same thread')")
+})
+
+it('media parity executes each real shell API without a phone alias on desktop', async () => {
+  const source = readFileSync(new URL('../qa/agent-parity/browser.mjs', import.meta.url), 'utf8')
+  const media = source.slice(source.indexOf('async function mediaChecks'), source.indexOf('async function staticChecks'))
+  const ready = media.match(/await p\.waitForFunction\(([^\n]+),\{timeout:30000\}\)/)![1]
+  const selected = media.match(/const selected=([^\n]+)/)![1]
+  for (const phone of [true, false]) {
+    const shell = phone ? 'phone' : 'desktop'
+    const key = phone ? '__wos' : '__wux'
+    const win = { id: 'actual-window', app: 'chats', focus: { kind: 'agent', key: 'scoped-agent' }, thread: 'wizard_parity' }
+    const sandbox = { window: { [key]: { live: { ok: true }, wins: { [win.id]: win } } }, document: { documentElement: { dataset: { shell } } }, s: { id: 'scoped-agent' }, phone }
+    // Execute the exact Playwright callback AND argument, not a copied resolver.
+    expect(runInNewContext(`((fn,arg)=>fn(arg))(${ready})`, sandbox)).toBe(true)
+    const select = runInNewContext(`(${selected})`, sandbox)
+    const actual = await select({ evaluate: (fn: Function, arg: string) => fn(arg) })
+    expect(JSON.parse(JSON.stringify(actual))).toEqual({ id: win.id, agent: 'scoped-agent', thread: 'wizard_parity' })
+    sandbox.window[key].live.ok = false
+    expect(runInNewContext(`((fn,arg)=>fn(arg))(${ready})`, sandbox)).toBe(false)
+    sandbox.s.id = 'other-agent'
+    expect(await select({ evaluate: (fn: Function, arg: string) => fn(arg) })).toBe(null)
+  }
+  const selection = source.match(/const mediaShells=([^\n]+)/)![1]
+  for (const [value, expected] of [[undefined, ['phone', 'desktop']], ['desktop', ['desktop']], ['phone', ['phone']]] as const) {
+    const actual = runInNewContext(`const mediaShells=${selection};mediaShells`, { process: { env: { QA_MEDIA_SHELLS: value } }, selectedGroup: 'media', assert: { ok: (v: boolean) => { if (!v) throw Error('invalid shells') } } })
+    expect(JSON.parse(JSON.stringify(actual))).toEqual(expected)
+  }
+  expect(media.match(/__wos/g)).toHaveLength(3) // readiness, selection, phone-only native Back
+  expect(media).not.toContain('__wos.wins')
+})
+
+it('desktop media setup uses the production thread route once and never repairs cold state', async () => {
+  const source = readFileSync(new URL('../qa/agent-parity/browser.mjs', import.meta.url), 'utf8')
+  const media = source.slice(source.indexOf('async function mediaChecks'), source.indexOf('async function staticChecks'))
+  const body = media.slice(media.indexOf(' const thread=async'), media.indexOf('\n const ready=')).replace(' const thread=', 'globalThis.thread=')
+  const exercise = async (select: boolean, restored: string | null, agent = 'scoped-agent') => {
+    const win = { id: 'desktop-window', agent: 'scoped-agent', thread: restored }
+    const calls: string[] = []
+    const sandbox: any = { assert: { equal: (a: unknown, b: unknown, reason?: string) => expect(a, reason).toBe(b) }, s: { id: 'scoped-agent' }, document: { documentElement: { dataset: { shell: 'desktop' } } }, WizLive: { agentOf: () => agent }, WosAgents: { defaultId: () => 'main' }, WizOpenAgentChats: (id: string) => { expect(id).toBe('scoped-agent'); calls.push('agent') }, until: async (f: Function) => expect(await f()).toBe(true), selected: async () => ({ ...win }), desktopSnapshot: async (_p: unknown, phase: string) => { calls.push(phase) } }
+    sandbox.window = { __wux: { openThread: (id: string) => { calls.push('openThread'); win.thread = id } } }
+    const chat = { locator: (selector: string) => { expect(selector).toBe('.ch-thread'); return { waitFor: async () => { expect(win.thread).toBe('wizard_parity'); calls.push('rendered') } } } }
+    const p = { evaluate: (fn: Function, arg?: unknown) => fn(arg), locator: (selector: string) => { expect(selector).toBe('[data-chats="desktop-window"]'); return chat } }
+    runInNewContext(body, sandbox)
+    return { run: () => sandbox.thread(p, select), calls }
+  }
+  const first = await exercise(true, null); await first.run()
+  expect(first.calls).toEqual(['agent', 'before-thread-open', 'openThread', 'rendered'])
+  const cold = await exercise(false, 'wizard_parity'); await cold.run()
+  expect(cold.calls).toEqual(['cold-before-thread-assert', 'rendered'])
+  const lost = await exercise(false, null); await expect(lost.run()).rejects.toThrow('cold desktop thread restored without bootstrap')
+  expect(lost.calls).toEqual(['cold-before-thread-assert'])
+  const wrong = await exercise(true, null, 'wrong-agent'); await expect(wrong.run()).rejects.toThrow()
+  expect(wrong.calls).toEqual(['agent', 'before-thread-open'])
+  const failureSnapshot = media.indexOf("desktopSnapshot(p,'failure')")
+  const desktopClose = media.indexOf('finally{await desktop.close()}')
+  expect(failureSnapshot).toBeGreaterThan(-1)
+  expect(desktopClose).toBeGreaterThan(-1)
+  expect(failureSnapshot).toBeLessThan(desktopClose)
+  expect(media).not.toContain('force:true')
 })

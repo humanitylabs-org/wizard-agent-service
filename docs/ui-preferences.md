@@ -17,7 +17,12 @@ arrays at the root, wrong types and invalid values are rejected (400). Send
 - `archiveAfterDays`: 0 (Never), 1, 3, 7, 14 or 30. Default: 7.
 - `compact`: boolean. Default: false.
 - `chatLayout`: `day` (Ready, Yesterday, Past week) or `status` (Working, Ready, Archive). Default: `day`.
+- `workingOrder`: optional `alphabetical`, `newest` or `oldest`. When absent the shell defaults to A to Z; independent of Ready.
 - `readyOrder`: `newest`, `oldest`, `priority` or `subject`. Default: `newest`.
+- `replySummary`: optional `{on,start?,length?}` for the shell's short-answer view. `on` is boolean;
+  `start` is `collapsed` or `expanded`; `length` is `line`, `sentences` or `paragraph`. Unknown nested
+  keys are rejected. Absent stays absent: reopening the view reads the box before saving its choice.
+  This accepts the existing shell contract only; it does not change reply generation or enable the view.
 - `subjectOrder`: at most 60 unique strings, each at most 120 characters without control
   characters. Default: empty (natural order).
 

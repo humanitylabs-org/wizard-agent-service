@@ -18,8 +18,17 @@
   },
   "policies": [
     {
+      "id": "private-incognito-only",
+      "kinds": ["main", "host-profile", "container", "restricted"],
+      "rule": "Private agent only, by owner decision: each standard runtime must refuse Incognito before upstream admission."
+    },
+    {
       "id": "owner-scoped-hermes-only",
-      "kinds": ["host-profile", "container", "restricted"],
+      "kinds": [
+        "host-profile",
+        "container",
+        "restricted"
+      ],
       "rule": "Owner-scoped hermes-only: James explicitly requested 'Archimedes only' on 27 Oct 2026 for owned-open-work follow-through. Routed instructions, status projection and admissions remain untouched; this does not exempt any other chat feature."
     },
     {
@@ -41,12 +50,112 @@
   ],
   "features": [
     {
+      "id": "viewer-desktop-fit-keys",
+      "description": "Scoped chat media opens the shared viewer: desktop images fit the viewport, Left/Right navigate in order, close restores the exact thread and draft, and phone open/Back remains scoped after cold selected-agent restore.",
+      "layer": "ux",
+      "fixture": null,
+      "how_to_test": "Run QA_GROUP=media QA_KINDS=main,host-profile,container,restricted QA_UX_ROOT=<ux> QA_OUT=<fresh-output> QA_EXTERNAL_ROOT=<worker-root> node qa/agent-parity/browser.mjs on the admitted browser worker. Linux additionally requires QA_FORUM_MEDIA=1 QA_CHROMIUM=<pinned-chrome> QA_PLAYWRIGHT=<pinned-playwright>. This narrow cell clicks actual rendered MEDIA buttons from synthetic transcripts through the real Service; host-profile really traverses /p/<profile>, container uses a distinct TCP origin, restricted uses mode-0600 Unix ingress. Browser and disposable runtime reject mutations after seed; no real agents/providers/private history are opened. Desktop fit at two widths, ordered trusted Left/Right, focus, Escape/outside and phone open/Back/outside preserve cold-selected agent/thread/draft. Native video/audio UA seeking is separately covered by wizard-ux/qa-viewer-desktop-fit.cjs with mandatory provisioned QA_MEDIA_DIR. Synthetic-runtime browser evidence is not real-container/provider/physical-device acceptance. Companion UX PRs #1039/#1038.",
+      "source_refs": ["wizard-ux/web/core/chat-kit.js", "wizard-ux/web/core/chats.css", "wizard-ux/web/core/chats.js"],
+      "reference_tests": ["qa/agent-parity/browser.mjs", "wizard-ux/qa-viewer-desktop-fit.cjs", "wizard-ux/tests/viewer-desktop-fit.test.mjs"],
+      "policy_exemptions": []
+    },
+    {
+      "id": "in-flight-notice",
+      "description": "Controller and live-lease execution outrank out-of-band notice attention while queued or steered owner messages arrive; notices can classify Ready only after the run ends.",
+      "layer": "server",
+      "fixture": "in-flight-notice",
+      "how_to_test": "Exercise full and slim HTTP lists for main, host-profile, container and restricted Unix ingress, with an admitted synthetic run, heavy background work, needs_you notice, owner message queued outside history then persisted steer, another notice and a real terminal receipt. No live owner writes, provider or browser proof.",
+      "source_refs": ["server/service.mjs", "server/open-ask.mjs"],
+      "reference_tests": ["tests/in-flight-notice.node.mjs", "qa/agent-parity/server-checks.mjs"],
+      "policy_exemptions": []
+    },
+    {
+      "id": "coalesced-owner-history",
+      "description": "Owner text, recording chips and inline multipart media survive history projection when Hermes coalesces them after a helper completion, before the matching reply; helper material stays hidden.",
+      "layer": "server",
+      "fixture": "coalesced-owner-history",
+      "how_to_test": "Read synthetic coalesced history through each runtime's actual Service HTTP route (main, host-profile, container and restricted Unix ingress); require original row/client identity, time, text, recording and inline media, unchanged upstream rows, and no admitted run. Synthetic routed HTTP evidence, not live/provider/browser or physical phone proof.",
+      "source_refs": ["server/service.mjs"],
+      "reference_tests": ["tests/coalesced-voice-history.node.mjs", "qa/agent-parity/server-checks.mjs"],
+      "policy_exemptions": []
+    },
+    {
+      "id": "reply-summary-preferences",
+      "description": "Reopening the shell short-answer view accepts and persists its existing box-wide choice while main, host-profile, container and restricted chats retain their own unchanged transcripts and admit no reply.",
+      "layer": "server",
+      "fixture": "reply-summary-preferences",
+      "how_to_test": "For each runtime kind, read its real routed transcript (host-profile via its profile API, restricted via mode-0600 Unix ingress), then GET/PUT the shell's owner-level /wizard/v1/ui-preferences route. Require absent-stays-absent, successful existing reopen payload, exact preservation of unrelated/future stored fields, restart readback, atomic invalid-field rejection, unchanged transcript and zero admitted replies. Synthetic HTTP fixture evidence only, not live runtime, browser or physical-phone proof.",
+      "source_refs": ["server/ui-preferences.mjs", "server/service.mjs"],
+      "reference_tests": ["qa/agent-parity/server-checks.mjs", "tests/ui-preferences.test.ts"],
+      "policy_exemptions": []
+    },
+    {
+      "id": "hosted-thread-draft-custody",
+      "description": "An admitted installed app opens the shared native thread with exact owner text held as a draft, not a send; app context remains quoted data and hosted audio stays bound to its original thread, model and run.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/hosted-thread-routes.test.mjs tests/thread-draft-admission.test.mjs tests/hosted-reply-recorder.test.mjs. Source-executed main, host-profile, container and restricted UX fixtures run the real App Services admission, openHosted and durable draft store; verify exact text/reload, conflict refusal before agent pinning, quoted reply context, hidden/revoked source refusal, and recorder retry custody with the same scoped thread/model/run/id. The recorder's Chats delivery boundary is instrumented, not a real Service/runtime transport. No browser, HTTP runtime, provider or physical microphone acceptance is earned. Companion UX PR #920.",
+      "source_refs": ["wizard-ux/web/core/app-services.js", "wizard-ux/web/core/chats.js", "wizard-ux/web/core/chat-kit.js", "wizard-ux/web/core/chats-view.js"],
+      "reference_tests": ["wizard-ux/tests/hosted-thread-routes.test.mjs", "wizard-ux/tests/thread-draft-admission.test.mjs", "wizard-ux/tests/hosted-reply-recorder.test.mjs"],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "installed-ready-extension-custody",
+      "description": "Owner-level installed app Ready cards are independent of agent threads: they render/poll only at the owner root, never inside main-session, host-profile, container or restricted-agent contexts; writes require the actual shell-owned app frame.",
+      "layer": "ux",
+      "how_to_test": "Run wizard-ux/tests/app-ready-extension.test.mjs: compare root versus synthetic host-profile/container/restricted renderer and poll branches; verify browser-supplied frame provenance, revocation, wrong/nested/destroyed frames and independent failing callbacks. Run tests/app-ready-client.test.mjs for admitted-before-settlement and recovery details. These are source-executing VM fixtures, not live routed-runtime or browser proof; real installed-app browser/update acceptance remains required.",
+      "source_refs": [
+        "wizard-ux/web/core/chats.js",
+        "wizard-ux/web/core/chats-view.js",
+        "wizard-ux/web/core/app-client.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/app-ready-extension.test.mjs",
+        "wizard-ux/tests/app-ready-client.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "head-row-owner-write-parity",
+      "description": "Chats retains exact projected row fields across unrelated owner writes and reflects row-affecting writes on main, host-profile, container and restricted runtimes; main reuses quiet head rows.",
+      "layer": "server",
+      "fixture": "head-row-owner-write-parity",
+      "how_to_test": "Seed a completed synthetic thread, compare list rows before and after eight owner read-state writes, require main head reuse without fallback, then rename through the exact runtime route and assert the changed title updates. Host-profile uses its profile API; restricted uses its mode-0600 ingress socket. Fixture evidence only, not live runtime/browser acceptance.",
+      "source_refs": ["server/service.mjs", "server/session-list-cache.mjs", "server/agents-http.mjs"],
+      "reference_tests": ["tests/chats-head-runtime-parity.node.mjs", "tests/session-list-cache-http.node.mjs", "tests/chats-list-head.node.mjs"],
+      "policy_exemptions": []
+    },
+    {
+      "id": "private-incognito",
+      "description": "Temporary private-agent chats never enter ordinary stores; standard agents are explicitly refused. This matrix fixture proves the privacy policy, not real-container or confidential-model operation.",
+      "layer": "server",
+      "fixture": "private-incognito-policy",
+      "how_to_test": "Assert the real Service refuses Incognito on the standard agent of each runtime kind with 409 incognito_private_only before upstream admission; use the dedicated synthetic private browser/stock rig for positive no-persistence proof.",
+      "source_refs": ["server/incognito.mjs", "ops/agent-runtime/incognito_runtime.py", "wizard-ux/web/core/incognito-chat.js"],
+      "reference_tests": ["tests/incognito.node.mjs", "ops/agent-runtime/test_incognito_runtime.py", "scripts/incognito-stock-acceptance.py"],
+      "policy_exemptions": [
+        {"kind":"main","policy":"private-incognito-only","assertion":"private-incognito-policy"},
+        {"kind":"host-profile","policy":"private-incognito-only","assertion":"private-incognito-policy"},
+        {"kind":"container","policy":"private-incognito-only","assertion":"private-incognito-policy"},
+        {"kind":"restricted","policy":"private-incognito-only","assertion":"private-incognito-policy"}
+      ]
+    },
+    {
       "id": "holographic-fact-memory",
       "description": "Stock local fact_store and prefetch recall survive process/container restart in each runtime's own Hermes home without crossing agent/profile homes.",
       "layer": "runtime",
       "how_to_test": "Run tests/holographic_container_proof.py on an isolated Docker worker. Real stock gateway containers model main-home, named-profile, managed-container and restricted-home scopes; the stock memory initializer must inject fact_store/fact_feedback, add/search/prefetch a canary, restart only its disposable gateway and recall again for every kind. Restricted proof also backs up via native SQLite-safe backup, imports into a second home, applies Wizard import wiring, and recalls. This is stock runtime home/tool behavior, not live Wizard routing or model adherence. Never use existing private agents or owner homes. The Holographic memory workflow saves the per-kind JSON results; an empty report or failed command fails CI.",
-      "source_refs": ["server/agents.mjs", "ops/agent-runtime/hermes_import.py"],
-      "reference_tests": ["tests/holographic-memory.test.ts", "tests/holographic_container_proof.py", "tests/test_hermes_import.py", "tests/managed-harness-upgrade.test.ts"],
+      "source_refs": [
+        "server/agents.mjs",
+        "ops/agent-runtime/hermes_import.py"
+      ],
+      "reference_tests": [
+        "tests/holographic-memory.test.ts",
+        "tests/holographic_container_proof.py",
+        "tests/test_hermes_import.py",
+        "tests/managed-harness-upgrade.test.ts"
+      ],
       "fixture": null,
       "policy_exemptions": []
     },
@@ -56,12 +165,33 @@
       "layer": "server",
       "fixture": "owned-open-work",
       "how_to_test": "Admit a synthetic HTTP turn per kind and inspect actual upstream instructions: no runtime receives OWNED_OPEN_WORK_INSTRUCTIONS, because reply and follow-up style belong to its persona. Project an owned Still open reply through the real session list, assert routed kinds stay done without owned_work or automatic sends, and execute the Hermes guard. tests/owned-open-work.test.ts additionally proves the main service's hidden continuation, restart dedupe and exact optional-handle behavior. These are disposable fixture checks, not live-model or browser proof.",
-      "source_refs": ["server/owned-open-work-follow-through.mjs", "server/owned-open-work.mjs", "server/thread-status.mjs", "server/service.mjs"],
-      "reference_tests": ["tests/owned-open-work.test.ts", "qa/agent-parity/server-checks.mjs", "qa/agent-parity/policy.test.mjs"],
+      "source_refs": [
+        "server/owned-open-work-follow-through.mjs",
+        "server/owned-open-work.mjs",
+        "server/thread-status.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/owned-open-work.test.ts",
+        "qa/agent-parity/server-checks.mjs",
+        "qa/agent-parity/policy.test.mjs"
+      ],
       "policy_exemptions": [
-        {"kind":"host-profile","policy":"owner-scoped-hermes-only","assertion":"owned-open-work"},
-        {"kind":"container","policy":"owner-scoped-hermes-only","assertion":"owned-open-work"},
-        {"kind":"restricted","policy":"owner-scoped-hermes-only","assertion":"owned-open-work"}
+        {
+          "kind": "host-profile",
+          "policy": "owner-scoped-hermes-only",
+          "assertion": "owned-open-work"
+        },
+        {
+          "kind": "container",
+          "policy": "owner-scoped-hermes-only",
+          "assertion": "owned-open-work"
+        },
+        {
+          "kind": "restricted",
+          "policy": "owner-scoped-hermes-only",
+          "assertion": "owned-open-work"
+        }
       ]
     },
     {
@@ -70,8 +200,16 @@
       "layer": "server",
       "fixture": "provider-signin-recovery",
       "how_to_test": "Fail a real HTTP admission with a controlled zero-token sign-in error, observe unavailable then ready, and assert one same-model source-preserving resend on main, host-profile, container and restricted queues.",
-      "source_refs": ["server/run-queue.mjs", "server/routed-run-queue.mjs", "server/service.mjs"],
-      "reference_tests": ["tests/provider-diagnosed-recovery.node.mjs", "tests/provider-saved-retry-route-race.node.mjs", "qa/agent-parity/server-checks.mjs"],
+      "source_refs": [
+        "server/run-queue.mjs",
+        "server/routed-run-queue.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/provider-diagnosed-recovery.node.mjs",
+        "tests/provider-saved-retry-route-race.node.mjs",
+        "qa/agent-parity/server-checks.mjs"
+      ],
       "policy_exemptions": []
     },
     {
@@ -113,9 +251,9 @@
     },
     {
       "id": "finish-report-instructions",
-      "description": "All agent kinds receive only Wizard OS facts, the persona pointer and the status protocol, never a reply-style rule, whatever response_style an older shell saved.",
+      "description": "All agent kinds receive only Wizard OS facts, the persona pointer and the status protocol, never a reply-style rule, whatever response_style an older shell saved. The Markdown fact overrides only the API-server plain-text line, so the runtime's own keep-replies-brief default survives.",
       "layer": "server",
-      "how_to_test": "Admit fresh-install and legacy summary/concise/own turns through main, host-profile, container and restricted HTTP routes; assert settings read Own and actual upstream instructions contain Wizard facts, the persona pointer and STATUS_PROTOCOL_INSTRUCTIONS without reply-style rules. Fixture proof covers prompt delivery, not model compliance.",
+      "how_to_test": "Admit fresh-install and legacy summary/concise/own turns through main, host-profile, container and restricted HTTP routes; assert settings read Own and actual upstream instructions contain Wizard facts, the persona pointer and STATUS_PROTOCOL_INSTRUCTIONS without reply-style rules, and with the scoped Markdown override that keeps the runtime's brevity default. Fixture proof covers prompt delivery, not model compliance.",
       "source_refs": [
         "server/thread-status.mjs",
         "server/service.mjs",
@@ -515,7 +653,7 @@
       "id": "ready-ask-contract",
       "description": "Deliver the cold-readable, situation-first Ready ask contract to every runtime kind",
       "layer": "server",
-      "how_to_test": "Admit a real HTTP run for main, host-profile, container and restricted fixtures; capture the instructions at the routed upstream boundary and assert the complete shared status contract, 140-character limit, situation then action, reply-word meaning and jargon ban. Round-trip a compliant synthetic needs_you answer through the Ready list and history, preserving the ask while hiding its marker. This proves prompt delivery and projection, not stochastic model adherence or live-provider behavior.",
+      "how_to_test": "Admit a real HTTP run for main, host-profile, container and restricted fixtures; capture the instructions at the routed upstream boundary and assert the complete shared status contract, 140-character limit, situation then action, reply-word meaning and jargon ban, including the rule that an unbuilt plan/diagnosis/audit/proposal for requested work must either start in the same turn with fyi and a verified running mechanism or ask needs_you with a reply word that starts it; only explicitly research-only or hypothetical requests may finish at the plan. Round-trip a compliant synthetic needs_you answer through the Ready list and history, preserving the ask while hiding its marker. This proves prompt delivery and projection, not stochastic model adherence or live-provider behavior.",
       "source_refs": [
         "server/thread-status.mjs",
         "server/service.mjs",
@@ -532,7 +670,7 @@
       "id": "status-list-state",
       "description": "Emit needs_you/done/working status with ask, subject and title",
       "layer": "server",
-      "how_to_test": "Project ask, subject and title without raw tags. tests/open-ask.node.mjs covers Ready/Working cases and real HTTP lists on main, host-profile, container and restricted: an unanswered needs_you ask survives progress while background continues, with wizard_background preserved in slim lists; immediate QR actions stay Ready even when their explanation says it will link the phone, while future delivery promises stay Working. tests/heavy-status.test.ts exercises real list and notice delivery routes for all four runtime kinds: check stays Working until heavy results land; done is not demoted and never creates an open ask. On upgrade, legacy terminal jobs are acknowledged once, preserve done/check, and never inject stale sibling notices; post-migration results remain owed across reopens until delivery. Companion wizard-ux tests/ready-open-ask.test.mjs verifies the muted Helper still working badge and latest helper-reply preview. Fixture/unit evidence is not browser, two-skin visual or live-model acceptance.",
+      "how_to_test": "Project ask, subject and title without raw tags. tests/open-ask.node.mjs covers Ready/Working cases and real HTTP lists on main, host-profile, container and restricted: an unanswered needs_you ask survives progress while background continues, with wizard_background preserved in slim lists; immediate QR actions stay Ready even when their explanation says it will link the phone, while future delivery promises stay Working. A queued owner message (not yet in the transcript) or an admitted started/accepted/running/unknown run keeps its lifecycle ahead of an older transcript ask and helper background: queued input drops every transcript ask, a running run keeps only asks its own replies wrote after admission, and helper-only rows without a run id still yield to owner gates. tests/heavy-status.test.ts exercises real list and notice delivery routes for all four runtime kinds: check stays Working until heavy results land; done is not demoted and never creates an open ask. On upgrade, legacy terminal jobs are acknowledged once, preserve done/check, and never inject stale sibling notices; post-migration results remain owed across reopens until delivery. Companion wizard-ux tests/ready-open-ask.test.mjs verifies the muted Helper still working badge and latest helper-reply preview. Fixture/unit evidence is not browser, two-skin visual or live-model acceptance.",
       "source_refs": [
         "server/thread-status.mjs",
         "server/open-ask.mjs",
@@ -566,9 +704,9 @@
     },
     {
       "id": "automatic-titles",
-      "description": "Complete an untitled thread and verify its generated title after list reload without touching other agents",
+      "description": "Project-home titles stay stable for sub-asks, broaden legacy feature labels once, change for a new project and respect owner locks",
       "layer": "server",
-      "how_to_test": "Complete an untitled thread and verify its generated title after list reload without touching other agents.",
+      "how_to_test": "Project-home titles stay stable for sub-asks, broaden legacy feature labels once, change for a new project and respect owner locks.",
       "source_refs": [
         "server/thread-titles.mjs"
       ],
@@ -627,8 +765,14 @@
       "description": "Agent screenshots appear inline where the reply mentions them",
       "layer": "ux",
       "how_to_test": "Render image MEDIA between explanation paragraphs; assert DOM order, no duplicate bottom image, same shared viewer and Back-to-thread. Targeted paired UX checks additionally cover two distinct images on two skins, copy/share and legacy clients.",
-      "source_refs": ["web/core/chat-kit.js", "web/core/chats.js"],
-      "reference_tests": ["wizard-ux/tests/inline-agent-screenshots.test.mjs", "wizard-ux/qa-inline-agent-screenshots.cjs"],
+      "source_refs": [
+        "web/core/chat-kit.js",
+        "web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/inline-agent-screenshots.test.mjs",
+        "wizard-ux/qa-inline-agent-screenshots.cjs"
+      ],
       "fixture": null,
       "policy_exemptions": []
     },
@@ -993,6 +1137,8 @@
       ],
       "reference_tests": [
         "tests/chats-views.test.ts",
+        "tests/ready-thread-speed.node.mjs",
+        "wizard-ux/tests/ready-thread-speed.test.mjs",
         "qa/agent-parity/history-sections.mjs"
       ],
       "fixture": "history-pagination",
@@ -1028,15 +1174,16 @@
     },
     {
       "id": "app-job-routing",
-      "description": "Each agent learns which of its own apps does which job, and the main agent's pointer skills send it through the app's shipped skill first.",
+      "description": "Each agent learns its own app jobs and receives app-first, source-of-truth, explicit tool-error reporting and registered-exact-tool-name rules; main pointer skills load the app's shipped skill first.",
       "layer": "server",
-      "how_to_test": "Install a synthetic app with a provides job and a shipped skill into the real Service's apps.json, restart, and open the wizard MCP gateway with each kind's own credential and transport. Main: the wizard-job-<job> pointer skill is written, tells it to load the app's skill with skill_view first, and the gateway kernel points at that skills index. Other kinds have no pointer skills: their gateway kernel lists the job -> app map for their own apps instead. Uninstall: the pointer disappears and no kind is told about the app. Disposable fixture checks; the live-model proof for the main agent is ops/acceptance/pointer-skills (fresh KVM VM).",
+      "how_to_test": "Install a synthetic app with a provides job and shipped skill into the real Service's apps.json, restart, and initialize its wizard MCP gateway through each main, host-profile, container and restricted agent's own credential and transport (restricted: Unix socket). Assert exact new app-first and source-of-truth lines, including missing-tool search/retry, no old-chat guesses or app URLs, checked negative results and explicit tool-error reporting; assert registered exact tool names and absence of the old speculative-name instruction. Repeat after uninstall to prove the standalone rules survive without apps. Main pointer skills load the shipped skill with skill_view first; other kinds receive their own inline job map and no pointer wording. Uninstall removes the pointer and app name. These execute actual Service gateway handlers against disposable synthetic upstreams, not stock live Hermes, model adherence or browser acceptance. Full fixture execution must be recorded separately; main live-model pointer proof is ops/acceptance/pointer-skills (fresh KVM VM).",
       "source_refs": [
         "server/agent-bridge.mjs",
         "hermes-plugin/wizard-os/kernel.py"
       ],
       "reference_tests": [
         "tests/agent-bridge.test.ts",
+        "tests/wizard-os-portable.test.ts",
         "qa/agent-parity/server-checks.mjs"
       ],
       "fixture": "app-job-routing",
@@ -1054,6 +1201,16 @@
         "tests/agent-principals.test.ts"
       ],
       "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "locked-selector-boundary",
+      "description": "Explicit admitted locks survive later selector changes without an app/model-specific dispatch override",
+      "layer": "server",
+      "how_to_test": "For main, host-profile, container and restricted real Service fixture routes: declare the synthetic Opus/Sonnet models in each agent's allowed_models, hold a first turn, admit a required Opus lock, change the selector to Sonnet and release the queue. Verify Opus remains immutable, then restart/replay without duplication and confirm picker edits do not admit chat turns. Main fixture persists browser_model_lock in synthetic SQLite. An earlier live bridge override fails this queued-admission regression; shared main already preserves it and must not adopt that override. Undeclared models remain forbidden by existing model_not_allowed tests. Fixture-only, not real-provider acceptance.",
+      "source_refs": ["server/locked-run-bridge.mjs", "server/run-queue.mjs", "server/agents-http.mjs"],
+      "reference_tests": ["tests/locked-run-bridge.test.mjs", "qa/agent-parity/queue-checks.mjs"],
+      "fixture": "locked-selector-boundary",
       "policy_exemptions": []
     },
     {
@@ -1176,8 +1333,16 @@
       "description": "Scheduled notifications preserve silent output, agent app authority and thread visibility",
       "layer": "server",
       "how_to_test": "Run a notification schedule through the real Service and each runtime route with a bound notifications MCP app (main is denied in routed cases). Assert the scheduler's internal read retains the silent answer, owner proof plus the raw header still scrubs it, the app receives one notify as the job agent, and the agent's thread is hidden. Remove the app grant and run again: the same thread is unhidden, fallback is recorded and no notification is sent. Restricted uses a mode-0600 Unix ingress; host-profile uses /p/parity-profile.",
-      "source_refs": ["server/scheduler.mjs", "server/service.mjs", "server/agents-http.mjs", "server/agent-bridge.mjs"],
-      "reference_tests": ["tests/scheduler-notify-parity.test.ts", "qa/agent-parity/scheduler-notify.mjs"],
+      "source_refs": [
+        "server/scheduler.mjs",
+        "server/service.mjs",
+        "server/agents-http.mjs",
+        "server/agent-bridge.mjs"
+      ],
+      "reference_tests": [
+        "tests/scheduler-notify-parity.test.ts",
+        "qa/agent-parity/scheduler-notify.mjs"
+      ],
       "fixture": "scheduler-notifications",
       "policy_exemptions": []
     },
@@ -1244,6 +1409,16 @@
       "policy_exemptions": []
     },
     {
+      "id": "chat-tweak-card",
+      "description": "A reply carrying [WIZARD_TWEAK_V1] shows Settings › Look's own live switch for that tweak in the message, for main and routed threads; the marker never shows as text in the thread, copy, streaming answer or Chats list preview.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/chat-tweak-card.test.mjs: the same history and list rows for main, host-profile, container and restricted threads parse to the same tweak ids, render the same switch card bound to current WosExperience state, and strip the marker from the full-list preview; a tap toggles the device's Look once. In this repo tests/session-list-view.node.mjs proves the slim Chats list preview strips the marker (complete and cut off) for all four kinds. The Service passes the marker through history unchanged for every kind. Synthetic source-executed evidence; browser cells in wizard-ux/tests/qa-chat-tweak-card.cjs.",
+      "source_refs": ["wizard-ux/web/core/chat-kit.js", "wizard-ux/web/core/chats.js", "wizard-ux/web/core/settings.js", "wizard-ux/web/live.js", "server/session-list-view.mjs"],
+      "reference_tests": ["wizard-ux/tests/chat-tweak-card.test.mjs", "wizard-ux/tests/qa-chat-tweak-card.cjs", "tests/session-list-view.node.mjs"],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "synced-list-ops",
       "description": "Shared Chats lists (Spaces and their members, subject order, pins) keep every device's and agent's change for main and routed threads: edits are item operations applied atomically by the service, never a device's whole cached list, so a stale or simultaneous device cannot drop another's edit.",
       "layer": "ux",
@@ -1266,20 +1441,86 @@
       "description": "The owner's per-agent app switch (Connections → Agents): an app turned off for an agent leaves that agent's tool list and its calls are refused in plain words at once; turned on again it is callable, without a restart.",
       "layer": "server",
       "how_to_test": "Authenticate as each main/host-profile/container/restricted agent (restricted via its Unix gateway) with a synthetic app on its own list (main: .main-agent.json, others: agent.json). The call is not refused; with the app off the call returns '<agent> is not allowed to use Synthetic Video. The owner can turn it on in Connections.' and tools/list has none of its tools; back on, the call is not refused, with no restart. tests/agents-sealed-apps.test.ts covers the owner API path, the private-app seal and new-agent defaults. Fixture HTTP evidence, not live runtime proof.",
-      "source_refs": ["server/agent-bridge.mjs", "server/agents.mjs"],
-      "reference_tests": ["tests/agents-sealed-apps.test.ts", "qa/agent-parity/server-checks.mjs"],
+      "source_refs": [
+        "server/agent-bridge.mjs",
+        "server/agents.mjs"
+      ],
+      "reference_tests": [
+        "tests/agents-sealed-apps.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
       "fixture": "agent-app-access",
       "policy_exemptions": []
     },
     {
       "id": "ai-apps-chat-drawer",
-      "description": "The AI apps shell view (Miguel's off-by-default tweak miguel/ai-apps) lists and acts on chats in its drawer (phone) and sidebar (desktop) for the MAIN agent only: rows come from the shell's Ready / Working / Snoozed / Archive groups and every row action (done, snooze, restore, unread, rename) lands on the main Chats window through Chats' own threadAct / openRenameSheet. Host-profile, container and restricted agents' Chats windows open beside it keep their own threads and lists untouched.",
+      "description": "The AI apps shell view (Miguel's off-by-default tweak miguel/ai-apps) lists and acts on chats in its drawer (phone) and sidebar (desktop) for the MAIN agent only: rows come from the shell's Ready / Working / Snoozed / Archive groups (failed or interrupted chats and the By day layout's Yesterday / Past week fold into Ready, so no main-agent chat is left out) and every row action (done, snooze, restore, unread, rename) lands on the main Chats window through Chats' own threadAct / openRenameSheet. Host-profile, container and restricted agents' Chats windows open beside it keep their own threads and lists untouched.",
       "layer": "ux",
-      "how_to_test": "In wizard-ux, node --test tests/ai-apps-agent-parity.test.mjs runs the real phone (web/app.js) and desktop (web/desktop/desktop.js) adapter code with a main, host-profile, container and restricted Chats window open (a routed one in front): the drawer lists only the main agent's rows, and done, snooze and rename each land on the main window once with no routed window touched. Synthetic source-executed evidence; write-free browser checks recorded on wizard-ux PR #888.",
-      "source_refs": ["wizard-ux/web/app.js", "wizard-ux/web/desktop/desktop.js", "wizard-ux/web/layouts/ai-apps/layout.js", "wizard-ux/web/layouts/ai-apps/desktop.js"],
-      "reference_tests": ["wizard-ux/tests/ai-apps-agent-parity.test.mjs"],
+      "how_to_test": "In wizard-ux, node --test tests/ai-apps-agent-parity.test.mjs runs the real phone (web/app.js) and desktop (web/desktop/desktop.js) adapter code with a main, host-profile, container and restricted Chats window open (a routed one in front): the drawer lists only the main agent's rows, its interrupted, Yesterday and Past week chats included in Ready, and done, snooze and rename on each of them land on the main window once with no routed window touched. Synthetic source-executed evidence; write-free browser checks recorded on wizard-ux PR #888; missing-bucket fix on wizard-ux PR #961.",
+      "source_refs": [
+        "wizard-ux/web/app.js",
+        "wizard-ux/web/desktop/desktop.js",
+        "wizard-ux/web/layouts/ai-apps/layout.js",
+        "wizard-ux/web/layouts/ai-apps/desktop.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/ai-apps-agent-parity.test.mjs"
+      ],
       "fixture": null,
       "policy_exemptions": []
+    },
+    {
+      "id": "bring-my-data",
+      "description": "An owner's ChatGPT/Claude/Hermes export dropped in Files is archived as searchable chats in the owner's Files, and picked Hermes skills install only into the importing agent's own home, or, from the Importer app, into another Wizard OS agent the owner picks (dest: a standard container or host profile agent; restricted agents are never offered).",
+      "layer": "server",
+      "how_to_test": "For every runtime kind, upload a synthetic ChatGPT export and a synthetic Hermes backup through the Service's Files upload, run the wizard-os bring_data tool with that kind's own HERMES_HOME and the owner Files root, then assert scan counts, the archived chat under Files/Imported/ChatGPT, the scan record and the installed skill under that agent's home only, and that no credential from the export appears in tool output. Synthetic fixture evidence, not live/browser evidence.",
+      "source_refs": [
+        "hermes-plugin/wizard-os/bring_data.py",
+        "hermes-plugin/wizard-os/__init__.py"
+      ],
+      "reference_tests": [
+        "tests/test_bring_data_plugin.py",
+        "tests/test_bring_data_importer.py"
+      ],
+      "fixture": "bring-my-data",
+      "policy_exemptions": []
+    },
+    {
+      "id": "thread-tracker-visible-seen",
+      "description": "Green all-done reply groups acknowledge after continuous visible/front-thread dwell or an owner send that snapshots their exact loaded server id/updated_at versions, separately for each agent/thread scope. Ordinary-height replies require their top or at least 40 percent visible; only replies taller than the readable viewport permit a small visible tail. Amber stays untouched by auto-Seen and send-clear; explicit Dismiss acknowledges amber groups via exact per-id versions and the existing Ready Done operation. Blocked and running rows have no Dismiss. The strip stays visible for running, needs-you, blocked or finished-but-unseen groups; only acknowledged-only or empty threads have no strip. Header counts active groups only as N open; acknowledged history remains a collapsed footer. Sends/steers paint before navigation, commit Seen only after durable Outbox custody and cancel on save refusal. Late ledger reads cannot expand the version snapshot. Away shares never acknowledge. Ordinary phone browsers require focus; only native phone bridges use the no-focus exception. Dropdown expansion is not seeing. Tracker header/list form one opaque panel; opening and anchored jumps leave the first line below the measured strip, with tweak-off eye-line unchanged. New clients send both legacy ids and versioned items; the prepared service compares each id/updated_at inside its synchronous atomic store write and returns acknowledged or stale, preserving ids-only behavior for old clients. Stale responses retire optimistic pins and remain unseen. The UX works with the old endpoint, but atomic server rejection requires deploying the prepared service separately.",
+      "layer": "ux",
+      "fixture": null,
+      "how_to_test": "Run wizard-ux tests/thread-tracker-autoseen.test.mjs for main, host-profile, container and restricted scoped-client GET/Seen payloads, running-only strip presence, remaining-running presence after Seen, acknowledged-only absence and no cross-agent leakage. With client clock -60s, aligned and +60s, acknowledge the same already-loaded all-done versions but never a completion arriving 10s after send, a changed member version or an unpinned late-ledger id. Reload a changed version while durable custody waits: it must receive no Seen POST. A 300px reply with a 50px tail held 1s must not acknowledge; a 4000px reply tail held 1s must. Include tests/thread-tracker-send.test.mjs for send/steer before-navigation scoping, deferred commit/cancel, storage refusal and away-share exclusion; sync tests cover refusal rollback and late-ledger non-expansion. Require late streamed anchors to re-arm without a render, native-phone no-focus acceptance versus ordinary-browser focus refusal, and 1 amber plus 3 acknowledged reading 1 open. Run wizard-ux tools/qa-thread-tracker.cjs on the admitted browser worker for phone, Android document-scroll and AI-apps desktop in Nebula/Grove. Measure geometry continuously throughout dwell, not just before queued shell repaints. Require hidden/background refusal, later unseen re-arm, measured first-line clearance, opaque seam and unchanged tweak-off eye-line; all service writes intercepted. These are synthetic client/browser evidence, not live routed runtime-transport or physical-device proof. The server thread-tracker fixture covers old/new-client CAS, standalone amber dismissal, newer-version rearm and actual upstream action-text instructions for all runtime kinds. UX tests additionally require same-frame last-amber/Ready Done paint and rollback on stale Seen, not a new attention store. These are fixture HTTP checks rather than physical-device or live model-adherence proof.",
+      "source_refs": [
+        "wizard-ux/web/core/thread-tracker.js",
+        "wizard-ux/web/core/thread-tracker.css",
+        "wizard-ux/web/core/chats.js",
+        "wizard-ux/web/core/chat-power.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/thread-tracker-autoseen.test.mjs",
+        "wizard-ux/tests/thread-tracker-send.test.mjs",
+        "wizard-ux/tests/thread-tracker-sync.test.mjs",
+        "wizard-ux/tools/qa-thread-tracker.cjs"
+      ],
+      "policy_exemptions": []
+    },
+    {
+        "id": "thread-tracker",
+        "description": "Only with the owner's Thread tracker tweak on, Seen accepts exact per-id versions atomically, reports stale without acknowledging newer unseen replies, and keeps legacy ids-only requests. Explicit amber Dismiss uses Seen, including non-try asks; newer action text reopens it. Optional ask/summary text is bounded and preserved. Every runtime receives the rule that needs_you requires one specific owner action named in title/ask and optional follow-ups are done. Every runtime receives the mandatory every-ask instruction, including answered questions as done and mid-turn additions. The 16-item reply cap prioritizes open asks on overflow; earlier answered asks need not repeat. Retention evicts seen done, then unseen done asks, never unresolved work. Separate asks stay recorded per id, but counts group by current reply anchor using the most urgent member; Seen of every member acknowledges that reply. Unknown anchors stay separate. The status line never shows in the transcript, and a quote reply tells the agent which message and ask it answers. With the tweak off the ledger answers empty, nothing is recorded and the quote reaches the agent unchanged. Routed runs that finish while the thread is closed are ingested from their run read.",
+        "layer": "server",
+        "fixture": "thread-tracker",
+        "how_to_test": "For main, host-profile, container and restricted HTTP fixtures, inspect actual upstream run instructions: require the complete mandatory every-ask contract, quick answered question = done, mid-turn additions, 16-item cap and open-first overflow without repeating earlier answers. Read a transcript whose assistant reply carries items: assert no items text in history, one most-urgent count for two asks on one reply, both per-id ledger items anchored to the reply, partial Seen remains actionable, all-member Seen persists as one acknowledged reply, and the runtime input carries the plain reply-to sentence. With the tweak false and absent in separate scenes, assert no tracker/items instructions, empty counts/items, Seen no-op and unchanged quote. tests/thread-items.test.ts executes these same per-kind checks plus 16-item parse/normalization and retention/restart regressions (seen done before unseen done, open states survive quick-answer churn, soft limit if all asks are open). Synthetic HTTP fixture evidence only, not model compliance, live runtime, browser or physical-phone proof.",
+        "source_refs": [
+            "server/thread-items.mjs",
+            "server/service.mjs",
+            "server/agents-http.mjs"
+        ],
+        "reference_tests": [
+            "qa/agent-parity/tracker-checks.mjs",
+            "tests/thread-items.test.ts"
+        ],
+        "policy_exemptions": []
     }
   ]
 }

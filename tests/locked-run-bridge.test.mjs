@@ -11,6 +11,20 @@ const frame = (name,p)=>`event: ${name}\ndata: ${JSON.stringify(p)}\n\n`
 const ack = {model:'',provider:'',requested:route,model_lock:'accepted'}
 function stream(text) { return new Response(text,{headers:{'Content-Type':'text/event-stream'}}) }
 
+test('an explicit locked send retains its admission route after the thread selector changes',async()=>{
+ const admitted={model:'claude-opus-5-5',provider:'anthropic'};
+ let stored={...admitted};const calls=[];
+ const queued={session_id:'wizard_synthetic',input:'Synthetic admitted work',...admitted,require_model_lock:true};
+ const b=new LockedRunBridge({origin:'http://localhost:8865',sessionRoute:()=>stored,log:()=>{},fetchImpl:async(_,init)=>{
+  const body=JSON.parse(init.body);calls.push(body);
+  return stream(frame('run.started',{run_id:'run_delayed',runtime:{model:body.model,provider:body.provider,model_lock:'accepted'}}))
+ }});
+ // A later picker edit is not authority to rewrite already admitted work.
+ stored={model:'claude-sonnet-5-5',provider:'anthropic'};
+ const response=await b.fetch('http://localhost:8865/v1/runs',start(queued));
+ assert.equal((await response.json()).runtime.model,admitted.model);
+ assert.equal(calls[0].model,admitted.model);assert.equal(calls[0].provider,admitted.provider)
+});
 test('native lock endpoint, not unguarded v1/runs, creates a controllable native run',async()=>{
  const calls=[];const bridge=new LockedRunBridge({origin:'http://127.0.0.1:8865',fetchImpl:async(url,init)=>{
   calls.push({url,body:JSON.parse(init.body),signal:init.signal});
@@ -31,6 +45,53 @@ test('Responses user-message input keeps text and image parts in native session 
 test('older client inherits persisted selector lock before admission',async()=>{
  let received; const b=new LockedRunBridge({origin:'http://localhost:8865',sessionRoute:()=>route,fetchImpl:async(_,init)=>{received=JSON.parse(init.body);return stream(frame('run.started',{run_id:'run_old_client',runtime:ack}))}});
  await b.fetch('http://localhost:8865/v1/runs',start({session_id:'wizard_synthetic',input:'synthetic'}));assert.equal(received.provider,route.provider);assert.equal(received.model,route.model)
+});
+test('stale Opus sends retain the confirmed non-Opus route throughout launch and runtime checks',async()=>{
+ for (const model of ['claude-opus-5-5','claude-opus-5-5[1m]','claude-opus-4-6']) {
+  const stored={model:'claude-sonnet-5-5',provider:'anthropic'};const calls=[];const logs=[];
+  const actual={...stored,model_lock:'confirmed'};
+  const b=new LockedRunBridge({origin:'http://localhost:8865',sessionRoute:()=>stored,log:line=>logs.push(line),fetchImpl:async(url,init)=>{
+   if (!init?.method) return new Response(JSON.stringify({status:'completed',output:'OK',runtime:actual}),{headers:{'Content-Type':'application/json'}});
+   calls.push(JSON.parse(init.body));
+   return stream(frame('run.started',{run_id:'run_clamped',runtime:{...stored,model_lock:'accepted'}})+frame('run.completed',{runtime:actual}))
+  }});
+  const response=await b.fetch('http://localhost:8865/v1/runs',start({session_id:'wizard_synthetic',input:'Reply OK',model,provider:'anthropic'}));
+  assert.equal(response.status,202);assert.equal((await response.json()).runtime.model,stored.model);
+  await Promise.all([...b.streams]);
+  assert.equal(calls.length,1);assert.equal(calls[0].model,stored.model);assert.equal(calls[0].provider,stored.provider);
+  assert.equal([...b.entries.values()][0].state,'completed');assert.equal(logs.length,1);
+  const completed=await (await b.fetch('http://localhost:8865/v1/runs/run_clamped')).json();
+  assert.equal(completed.status,'completed');assert.equal(completed.output,'OK');assert.equal(completed.runtime.model,stored.model);
+ }
+});
+test('a deliberate Opus pick updates the stored route before sending and is honored',async()=>{
+ let stored={model:'claude-sonnet-5-5',provider:'anthropic'};const calls=[];const logs=[];
+ const b=new LockedRunBridge({origin:'http://localhost:8865',sessionRoute:()=>stored,log:line=>logs.push(line),fetchImpl:async(_,init)=>{
+  const body=JSON.parse(init.body);calls.push(body);
+  return stream(frame('run.started',{run_id:'run_deliberate',runtime:{model:body.model,provider:body.provider,model_lock:'accepted'}}))
+ }});
+ // The model endpoint persists the picker selection before setThreadModel resolves.
+ stored={model:'claude-opus-5-5',provider:'anthropic'};
+ const response=await b.fetch('http://localhost:8865/v1/runs',start({session_id:'wizard_synthetic',input:'Reply OK',...stored}));
+ assert.equal((await response.json()).runtime.model,stored.model);assert.equal(calls[0].model,stored.model);assert.equal(logs.length,0)
+});
+test('no stored route, stored Opus, and explicit non-Opus routes keep their existing behavior',async()=>{
+ const sonnet={model:'claude-sonnet-5-5',provider:'anthropic'};const opus={model:'claude-opus-5-5[1m]',provider:'anthropic'};
+ for (const [stored,explicit] of [[null,opus],[opus,opus],[opus,sonnet],[sonnet,route]]) {
+  const calls=[];const logs=[];const b=new LockedRunBridge({origin:'http://localhost:8865',sessionRoute:()=>stored,log:line=>logs.push(line),fetchImpl:async(url,init)=>{
+   const body=JSON.parse(init.body);calls.push({url,body});
+   if (!stored) return new Response('{}');
+   return stream(frame('run.started',{run_id:'run_unchanged',runtime:{...explicit,model_lock:'accepted'}}))
+  }});
+  await b.fetch('http://localhost:8865/v1/runs',start({session_id:'wizard_synthetic',input:'Reply OK',...explicit}));
+  assert.equal(calls[0].body.model,explicit.model);assert.equal(calls[0].body.provider,explicit.provider);assert.equal(logs.length,0);
+  if (!stored) assert.equal(calls[0].url,'http://localhost:8865/v1/runs')
+ }
+});
+test('clamping does not accept an actual Opus runtime against a stored Sonnet lock',async()=>{
+ const stored={model:'claude-sonnet-5-5',provider:'anthropic'};
+ const b=new LockedRunBridge({origin:'http://localhost:8865',sessionRoute:()=>stored,log:()=>{},fetchImpl:async()=>stream(frame('run.started',{run_id:'run_wrong_opus',runtime:{model:'claude-opus-5-5',provider:'anthropic',model_lock:'accepted'}}))});
+ await assert.rejects(b.fetch('http://localhost:8865/v1/runs',start({session_id:'wizard_synthetic',input:'Reply OK',model:'claude-opus-5-5',provider:'anthropic'})),/acknowledge/)
 });
 test('requested provider cannot override contradictory actual provider',()=>{
  assert.equal(runtimeMatches({model:route.model,provider:'different-provider',requested:route},route),false);

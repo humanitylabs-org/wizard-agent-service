@@ -37,11 +37,24 @@ export function resolveThreadSection({ replies = [], lastUserAt = 0, background 
 
 // Shared by main and routed runtimes, including slim list windows. Do not turn
 // errors, stop requests or native approval gates into an ordinary Ready row.
-export function projectOpenAskSession(session, { replies, lastUserAt, background = '', heavyPending = background === 'heavy' } = {}) {
+export function projectOpenAskSession(session, { replies, lastUserAt, background = '', heavyPending = background === 'heavy', inFlight = false } = {}) {
   const decision = resolveThreadSection({ replies, lastUserAt, background, heavyPending })
   const row = { ...session }
   delete row.wizard_background
   if (['failed', 'interrupted', 'cancelled', 'expired', 'waiting_for_approval', 'stopping'].includes(row.status)) return row
+  // A live lease also owns execution when no API run has been admitted.
+  if (inFlight && !row.wizard_run_id && row.status !== 'queued') return row
+  // Admitted owner input can still be outside history. Keep the live release's
+  // own-reply attention policy, while every controller ingress/status wins over
+  // notice/helper classification until its real terminal receipt.
+  if (row.status === 'queued' || row.wizard_run_id && ['submitting', 'accepted', 'started', 'running', 'unknown'].includes(row.status)) {
+    const since = row.status === 'queued' ? Infinity : replyEpoch(row.wizard_assigned_at)
+    const own = resolveThreadSection({ replies: (replies ?? []).filter((reply) => replyEpoch(reply.timestamp) >= since), lastUserAt })
+    if (own.attention) row.wizard_attention = own.attention
+    else delete row.wizard_attention
+    if (row.wizard_waiting_on === 'helper') delete row.wizard_waiting_on
+    return row
+  }
   if (decision.attention) row.wizard_attention = decision.attention
   else delete row.wizard_attention
   if (decision.section === 'Working' && background) {

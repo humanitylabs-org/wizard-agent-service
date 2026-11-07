@@ -9,11 +9,12 @@ import { readHermesSessionTruth } from '../server/session-truth.mjs'
 import { latestVisibleSessionMessages, createWizardServer, listen } from '../server/service.mjs'
 import { listRow } from '../server/session-list-view.mjs'
 import { STATUS_INSTRUCTIONS } from '../server/thread-status.mjs'
-import { scene, kinds } from '../qa/agent-parity/fixture.mjs'
+import { scene, kinds, post } from '../qa/agent-parity/fixture.mjs'
 
 for (const kind of kinds) test(`open QR ask survives progress while background runs through ${kind} HTTP`, async () => {
   const root = mkdtempSync(join(tmpdir(), 'open-ask-runtime-')), heavyStatePath = join(root, 'heavy.db')
   const s = await scene(kind, { heavyStatePath, heavyToken: 'fixture-open-ask-token-not-secret', heavyPollIntervalMs: 3_600_000,
+    dispatchHealthReader: () => false,
     heavyTransport: async () => { throw Error('fixture never contacts a worker') } })
   const db = new DatabaseSync(heavyStatePath), sid = 'wizard_qr_runtime', now = Date.now() / 1000
   const message = (state, ask, at) => ({ role: 'assistant', timestamp: at, content: `QR reply\n[WIZARD_STATUS_V1]${JSON.stringify({ state, ask, subject: 'Parity QA' })}[/WIZARD_STATUS_V1]` })
@@ -31,6 +32,23 @@ for (const kind of kinds) test(`open QR ask survives progress while background r
     assert.equal(projected.wizard_attention.state, 'needs_you')
     assert.equal(projected.wizard_attention.ask, qr.ask)
     assert.equal(projected.wizard_background, 'heavy')
+    // The new owner message has not reached upstream history: the old ask is
+    // still its newest visible reply, but durable admission now owns lifecycle.
+    const prior = await s.request('/v1/runs', post({ session_id: sid, input: '[Wizard follow-through] Finish integration' }))
+    assert.equal(prior.status, 202)
+    const admitted = await s.request('/v1/runs', post({ session_id: sid, input: 'I scanned it; continue' }))
+    assert.equal(admitted.status, 202)
+    const run = await admitted.json()
+    assert.equal(run.status, 'queued')
+    for (const query of ['?limit=100', '?view=list&window=archive-50&overrides=%7B%7D&limit=100&offset=0&include_children=false']) {
+      const response = await s.request('/api/sessions' + query)
+      assert.equal(response.status, 200)
+      const queued = (await response.json()).data.find(r => r.id === sid)
+      assert.equal(queued.status, 'queued', `${kind} ${query}`)
+      assert.equal(queued.runId ?? queued.wizard_run_id, run.run_id)
+      assert.equal(queued.background ?? queued.wizard_background, undefined)
+      assert.equal(queued.attention ?? queued.wizard_attention, undefined)
+    }
   } finally { db.close(); await s.close(); rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -59,6 +77,35 @@ for (const [name, replies, background, lastUserAt, section, attention] of cases)
   assert.equal(row.wizard_background, section === 'Ready' && background ? background : undefined)
   if (attention) assert.deepEqual(row.wizard_attention, attention)
 })
+test('admitted owner runs stay Working ahead of a transcript ask and helper background', () => {
+  const replies = [reply(qr, 20)]
+  for (const status of ['queued', 'started', 'accepted', 'running', 'unknown']) {
+    const row = { id: 'wizard_active', status, wizard_run_id: 'wizardq_owner', wizard_assigned_at: 30,
+      wizard_attention: qr, wizard_background: 'helper', wizard_waiting_on: 'helper' }
+    const projected = projectOpenAskSession(row, { replies, lastUserAt: 10, background: 'helper' })
+    assert.equal(projected.status, status)
+    assert.equal(projected.wizard_run_id, 'wizardq_owner')
+    assert.equal(projected.wizard_attention, undefined)
+    assert.equal(projected.wizard_background, undefined)
+    assert.equal(projected.wizard_waiting_on, undefined)
+    assert.equal(row.wizard_attention.state, 'needs_you', 'input remains unchanged')
+  }
+  assert.equal(projectOpenAskSession({ status: 'queued' }, { replies, lastUserAt: 10, background: 'helper' }).status, 'queued')
+  // A running continuation's own reply (after admission) keeps its status line.
+  const fyi = { state: 'fyi', ask: 'Checks finished' }
+  const own = projectOpenAskSession({ status: 'running', wizard_run_id: 'wizardq_cont', wizard_assigned_at: 30 },
+    { replies: [reply(qr, 20), reply(fyi, 40)], lastUserAt: 10, background: 'helper' })
+  assert.equal(own.status, 'running')
+  assert.deepEqual(own.wizard_attention, fyi)
+  // Queued input supersedes even a reply written after an earlier admission.
+  assert.equal(projectOpenAskSession({ status: 'queued', wizard_run_id: 'wizardq_next', wizard_assigned_at: 30 },
+    { replies: [reply(fyi, 40)], lastUserAt: 10 }).wizard_attention, undefined)
+  const helperOnly = projectOpenAskSession({ status: 'running', wizard_waiting_on: 'helper' }, { replies, lastUserAt: 10, background: 'helper' })
+  assert.equal(helperOnly.status, 'completed', 'synthetic helper activity still releases to the owner gate')
+  assert.equal(helperOnly.wizard_attention.state, 'needs_you')
+  assert.equal(helperOnly.wizard_background, 'helper')
+})
+
 test('archived user-only history without background keeps its existing section', () => {
   assert.equal(projectOpenAskSession({ id: 'old', status: 'completed', archived: true }, { replies: [], lastUserAt: 10 }).status, 'completed')
 })

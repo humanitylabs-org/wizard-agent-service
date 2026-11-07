@@ -225,10 +225,34 @@ const SAFE_URL = /^(?:\/[^\s]*|https:\/\/[^\s]+)$/u
 const APP_TYPES = new Set(['view', 'service', 'agent', 'external'])
 const APP_CATEGORIES = new Set(['agent', 'interface', 'app', 'system'])
 
+// wizard.md `home_screen` (spec/WIZARD_MD.md "Home-screen pins"): offline (true), position_keys, route_state.
+const HOME_SCREEN_ROUTE = /^[A-Za-z_][A-Za-z0-9_]{0,39}$/
+function homeScreen(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const out = {}
+  if (raw.offline === true) out.offline = true
+  if (Array.isArray(raw.position_keys)) {
+    const keys = raw.position_keys.filter(k => typeof k === 'string' && k.length <= 120 && !/[\x00-\x1f\x7f]/.test(k) && k.split('*', 1)[0].length >= 3).slice(0, 8)
+    if (keys.length) out.position_keys = keys
+  }
+  if (typeof raw.route_state === 'string' && HOME_SCREEN_ROUTE.test(raw.route_state)) out.route_state = raw.route_state
+  return Object.keys(out).length ? out : null
+}
+
 /**
  * The launcher list: installed Wizard apps from the App Manager's apps.json, plus the owner's own
  * links from launcher.json. Only what a front end needs to draw and open a tile leaves the box.
  */
+// Routes are data, not an app-installed speech receiver. Keep the destination local;
+// the shell further binds it to the declaring app's URL before opening it.
+export function voiceRoutes(value) {
+  return (Array.isArray(value) ? value : []).slice(0, 16).flatMap(route => {
+    const words = Array.isArray(route?.words) ? [...new Set(route.words.filter(w => typeof w === 'string' && /^[\p{L}\p{N}-]{1,40}$/u.test(w)).map(w => w.toLowerCase()))].slice(0, 8) : []
+    if (!words.length || typeof route.open !== 'string' || !/^(?:\?|\/(?!\/))[^\x00-\x1f\x7f\\]{0,500}$/.test(route.open)) return []
+    if (route.rest_param !== undefined && !/^[a-zA-Z][a-zA-Z0-9_]{0,39}$/.test(route.rest_param)) return []
+    return [{ words, open: route.open, ...(route.rest_param ? { rest_param: route.rest_param } : {}) }]
+  })
+}
 export function readApps({ appsJsonPath, launcherPath }) {
   const out = []
   const seen = new Set()
@@ -246,11 +270,15 @@ export function readApps({ appsJsonPath, launcherPath }) {
     out.push({
       id, name: cleanText(app.name, 60) || id, desc: cleanText(app.summary, 120),
       url: view, view: appView(appsJsonPath, id, view), status: cleanText(app.status, 24), system: app.system === true, source: 'apps.json',
+      voice_routes: voiceRoutes(app.voice_routes),
       receives_voice_input: !!view && app.receives_voice_input === true,
       // Omit only when the key is absent (pre-metadata installations); [] is an explicit declaration, and a present
       // malformed value (string, null) normalizes to [] so it is never mistaken for an old registration.
       ...(Object.hasOwn(app, 'voice_names') ? { voice_names: Array.isArray(app.voice_names) ? app.voice_names.filter(n =>
         typeof n === 'string' && n.trim() && [...n].length <= 40 && !/[\x00-\x1f\x7f]/.test(n)).slice(0, 8) : [] } : {}),
+      // Home-screen pin capabilities the app declared (wizard.md home_screen, normalized by the App Manager). Re-validated
+      // here because apps.json is a file on disk; only well-formed values leave the box, and absence stays absent.
+      ...(homeScreen(app.home_screen) ? { home_screen: homeScreen(app.home_screen) } : {}),
       provides: Array.isArray(app.provides) ? app.provides.filter(v => typeof v === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(v)) : [],
       // The app's declared kind (wizard.md type) and store shelf: shells sort Apps / Agent apps / Connectors by them.
       // Only known values leave the box; anything else is omitted so the shell falls back to its own heuristics.
@@ -269,6 +297,7 @@ export function readApps({ appsJsonPath, launcherPath }) {
       id, name: cleanText(link.name, 60) || id, desc: cleanText(link.desc, 120), url, view: { mode: 'original', url },
       icon: cleanText(link.icon, 8), colors: Array.isArray(link.colors) ? link.colors.filter((c) => typeof c === 'string' && /^#[0-9a-f]{3,8}$/iu.test(c)).slice(0, 2) : [],
       ...(link.desktop_only === true ? { desktop_only: true } : {}), source: 'launcher.json',
+      voice_routes: voiceRoutes(link.voice_routes),
       receives_voice_input: link.receives_voice_input === true,
     })
   }

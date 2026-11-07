@@ -28,3 +28,20 @@ test('aliases, empty rows and optional metadata remain compatible', () => {
   assert.equal(listRow({id:'x',status:'accepted'}).status,'queued');
   assert.equal(listRow({id:'x'}).updatedAt,'1970-01-01T00:00:00.000Z');
 });
+// A reply can carry a tweak card ([WIZARD_TWEAK_V1]{"id":…}[/WIZARD_TWEAK_V1], wizard-ux core/chat-kit.js). The marker is
+// drawn as a switch in the thread and never shows as text in the Chats list, for the main agent and every routed kind.
+test('tweak-card marker never reaches the list preview, main and routed (host-profile, container, restricted)', () => {
+  const mark = '[WIZARD_TWEAK_V1]{"id":"wizard/desktop-chats"}[/WIZARD_TWEAK_V1]';
+  for (const kind of ['main', 'host-profile', 'container', 'restricted']) {
+    const agent = kind === 'main' ? '' : `qa-${kind}`;
+    const base = { id: `tweak-${kind}`, title: 'Synthetic', status: 'completed', ...(agent ? { agent } : {}), wizard_last_user_at: 1700000000 };
+    for (const content of [`Shipped the phone list. It starts off.\n\n${mark}\n\nSay if it reads right.`, `Shipped the phone list. It starts off.\n\n${mark.slice(0, 30)}`]) {
+      const row = listRow({ ...base, latest_message: { role: 'assistant', content, timestamp: 1700000100 } });
+      assert.equal(row.agent, agent, kind);
+      assert.doesNotMatch(row.preview, /WIZARD|TWEAK|desktop-chats/, `${kind}: ${row.preview}`);
+      assert.match(row.preview, /^Shipped the phone list\. It starts off\./, kind);
+      assert.equal(normalizeFull({ ...base, latest_message: { role: 'assistant', content } }).preview, row.preview, `${kind} full = slim`);
+    }
+    assert.equal(listRow({ ...base, latest_message: { role: 'assistant', content: 'No card here.' } }).preview, 'No card here.');
+  }
+});

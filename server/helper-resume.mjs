@@ -15,7 +15,7 @@ export async function resumeHelper({ sessionDbPath, sessionId, admit, now=Date.n
   const token=captureContinuation(sessionDbPath,pending)
   if(!continuationCurrent(sessionDbPath,token,now)) return {status:409,body:{error:'helper_not_resumable'}}
   try {
-    await admit(sessionId,pending.input??'[Wizard follow-through] The delegated results above have arrived. Finish the original request now, in one self-contained reply.',key,token)
+    await admit(sessionId,pending.input??'[Wizard follow-through] The delegated results above have arrived. Finish the original request now.',key,token)
   } catch(error) {
     if(error?.status===410) return {status:409,body:{error:'helper_not_resumable'}}
     throw error
