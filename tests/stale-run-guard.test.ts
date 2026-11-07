@@ -144,12 +144,13 @@ describe('stale-run guard: a message held behind the thread\'s active turn', () 
 describe('stale-run guard: only an ingested message can be abandoned', () => {
   const RUN = 'run_accad41e57684983bb43349a678219ba'
   const SESSION = 'wizard_1794036340706_7a4a6d366ae1'
-  async function stateDb(rows: Array<{ session: string, role: string, meta: object | null }>) {
+  async function stateDb(rows: Array<{ session: string, role: string, meta: object | null }>, deep = false) {
     const path = join(await tempDir(), 'state.db')
     const db = new DatabaseSync(path)
     db.exec('CREATE TABLE sessions(id TEXT PRIMARY KEY, parent_session_id TEXT); CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, display_metadata TEXT)')
     db.prepare('INSERT INTO sessions VALUES(?, NULL)').run(SESSION)
     db.prepare('INSERT INTO sessions VALUES(?, ?)').run('child_of_thread', SESSION)
+    if (deep) db.prepare('INSERT INTO sessions VALUES(?, ?)').run('grandchild_of_thread', 'child_of_thread')
     for (const row of rows) db.prepare('INSERT INTO messages(session_id, role, display_metadata) VALUES(?, ?, ?)').run(row.session, row.role, row.meta ? JSON.stringify(row.meta) : null)
     db.close()
     return path
@@ -163,6 +164,8 @@ describe('stale-run guard: only an ingested message can be abandoned', () => {
     expect(readRunDelivered(delivered, SESSION, RUN)).toBe(true)
     const child = await stateDb([{ session: 'child_of_thread', role: 'user', meta }])
     expect(readRunDelivered(child, SESSION, RUN)).toBe(true)
+    const grandchild = await stateDb([{ session: 'grandchild_of_thread', role: 'user', meta }], true)
+    expect(readRunDelivered(grandchild, SESSION, RUN)).toBe(true)
     expect(() => readRunDelivered(join(delivered, 'missing'), SESSION, RUN)).toThrow(/unavailable/)
   })
 

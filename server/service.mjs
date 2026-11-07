@@ -430,17 +430,20 @@ export function readActiveHumanSessionIds(sessionDbPath, currentTime = Date.now(
   }
 }
 
-// True once Hermes has ingested the run's message into the thread (or a compression child of it):
+// True once Hermes has ingested the run's message into the thread (or any compression descendant of it):
 // its user row carries display_metadata.submission_id = the run id. Throws when state is unreadable.
 export function readRunDelivered(sessionDbPath, sessionId, upstreamRunId) {
   if (!sessionDbPath || !existsSync(sessionDbPath)) throw new Error('Hermes session state is unavailable')
   const database = new DatabaseSync(sessionDbPath, { readOnly: true })
   try {
     return Boolean(database.prepare(`
+      WITH RECURSIVE lineage(id) AS (
+        SELECT id FROM sessions WHERE id = ?
+        UNION SELECT sessions.id FROM sessions JOIN lineage ON sessions.parent_session_id = lineage.id)
       SELECT 1 FROM messages
-       WHERE session_id IN (SELECT id FROM sessions WHERE id = ? OR parent_session_id = ?)
+       WHERE session_id IN (SELECT id FROM lineage)
          AND role = 'user' AND json_extract(display_metadata, '$.submission_id') = ?
-       LIMIT 1`).get(sessionId, sessionId, upstreamRunId))
+       LIMIT 1`).get(sessionId, upstreamRunId))
   } finally {
     database.close()
   }
@@ -3933,7 +3936,7 @@ function buildWizardServer(options, lifetime) {
       confirmAbandoned: async (record) => {
         if (!await runHasNoAgent(record.upstreamRunId)) return null
         const outcome = await (options.abandonedOutcomeReader ?? ((sessionId, startedAt) => readAbandonedRunOutcomeHttp((path) => hermesJson(path), sessionId, startedAt)))(record.sessionId, record.createdAt)
-        const delivered = await (options.runDeliveredReader ?? ((r) => readRunDelivered(hermesStatePath, r.sessionId, r.upstreamRunId)))(record)
+        const delivered = await (options.runDeliveredReader ?? ((r) => (hermesStatePath ? readRunDelivered(hermesStatePath, r.sessionId, r.upstreamRunId) : true)))(record)
         return abandonedRunVerdict({ delivered, outcome, ageSeconds: Date.now() / 1000 - record.createdAt })
       },
       onReconciled: (record, verdict, leaselessSeconds) => {
