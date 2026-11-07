@@ -151,6 +151,23 @@ it('Hermes 0.22.7: a submitted owner turn typed internal_notification is the lat
   expect(submittedRowIds(null, 's', [10]).size).toBe(0)
 })
 
+it('Hermes 0.22.7: a submitted owner row stored in a compression descendant still counts for the root thread', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'heavy-watermark-lineage-'))
+  cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
+  const path = hermesState(dir, [submittedRow(30, 'Before compaction')])
+  const write = new DatabaseSync(path)
+  write.prepare('INSERT INTO sessions VALUES (?, ?)').run('s-compacted', 's')
+  write.prepare('INSERT INTO sessions VALUES (?, NULL)').run('unrelated')
+  write.prepare('INSERT INTO messages VALUES (?,?,?,?,?,?)').run(31, 's-compacted', 'user', 'After compaction',
+    'internal_notification', JSON.stringify({ submission_id: 'run_31' }))
+  write.prepare('INSERT INTO messages VALUES (?,?,?,?,?,?)').run(32, 'unrelated', 'user', 'Other thread',
+    'internal_notification', JSON.stringify({ submission_id: 'run_32' }))
+  write.close()
+  const db = new DatabaseSync(path, { readOnly: true })
+  cleanup.push(() => db.close())
+  expect([...submittedRowIds(db, 's', [30, 31, 32])].sort((a, b) => a - b)).toEqual([30, 31])
+})
+
 it('Hermes 0.22.7: heavy submit is admitted from a live owner turn whose request row is internal_notification', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'heavy-submit-0227-'))
   cleanup.push(() => rmSync(dir, { recursive: true, force: true }))

@@ -21,11 +21,17 @@ const terminal = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 // messages included, as display_kind=internal_notification with a submission_id
 // in display_metadata; a gateway self-injected wake carries none. The HTTP history
 // omits display_metadata, so the ids of submitted rows come from the read-only
-// state.db by primary key. A submitted row is judged by its text, as before 0.22.7.
+// state.db by primary key, across the thread's compression descendants (Hermes may store
+// a new owner row in a descendant while root history still returns it). Only ids
+// that the canonical history itself returned are looked up. A submitted row is judged
+// by its text, as before 0.22.7.
 export function submittedRowIds(db, sessionId, ids) {
   if (!db || !ids.length) return new Set()
   try {
-    const rows = preparedRead(db, `SELECT id, display_metadata FROM messages WHERE session_id=? AND role='user'
+    const rows = preparedRead(db, `WITH RECURSIVE lineage(id) AS (
+        SELECT id FROM sessions WHERE id = ?
+        UNION SELECT sessions.id FROM sessions JOIN lineage ON sessions.parent_session_id = lineage.id)
+      SELECT id, display_metadata FROM messages WHERE session_id IN (SELECT id FROM lineage) AND role='user'
       AND display_kind='internal_notification' AND id IN (SELECT value FROM json_each(?))`).all(sessionId, JSON.stringify(ids))
     return new Set(rows.filter(row => {
       try { const id = JSON.parse(row.display_metadata || 'null')?.submission_id; return typeof id === 'string' && id.length > 0 }
