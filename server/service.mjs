@@ -3841,7 +3841,8 @@ function buildWizardServer(options, lifetime) {
   })
   // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
   // restart is relaunched by the first tick and must be validated, not cancelled.
-  heavyWork = createHeavyIntegration({ options, queue: runQueue, registry: agents, hermesStatePath,
+  // A routed heavy continuation is the thread's final reply: it carries the owner's short-answer ask budget too.
+  heavyWork = createHeavyIntegration({ options, queue: runQueue, registry: agents, hermesStatePath, askMax: askMaxNow,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
     isAutomaticAgentAllowed: id => agents?.read(id)?.role !== 'recovery', request: async path => {
     try { return await hermesJson(path, { signal: AbortSignal.timeout(3000) }, true) }
