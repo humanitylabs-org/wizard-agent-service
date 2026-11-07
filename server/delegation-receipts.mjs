@@ -11,9 +11,25 @@ export const FOLLOWUP_FAILURE_GUIDANCE = "Count each failed run toward this thre
 export const receiptKey = id => `wizard-helper-receipt-${id}`
 export const completionDelegationId = text => typeof text === 'string' ? text.match(/^\[ASYNC DELEGATION BATCH COMPLETE\s*[—-]\s*(deleg_[A-Za-z0-9_-]+)\]/u)?.[1] : undefined
 export const internalHelperMessage = text => /^\s*\[(?:ASYNC DELEGATION BATCH COMPLETE|Wizard follow-through|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT|IMPORTANT:|System:|Your active task list|Your previous agent loop|Agent-to-agent|supervisor (?:update|build|review|question|closed)|Wizard schedule|Wizard heavy-work (?:completion|notice)|Owner requested recovery|James requested recovery|STILL IN PROGRESS)/u.test(text)
+// Machinery row kinds. Hermes 0.22.7 also persists every canonical /v1/runs admission, the owner's own
+// messages included, as internal_notification stamped with the admission's submission_id; a gateway
+// self-injected wake carries none. A submitted turn is judged by its text, as before that release.
+// Otherwise every owner reply vanishes, an older needs_you looks current, and finished helpers never wake.
+export const MACHINERY_USER_KINDS = new Set(['system','async_delegation_complete','internal_notification','hidden','commentary'])
+export function submittedTurn(row) {
+  if (row?.display_kind !== 'internal_notification' || !row.display_metadata) return false
+  try {
+    const meta = typeof row.display_metadata === 'string' ? JSON.parse(row.display_metadata) : row.display_metadata
+    return typeof meta?.submission_id === 'string' && meta.submission_id.length > 0
+  } catch { return false }
+}
+export const machineryKind = row => MACHINERY_USER_KINDS.has(row?.display_kind) && !submittedTurn(row)
+// SELECT fragment: display_kind plus the metadata that tells a submitted turn from a gateway wake.
+export const displayColumns = columns => !columns.has('display_kind') ? ''
+  : columns.has('display_metadata') ? ',display_kind,display_metadata' : ',display_kind'
 export const isHumanRequest = row => row.role === 'user' && Boolean(String(row.content || '').trim())
   && !internalHelperMessage(row.content || '')
-  && !['system','async_delegation_complete','internal_notification','hidden','commentary'].includes(row.display_kind)
+  && !machineryKind(row)
   && !String(row.display_kind || '').startsWith('process_wakeup')
   && !/^(?:Your previous turn indicated a tool call|You just executed tool calls but returned an empty response|Workline browser QA found a concrete regression)/u.test(String(row.content || '').trim())
 // Inactive compaction history is retained; rewound/deleted turns are not.
@@ -26,13 +42,13 @@ export function currentOwnerResult(db, sessionId) {
   const columns = new Set(preparedRead(db, 'PRAGMA table_info(messages)').all().map(r=>r.name))
   // Compaction changes model context, not the owner's request/answer boundary.
   // Only compacted inactive rows remain authoritative for gates and supersession.
-  const kind = columns.has('display_kind') ? ', display_kind' : ''
+  const kind = displayColumns(columns)
   const rows = preparedRead(db, `SELECT role, content, timestamp ${kind} FROM messages WHERE session_id=?
     AND ${retainedMessagesWhere(columns)} AND role IN ('user','assistant') AND trim(COALESCE(content,''))<>'' ORDER BY timestamp DESC,id DESC LIMIT 513`).iterate(sessionId)
   let assistant, userAt=0, inspected=0
   for (const row of rows) {
     inspected++
-    if (internal(row.content) || ['async_delegation_complete','internal_notification','system','commentary','hidden'].includes(row.display_kind)) continue
+    if (internal(row.content) || machineryKind(row)) continue
     if (row.role==='user' && isHumanRequest(row) && !userAt) userAt=Number(row.timestamp)
     if (row.role==='assistant' && !assistant && /\[\/WIZARD_STATUS_V1\]\s*$/u.test(row.content || '')
       && ['done','needs_you','check'].includes(parseStatus(row.content)?.state)) assistant=row
@@ -98,7 +114,7 @@ export function continuationAllowed(path, sessionId, id, now=Date.now()) {
 // thread, and resuming it would override what the owner asked for next. It stays queryable in Hermes.
 export function ownerMovedOn(db, sessionId, completedAt) {
   const columns = new Set(preparedRead(db, 'PRAGMA table_info(messages)').all().map(r=>r.name))
-  const rows = preparedRead(db, `SELECT content ${columns.has('display_kind')?',display_kind':''} FROM messages WHERE session_id=? AND role='user' AND timestamp>?
+  const rows = preparedRead(db, `SELECT content ${displayColumns(columns)} FROM messages WHERE session_id=? AND role='user' AND timestamp>?
     AND ${retainedMessagesWhere(columns)} AND trim(COALESCE(content,''))<>'' ORDER BY timestamp DESC,id DESC LIMIT 513`).all(sessionId, Number(completedAt) || 0)
   return rows.length>512 || rows.some(row => isHumanRequest({ ...row, role: 'user' }))
 }

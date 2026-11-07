@@ -83,6 +83,28 @@ export function findPendingFollowThroughs(sessionDbPath, { now = Date.now(), max
   }
 }
 
+// One completion keeps one stable admission identity, but an attempt that ended failed/interrupted
+// before the agent took the results must not pin that key forever: the retry body differs (fresh run
+// instructions), so reusing the key was an "idempotency key conflict" and the thread never woke.
+// A queued/running/completed attempt stands ("already running: fine"); cancelled stays stale;
+// a failed/interrupted attempt whose upstream run is still live stands too (no double wake).
+export const HELPER_RETRY_STATUSES = new Set(['failed', 'interrupted'])
+export const MAX_HELPER_ATTEMPTS = 3
+export const helperAttemptKey = (key, attempt) => attempt <= 1 ? key : `${key}~attempt-${attempt}`
+export async function resolveHelperAttempt(key, { lookup, upstreamLive = async () => false }) {
+  for (let attempt = 1; attempt <= MAX_HELPER_ATTEMPTS; attempt++) {
+    const attemptKey = helperAttemptKey(key, attempt)
+    const record = lookup(attemptKey)
+    if (!record) return { key: attemptKey, attempt }
+    if (!HELPER_RETRY_STATUSES.has(record.status)) return { key: attemptKey, attempt, record }
+    // Unknown upstream liveness is not permission to start a second turn.
+    let live
+    try { live = await upstreamLive(record) } catch { live = null }
+    if (live !== false) return { key: attemptKey, attempt, record, live: live ?? 'unknown' }
+  }
+  return { exhausted: true }
+}
+
 /**
  * Start the watcher. `find()` returns the pending threads ({ sessionId, messageId }).
  * `admit(sessionId, input, idempotencyKey)` submits one run through the service's normal admission
@@ -122,6 +144,8 @@ export function startDelegationFollowThrough({ sessionDbPath = '', find = () => 
           // A turn can win the race after the preflight. This is a deferred receipt,
           // not a failed continuation; retain it for revalidation after that turn ends.
           if (error?.code === 'helper_session_busy') continue
+          // Every attempt failed: say so once and leave the thread for the owner's Resume, not a retry storm.
+          if (error?.code === 'helper_attempts_exhausted') done.add(key)
           log(`follow-through failed for ${pending.sessionId}: ${error?.message ?? error}`)
         }
       }

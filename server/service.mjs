@@ -49,7 +49,7 @@ import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, cou
 import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
-import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
+import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX, resolveHelperAttempt, MAX_HELPER_ATTEMPTS } from './delegation-follow-through.mjs'
 import { projectOwnedOpenWork } from './owned-open-work.mjs'
 import { readNonHoldingFollowUps, createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND } from './owned-open-work-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, abandonedRunVerdict, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
@@ -4806,8 +4806,29 @@ function buildWizardServer(options, lifetime) {
       }
       await requireHelperContinuation(continuation)
       if (runQueue) {
-        const admitted = await runQueue.admit({ runtime: 'direct', sessionId, idempotencyKey: key,
+        // A failed/interrupted earlier attempt gets a fresh attempt key; a live or finished one stands.
+        const resolved = await resolveHelperAttempt(key, {
+          lookup: (attemptKey) => runQueue.byIdempotencyKey('direct', attemptKey),
+          upstreamLive: async (record) => {
+            if (!record.upstreamRunId) return false
+            const current = await hermesJson(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)
+            return !['completed', 'failed', 'cancelled', 'interrupted', 'expired'].includes(current?.status)
+          },
+        })
+        if (resolved.exhausted) throw Object.assign(new Error(`gave up after ${MAX_HELPER_ATTEMPTS} failed attempts`), { status: 409, code: 'helper_attempts_exhausted' })
+        if (resolved.record) {
+          if (resolved.record.status === 'cancelled') throw Object.assign(new Error('Stale helper request'), { status: 410 })
+          return resolved.record
+        }
+        const admitOnce = () => runQueue.admit({ runtime: 'direct', sessionId, idempotencyKey: resolved.key,
           requestHash: queueRequestHash('direct', body.toString('utf8')), body: body.toString('utf8'), trustedPaths: prepared.trustedPaths, continuation })
+        let admitted
+        try { admitted = await admitOnce() } catch (error) {
+          // Another admission won this attempt key between lookup and insert: that run is this follow-through.
+          const raced = error?.status === 409 ? runQueue.byIdempotencyKey('direct', resolved.key) : null
+          if (!raced || raced.sessionId !== sessionId) throw error
+          admitted = { record: raced }
+        }
         if (admitted.record.status === 'cancelled') throw Object.assign(new Error('Stale helper request'), { status: 410 })
         return admitted.record
       }
