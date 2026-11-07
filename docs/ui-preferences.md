@@ -22,7 +22,8 @@ arrays at the root, wrong types and invalid values are rejected (400). Send
 - `replySummary`: optional `{on,start?,length?}` for the shell's short-answer view. `on` is boolean;
   `start` is `collapsed` or `expanded`; `length` is `line`, `sentences` or `paragraph`. Unknown nested
   keys are rejected. Absent stays absent: reopening the view reads the box before saving its choice.
-  This accepts the existing shell contract only; it does not change reply generation or enable the view.
+  While `on`, `length` sets the status ask's character budget in run instructions (80, 140, 300;
+  `thread-status.mjs` `askMaxFor`); the chat list still clips at 140. Off or absent, replies are unchanged.
 - `subjectOrder`: at most 60 unique strings, each at most 120 characters without control
   characters. Default: empty (natural order).
 

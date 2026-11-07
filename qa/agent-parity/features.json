@@ -90,6 +90,16 @@
       "policy_exemptions": []
     },
     {
+      "id": "reply-summary-ask-length",
+      "description": "While the owner's short-answer view is on (ui-preferences replySummary.on), its length line/sentences/paragraph sets the status ask budget to 80/140/300 characters in the instructions sent to main, host-profile, container and restricted runtimes; off or absent keeps 140.",
+      "layer": "server",
+      "fixture": "reply-summary-ask-length",
+      "how_to_test": "For each runtime kind, store replySummary absent, on+line, on+sentences, on+paragraph and off+paragraph in the box ui-preferences, admit a run through the kind's real ingress, and require the forwarded upstream instructions to carry exactly the 140/80/140/300/140-character ask rule and no other. Synthetic HTTP fixture evidence only, not live model output.",
+      "source_refs": ["server/thread-status.mjs", "server/service.mjs", "server/agents-http.mjs"],
+      "reference_tests": ["qa/agent-parity/server-checks.mjs", "tests/reply-summary-field.test.ts"],
+      "policy_exemptions": []
+    },
+    {
       "id": "hosted-thread-draft-custody",
       "description": "An admitted installed app opens the shared native thread with exact owner text held as a draft, not a send; app context remains quoted data and hosted audio stays bound to its original thread, model and run.",
       "layer": "ux",
@@ -465,14 +475,16 @@
     },
     {
       "id": "status-hidden",
-      "description": "Return WIZARD_STATUS_V1 in an assistant reply",
+      "description": "Return WIZARD_STATUS_V1 in an assistant reply; Wizard history hides the marker and keeps its ask and state on that row (wizard_ask, wizard_state) for the shell's reply summary",
       "layer": "server",
-      "how_to_test": "Return WIZARD_STATUS_V1 in an assistant reply; Wizard history must hide the wire marker.",
+      "how_to_test": "Return WIZARD_STATUS_V1 in an assistant reply; Wizard history must hide the wire marker and carry wizard_ask/wizard_state on that assistant row.",
       "source_refs": [
-        "server/thread-status.mjs"
+        "server/thread-status.mjs",
+        "server/service.mjs"
       ],
       "reference_tests": [
-        "tests/thread-status.test.ts"
+        "tests/thread-status.test.ts",
+        "tests/reply-summary-field.test.ts"
       ],
       "fixture": "status-hidden",
       "policy_exemptions": []

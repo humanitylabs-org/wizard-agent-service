@@ -58,7 +58,7 @@ export async function heavyRequestWatermark(request, sessionId) {
   throw fail('human request history scan exhausted', 503)
 }
 
-export function createHeavyIntegration({ options, queue, request, hermesStatePath, isAutomaticAgentAllowed = () => true, registry, fetchAgent }) {
+export function createHeavyIntegration({ options, queue, request, hermesStatePath, isAutomaticAgentAllowed = () => true, registry, fetchAgent, askMax }) {
   const token = options.heavyToken
   if (!options.heavyStatePath || !token || !queue) return null
   if (typeof token !== 'string' || token.length < 32) throw new Error('heavy token must contain at least 32 characters')
@@ -84,7 +84,7 @@ export function createHeavyIntegration({ options, queue, request, hermesStatePat
     admissionFences.set(sessionId, (admissionFences.get(sessionId) || 0) + 1)
     heavy.supersede(sessionId)
   }
-  const agentRelay = createAgentHeavyRelay({ options, registry, queue: () => heavy, fetchAgent })
+  const agentRelay = createAgentHeavyRelay({ options, registry, queue: () => heavy, fetchAgent, askMax })
   // Walk only service-owned heavy edges, never helper/human requests. A repair
   // submitted by a completion turn remains in the original request generation;
   // its immediate origin still owns the lease and must finish before resume.

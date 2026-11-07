@@ -30,7 +30,7 @@ import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, createHeavyStatusGuard, replyAppId, projectStatusMarkers } from './thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, fullStatusAsk, askMaxFor, withAskMax, createHeavyStatusGuard, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
@@ -334,7 +334,7 @@ export function clientViewContext(value) {
   return `${VIEW_CONTEXT_FRAME}\n${note.length > VIEW_CONTEXT_MAX ? `${note.slice(0, VIEW_CONTEXT_MAX - 1)}…` : note}`
 }
 
-function directBody(method, pathname, body, contract, osInstructions = '', noteFor = null) {
+function directBody(method, pathname, body, contract, osInstructions = '', noteFor = null, askMax = null) {
   if (method !== 'POST') return body
   const isSessionCreate = pathname === '/api/sessions'
   const isRunCreate = pathname === '/v1/runs'
@@ -351,7 +351,7 @@ function directBody(method, pathname, body, contract, osInstructions = '', noteF
   if (!isRunCreate) return body
   return Buffer.from(JSON.stringify({
     ...value,
-    instructions: [runInstructions(contract) + (typeof osInstructions === 'function' ? osInstructions(value.session_id) : osInstructions), typeof noteFor === 'function' ? noteFor(value.session_id) : '', clientViewContext(value.instructions)].filter(Boolean).join('\n\n'),
+    instructions: [withAskMax(runInstructions(contract), typeof askMax === 'function' ? askMax() : 140) + (typeof osInstructions === 'function' ? osInstructions(value.session_id) : osInstructions), typeof noteFor === 'function' ? noteFor(value.session_id) : '', clientViewContext(value.instructions)].filter(Boolean).join('\n\n'),
     ...runContractFields(contract),
   }))
 }
@@ -1545,6 +1545,19 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
       && !(Array.isArray(message.tool_calls) && message.tool_calls.length)
       && Boolean(safeHistoryText(projected.content, 1_000).trim())
       && !legacyInternalHistoryMessage(message)
+    // The reply's own status line (hidden from the text above) carries a plain-words ask written for someone reading
+    // cold. Keep it on the row so a shell can lead a long reply with it (wizard-ux --wos-reply-summary).
+    // Only a visible final, tool-free completion speaks for the reply: commentary, hidden or tool-call rows and
+    // cut-off completions never surface an ask (same rule as latestVisibleSessionMessages).
+    const finalReply = role === 'assistant' && (!kind || kind === 'final')
+      && !(Array.isArray(message.tool_calls) && message.tool_calls.length)
+      && (!message.finish_reason || message.finish_reason === 'stop')
+    if (finalReply) {
+      // Only a terminal marker is the reply's own status; a quoted example mid-reply is not (helper-continuation.mjs).
+      const raw = historyContentStrings(sourceMessage?.content ?? sourceMessage?.text ?? sourceMessage?.output).join('\n')
+      const status = /\[\/WIZARD_STATUS_V1\]\s*$/u.test(raw) ? parseStatus(raw) : null
+      if (status) { projected.wizard_ask = fullStatusAsk(raw) || status.ask; projected.wizard_state = status.state }
+    }
     const wakeup = historyProcessWakeup(message, projected.content)
     if (wakeup) Object.assign(projected, wakeup)
     if (Array.isArray(message.tool_calls)) projected.tool_calls = message.tool_calls.map(slimCall)
@@ -2656,6 +2669,8 @@ function buildWizardServer(options, lifetime) {
     : null
   if (bridge) lifetime.own(() => bridge.close())
   const threadApps = bridge ? new ThreadAppSnapshots(options.threadAppsStatePath ? resolve(String(options.threadAppsStatePath)) : '') : null
+  // The status ask's length from the owner's short-answer setting (140 unless the reply-summary view set one).
+  const askMaxNow = () => askMaxFor(readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')))
   const osInstructions = (sessionId) => {
     if (!bridge || gatewayOnly) return ''
     const apps = bridge.apps()
@@ -2895,6 +2910,7 @@ function buildWizardServer(options, lifetime) {
     },
   } : null
   if (agentCtx) agentCtx.mainHasSession = (sessionId) => agentCtx.sessionExists(MAIN_AGENT_ID, sessionId)
+  if (agentCtx) agentCtx.askMax = askMaxNow
   if (agentCtx) agentCtx.archiveAfterDays = () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays
   spacesTools = createSpacesTools({
     path: resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'),
@@ -3529,7 +3545,8 @@ function buildWizardServer(options, lifetime) {
       provider: 'custom:tinfoil-operator',
       require_model_lock: true,
       model_options: { reasoning_effort: 'max' },
-      instructions: [runInstructions({ join: true, response_style: readSettings(settingsPath).settings.response_style }), appProvenanceRunNote(appCatalog())].join('\n\n'),
+      // The worker writes the owner-visible reply (projectOperatorMessages), so it carries the short-answer ask budget too.
+      instructions: [withAskMax(runInstructions({ join: true, response_style: readSettings(settingsPath).settings.response_style }), askMaxNow()), appProvenanceRunNote(appCatalog())].join('\n\n'),
       ...runContractFields(await assertJoinedDelegationCapability()),
     })
     if (durableIdentity) workerBody = runQueue.freezeWorkerDispatchBody(durableIdentity, workerBody)
@@ -3660,7 +3677,7 @@ function buildWizardServer(options, lifetime) {
         const value = parseJsonBody(queuedBody)
         if (!isInlineOperatorRequest(value.input)) pendingWorker = await startOperatorWorker(value.session_id, value.input, record.publicRunId)
         queuedBody = operatorBody('POST', '/v1/runs', queuedBody)
-      } else queuedBody = record.dispatchBody ? Buffer.from(record.dispatchBody) : directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions, runTitleNote)
+      } else queuedBody = record.dispatchBody ? Buffer.from(record.dispatchBody) : directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions, runTitleNote, askMaxNow)
       const headers = new Headers({
         'Content-Type': 'application/json',
         'Idempotency-Key': record.idempotencyKey,
@@ -3825,7 +3842,8 @@ function buildWizardServer(options, lifetime) {
   })
   // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
   // restart is relaunched by the first tick and must be validated, not cancelled.
-  heavyWork = createHeavyIntegration({ options, queue: runQueue, registry: agents, hermesStatePath,
+  // A routed heavy continuation is the thread's final reply: it carries the owner's short-answer ask budget too.
+  heavyWork = createHeavyIntegration({ options, queue: runQueue, registry: agents, hermesStatePath, askMax: askMaxNow,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
     isAutomaticAgentAllowed: id => agents?.read(id)?.role !== 'recovery', request: async path => {
     try { return await hermesJson(path, { signal: AbortSignal.timeout(3000) }, true) }
@@ -4615,7 +4633,7 @@ function buildWizardServer(options, lifetime) {
         ...(locked ? { model: locked.model, provider: locked.provider, require_model_lock: true } : {}) }))
       const prepared = await prepareRunBody(raw, resolveFiles, true)
       const body = prepared.body
-      const projected = directBody('POST', '/v1/runs', body, contract, osInstructions, runTitleNote)
+      const projected = directBody('POST', '/v1/runs', body, contract, osInstructions, runTitleNote, askMaxNow)
       if (await helperSessionActive(sessionId)) {
         throw Object.assign(new Error('Agent already active'), { status: 409, code: 'helper_session_busy' })
       }
@@ -6609,7 +6627,7 @@ function buildWizardServer(options, lifetime) {
             }))
           }
         }
-        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract, osInstructions, runTitleNote)
+        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract, osInstructions, runTitleNote, askMaxNow)
         const headers = new Headers()
         headers.set('Authorization', `Bearer ${hermesKey}`)
         if (hasBody) headers.set('Content-Type', 'application/json')

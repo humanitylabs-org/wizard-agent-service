@@ -80,6 +80,27 @@ export function parseStatus(text) {
   return found
 }
 
+// Short-answer length (ui-preferences replySummary, set from the shell's reply-summary view): the character budget
+// of the status ask, only while that view is on. Protocol only: one number for one field. The chat list still clips
+// at 140 (parseStatus); the history row keeps up to 400 (fullStatusAsk).
+export const ASK_LENGTHS = Object.freeze({ line: 80, sentences: 140, paragraph: 300 })
+const ASK_RULE = 'at most 140 characters'
+export const askMaxFor = prefs => { const r = prefs?.replySummary; return r?.on === true && Object.hasOwn(ASK_LENGTHS, r.length ?? '') ? ASK_LENGTHS[r.length] : 140 }
+export const withAskMax = (text, max) => typeof text !== 'string' || !Number.isInteger(max) || max === 140 ? text : text.replaceAll(ASK_RULE, `at most ${max} characters`)
+
+// The last marker's ask in full (up to 400 chars, cut at a word), for the reply-summary lead on a history row.
+// The 140-char clip above is for the chat list; a lead that ends in "eve…" hides the very outcome it summarises.
+export function fullStatusAsk(text, max = 400) {
+  if (typeof text !== 'string' || !text.includes('[WIZARD_STATUS_V1]')) return ''
+  let ask = ''
+  for (const match of text.matchAll(MARKER)) {
+    try { const v = JSON.parse(match[1]); ask = String(v?.ask ?? v?.line ?? v?.summary ?? '').replace(/\s+/gu, ' ').trim() } catch { ask = '' }
+  }
+  if (ask.length <= max) return ask
+  const cut = ask.slice(0, max - 1), sp = cut.lastIndexOf(' ')
+  return `${(sp > max * 0.6 ? cut.slice(0, sp) : cut).trimEnd()}…`
+}
+
 // Apply after parsing/backfill, including cached rows: heavy work can change
 // independently of the assistant's final reply. An owner decision still wins.
 export function guardHeavyStatus(status, { jobs = [], agentId = 'hermes', sessionId = '', isDelivered = () => false, nonHoldingIds = new Set() } = {}) {

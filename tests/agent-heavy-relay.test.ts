@@ -89,7 +89,7 @@ async function serveFakeAgents(root: string, runtime: ReturnType<typeof fakeRunt
     clean.push(async () => { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) })
   }
 }
-async function scene(enabled: string | undefined = 'on', routed = false) {
+async function scene(enabled: string | undefined = 'on', routed = false, askMax?: () => number) {
   const root = home(); records(root)
   const runtime = fakeRuntime()
   await serveFakeAgents(root, runtime)
@@ -101,7 +101,7 @@ async function scene(enabled: string | undefined = 'on', routed = false) {
   const hostOrigin = { publicRunId: 'host-origin', sessionId: 'shared', runtime: 'direct', status: 'running', body: JSON.stringify({ model: 'host-model', provider: 'host-provider' }) }
   const hostQueue = { latestForSession: () => hostOrigin, mutationOwnerForSession: () => hostOrigin, get: () => hostOrigin }
   const routedQueues = routed ? createRoutedQueues({ registry, own: (fn: any) => clean.push(fn), pollIntervalMs: 60_000 }) : null
-  const heavy = createHeavyIntegration({ options, registry, queue: hostQueue,
+  const heavy = createHeavyIntegration({ options, registry, queue: hostQueue, askMax,
     fetchAgent: routedQueues ? (agent: any, path: string, init: any) => routedQueues.fetch(agent, path, init) : undefined, request: async () => ({ data: [{ id: 1, role: 'user', content: 'Host instruction' }] }) })!
   clean.push(() => heavy.close())
   async function req(id = 'alpha', ingress = true, credential = gateway(id)) {
@@ -133,6 +133,16 @@ it.each(['host-profile', 'container', 'restricted'])('preserves heavy authority 
   expect(posted.body.input).toContain('After five failed runs, stop and report what works and the blocker.')
   expect(posted.body.input).toContain('Preserve explicit owner approval gates; new scope still needs authorization.')
   expect(posted.body.require_model_lock).toBe(true)
+})
+
+it.each([[undefined, 140], [() => 80, 80], [() => 300, 300]] as const)('a routed heavy continuation carries the owner short-answer ask budget (%s -> %i)', async (askMax, max) => {
+  const s = await scene('on', false, askMax as any)
+  const receipt = await s.submit()
+  s.states.originDone = true; s.states.workerDone = true
+  await s.heavy.queue.tick()
+  const posted = s.posts.find(p => p.headers.get('idempotency-key') === `wizard-heavy-${receipt.job_id}`)!
+  expect(posted.body.instructions).toContain(`at most ${max} characters`)
+  for (const other of [80, 140, 300].filter(n => n !== max)) expect(posted.body.instructions).not.toContain(`at most ${other} characters`)
 })
 
 it('resolves public routed run ids for agent heavy admission and continuation without sending them to Hermes', async () => {
