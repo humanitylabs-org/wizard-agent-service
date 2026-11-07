@@ -62,6 +62,19 @@ export async function hermesRunTurnHeld(fetchImpl, origin, key, runId) {
   return hermesRunHasAgent(fetchImpl, origin, key, runId)
 }
 
+// A message accepted while the thread's earlier reply is still running (or while Hermes has no free
+// slot) is reported `running` with no agent until Hermes ingests it, sometimes 15+ minutes later.
+// Only a message Hermes has ingested can have been abandoned; one it never ingested is still waiting.
+export const UNDELIVERED_GRACE_SECONDS = 45 * 60
+export const UNDELIVERED_SAFE_ERROR = 'This message was never delivered. Send it again if you still want it carried out.'
+
+/** Verdict for a run with no agent attached: null keeps waiting, otherwise a terminal status. */
+export function abandonedRunVerdict({ delivered, outcome, ageSeconds, graceSeconds = UNDELIVERED_GRACE_SECONDS }) {
+  if (delivered) return { status: outcome }
+  if (ageSeconds < graceSeconds) return null
+  return { status: 'failed', safeError: UNDELIVERED_SAFE_ERROR }
+}
+
 /** Newest active messages first, as Hermes returns them for the thread's live lineage. */
 async function latestMessages(request, sessionId, limit) {
   const payload = await request(`/api/sessions/${enc(sessionId)}/messages?order=latest&limit=${limit}`)

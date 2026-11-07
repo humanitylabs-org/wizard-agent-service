@@ -52,7 +52,7 @@ import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
 import { projectOwnedOpenWork } from './owned-open-work.mjs'
 import { readNonHoldingFollowUps, createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND } from './owned-open-work-follow-through.mjs'
-import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
+import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, abandonedRunVerdict, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { PAGES_FOLDER, PagesError, createPages, servePage } from './pages.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
@@ -425,6 +425,22 @@ export function readActiveHumanSessionIds(sessionDbPath, currentTime = Date.now(
         return isDirectHumanSessionIdentity(id, row.source) || id.startsWith(OPERATOR_USER_SESSION_PREFIX)
       })
       .map((row) => String(row.id))
+  } finally {
+    database.close()
+  }
+}
+
+// True once Hermes has ingested the run's message into the thread (or a compression child of it):
+// its user row carries display_metadata.submission_id = the run id. Throws when state is unreadable.
+export function readRunDelivered(sessionDbPath, sessionId, upstreamRunId) {
+  if (!sessionDbPath || !existsSync(sessionDbPath)) throw new Error('Hermes session state is unavailable')
+  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
+  try {
+    return Boolean(database.prepare(`
+      SELECT 1 FROM messages
+       WHERE session_id IN (SELECT id FROM sessions WHERE id = ? OR parent_session_id = ?)
+         AND role = 'user' AND json_extract(display_metadata, '$.submission_id') = ?
+       LIMIT 1`).get(sessionId, sessionId, upstreamRunId))
   } finally {
     database.close()
   }
@@ -3916,7 +3932,9 @@ function buildWizardServer(options, lifetime) {
       turnHeld: options.turnHeldReader ?? ((record) => runTurnHeld(record.upstreamRunId)),
       confirmAbandoned: async (record) => {
         if (!await runHasNoAgent(record.upstreamRunId)) return null
-        return { status: await (options.abandonedOutcomeReader ?? ((sessionId, startedAt) => readAbandonedRunOutcomeHttp((path) => hermesJson(path), sessionId, startedAt)))(record.sessionId, record.createdAt) }
+        const outcome = await (options.abandonedOutcomeReader ?? ((sessionId, startedAt) => readAbandonedRunOutcomeHttp((path) => hermesJson(path), sessionId, startedAt)))(record.sessionId, record.createdAt)
+        const delivered = await (options.runDeliveredReader ?? ((r) => readRunDelivered(hermesStatePath, r.sessionId, r.upstreamRunId)))(record)
+        return abandonedRunVerdict({ delivered, outcome, ageSeconds: Date.now() / 1000 - record.createdAt })
       },
       onReconciled: (record, verdict, leaselessSeconds) => {
         const entry = { at: new Date().toISOString(), public_run_id: record.publicRunId, agent_id: record.agent_id ?? MAIN_AGENT_ID, session_id: record.sessionId,
