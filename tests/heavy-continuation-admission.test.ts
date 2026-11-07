@@ -19,7 +19,10 @@ async function fixture(providerAccessRecovery = false) {
   const root = mkdtempSync(join(tmpdir(), 'heavy-followup-'))
   const hermesStatePath = join(root, 'state.db')
   const sessions = new DatabaseSync(hermesStatePath)
-  sessions.exec("CREATE TABLE sessions(id TEXT PRIMARY KEY, parent_session_id TEXT); INSERT INTO sessions VALUES('s', NULL), ('child-session', 's')")
+  sessions.exec(`CREATE TABLE sessions(id TEXT PRIMARY KEY, parent_session_id TEXT, source TEXT, started_at REAL, ended_at REAL, model_config TEXT);
+    INSERT INTO sessions(id, parent_session_id) VALUES('s', NULL), ('child-session', 's');
+    CREATE TABLE async_delegations(delegation_id TEXT PRIMARY KEY, origin_session TEXT NOT NULL DEFAULT '', origin_ui_session_id TEXT NOT NULL DEFAULT '',
+      parent_session_id TEXT, state TEXT NOT NULL, dispatched_at REAL NOT NULL, completed_at REAL, origin_session_id TEXT)`)
   cleanup.push(() => sessions.close())
   let integration: any
   const statuses = new Map<string, string>()
@@ -312,4 +315,80 @@ it('keeps stop/steer fencing effective across a follow-up generation', async () 
   await f.finish(owner)
   await expect(f.integration.validate(next)).rejects.toMatchObject({ status: 410 })
   await expect(f.integration.validate(f.runs.get(f.integration.queue.get(second.job_id).resume))).rejects.toMatchObject({ status: 410 })
+})
+
+// Background helpers outlive the parent's turn (live 409, 7 Nov 2026).
+const backgroundHelper = (f: any, { child = 'bg-child', delegation = 'deleg_bg', parent = 's', state = 'running', ended = null as number | null } = {}) => {
+  const now = Date.now() / 1000
+  f.sessions.prepare('INSERT INTO sessions VALUES(?, ?, ?, ?, ?, ?)').run(child, parent, 'subagent', now, ended, JSON.stringify({ _delegate_from: parent }))
+  if (delegation) f.sessions.prepare('INSERT INTO async_delegations(delegation_id, origin_session_id, parent_session_id, state, dispatched_at, completed_at) VALUES(?, ?, ?, ?, ?, ?)')
+    .run(delegation, parent, parent, state, now - 1, state === 'running' ? null : now)
+}
+
+it('admits a tracked background helper under its idle parent and resumes the parent after the helper reports', async () => {
+  const f = await fixture()
+  await f.finish(f.origin.publicRunId)
+  backgroundHelper(f)
+  const job = await f.submit('bg', 'bg-child')
+  expect(job.session_id).toBe('s')
+  expect(f.integration.queue.get(job.job_id)).toMatchObject({ sessionId: 's', origin: f.origin.publicRunId, delegation_id: 'deleg_bg',
+    route: { model: 'original', provider: 'original-provider', require_model_lock: true } })
+  expect((await f.submit('bg', 'bg-child')).job_id).toBe(job.job_id)
+  await expect(f.submit('bg', 'bg-child', { ...spec, argv: ['false'] })).rejects.toMatchObject({ status: 409 })
+  f.workerStates.set(job.job_id, 'running')
+  await f.integration.queue.tick()
+  // The helper's own completion delivery is not a newer owner request.
+  const delivered = await f.admit('helper-done', { agent_id: 'hermes', sessionId: 's', session_id: 's', delegationId: 'deleg_bg' })
+  await f.finish(delivered.publicRunId)
+  f.workerStates.set(job.job_id, 'completed')
+  await f.integration.queue.tick()
+  const resumed = f.runs.get(f.integration.queue.get(job.job_id).resume)
+  expect(resumed.sessionId).toBe('s')
+  expect(JSON.parse(resumed.body)).toMatchObject({ session_id: 's', model: 'original', provider: 'original-provider', require_model_lock: true })
+  await f.integration.validate(resumed)
+})
+
+it('still supersedes a background helper job when another request arrives', async () => {
+  const f = await fixture()
+  await f.finish(f.origin.publicRunId)
+  backgroundHelper(f)
+  const job = await f.submit('bg', 'bg-child')
+  const other = await f.admit('other-helper', { agent_id: 'hermes', sessionId: 's', session_id: 's', delegationId: 'deleg_other' })
+  await f.finish(other.publicRunId)
+  await f.integration.queue.tick()
+  expect(f.integration.queue.get(job.job_id).resume).toBe('superseded')
+})
+
+it.each(['untracked', 'finished-delegation', 'ended-child', 'other-parent'])('refuses an idle-parent helper when it is %s', async kind => {
+  const f = await fixture()
+  await f.finish(f.origin.publicRunId)
+  if (kind === 'untracked') backgroundHelper(f, { delegation: '' })
+  if (kind === 'finished-delegation') backgroundHelper(f, { state: 'completed' })
+  if (kind === 'ended-child') backgroundHelper(f, { ended: Date.now() / 1000 })
+  if (kind === 'other-parent') {
+    backgroundHelper(f, { delegation: '' })
+    f.sessions.prepare("INSERT INTO async_delegations(delegation_id, origin_session_id, parent_session_id, state, dispatched_at) VALUES('deleg_x', 'other', 'other', 'running', ?)").run(Date.now() / 1000 - 1)
+  }
+  await expect(f.submit('bg', 'bg-child')).rejects.toMatchObject({ status: 409 })
+  await expect(f.integration.handle(req, path, { session_id: 'unrelated-session', parent_session_id: 's', key: 'spoof', spec })).rejects.toMatchObject({ status: 409 })
+  expect(f.integration.queue.rows()).toEqual([])
+})
+
+it('keeps a tracked background helper on the live parent path while the parent runs', async () => {
+  const f = await fixture()
+  backgroundHelper(f)
+  const job = await f.submit('bg-live', 'bg-child')
+  expect(f.integration.queue.get(job.job_id).origin).toBe(f.origin.publicRunId)
+  expect(f.integration.queue.get(job.job_id).delegation_id).toBeUndefined()
+})
+
+it('refuses an idle-parent helper when the parent has no direct run or its route is unknown', async () => {
+  const f = await fixture()
+  backgroundHelper(f, { parent: 'fresh', child: 'fresh-child', delegation: 'deleg_fresh' })
+  await expect(f.submit('none', 'fresh-child')).rejects.toMatchObject({ status: 409 })
+  const bare = JSON.stringify({ session_id: 'fresh', input: 'x' })
+  const run = (await f.runs.admit({ runtime: 'direct', sessionId: 'fresh', idempotencyKey: 'bare', body: bare, requestHash: queueRequestHash('direct', bare) })).record
+  await f.finish(run.publicRunId)
+  f.runs.database.prepare("UPDATE wizard_run_queue SET upstream_run_id='' WHERE public_run_id=?").run(run.publicRunId)
+  await expect(f.submit('no-route', 'fresh-child')).rejects.toMatchObject({ status: 409 })
 })

@@ -135,6 +135,29 @@ export function readUndeliveredHelperReceipts(path, {now=Date.now(),maxAgeSecond
     return receipts
   } catch{return []}finally{if (!suppliedDb) db?.close()}
 }
+// The running background delegation that launched this canonical Hermes child, from Hermes'
+// own records only: the child row names its parent and delegate marker, and the parent's
+// newest outstanding async delegation dispatched before the child started is the launcher.
+// Same 6 h horizon as the helpers-running projection: a lost helper keeps no authority.
+export function outstandingBackgroundDelegation(db, childSessionId, now=Date.now()) {
+  const sessionColumns=new Set(preparedRead(db, 'PRAGMA table_info(sessions)').all().map(r=>r.name))
+  if(!['parent_session_id','source','started_at','ended_at','model_config'].every(k=>sessionColumns.has(k))) return null
+  const exists=preparedRead(db, "SELECT 1 FROM sqlite_master WHERE type='table' AND name='async_delegations'").get()
+  if(!exists) return null
+  const columns=new Set(preparedRead(db, 'PRAGMA table_info(async_delegations)').all().map(r=>r.name))
+  const origins=['origin_session_id','parent_session_id','origin_ui_session_id'].filter(k=>columns.has(k))
+  if(!origins.length || !['delegation_id','state','dispatched_at','completed_at'].every(k=>columns.has(k))) return null
+  const child=preparedRead(db, 'SELECT parent_session_id,source,started_at,ended_at,model_config FROM sessions WHERE id=?').get(childSessionId)
+  const parent=String(child?.parent_session_id||'')
+  if(!parent || child.source!=='subagent' || child.ended_at!=null || !Number.isFinite(Number(child.started_at))) return null
+  let config; try { config=JSON.parse(child.model_config||'{}') } catch { return null }
+  if(config?._delegate_from!==parent) return null
+  const origin=`COALESCE(${origins.map(k=>`NULLIF(${k},'')`).join(',')},'')`
+  const row=preparedRead(db, `SELECT delegation_id FROM async_delegations WHERE ${origin}=?
+    AND state IN ('running','stalling','finalizing') AND completed_at IS NULL AND dispatched_at>? AND dispatched_at<=?
+    ORDER BY dispatched_at DESC LIMIT 1`).get(parent, now/1000-6*3600, Number(child.started_at)+30)
+  return row?.delegation_id ? { delegationId: String(row.delegation_id), sessionId: parent } : null
+}
 export function findIdleUndeliveredHelperReceipts(path,options={}) {
   return readUndeliveredHelperReceipts(path,options).filter(r=>continuationAllowed(path,r.sessionId,r.delegationId,options.now??Date.now()))
 }
