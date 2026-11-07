@@ -1161,6 +1161,13 @@ export class DurableRunQueue {
       try { held = await this.turnHeld(record) }
       catch { held = null }
       if (held !== false) { this.leaselessSince.delete(record.publicRunId); continue }
+      // Hermes serialises a thread's turns: a message sent while a long reply is still running is accepted
+      // but shows no agent until that reply ends, then it is delivered. Only a thread nothing else is
+      // working on can have an abandoned run; an unreadable busy state is unknown, so the run stays.
+      let busy
+      try { const active = await this.activeSessionIds(); busy = !Array.isArray(active) || active.includes(record.sessionId) }
+      catch { busy = true }
+      if (busy) { this.leaselessSince.delete(record.publicRunId); continue }
       const since = this.leaselessSince.get(record.publicRunId) ?? now
       this.leaselessSince.set(record.publicRunId, since)
       if (now - since < this.staleAfterSeconds) continue
@@ -1168,7 +1175,7 @@ export class DurableRunQueue {
       try { verdict = await this.confirmAbandoned(record) }
       catch { verdict = null }
       if (!verdict || !TERMINAL.has(verdict.status)) continue
-      const payload = { ...(record.payload ?? {}), status: verdict.status, last_event: 'run.reconciled', reconciled_reason: 'no_turn_held' }
+      const payload = { ...(record.payload ?? {}), status: verdict.status, last_event: 'run.reconciled', reconciled_reason: 'no_turn_held', ...(verdict.safeError ? { safe_error: verdict.safeError } : {}) }
       this._update(record.publicRunId, { status: verdict.status, payload, waitingReason: '', terminalAt: nowSeconds() })
       this.leaselessSince.delete(record.publicRunId)
       try { this.onReconciled(record, verdict, now - since) } catch { /* logging only */ }
