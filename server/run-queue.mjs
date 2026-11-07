@@ -366,6 +366,14 @@ export class DurableRunQueue {
       ORDER BY created_at, public_run_id`).all(runtime, sessionId).map((row) => this._record(row))
   }
 
+  /** Every queued row for a thread, including ones that have not reached Hermes (no upstream run yet). */
+  queuedForSession(runtime, sessionId) {
+    if (!['direct', 'operator'].includes(runtime) || typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) return []
+    return this.database.prepare(`SELECT * FROM wizard_run_queue
+      WHERE runtime = ? AND session_id = ?
+      ORDER BY created_at, public_run_id`).all(runtime, sessionId).map((row) => this._record(row))
+  }
+
   _existing(runtime, idempotencyKey) {
     return this._record(this.database.prepare('SELECT * FROM wizard_run_queue WHERE runtime = ? AND idempotency_key = ?').get(runtime, idempotencyKey))
   }
