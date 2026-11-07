@@ -17,10 +17,33 @@ export const HEAVY_FOLLOWUP_GUIDANCE = 'Check the receipt before claiming comple
 const fail = (message, status) => Object.assign(new Error(message), { status })
 const terminal = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 
+// Hermes 0.22.7 persists every canonical /v1/runs admission, the owner's own
+// messages included, as display_kind=internal_notification with a submission_id
+// in display_metadata; a gateway self-injected wake carries none. The HTTP history
+// omits display_metadata, so the ids of submitted rows come from the read-only
+// state.db by primary key, across the thread's compression descendants (Hermes may store
+// a new owner row in a descendant while root history still returns it). Only ids
+// that the canonical history itself returned are looked up. A submitted row is judged
+// by its text, as before 0.22.7.
+export function submittedRowIds(db, sessionId, ids) {
+  if (!db || !ids.length) return new Set()
+  try {
+    const rows = preparedRead(db, `WITH RECURSIVE lineage(id) AS (
+        SELECT id FROM sessions WHERE id = ?
+        UNION SELECT sessions.id FROM sessions JOIN lineage ON sessions.parent_session_id = lineage.id)
+      SELECT id, display_metadata FROM messages WHERE session_id IN (SELECT id FROM lineage) AND role='user'
+      AND display_kind='internal_notification' AND id IN (SELECT value FROM json_each(?))`).all(sessionId, JSON.stringify(ids))
+    return new Set(rows.filter(row => {
+      try { const id = JSON.parse(row.display_metadata || 'null')?.submission_id; return typeof id === 'string' && id.length > 0 }
+      catch { return false }
+    }).map(row => Number(row.id)))
+  } catch { return new Set() }
+}
+
 // Canonical display history includes compaction archives, but not rewound/deleted
 // turns. Do not use include_inactive or fall back to a summary/origin-body guess.
 // Hermes caps this endpoint at 500 and returns each latest page oldest-first.
-export async function heavyRequestWatermark(request, sessionId) {
+export async function heavyRequestWatermark(request, sessionId, { submitted = () => new Set() } = {}) {
   const limit = 500
   const base = `/api/sessions/${encodeURIComponent(sessionId)}/messages?order=latest&limit=${limit}&include_compacted=true`
   const fingerprint = rows => createHash('sha256').update(JSON.stringify(rows.map(
@@ -46,7 +69,10 @@ export async function heavyRequestWatermark(request, sessionId) {
       if (seen.has(row.id)) throw fail('history changed during pagination', 503)
       seen.add(row.id)
     }
-    const row = rows.slice().reverse().find(r => isHumanRequest(r) && !String(r.content).startsWith(HEAVY_PREFIX))
+    const ids = submitted(rows.filter(r => r.role === 'user' && r.display_kind === 'internal_notification').map(r => r.id))
+    const human = r => isHumanRequest(r) || (r.display_kind === 'internal_notification' && ids.has(r.id)
+      && isHumanRequest({ ...r, display_kind: null }))
+    const row = rows.slice().reverse().find(r => human(r) && !String(r.content).startsWith(HEAVY_PREFIX))
     if (row) {
       // Offset pages are not a snapshot: a new correction (or history rewrite)
       // during the scan must not allow us to return an older request as latest.
@@ -85,7 +111,8 @@ export function createHeavyIntegration({ options, queue, request, hermesStatePat
     const provider = body.provider || runtime?.requested?.provider || runtime?.provider
     return model && provider && provider !== 'custom' ? { model, provider, require_model_lock: true } : null
   }
-  const watermark = sessionId => heavyRequestWatermark(request, sessionId)
+  const watermark = sessionId => heavyRequestWatermark(request, sessionId,
+    { submitted: ids => submittedRowIds(sessions.get(), sessionId, ids) })
   let heavy
   const admissionFences = new Map()
   const invalidate = sessionId => {
