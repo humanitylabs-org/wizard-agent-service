@@ -90,6 +90,16 @@
       "policy_exemptions": []
     },
     {
+      "id": "reply-summary-ask-length",
+      "description": "While the owner's short-answer view is on (ui-preferences replySummary.on), its length line/sentences/paragraph sets the status ask budget to 80/140/300 characters in the instructions sent to main, host-profile, container and restricted runtimes; off or absent keeps 140.",
+      "layer": "server",
+      "fixture": "reply-summary-ask-length",
+      "how_to_test": "For each runtime kind, store replySummary absent, on+line, on+sentences, on+paragraph and off+paragraph in the box ui-preferences, admit a run through the kind's real ingress, and require the forwarded upstream instructions to carry exactly the 140/80/140/300/140-character ask rule and no other. Synthetic HTTP fixture evidence only, not live model output.",
+      "source_refs": ["server/thread-status.mjs", "server/service.mjs", "server/agents-http.mjs"],
+      "reference_tests": ["qa/agent-parity/server-checks.mjs", "tests/reply-summary-field.test.ts"],
+      "policy_exemptions": []
+    },
+    {
       "id": "hosted-thread-draft-custody",
       "description": "An admitted installed app opens the shared native thread with exact owner text held as a draft, not a send; app context remains quoted data and hosted audio stays bound to its original thread, model and run.",
       "layer": "ux",

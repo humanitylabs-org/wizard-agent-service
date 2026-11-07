@@ -50,6 +50,11 @@ describe('reply summary on Wizard history rows', () => {
       { ...reply, id: 3, role: 'user', content: `Quoting: ${marker}` },
       // A valid marker quoted as an example, with the reply continuing after it, is not this reply's status.
       { ...reply, id: 4, content: `The line looks like ${marker} and then I kept explaining.` },
+      // Non-final assistant rows ending in a valid marker are not the reply's answer.
+      { ...reply, id: 5, display_kind: 'commentary' },
+      { ...reply, id: 6, display_kind: 'hidden' },
+      { ...reply, id: 7, tool_calls: [{ id: 'c1', function: { name: 'terminal', arguments: '{}' } }] },
+      { ...reply, id: 8, finish_reason: 'length' },
     ])
     for (const row of rows) { expect(row).not.toHaveProperty('wizard_ask'); expect(row).not.toHaveProperty('wizard_state') }
   })

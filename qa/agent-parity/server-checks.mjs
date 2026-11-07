@@ -129,6 +129,27 @@ export const serverChecks = {
     assert.deepEqual(await history(s), before, 'main and routed transcripts remain unchanged')
     assert.equal(sends(), admitted, 'reopening preferences never generates a reply')
   },
+  'reply-summary-ask-length': async s => {
+    // While the owner's short-answer view is on, its length sets the status ask budget in the instructions that
+    // actually reach every runtime kind (main directBody, routed proxyToAgent); off or absent keeps 140.
+    const file = join(s.root, 'os', 'ui-preferences.json')
+    const cases = [
+      [null, 140],
+      [{ on: true, length: 'line' }, 80],
+      [{ on: true, length: 'sentences' }, 140],
+      [{ on: true, length: 'paragraph' }, 300],
+      [{ on: false, length: 'paragraph' }, 140],
+    ]
+    for (const [replySummary, max] of cases) {
+      writeFileSync(file, JSON.stringify(replySummary ? { replySummary } : {}) + '\n')
+      const session_id = `wizard_parity_ask_${replySummary ? `${replySummary.on}_${replySummary.length}` : 'absent'}`
+      await s.request('/api/sessions', post({ id: session_id }))
+      await admit(s, { session_id, input: 'Synthetic short-answer length' })
+      const text = sent(s).instructions
+      assert.ok(text.includes(`at most ${max} characters`), `${s.kind}: ${JSON.stringify(replySummary)} sends the ${max}-character ask rule`)
+      for (const other of [80, 140, 300].filter(n => n !== max)) assert.ok(!text.includes(`at most ${other} characters`), `${s.kind}: ${JSON.stringify(replySummary)} sends no ${other}-character ask rule`)
+    }
+  },
   'head-row-owner-write-parity': async s => {
     if (s.kind === 'main') {
       const db = new DatabaseSync(join(s.root, 'hermes-state.db'))

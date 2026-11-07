@@ -1547,7 +1547,12 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
       && !legacyInternalHistoryMessage(message)
     // The reply's own status line (hidden from the text above) carries a plain-words ask written for someone reading
     // cold. Keep it on the row so a shell can lead a long reply with it (wizard-ux --wos-reply-summary).
-    if (role === 'assistant') {
+    // Only a visible final, tool-free completion speaks for the reply: commentary, hidden or tool-call rows and
+    // cut-off completions never surface an ask (same rule as latestVisibleSessionMessages).
+    const finalReply = role === 'assistant' && (!kind || kind === 'final')
+      && !(Array.isArray(message.tool_calls) && message.tool_calls.length)
+      && (!message.finish_reason || message.finish_reason === 'stop')
+    if (finalReply) {
       // Only a terminal marker is the reply's own status; a quoted example mid-reply is not (helper-continuation.mjs).
       const raw = historyContentStrings(sourceMessage?.content ?? sourceMessage?.text ?? sourceMessage?.output).join('\n')
       const status = /\[\/WIZARD_STATUS_V1\]\s*$/u.test(raw) ? parseStatus(raw) : null
