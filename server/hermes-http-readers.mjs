@@ -12,7 +12,8 @@
 // `request(path, init)` is the caller's authenticated fetch: it returns parsed JSON or throws.
 
 export const FOLLOW_THROUGH_DISPLAY_KIND = 'async_delegation_complete'
-const HUMAN_SESSION_SOURCES = new Set(['webui', 'telegram', 'discord', 'slack', 'whatsapp', 'signal', 'wizard-mobile'])
+// Stock Hermes import retains CLI/TUI source and ids; these are interactive human chats too.
+const HUMAN_SESSION_SOURCES = new Set(['cli', 'tui', 'webui', 'telegram', 'discord', 'slack', 'whatsapp', 'signal', 'wizard-mobile'])
 const HUMAN_ID_PREFIXES = ['wizard_', 'wizard-assistant-', 'wizardop_user_']
 const SESSION_PAGE = 200
 const MAX_AGE_SECONDS = 30 * 24 * 60 * 60
