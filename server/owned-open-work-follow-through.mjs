@@ -10,6 +10,7 @@ import { createHash } from 'node:crypto'
 import { parseStatus } from './thread-status.mjs'
 import { dispatchHandles, countDispatchHandles, ownedOpenItems, guardOwnedOpenWork, claimsExistingHandle, nonHoldingFollowUpIds } from './owned-open-work.mjs'
 import { isHumanRequest, retainedMessagesWhere } from './delegation-receipts.mjs'
+import { createReadOnlySqlite, preparedRead } from './read-only-sqlite.mjs'
 
 export const OWNED_WORK_KIND = 'owned-open-work'
 export const ownedWorkStatePathOf = options => options.followThrough === false || options.ownedOpenWork === false ? ''
@@ -28,38 +29,96 @@ export function readOwnedOpenWork(path, sessionId) {
   try {
     db = new DatabaseSync(path, { readOnly: true })
     db.exec('BEGIN')
-    const cols = new Set(db.prepare('PRAGMA table_info(messages)').all().map(row => row.name))
-    if (!['id', 'session_id', 'role', 'content', 'tool_calls', 'tool_call_id', 'timestamp'].every(key => cols.has(key))) return null
-    const retained = `AND ${retainedMessagesWhere(cols)}`
-    const active = cols.has('active') ? 'AND COALESCE(active,1)=1' : ''
-    const latest = db.prepare(`SELECT * FROM messages WHERE session_id=? AND role IN ('user','assistant') ${active} ORDER BY id DESC LIMIT 100`).all(sessionId)
-      .find(row => !hidden.has(row.display_kind) && String(row.content ?? '').trim())
-    if (!latest || latest.role !== 'assistant' || latest.tool_calls && latest.tool_calls !== '[]' && latest.tool_calls !== 'null') return null
-    // Machine wakeups, reporter rewrites and compaction must not renew nudge authority.
-    // Keep retained rows: compaction changes context, not the owner request chain.
-    const users = db.prepare(`SELECT * FROM messages WHERE session_id=? AND role='user' AND id<? ${retained} ORDER BY id DESC LIMIT 513`).all(sessionId, latest.id)
-    const user = users.find(row => !/^\s*\[(?:reporter|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT)/u.test(String(row.content ?? '')))
-    const owner = users.find(row => isHumanRequest(row) && !String(row.content ?? '').startsWith('[reporter]'))
-    if (!user || !owner) return null // machine-only chains have no owner authority
-    const continuation = users.some(row => row.id >= owner.id && String(row.content ?? '').startsWith(OWNED_WORK_PREFIX))
-    const items = ownedOpenItems(latest.content)
-    const rows = items.length ? db.prepare(`SELECT * FROM messages WHERE session_id=? AND id>? AND id<=? ${retained} ORDER BY id LIMIT ?`).all(sessionId, user.id, latest.id, MAX_ROWS + 1) : []
-    if (rows.length > MAX_ROWS) return null // incomplete tool evidence is not zero handles
-    const claimed = items.filter(claimsExistingHandle).length
-    // Earlier turns of this thread (bounded): real handles that a restated item may point to.
-    const prior = claimed ? countDispatchHandles(db.prepare(`SELECT * FROM messages WHERE session_id=? AND id<=? ${retained} ORDER BY id DESC LIMIT 2000`).all(sessionId, user.id)) : 0
-    const handles = dispatchHandles(rows)
-    const handleCount = handles.length + Math.min(Math.max(0, claimed - handles.length), prior)
-    return { agentId: 'hermes', sessionId, runId: String(user.message_uid || user.id), chainId: String(owner.message_uid || owner.id), messageId: String(latest.message_uid || latest.id),
-      userId: Number(user.id), replyId: Number(latest.id), fingerprint: digest(latest.content), at: Number(latest.timestamp),
-      status: parseStatus(latest.content), items, ownedCount: items.length, handleCount,
-      followUpIds: nonHoldingFollowUpIds(latest.content, parseStatus(latest.content), handles),
-      continuation }
-
+    return readOwnedOpenWorkFrom(db, sessionId)
   } catch { return null } finally { db?.close() }
 }
 
+// The one owned-work transcript reader. Callers own the handle and its read transaction.
+function readOwnedOpenWorkFrom(db, sessionId) {
+  const cols = new Set(preparedRead(db, 'PRAGMA table_info(messages)').all().map(row => row.name))
+  if (!['id', 'session_id', 'role', 'content', 'tool_calls', 'tool_call_id', 'timestamp'].every(key => cols.has(key))) return null
+  const retained = `AND ${retainedMessagesWhere(cols)}`
+  const active = cols.has('active') ? 'AND COALESCE(active,1)=1' : ''
+  const latest = preparedRead(db, `SELECT * FROM messages WHERE session_id=? AND role IN ('user','assistant') ${active} ORDER BY id DESC LIMIT 100`).all(sessionId)
+    .find(row => !hidden.has(row.display_kind) && String(row.content ?? '').trim())
+  if (!latest || latest.role !== 'assistant' || latest.tool_calls && latest.tool_calls !== '[]' && latest.tool_calls !== 'null') return null
+  // Machine wakeups, reporter rewrites and compaction must not renew nudge authority.
+  // Keep retained rows: compaction changes context, not the owner request chain.
+  const users = preparedRead(db, `SELECT * FROM messages WHERE session_id=? AND role='user' AND id<? ${retained} ORDER BY id DESC LIMIT 513`).all(sessionId, latest.id)
+  const user = users.find(row => !/^\s*\[(?:reporter|CONTEXT COMPACTION|CONTEXT SUMMARY|PRIOR CONTEXT)/u.test(String(row.content ?? '')))
+  const owner = users.find(row => isHumanRequest(row) && !String(row.content ?? '').startsWith('[reporter]'))
+  if (!user || !owner) return null // machine-only chains have no owner authority
+  const continuation = users.some(row => row.id >= owner.id && String(row.content ?? '').startsWith(OWNED_WORK_PREFIX))
+  const items = ownedOpenItems(latest.content)
+  const rows = items.length ? preparedRead(db, `SELECT * FROM messages WHERE session_id=? AND id>? AND id<=? ${retained} ORDER BY id LIMIT ?`).all(sessionId, user.id, latest.id, MAX_ROWS + 1) : []
+  if (rows.length > MAX_ROWS) return null // incomplete tool evidence is not zero handles
+  const claimed = items.filter(claimsExistingHandle).length
+  // Earlier turns of this thread (bounded): real handles that a restated item may point to.
+  const prior = claimed ? countDispatchHandles(preparedRead(db, `SELECT * FROM messages WHERE session_id=? AND id<=? ${retained} ORDER BY id DESC LIMIT 2000`).all(sessionId, user.id)) : 0
+  const handles = dispatchHandles(rows)
+  const handleCount = handles.length + Math.min(Math.max(0, claimed - handles.length), prior)
+  return { agentId: 'hermes', sessionId, runId: String(user.message_uid || user.id), chainId: String(owner.message_uid || owner.id), messageId: String(latest.message_uid || latest.id),
+    userId: Number(user.id), replyId: Number(latest.id), fingerprint: digest(latest.content), at: Number(latest.timestamp),
+    status: parseStatus(latest.content), items, ownedCount: items.length, handleCount,
+    followUpIds: nonHoldingFollowUpIds(latest.content, parseStatus(latest.content), handles),
+    continuation }
+}
+
 export const readNonHoldingFollowUps = (path, sessionId) => new Set(readOwnedOpenWork(path, sessionId)?.followUpIds ?? [])
+
+// Chats list builds ask for the same sessions' evidence on every build. The result is a pure
+// function of that session's rows, so it is reused while a cheap covering-index revision holds:
+// any append, delete, rewind/undo/compaction (active flip) or in-place rewrite (Hermes's
+// transcript_revision trigger) moves it. Without that trigger, or within FRESH_SECONDS of the
+// newest row (Hermes's only display_kind rewrite is the post-turn stamp right after a turn lands,
+// and the trigger does not cover display_kind), nothing is memoized and every read is fresh,
+// exactly as before. One read-only handle serves all rows; a reopened handle empties the memo.
+export const OWNED_WORK_MEMO_MAX = 1000
+const FRESH_SECONDS = 120
+function ownedWorkRevision(db, sessionId, nowSeconds) {
+  try {
+    if (!preparedRead(db, "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='messages_transcript_revision_update'").get()) return null
+    const m = preparedRead(db, `SELECT COUNT(*) AS n, MAX(id) AS top, SUM(CASE WHEN COALESCE(active,1)=1 THEN 1 ELSE 0 END) AS live,
+      SUM(CASE WHEN COALESCE(active,1)=1 THEN id ELSE 0 END) AS ids FROM messages WHERE session_id=?`).get(sessionId)
+    if (!m?.top) return null
+    const at = Number(preparedRead(db, 'SELECT timestamp FROM messages WHERE id=?').get(m.top)?.timestamp)
+    if (!Number.isFinite(at) || at > nowSeconds - FRESH_SECONDS) return null
+    const session = preparedRead(db, 'SELECT transcript_revision AS r FROM sessions WHERE id=?').get(sessionId)
+    return session ? `${m.n}:${m.top}:${m.live}:${m.ids}:${session.r}` : null
+  } catch { return null }
+}
+/** @param {string} path @param {{max?: number, now?: () => number}} [options] */
+export function createOwnedOpenWorkReader(path, { max = OWNED_WORK_MEMO_MAX, now = Date.now } = {}) {
+  const handle = path ? createReadOnlySqlite(path) : null
+  const memo = new Map()
+  const stats = { reads: 0, hits: 0, transcriptReads: 0 }
+  let memoDb = null
+  const read = sessionId => {
+    if (!handle || !sessionId) return null
+    stats.reads++
+    const db = handle.get()
+    // A replaced/restored state.db reopens the handle; its sessions share nothing with the old memo.
+    if (db !== memoDb) { memo.clear(); memoDb = db }
+    if (!db) return null
+    let open = false
+    try {
+      db.exec('BEGIN'); open = true
+      const key = ownedWorkRevision(db, sessionId, now() / 1000)
+      const hit = memo.get(sessionId)
+      memo.delete(sessionId)
+      if (key && hit?.key === key) { memo.set(sessionId, hit); stats.hits++; return hit.value }
+      stats.transcriptReads++
+      const value = readOwnedOpenWorkFrom(db, sessionId)
+      if (key) {
+        memo.set(sessionId, { key, value })
+        while (memo.size > max) memo.delete(memo.keys().next().value)
+      }
+      return value
+    } catch { return null } finally { if (open) try { db.exec('ROLLBACK') } catch { /* no snapshot left open */ } }
+  }
+  return { read, nonHolding: sessionId => new Set(read(sessionId)?.followUpIds ?? []),
+    stats: () => ({ ...stats, size: memo.size }), close: () => { memo.clear(); handle?.close() } }
+}
 
 // Rowid-range scan only: state.db holds millions of rows, so a time/content predicate
 // over the whole table is a full scan. Callers pass the previous high-water id; the

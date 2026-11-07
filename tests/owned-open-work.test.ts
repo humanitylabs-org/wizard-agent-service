@@ -481,6 +481,111 @@ describe('owned-work service wiring', () => {
     expect(readHermesListRevision(f.path)).toBeNull()
     expect(readNonHoldingFollowUps(f.path, 'wizard_owned').size).toBe(0)
   })
+  // Hermes's real schema: an in-place rewrite bumps sessions.transcript_revision by trigger.
+  const hermesRevisions = (db: any) => db.exec(`ALTER TABLE sessions ADD COLUMN transcript_revision INTEGER NOT NULL DEFAULT 0;
+    CREATE TRIGGER messages_transcript_revision_update AFTER UPDATE OF role, content, tool_calls, tool_call_id ON messages
+    BEGIN UPDATE sessions SET transcript_revision = transcript_revision + 1 WHERE id = new.session_id; END;`)
+  const settle = (db: any) => db.exec('UPDATE messages SET timestamp = timestamp - 600') // past the in-place stamp window
+  async function optionalHeavyThread() {
+    const f = await service(false, true)
+    hermesRevisions(f.db)
+    f.add('user', 'Fix the synthetic bug')
+    f.add('assistant', '', { tool_calls: [call('wizard_heavy_submit', {}, 'heavy_memo')] })
+    f.add('tool', JSON.stringify({ job_id: 'heavy_memo' }), { tool_call_id: 'heavy_memo' })
+    const optional = reply('Archimedes: started optional follow-up checks: heavy_memo running now').replace('The fix works.', 'The fix is verified.')
+    f.add('assistant', optional)
+    settle(f.db)
+    const heavyDb = new DatabaseSync(join(f.root, 'heavy.db'))
+    const job = { job_id: 'heavy_memo', sessionId: 'wizard_owned', agent_id: 'hermes', state: 'running', resume: '', created_at: Date.now() }
+    heavyDb.prepare('INSERT INTO heavy_jobs(id,session,origin,key,hash,data,agent_id) VALUES(?,?,?,?,?,?,?)')
+      .run(job.job_id, 'wizard_owned', 'wizardq_origin', 'memo', 'hash', JSON.stringify(job), 'hermes')
+    heavyDb.close()
+    return { ...f, optional, replyId: Number(f.db.prepare('SELECT MAX(id) id FROM messages').get()!.id) }
+  }
+  it('a Chats list build does not re-read thread history for unchanged sessions', async () => {
+    const f = await optionalHeavyThread()
+    const first = await f.list()
+    expect(first.status).not.toBe('running'); expect(first.wizard_attention.state).toBe('done')
+    const warm = f.server.ownedWorkEvidence.stats()
+    expect(warm.transcriptReads).toBeGreaterThan(0)
+    const second = await f.list(), third = await f.list()
+    const after = f.server.ownedWorkEvidence.stats()
+    expect(after.reads).toBeGreaterThan(warm.reads) // each build still asks, and is answered from the revision memo
+    expect(after.transcriptReads).toBe(warm.transcriptReads)
+    const stable = ({ last_active: _clock, ...row }: any) => row // the fixture's own list clock
+    expect(stable(second)).toEqual(stable(first)); expect(stable(third)).toEqual(stable(first))
+  })
+  it('a new message in a session refreshes its follow-up state', async () => {
+    const f = await optionalHeavyThread()
+    expect((await f.list()).status).not.toBe('running')
+    f.add('assistant', 'Optional follow-up heavy_memo is running now. Waiting for its required result.'); settle(f.db)
+    expect((await f.list()).status).toBe('running')
+    // An in-place rewrite moves Hermes's transcript revision, not the row count or newest id.
+    f.db.prepare('DELETE FROM messages WHERE id>?').run(f.replyId)
+    expect((await f.list()).status).not.toBe('running')
+    f.db.prepare('UPDATE messages SET content=? WHERE id=?').run(f.optional.replace('optional follow-up', 'required blocking'), f.replyId)
+    expect((await f.list()).status).toBe('running')
+    // A rewind deactivates the reply without adding a row.
+    f.db.prepare('UPDATE messages SET content=? WHERE id=?').run(f.optional, f.replyId)
+    expect((await f.list()).status).not.toBe('running')
+    f.db.prepare('UPDATE messages SET active=0 WHERE id=?').run(f.replyId)
+    expect((await f.list()).wizard_attention?.state).not.toBe('done')
+  })
+})
+
+describe('owned-work evidence memo', () => {
+  const thread = (revisions = true) => {
+    const f = transcript()
+    f.db.prepare('INSERT INTO sessions(id,title,source,started_at) VALUES(?,?,?,?)').run('wizard_owned', 'Synthetic checks', 'wizard-mobile', Date.now()/1000)
+    if (revisions) f.db.exec(`ALTER TABLE sessions ADD COLUMN transcript_revision INTEGER NOT NULL DEFAULT 0;
+      CREATE TRIGGER messages_transcript_revision_update AFTER UPDATE OF content ON messages
+      BEGIN UPDATE sessions SET transcript_revision = transcript_revision + 1 WHERE id = new.session_id; END;`)
+    f.add('user', 'Fix the synthetic bug'); f.add('assistant', reply())
+    return f
+  }
+  it('memoized evidence equals a fresh read and reuses one handle', async () => {
+    const { createOwnedOpenWorkReader } = await import('../server/owned-open-work-follow-through.mjs')
+    const f = thread(); f.db.exec('UPDATE messages SET timestamp = timestamp - 600')
+    const memo = createOwnedOpenWorkReader(f.path); cleanup.push(() => memo.close())
+    expect(memo.read('wizard_owned')).toEqual(readOwnedOpenWork(f.path, 'wizard_owned'))
+    expect(memo.read('wizard_owned')).toEqual(readOwnedOpenWork(f.path, 'wizard_owned'))
+    expect(memo.stats()).toMatchObject({ reads: 2, hits: 1, transcriptReads: 1 })
+  })
+  it('without Hermes transcript revisions, or right after a turn lands, every read is fresh', async () => {
+    const { createOwnedOpenWorkReader } = await import('../server/owned-open-work-follow-through.mjs')
+    const legacy = thread(false); legacy.db.exec('UPDATE messages SET timestamp = timestamp - 600')
+    const a = createOwnedOpenWorkReader(legacy.path); cleanup.push(() => a.close())
+    a.read('wizard_owned'); a.read('wizard_owned')
+    expect(a.stats()).toMatchObject({ hits: 0, transcriptReads: 2, size: 0 })
+    const fresh = thread() // Hermes may still stamp this turn's display_kind in place
+    const b = createOwnedOpenWorkReader(fresh.path); cleanup.push(() => b.close())
+    b.read('wizard_owned'); b.read('wizard_owned')
+    expect(b.stats()).toMatchObject({ hits: 0, transcriptReads: 2, size: 0 })
+  })
+  it('a replaced state.db never serves the old database\'s memoized evidence', async () => {
+    const { createOwnedOpenWorkReader } = await import('../server/owned-open-work-follow-through.mjs')
+    const { renameSync } = await import('node:fs')
+    const f = thread(); f.db.exec('UPDATE messages SET timestamp = timestamp - 600')
+    const memo = createOwnedOpenWorkReader(f.path); cleanup.push(() => memo.close())
+    expect(memo.read('wizard_owned')?.items).toHaveLength(1)
+    // Same session, same row count, ids and revision; only the reply's content differs.
+    const g = thread(); g.db.exec(`UPDATE messages SET timestamp = timestamp - 600;
+      UPDATE sessions SET transcript_revision = 0`)
+    g.db.prepare("UPDATE messages SET content='Done. Nothing is still open.' WHERE role='assistant'").run()
+    g.db.exec('UPDATE sessions SET transcript_revision = 0')
+    renameSync(g.path, f.path) // atomic replacement: a new inode at the same path
+    expect(memo.read('wizard_owned')).toEqual(readOwnedOpenWork(f.path, 'wizard_owned'))
+    expect(memo.stats().hits).toBe(0)
+  })
+  it('the memo is bounded', async () => {
+    const { createOwnedOpenWorkReader } = await import('../server/owned-open-work-follow-through.mjs')
+    const f = thread()
+    const add = f.db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)')
+    for (let i = 0; i < 5; i++) { f.db.prepare('INSERT INTO sessions(id,started_at) VALUES(?,?)').run(`wizard_b${i}`, 0); add.run(`wizard_b${i}`, 'user', 'Fix', 1); add.run(`wizard_b${i}`, 'assistant', reply(), 1) }
+    const memo = createOwnedOpenWorkReader(f.path, { max: 3 }); cleanup.push(() => memo.close())
+    for (let i = 0; i < 5; i++) expect(memo.read(`wizard_b${i}`)?.items).toHaveLength(1)
+    expect(memo.stats().size).toBe(3)
+  })
 })
 
 describe('owned open work scan stays cheap on large transcripts', () => {

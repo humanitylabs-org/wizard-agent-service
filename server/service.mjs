@@ -51,7 +51,7 @@ import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX, resolveHelperAttempt, MAX_HELPER_ATTEMPTS } from './delegation-follow-through.mjs'
 import { projectOwnedOpenWork } from './owned-open-work.mjs'
-import { readNonHoldingFollowUps, createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND } from './owned-open-work-follow-through.mjs'
+import { createOwnedOpenWorkReader, createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND } from './owned-open-work-follow-through.mjs'
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, abandonedRunVerdict, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { PAGES_FOLDER, PagesError, createPages, servePage } from './pages.mjs'
@@ -2938,8 +2938,12 @@ function buildWizardServer(options, lifetime) {
   const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
   // Only this thread's jobs are read, and only for done/check. Callers projecting a list pass one
   // snapshot for all rows; the done-row follow-up evidence is read only when the thread owns a job.
+  // Every Chats list build guards its done rows; one handle and a per-session revision memo keep
+  // that from re-reading each owning thread's transcript on the HTTP loop when nothing changed.
+  const ownedWorkEvidence = createOwnedOpenWorkReader(hermesStatePath)
+  lifetime.own(() => ownedWorkEvidence.close())
   const heavyStatus = createHeavyStatusGuard({ rows: () => heavyWork?.queue.rows(),
-    nonHolding: (_agentId, sessionId) => readNonHoldingFollowUps(hermesStatePath, sessionId),
+    nonHolding: (_agentId, sessionId) => ownedWorkEvidence.nonHolding(sessionId),
     isDelivered: (agentId, sessionId, job) => {
       if (agentId === 'hermes') return Boolean(runQueue?.get(job.resume)?.upstreamRunId)
       const run = agents?.runThread(agentId, job.resume)
@@ -4847,7 +4851,7 @@ function buildWizardServer(options, lifetime) {
   const ownedWorkStatePath = ownedWorkStatePathOf(options)
   if (options.followThrough !== false && options.ownedOpenWork !== false && ownedWorkStatePath && (hermesStatePath || options.ownedOpenWorkReader)) {
     ownedOpenWork = createOwnedWorkFollowThrough({ statePath: ownedWorkStatePath, sessionDbPath: hermesStatePath,
-      ...(options.ownedOpenWorkReader ? { read: options.ownedOpenWorkReader } : {}),
+      read: options.ownedOpenWorkReader ?? (sessionId => ownedWorkEvidence.read(sessionId)),
       ...(options.ownedOpenWorkFinder ? { find: options.ownedOpenWorkFinder } : {}),
       admit: admitHelperContinuation, busy: helperSessionActive,
       log: line => console.log(`[owned-open-work] ${line}`) })
@@ -7203,6 +7207,7 @@ function buildWizardServer(options, lifetime) {
   })
   server.scheduler = scheduler
   server.supervisor = supervisor
+  server.ownedWorkEvidence = ownedWorkEvidence // testable read-only memo stats, never an HTTP authority
   if (ownedOpenWork) {
     server.ownedOpenWork = ownedOpenWork // testable private controller, never an HTTP authority
     const tick = () => { if (!lifetime.closing) void lifetime.track(ownedOpenWork.tick()) }

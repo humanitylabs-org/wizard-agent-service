@@ -1,15 +1,17 @@
 // Build-local list evidence only. Never cache truth across projections or start
-// queue/recovery controllers here: all database readers are read-only.
+// queue/recovery controllers here: all database readers are read-only. The one
+// exception is owned-work evidence, reused only while its session revision holds.
 import { createHermesSessionTruthReader } from './session-truth.mjs'
-import { readNonHoldingFollowUps } from './owned-open-work-follow-through.mjs'
+import { createOwnedOpenWorkReader } from './owned-open-work-follow-through.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { pendingHeavyJobs, heavyResultOwed } from './heavy-wait.mjs'
 import { readSupervisorBuildWaits, readSupervisorWaitStamps } from './supervisor-wait.mjs'
 
 export function createListEvidenceReader(hermesStatePath) {
   const listTruthReader = createHermesSessionTruthReader(hermesStatePath)
+  const ownedWork = createOwnedOpenWorkReader(hermesStatePath)
   return {
-    close: () => listTruthReader.close(),
+    close: () => { listTruthReader.close(); ownedWork.close() },
     read({ kind, ids, activeSessionIds, heavyJobs, supervisorStatePath, operator, now }) {
       if (kind === 'signals') return {
         supervisorWaitIds: [...readSupervisorBuildWaits(supervisorStatePath, hermesStatePath, ids, now).keys()],
@@ -17,7 +19,7 @@ export function createListEvidenceReader(hermesStatePath) {
       }
       const followUps = new Map()
       const nonHoldingFor = id => {
-        if (!followUps.has(id)) followUps.set(id, readNonHoldingFollowUps(hermesStatePath, id))
+        if (!followUps.has(id)) followUps.set(id, ownedWork.nonHolding(id))
         return followUps.get(id)
       }
       const sessionTruth = listTruthReader.read(ids, now / 1000, { nonHoldingFor })
