@@ -71,7 +71,7 @@ export async function instrumentProjection(source, archive, fixture, { legacy = 
     .replace(/(export function receiptConsumed\([^)]*\) \{)/, `$1 if (globalThis['${key}']) globalThis['${key}'].receipt_queries++;`)
     .replace('export function receiptsConsumed(db, receipts) {', `export function receiptsConsumed(db, receipts) { if (receipts.length) if (globalThis['${key}']) globalThis['${key}'].receipt_queries++;`))
   const ownedPath = join(archive, 'server/owned-open-work-follow-through.mjs')
-  writeFileSync(ownedPath, readFileSync(ownedPath, 'utf8').replace('export function readOwnedOpenWork(path, sessionId) {', `export function readOwnedOpenWork(path, sessionId) { if (globalThis['${key}']) globalThis['${key}'].owned_reads++;`))
+  writeFileSync(ownedPath, readFileSync(ownedPath, 'utf8').replace('function readOwnedOpenWorkFrom(db, sessionId) {', `function readOwnedOpenWorkFrom(db, sessionId) { if (globalThis['${key}']) globalThis['${key}'].owned_reads++;`))
   const servicePath = join(archive, 'server/service.mjs')
   let service = readFileSync(servicePath, 'utf8')
   if (legacy && existsSync(join(archive, 'server/list-evidence.mjs'))) {
