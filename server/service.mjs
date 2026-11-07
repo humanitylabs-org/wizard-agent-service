@@ -5960,7 +5960,17 @@ function buildWizardServer(options, lifetime) {
         if (!heavyWork) { sendJson(response, 404, { error: 'not_found' }); return }
         if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
         const value = JSON.parse((await readBoundedBody(request, 32 * 1024)).toString('utf8'))
-        sendJson(response, 200, await heavyWork.handle(request, url.pathname, value))
+        let result
+        try { result = await heavyWork.handle(request, url.pathname, value) }
+        catch (error) {
+          // The token-gated admission tool reports the refusal's fixed reason ('human request unavailable',
+          // 'no mutation-owning direct run'): a bare 503/409 hid the Hermes 0.22.7 watermark regression.
+          if (Number.isInteger(error?.status) && error.status >= 400 && error.status < 500 || error?.status === 503) {
+            sendJson(response, error.status, { error: String(error.message || 'heavy admission refused').slice(0, 200) }); return
+          }
+          throw error
+        }
+        sendJson(response, 200, result)
         return
       }
       if (url.pathname === '/wizard/v1/agent-context' && request.method === 'GET') {

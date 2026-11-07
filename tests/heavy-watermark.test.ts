@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createHeavyIntegration, heavyRequestWatermark, HEAVY_PREFIX } from '../server/heavy-integration.mjs'
+import { createHeavyIntegration, heavyRequestWatermark, submittedRowIds, HEAVY_PREFIX } from '../server/heavy-integration.mjs'
+import { DatabaseSync } from 'node:sqlite'
 import { DurableRunQueue, queueRequestHash } from '../server/run-queue.mjs'
 
 const human = (id: number, content = 'Run the authorized check') => ({ id, role: 'user', content })
@@ -110,4 +111,66 @@ it('uses the compacted watermark at admission and rejects a newer correction at 
   await expect(integration.validate(continuation)).resolves.toBeUndefined()
   rows = [...rows, human(602, 'Stop; do not continue')]
   await expect(integration.validate(continuation)).rejects.toMatchObject({ status: 410 })
+})
+
+// Hermes 0.22.7 shape (live 7 Nov 2026): every /v1/runs admission, the owner's own reply included,
+// is persisted as internal_notification with display_metadata.submission_id; the HTTP history omits
+// display_metadata. A gateway self-injected wake has no submission_id.
+function hermesState(dir: string, rows: { id: number, content: string, meta?: any, kind?: string | null }[], session = 's') {
+  const path = join(dir, 'state.db'), db = new DatabaseSync(path)
+  db.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, parent_session_id TEXT);
+    CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, display_kind TEXT, display_metadata TEXT)`)
+  db.prepare('INSERT INTO sessions VALUES (?, NULL)').run(session)
+  for (const r of rows) db.prepare('INSERT INTO messages VALUES (?,?,?,?,?,?)').run(r.id, session, 'user', r.content,
+    r.kind === undefined ? 'internal_notification' : r.kind, r.meta === undefined ? null : JSON.stringify(r.meta))
+  db.close()
+  return path
+}
+const submittedRow = (id: number, content: string) => ({ id, content, meta: { gateway_input_owner: 'o', submission_id: `run_${id}` } })
+const httpRows = (rows: any[]) => rows.map(r => ({ id: r.id, role: 'user', content: r.content, display_kind: r.kind === undefined ? 'internal_notification' : r.kind }))
+
+it('Hermes 0.22.7: a submitted owner turn typed internal_notification is the latest request; wakes and machine inputs are not', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'heavy-watermark-0227-'))
+  cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
+  const owner = submittedRow(10, 'Okay, rehearse the installer on forum')
+  const rows = [submittedRow(9, 'adopt'), owner,
+    { id: 11, content: 'Background process finished', meta: { gateway_input_owner: 'o' } },
+    { id: 12, content: 'Process watcher fired' },
+    submittedRow(13, '[Wizard follow-through] helper receipt'),
+    submittedRow(14, '[Wizard schedule] deferred run'),
+    submittedRow(15, HEAVY_PREFIX + '\nreceipt')]
+  const db = new DatabaseSync(hermesState(dir, rows), { readOnly: true })
+  cleanup.push(() => db.close())
+  const read = async () => envelope(httpRows(rows), 0)
+  // Without the state.db lookup every row is machinery: the live 503 'human request unavailable'.
+  await expect(heavyRequestWatermark(read, 's')).rejects.toMatchObject({ status: 503, message: 'human request unavailable' })
+  expect([...submittedRowIds(db, 's', rows.map(r => r.id))].sort((a, b) => a - b)).toEqual([9, 10, 13, 14, 15])
+  expect(submittedRowIds(db, 'other-session', rows.map(r => r.id)).size).toBe(0)
+  expect(await heavyRequestWatermark(read, 's', { submitted: (ids: number[]) => submittedRowIds(db, 's', ids) })).toEqual(mark(owner))
+  // Unreadable metadata or state fails closed, never grants authority.
+  expect(submittedRowIds(null, 's', [10]).size).toBe(0)
+})
+
+it('Hermes 0.22.7: heavy submit is admitted from a live owner turn whose request row is internal_notification', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'heavy-submit-0227-'))
+  cleanup.push(() => rmSync(dir, { recursive: true, force: true }))
+  const owner = submittedRow(20, 'Run the forum rehearsal')
+  const rows = [owner, { id: 21, content: 'Gateway wake' }]
+  const statePath = hermesState(dir, rows)
+  const runs = new DurableRunQueue({ statePath: join(dir, 'run.db'), pollIntervalMs: 0,
+    launch: async (r: any) => ({ upstreamRunId: r.publicRunId, payload: { status: 'running' } }),
+    lookup: async () => ({ payload: { status: 'running' } }) })
+  cleanup.push(() => runs.close())
+  const body = JSON.stringify({ session_id: 's', input: owner.content, model: 'origin-model', provider: 'origin-provider' })
+  await runs.admit({ runtime: 'direct', sessionId: 's', idempotencyKey: 'origin', body, requestHash: queueRequestHash('direct', body) })
+  await runs.tick(true)
+  const token = 'watermark-fixture-token-000000000000000'
+  const integration = createHeavyIntegration({ options: { heavyStatePath: join(dir, 'heavy.db'), heavyToken: token,
+    heavyTransport: async () => new Promise(() => {}) }, queue: runs, hermesStatePath: statePath,
+    request: async (path: string) => path.startsWith('/v1/runs/') ? {} : envelope(httpRows(rows), 0) }) as any
+  cleanup.push(() => integration.close())
+  const job = await integration.handle({ headers: { authorization: `Bearer ${token}` } }, '/wizard/internal/heavy/submit', {
+    session_id: 's', key: 'forum-rehearsal', spec: { cwd: join(heavyRoot, 'fixture'), argv: ['true'], timeout_seconds: 10 } })
+  expect(job.session_id).toBe('s')
+  expect(integration.queue.get(job.job_id).watermark).toEqual(mark(owner))
 })
