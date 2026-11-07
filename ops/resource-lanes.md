@@ -64,6 +64,15 @@ The sidecar has no queue or authority of its own. Restarting it preserves job id
 
 ### Android helper migration
 
+**Default placement:** Linux/forum owns Android builds, emulator QA and signing. macOS is only an explicit fallback or a genuinely Apple-specific gate. A Mac outage must not become an Android release gate. Keep each app's signer pinned; Wizard OS and legacy Mobile are different identities and keys.
+
+The portable helper still requires `WIZARD_HEAVY_ROOT` (or `WIZARD_WORK_ROOT`). `WIZARD_BUILD_HOST` defaults to `forum`; `WIZARD_ANDROID_PLATFORM` defaults to `linux` (explicit legacy Mac alias selects `darwin`). Operator configuration supplies the remote root and protected signing paths; do not copy personal host paths into this repo. Linux defaults to Python `/usr/bin/python3` and the Linux SDK; optional `WIZARD_ANDROID_PYTHON`, `WIZARD_ANDROID_WORKER_NAME` and `WIZARD_ANDROID_WORKER_LOCK` pin custom host configuration into the prepared command. The Linux worker checks its hostname and retains 200 GiB scratch headroom. It never executes Android compilation on the controller.
+
+Every job gets an isolated Gradle home, sharing only `caches` and `wrapper`. Owner-specific builds may explicitly pass `--owner-config <private-remote-address-properties>`; only the four Wizard address properties are accepted. Canonical builds omit that flag and do not inherit a shared user's owner origin. Signing requires `--signing-env` and the independent `--expected-signer`; keys and passwords remain off-repo. Forum's signing root is operator-managed, not a dependency on Mac-mounted storage.
+
+Bounded controller regressions (no build/emulator): `python3 tests/android-forum-default.remote.py`. A signing-only rehearsal of an existing APK is not a fresh source build, handset upgrade acceptance, or permission to publish.
+
+
 `scripts/android-build-thales.py` preserves the current host helper implementation and adds `--prepare-only` and inherited-lock support. Install this version as the helper **only after comparing against any newer host edits**; preserve the original executable mode. Keep source/signing/security/placement guards intact.
 
 Run the normal helper command with `--prepare-only` and its usual output directory. It stages the real source and returns `cwd`, `argv`, source revision/hash and remote receipt path without executing Gradle or acquiring/waiting on the worker lock. Pass that exact `cwd`/`argv` to `wizard_heavy_submit` with a stable semantic key. The remote dispatcher supplies `WIZARD_HEAVY_LOCK_FD`; the helper verifies the shared lock inode and uses the inherited lease instead of deadlocking on a second flock. Existing synchronous invocations remain backward-compatible. After completion, inspect/fetch the normal helper's remote receipt/artifacts; no APK should be claimed solely from the outer process receipt.

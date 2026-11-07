@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Private Android execution on Thales; never publishes or builds on Linux."""
+"""Private remote Android execution; Linux/forum default, explicit macOS fallback."""
 import argparse
 import datetime
 import fcntl
@@ -21,9 +21,14 @@ from contextlib import contextmanager
 
 P = pathlib.Path
 HEAVY_ROOT = os.environ.get('WIZARD_HEAVY_ROOT') or os.environ.get('WIZARD_WORK_ROOT')
-HOST = os.environ.get('WIZARD_BUILD_HOST')
+HOST = os.environ.get('WIZARD_BUILD_HOST', 'forum')
+PLATFORM = os.environ.get('WIZARD_ANDROID_PLATFORM', 'darwin' if HOST == 'thales' else 'linux')
+REMOTE_PYTHON = os.environ.get('WIZARD_ANDROID_PYTHON', '/opt/homebrew/bin/python3' if PLATFORM == 'darwin' else '/usr/bin/python3')
+WORKER_NAME = os.environ.get('WIZARD_ANDROID_WORKER_NAME', HOST)
+MIN_FREE_GB = 20 if PLATFORM == 'darwin' else 200
+LOCK_PATH = os.environ.get('WIZARD_ANDROID_WORKER_LOCK')
 BASE = str(P(HEAVY_ROOT) / 'AndroidBuilds') if HEAVY_ROOT else None
-SDK = os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT') or '/opt/homebrew/share/android-commandlinetools'
+SDK = os.environ.get('ANDROID_HOME') or os.environ.get('ANDROID_SDK_ROOT') or ('/opt/homebrew/share/android-commandlinetools' if PLATFORM == 'darwin' else '/srv/work/android-sdk')
 BUILD_TOOLS = P(SDK) / 'build-tools' / '35.0.0'
 EXCLUDED = {
     '.git', '.worktrees', '.ui-generations', '.gradle', '.cxx', 'build',
@@ -272,7 +277,7 @@ def shared_worker_lock(wait):
     inherited = os.environ.get('WIZARD_HEAVY_LOCK_FD')
     if inherited:
         fd = int(inherited)
-        expected = (P(BASE) / 'worker.lock').stat()
+        expected = P(LOCK_PATH or P(BASE) / 'worker.lock').stat()
         actual = os.fstat(fd)
         if (expected.st_dev, expected.st_ino) != (actual.st_dev, actual.st_ino):
             raise RuntimeError('inherited lock identity mismatch')
@@ -280,24 +285,72 @@ def shared_worker_lock(wait):
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
     else:
-        with (P(BASE) / 'worker.lock').open('a') as lock:
+        with P(LOCK_PATH or P(BASE) / 'worker.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX if wait else (fcntl.LOCK_EX | fcntl.LOCK_NB))
             yield
+
+
+def worker_platform_allowed():
+    if PLATFORM == 'darwin':
+        return sys.platform == 'darwin'
+    return (PLATFORM == 'linux' and sys.platform.startswith('linux')
+            and os.uname().nodename.split('.')[0] == WORKER_NAME)
+
+
+def worker_command(job):
+    values = dict(WIZARD_HEAVY_ROOT=HEAVY_ROOT, WIZARD_BUILD_HOST=HOST,
+                  ANDROID_HOME=SDK, WIZARD_ANDROID_PLATFORM=PLATFORM,
+                  WIZARD_ANDROID_PYTHON=REMOTE_PYTHON,
+                  WIZARD_ANDROID_WORKER_NAME=WORKER_NAME,
+                  WIZARD_ANDROID_WORKER_LOCK=LOCK_PATH or '')
+    return ['env', *[key + '=' + value for key, value in values.items()],
+            REMOTE_PYTHON, job + '/worker.py', '--worker', job + '/job.json']
+
+
+def install_owner_properties(cfg, gradle_home):
+    value = cfg.get('owner_config')
+    if not value:
+        return
+    source = P(value)
+    if source.is_symlink() or not source.is_file() or source.stat().st_mode & 0o077:
+        raise RuntimeError('owner config missing or not private')
+    allowed = {'wizardOrigin', 'wizardHomeUrl', 'wizardLegacyHosts', 'wizardQaHomeUrl'}
+    text = source.read_text()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith(('#', '!')):
+            continue
+        if '=' not in line or line.split('=', 1)[0].strip() not in allowed:
+            raise RuntimeError('owner config contains an unsupported property')
+    target = P(gradle_home) / 'gradle.properties'
+    target.write_text(text)
+    os.chmod(target, 0o600)
+
+
+def remote_stage_command(job):
+    mode = 'stat -f %Lp' if PLATFORM == 'darwin' else 'stat -c %a'
+    jobs = shlex.quote(BASE + '/jobs')
+    target = shlex.quote(job)
+    return '; '.join(['set -eu', 'umask 077', 'mkdir -p ' + jobs,
+                      'test -O ' + jobs, 'chmod 700 ' + jobs,
+                      'test "$(' + mode + ' ' + jobs + ')" = 700',
+                      'mkdir -m 700 ' + target, 'test -O ' + target,
+                      'test "$(' + mode + ' ' + target + ')" = 700'])
 
 
 def worker(config_path):
     job = P(config_path).parent
     cfg = {}
     try:
-        if sys.platform != 'darwin':
-            raise RuntimeError('Android worker requires Thales/macOS')
+        if not worker_platform_allowed():
+            raise RuntimeError('Android worker host/platform mismatch')
         cfg = json.loads(P(config_path).read_text())
         if not job.resolve().is_relative_to(P(BASE)):
             raise RuntimeError('job outside worker root')
         expected_signer = expected_signer_from_config(cfg)
         with shared_worker_lock(cfg.get('wait_for_lock')):
-            if shutil.disk_usage(BASE).free < 20 * 1024 ** 3:
-                raise RuntimeError('Thales has insufficient scratch headroom')
+            if shutil.disk_usage(BASE).free < MIN_FREE_GB * 1024 ** 3:
+                raise RuntimeError('Android worker has insufficient scratch headroom')
             source = private_directory(job / 'source')
             with tarfile.open(job / 'source.tar.gz') as tar:
                 tar.extractall(source, filter='data')
@@ -307,12 +360,18 @@ def worker(config_path):
                 raise RuntimeError('invalid Gradle root')
             env = os.environ.copy()
             env.update(
-                JAVA_HOME='/opt/homebrew/opt/openjdk@' + cfg['java'] + '/libexec/openjdk.jdk/Contents/Home',
+                JAVA_HOME=('/opt/homebrew/opt/openjdk@' + cfg['java'] + '/libexec/openjdk.jdk/Contents/Home' if PLATFORM == 'darwin' else '/usr/lib/jvm/java-' + cfg['java'] + '-openjdk-amd64'),
                 ANDROID_HOME=SDK,
                 ANDROID_SDK_ROOT=SDK,
-                GRADLE_USER_HOME=BASE + '/gradle-cache',
+                GRADLE_USER_HOME=str(private_directory(job / 'gradle-user')),
                 ANDROID_USER_HOME=str(private_directory(job / 'android-user')),
             )
+            install_owner_properties(cfg, env['GRADLE_USER_HOME'])
+            for cache in ('caches', 'wrapper'):
+                shared = private_directory(P(BASE) / 'gradle-cache' / cache)
+                link = P(env['GRADLE_USER_HOME']) / cache
+                if not link.exists():
+                    link.symlink_to(shared, target_is_directory=True)
             env['PATH'] = env['JAVA_HOME'] + '/bin:/opt/homebrew/bin:/usr/local/bin:' + env['PATH']
             # No source local.properties reaches Thales. This worker is the sole
             # authority for the SDK location in its private build copy.
@@ -363,9 +422,10 @@ def main():
     ap.add_argument('--gradle-dir', default='.')
     ap.add_argument('--cap-sync', action='store_true')
     ap.add_argument('--signing-env')
+    ap.add_argument('--owner-config', help='Optional private address-only Gradle properties on the remote worker')
     ap.add_argument('--expected-signer')
     ap.add_argument('--java', choices=['17', '21'], default='21')
-    ap.add_argument('--wait-for-lock', action='store_true', help='Queue behind the shared Thales worker lease; default is fail-fast')
+    ap.add_argument('--wait-for-lock', action='store_true', help='Queue behind the selected worker lease; default is fail-fast')
     ap.add_argument('--prepare-only', action='store_true', help='Stage source and return a durable remote command; submit it through wizard_heavy_submit instead of waiting here')
     ap.add_argument('--output', type=P, required=True)
     ap.add_argument('tasks', nargs=argparse.REMAINDER)
@@ -405,6 +465,7 @@ def main():
         'wait_for_lock': a.wait_for_lock,
         'cap_sync': a.cap_sync,
         'signing_env': a.signing_env,
+        'owner_config': a.owner_config,
         'expected_signer': expected_signer,
         'files': {},
         'revision': None,
@@ -432,22 +493,13 @@ def main():
             write_private_json(output / 'source-manifest.json', cfg)
             write_private_json(output / 'job.json', {'host': HOST, 'job': job, 'status': 'started', 'phase': 'remote-stage'})
             phase = 'remote-stage'
-            remote_prepare = (
-                'set -eu; umask 077; mkdir -p ' + shlex.quote(BASE + '/jobs') + '; '
-                'test -O ' + shlex.quote(BASE + '/jobs') + '; '
-                'chmod 700 ' + shlex.quote(BASE + '/jobs') + '; '
-                'test "$(stat -f %Lp ' + shlex.quote(BASE + '/jobs') + ')" = 700; '
-                'mkdir -m 700 ' + shlex.quote(job) + '; '
-                'test -O ' + shlex.quote(job) + '; '
-                'test "$(stat -f %Lp ' + shlex.quote(job) + ')" = 700'
-            )
+            remote_prepare = remote_stage_command(job)
             run(ssh + [remote_prepare])
             phase = 'source-copy'
             run(['scp', '-q', stage / 'source.tar.gz', stage / 'job.json', stage / 'worker.py', HOST + ':' + job + '/'])
             if a.prepare_only:
                 prepared = {'host': HOST, 'job': job, 'status': 'prepared',
-                            'cwd': job, 'argv': ['env', 'WIZARD_HEAVY_ROOT=' + HEAVY_ROOT, 'WIZARD_BUILD_HOST=' + HOST,
-                                                 'ANDROID_HOME=' + SDK, '/opt/homebrew/bin/python3', job + '/worker.py', '--worker', job + '/job.json'],
+                            'cwd': job, 'argv': worker_command(job),
                             'source_revision': cfg['revision'], 'source_manifest_sha256': cfg['manifest_sha256'],
                             'receipt_path': job + '/receipt.json'}
                 write_private_json(output / 'job.json', prepared)
@@ -455,8 +507,7 @@ def main():
                 return
             phase = 'build'
             with open_private(output / 'build.log') as log:
-                run(ssh + [shlex.join(['env', 'WIZARD_HEAVY_ROOT=' + HEAVY_ROOT, 'WIZARD_BUILD_HOST=' + HOST,
-                                     'ANDROID_HOME=' + SDK, '/opt/homebrew/bin/python3', job + '/worker.py', '--worker', job + '/job.json'])], stdout=log, stderr=subprocess.STDOUT)
+                run(ssh + [shlex.join(worker_command(job))], stdout=log, stderr=subprocess.STDOUT)
             phase = 'receipt-copy'
             run(['scp', '-q', HOST + ':' + job + '/receipt.json', output / 'receipt.json'])
             os.chmod(output / 'receipt.json', 0o600)
