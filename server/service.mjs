@@ -869,46 +869,141 @@ function durableScreenshotCandidate(record) {
 
 // Hermes 0.22.5+ commits every API-server turn as a private-binding admission and stamps its user row
 // display_kind "internal_notification" (gateway/session_ingress.py sets event.internal for trust). For a Wizard
-// chat that row IS the owner's own message: its platform_message_id is the admission_id this queue recorded when
-// it admitted the run. Clear the kind on exactly those rows so the shell shows the owner's bubble and reconciles
-// its "Sent" outbox item; every other internal notification keeps its kind.
-export function restoreOwnerTurns(result, runQueue, sessionId) {
-  if (!runQueue || typeof sessionId !== 'string' || !sessionId || !result.includes('internal_notification')) return result
+// chat that row IS the owner's own message. Clear the kind on exactly those rows so the shell shows the owner's
+// bubble and reconciles its "Sent" outbox item; every other internal notification keeps its kind.
+//
+// A queued run is matched to its Hermes row, strongest first:
+//   1. Hermes' submission id (state.db display_metadata.submission_id, via `rowMeta`) === the run's upstream run id;
+//   2. the platform_message_id Hermes stamped === the admission id this queue recorded;
+//   3. exact visible input text, the row landing at or after admission (the queue may hold a run for many minutes
+//      before Hermes stamps the row; the API history omits both ids above).
+// Hermes 0.22.7 returns some owner rows as the multipart list (or its Python repr) with its own "[System: ...]" notice
+// appended: the repr is replaced with the queued input text and the notice part is dropped. Owner turns (list-shaped input) whose Hermes row is missing entirely (compaction,
+// lineage) are restored from the queue as synthetic user rows. Machine-tagged strings never become owner turns.
+const OWNER_TURN_WINDOW_SECONDS = 24 * 3600
+const SUPERSEDED_STATUSES = new Set(['interrupted', 'failed', 'cancelled', 'canceled'])
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'canceled', 'interrupted'])
+// Hermes re-renders attachments in a row's text (markers, paths), so long messages match on their opening words.
+const sameTurnText = (left, right) => left === right || (left.length >= 60 && right.length >= 60 && left.slice(0, 60) === right.slice(0, 60))
+// Unambiguous machine-tagged inputs the Service itself queues (follow-through, heavy, scheduler, reporter, relays).
+const MACHINE_INPUT = /^\[(?:Wizard\b|reporter\]|Relayed by\b|ASYNC\b|System\b)/i
+const PYTHON_REPR_PARTS = /^\s*\[\{'(?:text|type)':/
+export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null) {
+  if (!runQueue || typeof sessionId !== 'string' || !sessionId) return result
   let records
   try { records = runQueue.admittedForSession('direct', sessionId) } catch { return result }
-  // Hermes' session history omits platform_message_id, so an admitted run is matched by its exact visible
-  // input and its admission time (Hermes stamps the user row moments after admitting the run).
   const pending = []
   for (const record of Array.isArray(records) ? records : []) {
-    let input = ''
-    try { input = visibleInputText(JSON.parse(String(record?.body ?? '{}'))?.input).trim() } catch { /* unreadable body */ }
+    let body = null
+    try { body = JSON.parse(String(record?.body ?? '{}')) } catch { /* unreadable body */ }
+    const input = visibleInputText(body?.input).trim()
     const at = Number(record?.payload?.created_at ?? record?.createdAt)
     const id = typeof record?.payload?.admission_id === 'string' ? record.payload.admission_id : ''
-    if ((input || id) && Number.isFinite(at)) pending.push({ input, at, id, used: false })
+    const run = typeof record?.upstreamRunId === 'string' ? record.upstreamRunId : ''
+    // The owner's app sends list-shaped input (or a plain sentence typed in older builds); every machine message
+    // (follow-through, heavy, scheduler, reporter) is a bracketed string and never an owner turn.
+    const listShaped = Array.isArray(body?.input)
+    const owner = !body?._wizard_background_recovery && Boolean(input) && (listShaped || (typeof body?.input === 'string' && !MACHINE_INPUT.test(input)))
+    if ((input || id) && owner && Number.isFinite(at)) pending.push({ input, at, id, run, owner, listShaped, status: String(record?.status ?? ''), publicRunId: String(record?.publicRunId ?? ''), used: false })
   }
+  // An interrupted/failed attempt that a later queued run retried (the queue records the retry source) is the same
+  // message: show it once, through the retry.
+  const retried = new Set((Array.isArray(records) ? records : []).map((record) => record?.retrySourceId).filter(Boolean))
+  for (const p of pending) p.superseded = SUPERSEDED_STATUSES.has(p.status) && retried.has(p.publicRunId)
   if (!pending.length) return result
+  if (!result.includes('internal_notification') && !pending.some((p) => p.listShaped && !p.superseded)) return result
   let payload
   try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
-  let changed = false
-  const fix = (row) => {
-    if (!row || typeof row !== 'object' || Array.isArray(row)) return row
-    if ((row.role ?? row.author) !== 'user' || row.display_kind !== 'internal_notification') return row
-    if (row.session_id && row.session_id !== sessionId) return row
-    const rowId = row.platform_message_id ?? row.message_id
+  const collections = ['data', 'messages', 'items'].filter((key) => Array.isArray(payload?.[key]))
+  if (!collections.length) return result
+  const userRows = []
+  for (const key of collections) for (const row of payload[key]) {
+    if (row && typeof row === 'object' && !Array.isArray(row) && (row.role ?? row.author) === 'user'
+        && (!row.session_id || row.session_id === sessionId)) userRows.push(row)
+  }
+  let metaById = new Map()
+  const lookupIds = userRows.filter((row) => row.display_kind === 'internal_notification' && Number.isInteger(row.id)).map((row) => row.id)
+  if (typeof rowMeta === 'function' && lookupIds.length) {
+    try { const found = rowMeta(sessionId, lookupIds); if (found instanceof Map) metaById = found } catch { /* fall back to text matching */ }
+  }
+  // Rows Hermes already shows as normal user messages (older Hermes) claim their queued turn first, so an
+  // internal copy of the same turn is not restored beside them.
+  for (const row of userRows) {
+    if (row.display_kind && row.display_kind !== 'final') continue
     const text = visibleInputText(row.content).trim()
     const at = Number(row.timestamp ?? row.created_at)
-    const match = pending.find((p) => !p.used && ((p.id && rowId === p.id)
-      || (p.input && text === p.input && Number.isFinite(at) && at >= p.at - 5 && at - p.at <= OWNER_TURN_WINDOW_SECONDS)))
+    const seen = pending.find((p) => !p.used && p.input && sameTurnText(p.input, text) && Number.isFinite(at) && at >= p.at - 5 && at - p.at <= OWNER_TURN_WINDOW_SECONDS)
+    if (seen) seen.used = true
+  }
+  const strongClaim = (row) => {
+    const meta = metaById.get(row.id)
+    const rowId = row.platform_message_id ?? row.message_id ?? meta?.platform_message_id
+    const submission = meta?.submission_id
+    return pending.find((p) => !p.used && !p.superseded && ((submission && p.run === submission) || (p.id && rowId === p.id))) ?? null
+  }
+  const textClaim = (row) => {
+    // A row Hermes tied to a submission we know only as a superseded retry stays hidden rather than guessing by text.
+    const submission = metaById.get(row.id)?.submission_id
+    if (submission && pending.some((p) => p.run === submission)) return null
+    const text = visibleInputText(row.content).trim()
+    const at = Number(row.timestamp ?? row.created_at)
+    if (!text || !Number.isFinite(at)) return null
+    // Closest admission at or before the row.
+    let best = null
+    for (const p of pending) {
+      if (p.used || p.superseded || !p.input || !sameTurnText(p.input, text) || at < p.at - 5 || at - p.at > OWNER_TURN_WINDOW_SECONDS) continue
+      if (!best || p.at > best.at) best = p
+    }
+    return best
+  }
+  let changed = false
+  const internal = (row) => row && typeof row === 'object' && !Array.isArray(row) && (row.role ?? row.author) === 'user'
+    && row.display_kind === 'internal_notification' && (!row.session_id || row.session_id === sessionId)
+  const claimed = new Map()
+  for (const claim of [strongClaim, textClaim]) {
+    for (const key of collections) for (const row of payload[key]) {
+      if (!internal(row) || claimed.has(row)) continue
+      const match = claim(row)
+      if (!match) continue
+      match.used = true
+      claimed.set(row, match)
+    }
+  }
+  const fix = (row) => {
+    const match = claimed.get(row)
     if (!match) return row
-    match.used = true
     changed = true
     const { display_kind: _kind, ...rest } = row
+    if (typeof rest.content === 'string' && PYTHON_REPR_PARTS.test(rest.content)) rest.content = match.input
+    // Hermes appends its own "[System: ...]" notices to the multipart list; they are not the owner's words.
+    else if (Array.isArray(rest.content)) rest.content = rest.content.filter((part) => !(typeof part?.text === 'string' && part.text.startsWith('[System:')))
     return rest
   }
-  for (const key of ['data', 'messages', 'items']) if (Array.isArray(payload?.[key])) payload[key] = payload[key].map(fix)
+  for (const key of collections) payload[key] = payload[key].map(fix)
+  // Owner turns whose Hermes rows are gone entirely.
+  if (Array.isArray(payload.data)) {
+    const stamped = payload.data
+      .filter((row) => row && typeof row === 'object' && row.display_kind !== 'hidden' && !String(row.content ?? '').startsWith('[CONTEXT COMPACTION'))
+      .map((row) => Number(row.timestamp ?? row.created_at)).filter(Number.isFinite)
+    const page = payload.pagination && typeof payload.pagination === 'object' ? payload.pagination : null
+    const coversOldest = !page || (page.order === 'oldest' ? Number(page.offset) === 0 : Number(page.returned) < Number(page.limit))
+    if (stamped.length) {
+      const low = Math.min(...stamped)
+      const high = Math.max(...stamped)
+      const missing = pending.filter((p) => p.listShaped && !p.used && !p.superseded && p.input && TERMINAL_STATUSES.has(p.status)
+        && p.at <= high && (coversOldest || p.at >= low)).sort((left, right) => left.at - right.at)
+      for (const p of missing) {
+        const anchor = payload.data.findIndex((row) => row && typeof row === 'object' && row.display_kind !== 'hidden'
+          && !String(row.content ?? '').startsWith('[CONTEXT COMPACTION') && Number(row.timestamp ?? row.created_at) > p.at)
+        const row = { id: `queue-${p.publicRunId}`, session_id: sessionId, role: 'user', timestamp: p.at, content: p.input }
+        payload.data.splice(anchor < 0 ? payload.data.length : anchor, 0, row)
+        p.used = true
+        changed = true
+      }
+    }
+  }
   return changed ? Buffer.from(JSON.stringify(payload)) : result
 }
-const OWNER_TURN_WINDOW_SECONDS = 120
 
 function restoreDurableScreenshots(result, runQueue, sessionId) {
   if (!runQueue || typeof sessionId !== 'string' || !sessionId || !result.includes(DURABLE_SCREENSHOT_MARKER)) return result
@@ -2574,6 +2669,26 @@ function buildWizardServer(options, lifetime) {
   const sttOrigin = confinedUpstream(options.sttOrigin ?? 'http://127.0.0.1:8864')
   const helmOrigin = options.helmOrigin ? confinedUpstream(options.helmOrigin) : ''
   const hermesStatePath = options.hermesStatePath ? resolve(String(options.hermesStatePath)) : ''
+  // Hermes' history API omits display_metadata/platform_message_id; read them by primary key (read-only) so an owner
+  // row can be tied to its queued run by Hermes' submission id.
+  const ownerTurnRowMeta = !hermesStatePath ? null : (sessionId, ids) => {
+    const found = new Map()
+    const keys = [...new Set((Array.isArray(ids) ? ids : []).filter(Number.isInteger))].slice(0, 500)
+    if (!keys.length || !existsSync(hermesStatePath)) return found
+    const db = new DatabaseSync(hermesStatePath, { readOnly: true })
+    try {
+      const rows = db.prepare(`SELECT id, display_metadata, platform_message_id FROM messages WHERE id IN (${keys.map(() => '?').join(',')}) AND session_id = ?`).all(...keys, String(sessionId))
+      for (const row of rows) {
+        let metadata = {}
+        try { metadata = JSON.parse(row.display_metadata || '{}') } catch { /* no metadata */ }
+        found.set(Number(row.id), {
+          submission_id: typeof metadata?.submission_id === 'string' ? metadata.submission_id : '',
+          platform_message_id: typeof row.platform_message_id === 'string' ? row.platform_message_id : '',
+        })
+      }
+    } catch { /* older state.db without these columns: text matching still applies */ } finally { db.close() }
+    return found
+  }
   const helmDbPath = options.helmDbPath ? resolve(String(options.helmDbPath)) : ''
   const hermesKey = options.hermesKey ?? ''
   const baseRequireAccess = options.requireAccess ?? true
@@ -6868,7 +6983,7 @@ function buildWizardServer(options, lifetime) {
         if (contentType.includes('application/json')) {
           const messageHistory = request.method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/.test(upstreamPath)
           if (messageHistory && !operator && url.searchParams.get('view') === 'wizard') {
-            result = restoreOwnerTurns(result, runQueue, decodeURIComponent(upstreamPath.split('/')[3]))
+            result = restoreOwnerTurns(result, runQueue, decodeURIComponent(upstreamPath.split('/')[3]), ownerTurnRowMeta)
             result = projectProviderSignInHistory(result, runQueue?.latestForSession(decodeURIComponent(upstreamPath.split('/')[3])), url.searchParams)
             result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])
           }
