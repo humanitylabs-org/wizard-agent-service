@@ -4425,21 +4425,33 @@ function buildWizardServer(options, lifetime) {
     void lifetime.track(respellTitle(sessionId).catch(() => null))
   }
   // Once per install: every stored title, archived and hidden ones included, with a receipt that doubles as the backup.
+  // Titles Hermes refused stay in the receipt's `failed` list and are tried again on the next starts (at most 5 passes).
   const respellStoredTitles = async () => {
     const statePath = threadTitleStore.statePath
     if (!statePath || !titleDbPath()) return
     const receiptPath = `${statePath}.wizardos-respell.json`
-    if (existsSync(receiptPath)) return
-    const found = readMisspelledTitles(titleDbPath())
-    const receipt = { schema: 1, name: PRODUCT_NAME, started_at: new Date().toISOString(), titles_before: found, title_store_before: threadTitleStore.load(), renamed: [], failed: [] }
-    writeFileSync(`${receiptPath}.partial`, JSON.stringify(receipt), { mode: 0o600 })
+    let receipt = null
+    if (existsSync(receiptPath)) {
+      try { receipt = JSON.parse(readFileSync(receiptPath, 'utf8')) } catch { return }
+      if (!Array.isArray(receipt?.failed) || !receipt.failed.length || (receipt.passes ?? 1) >= 5) return
+    }
+    const found = receipt
+      ? readMisspelledTitles(titleDbPath()).filter((row) => receipt.failed.includes(row.id))
+      : readMisspelledTitles(titleDbPath())
+    if (!receipt) {
+      receipt = { schema: 1, name: PRODUCT_NAME, started_at: new Date().toISOString(), titles_before: found, title_store_before: threadTitleStore.load(), renamed: [], failed: [], passes: 0 }
+      writeFileSync(`${receiptPath}.partial`, JSON.stringify(receipt), { mode: 0o600 })
+    }
+    const failed = []
     for (const row of found) {
       try {
         const done = await respellTitle(row.id)
-        if (done) receipt.renamed.push(done); else receipt.failed.push(row.id)
-      } catch { receipt.failed.push(row.id) }
+        if (done) receipt.renamed.push(done); else failed.push(row.id)
+      } catch { failed.push(row.id) }
       await new Promise((resolveGap) => setTimeout(resolveGap, 15))
     }
+    receipt.failed = failed
+    receipt.passes = (receipt.passes ?? 1) + 1
     receipt.finished_at = new Date().toISOString()
     writeFileSync(receiptPath, JSON.stringify(receipt), { mode: 0o600 })
     try { rmSync(`${receiptPath}.partial`, { force: true }) } catch { /* the full receipt is written */ }

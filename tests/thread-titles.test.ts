@@ -273,6 +273,17 @@ describe('the Agent Service applies titles through Hermes', () => {
     expect((await list()).title).toBe('My WizardOS notes'); await settle()
     expect(patches).toEqual([{ id: 'wizard_t1', body: { title: 'My WizardOS notes' } }])
   })
+  it('a title the one-time respell could not fix is tried again on the next start', async () => {
+    const { directory: dir } = await fixture({ title: `${TWO} · Desktop`, extra: { respellStoredTitles: false } })
+    const fs = await import('node:fs/promises')
+    await fs.writeFile(join(dir, 'titles.json.wizardos-respell.json'), JSON.stringify({ schema: 1, renamed: [], failed: ['wizard_t1'], passes: 1 }))
+    const { patches } = await fixture({ title: `${TWO} · Desktop`, extra: { respellDelayMs: 5, threadTitleStatePath: join(dir, 'titles.json') } })
+    let done: any = null
+    for (let i = 0; i < 40 && !(done?.passes >= 2); i += 1) { await settle(); done = JSON.parse(await fs.readFile(join(dir, 'titles.json.wizardos-respell.json'), 'utf8')) }
+    expect(done).toMatchObject({ passes: 2, failed: [] })
+    expect(done.renamed).toEqual([expect.objectContaining({ id: 'wizard_t1', to: 'WizardOS · Desktop' })])
+    expect(patches).toEqual([{ id: 'wizard_t1', body: { title: 'WizardOS · Desktop' } }])
+  })
   it('shows WizardOS before the stored title is fixed, and spells an owner rename in one word', async () => {
     const { origin, list, patches } = await fixture({ title: `${TWO} plans`, titleSource: 'user', extra: { respellStoredTitles: false } })
     expect((await list()).title).toBe('WizardOS plans'); await settle()
