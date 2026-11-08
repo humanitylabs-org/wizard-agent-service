@@ -11,7 +11,7 @@ import { admissionFailure, retryDelaySeconds } from './hermes-compat.mjs'
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const TERMINAL_READ_TICK_MS = 5_000
 const ACTIVE = new Set(['launching', 'running', 'waiting_for_approval', 'stopping'])
-const ACTIVE_OR_QUEUED = new Set([...ACTIVE, 'queued'])
+const WAITING_TO_LAUNCH = new Set(['queued', 'launching'])
 const HEAVY_COLUMNS = new Set(['body', 'dispatch_body', 'worker_dispatch_body'])
 const RETRIABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const PUBLIC_ID = /^wizardq_[0-9a-f]{32}$/
@@ -993,6 +993,11 @@ export class DurableRunQueue {
     this.database.prepare('DELETE FROM wizard_owner_stops WHERE at < ?').run(nowSeconds() - 7 * 24 * 3600)
   }
 
+  _clearOwnerStop(record) {
+    const ids = [...new Set([record.publicRunId, record.upstreamRunId].filter(Boolean))]
+    for (const id of ids) this.database.prepare('DELETE FROM wizard_owner_stops WHERE run_id = ?').run(id)
+  }
+
   _ownerStopped(record) {
     return Boolean(this.database.prepare('SELECT 1 FROM wizard_owner_stops WHERE run_id IN (?, ?) LIMIT 1')
       .get(record.publicRunId, record.upstreamRunId || record.publicRunId))
@@ -1371,6 +1376,7 @@ export class DurableRunQueue {
       // runs across resends so health reports how long the owner has really been waiting.
       if (!this.stalledSince.has(record.publicRunId)) this.stalledSince.set(record.publicRunId, this.notStartedSince.get(record.publicRunId))
       const stalledFor = now - this.stalledSince.get(record.publicRunId)
+      const ownerStoppedBefore = this._ownerStopped(record) // the owner's own Stop wins: never cleared below
       let cancelled = false
       try { cancelled = (await this.cancelUpstream(record)) === true } catch { cancelled = false }
       // A cancel Hermes will not confirm cannot be resent safely; it must still not wait forever.
@@ -1381,6 +1387,9 @@ export class DurableRunQueue {
         this._update(record.publicRunId, { status: 'failed', waitingReason: '', terminalAt: nowSeconds(),
           payload: { ...(record.payload ?? {}), status: 'failed', last_event: 'run.not_started', reconciled_reason: 'not_started_gave_up',
             upstream_cancelled: cancelled, safe_error: NOT_STARTED_SAFE_ERROR } })
+        // The production cancel marks the run owner-stopped so Hermes's `cancelled` is never resumed. This cancel
+        // was Wizard's, not the owner's: clear that marker or savedRetry/Retry would refuse the row (409).
+        if (!ownerStoppedBefore) this._clearOwnerStop(record)
         this.notStartedSince.delete(record.publicRunId)
         this.stalledSince.delete(record.publicRunId)
         this.gaveUpAt.push(now)
@@ -1408,7 +1417,9 @@ export class DurableRunQueue {
       } catch { /* the next tick tries again */ }
     }
     for (const id of this.notStartedSince.keys()) if (!seen.has(id)) this.notStartedSince.delete(id)
-    for (const id of this.stalledSince.keys()) if (!seen.has(id) && !ACTIVE_OR_QUEUED.has(this._statusOf(id))) this.stalledSince.delete(id)
+    // Keep the stall clock only for a resend still waiting to launch; once Hermes leaves `queued` (or the row ends)
+    // the reply has started and health stops counting it.
+    for (const id of this.stalledSince.keys()) if (!seen.has(id) && !WAITING_TO_LAUNCH.has(this._statusOf(id))) this.stalledSince.delete(id)
     const horizon = now - 15 * 60
     while (this.gaveUpAt.length && this.gaveUpAt[0] < horizon) this.gaveUpAt.shift()
   }

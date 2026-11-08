@@ -14,7 +14,7 @@ const request = (id: string) => {
   const body = JSON.stringify({ session_id: id, input: 'Please carry on with the tracker' })
   return { runtime: 'direct', sessionId: id, idempotencyKey: id, body, requestHash: queueRequestHash('direct', body) }
 }
-async function setup({ cancels = true } = {}) {
+async function setup({ cancels = true, marksStop = true } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'wizard-gaveup-')); dirs.push(dir)
   const launches: string[] = [], gaveUp: any[] = []
   const hermesStatus = new Map<string, string>()
@@ -23,7 +23,8 @@ async function setup({ cancels = true } = {}) {
     launch: async () => { const id = `run_${++n}`; launches.push(id); hermesStatus.set(id, 'queued'); return { upstreamRunId: id, status: 'running', payload: { status: 'queued', run_id: id } } },
     lookup: async (r: any) => ({ payload: { status: hermesStatus.get(r.upstreamRunId) || 'queued', run_id: r.upstreamRunId } }),
     leaseHeld: async () => false,
-    cancelUpstream: async (r: any) => { if (cancels) hermesStatus.set(r.upstreamRunId, 'cancelled'); return cancels },
+    // Like production: cancelling marks the run owner-stopped so Hermes's `cancelled` is never resumed.
+    cancelUpstream: async (r: any) => { if (marksStop) q.markOwnerStop(r.upstreamRunId); if (cancels) hermesStatus.set(r.upstreamRunId, 'cancelled'); return cancels },
     onNotStartedGaveUp: (r: any, cancelled: boolean) => gaveUp.push({ id: r.publicRunId, cancelled }) })
   queues.push(q); await q.initialize()
   const age = (seconds: number) => {
@@ -31,7 +32,7 @@ async function setup({ cancels = true } = {}) {
     for (const [k, v] of q.stalledSince) q.stalledSince.set(k, v - seconds)
   }
   const advance = async () => { age(100); await q.tick(true); await q.tick(true) }
-  return { q, launches, gaveUp, advance, age }
+  return { q, launches, gaveUp, advance, age, hermesStatus }
 }
 
 it('fails the last never-started resend visibly with the message saved and Retry, instead of a fake "running"', async () => {
@@ -52,6 +53,33 @@ it('fails the last never-started resend visibly with the message saved and Retry
   const summary = await s.q.summary()
   expect(summary.replies_given_up_15m).toBe(1)
   expect(summary.replies_not_started).toBe(0)
+  // Wizard's own cancel is not an owner Stop: tapping Retry really resends the saved words.
+  const retried = await s.q.retrySaved(last.publicRunId, 'thread')
+  expect(retried.record.publicRunId).not.toBe(last.publicRunId)
+  expect(JSON.parse(retried.record.body).input).toBe('Please carry on with the tracker')
+  expect(s.launches).toHaveLength(5)
+})
+
+it('an owner Stop during the wait is kept: the given-up row stays stopped, not offered for Retry', async () => {
+  const s = await setup()
+  await s.q.admit(request('thread'))
+  await s.q.tick(true)
+  for (let i = 0; i < 3; i++) await s.advance()
+  const rows = s.q.queuedForSession('direct', 'thread')
+  s.q.markOwnerStop(rows[rows.length - 1].upstreamRunId)
+  await s.advance()
+  expect(s.q.savedRetry('thread')).toBeNull()
+})
+
+it('health stops counting a stalled reply as soon as Hermes starts it', async () => {
+  const s = await setup()
+  await s.q.admit(request('thread'))
+  await s.q.tick(true)
+  await s.advance() // stalled, resent as run_2
+  expect((await s.q.summary()).replies_not_started).toBe(1)
+  s.hermesStatus.set('run_2', 'running')
+  await s.q.tick(true)
+  expect((await s.q.summary()).replies_not_started).toBe(0)
 })
 
 it('health reports a reply that has not started for longer than a minute, across resends', async () => {
