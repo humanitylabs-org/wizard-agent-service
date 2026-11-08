@@ -10,10 +10,10 @@ const request = (id: string) => {
   const body = JSON.stringify({ session_id: id, input: 'hello' })
   return { runtime: 'direct', sessionId: id, idempotencyKey: id, body, requestHash: queueRequestHash('direct', body) }
 }
-async function setup(): Promise<any> {
+async function setup(pollIntervalMs = 3_600_000): Promise<any> {
   const dir = await mkdtemp(join(tmpdir(), 'wizard-terminal-read-')); dirs.push(dir)
   let n = 0
-  const q = new DurableRunQueue({ statePath: join(dir, 'q.sqlite3'), maxActive: 4, reservedInteractive: 1, pollIntervalMs: 0, canDispatch: () => true,
+  const q = new DurableRunQueue({ statePath: join(dir, 'q.sqlite3'), maxActive: 4, reservedInteractive: 1, pollIntervalMs, canDispatch: () => true,
     launch: async () => ({ upstreamRunId: `run_${++n}`, status: 'running', payload: { status: 'running' } }),
     lookup: async (r: any) => ({ payload: { status: 'completed', run_id: r.upstreamRunId } }) })
   queues.push(q); await q.initialize()
@@ -34,6 +34,17 @@ it('re-reading finished runs shares one forced tick instead of one per read', as
   q.terminalReadTickAt -= 6_000
   await q.refreshRun(ids[0])
   expect(ticks).toBe(2)
+})
+
+it('a queue without a poll timer keeps one forced tick per read', async () => {
+  const q = await setup(0)
+  const id = (await q.admit(request('a'))).record.publicRunId
+  await q.tick(true); await q.tick(true)
+  let ticks = 0
+  const original = q.tick.bind(q)
+  q.tick = (force?: boolean) => { ticks++; return original(force) }
+  for (let i = 0; i < 3; i++) await q.refreshRun(id)
+  expect(ticks).toBe(3)
 })
 
 it('keeps the diagnosed-sign-in scan on the failed-run id list, not a walk of every direct row', async () => {

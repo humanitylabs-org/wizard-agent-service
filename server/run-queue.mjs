@@ -1140,8 +1140,9 @@ export class DurableRunQueue {
     if (!record.upstreamRunId || TERMINAL.has(record.status)) {
       // A run that is already terminal has nothing of its own left to reconcile; the 1.5 s poll tick
       // owns admission and capacity. Re-reading a finished run (a client polling many old runs) must not
-      // force a whole-queue tick each time, so those reads share one forced tick per few seconds.
-      if (record.upstreamRunId && TERMINAL.has(record.status)) {
+      // force a whole-queue tick each time, so those reads share one forced tick per few seconds. A queue
+      // with no poll timer (pollIntervalMs 0: parity fixtures) has only these forced ticks, so it keeps them.
+      if (record.upstreamRunId && TERMINAL.has(record.status) && this.pollIntervalMs > 0) {
         const at = performance.now()
         if (this.terminalReadTickAt !== undefined && at - this.terminalReadTickAt < TERMINAL_READ_TICK_MS) return this.get(publicRunId)
         this.terminalReadTickAt = at
