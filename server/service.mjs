@@ -84,6 +84,7 @@ import { agentReachOutTools, reachOutNote } from './agent-reach-out.mjs'
 import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, projectFollowUps, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { handleAgentNotesApi } from './agent-notes-http.mjs'
+import { createLookup } from './lookup.mjs'
 import { loadAgentSessionRows, projectProfileSessions, decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { placeAgentFiles } from './agent-files.mjs'
 import { createIncognito, isIncognitoPath } from './incognito.mjs'
@@ -5441,6 +5442,14 @@ function buildWizardServer(options, lifetime) {
     if (qualified) return isPrivateAgent(agents, qualified[1]) && (agents.read(qualified[1])?.role === 'recovery' ? principalOf(request).kind !== 'owner' : !mayOpenAgent(request, qualified[1]))
     return ids.some((id) => { const pins = agents.pinnedAgents(id); return pins.length > 0 && pins.every(pinned => isPrivateAgent(agents, pinned) && !mayOpenAgent(request, pinned)) })
   }
+  // AI Look up privacy comes from the session itself, never from the caller's optional agent field: any private (or recovery)
+  // agent pinned to the session, or an agent-qualified key of one, keeps its text away from a cloud model, owner or not.
+  const sessionPinnedPrivate = (key) => {
+    if (!agents || typeof key !== 'string') return false
+    const qualified = /^agent\/([a-z][a-z0-9-]{0,30})\//u.exec(key)
+    if (qualified && isPrivateAgent(agents, qualified[1])) return true
+    return [key, key.split(':').slice(1).join(':')].filter(Boolean).some((id) => agents.pinnedAgents(id).some((pinned) => isPrivateAgent(agents, pinned)))
+  }
   const withoutHiddenSessions = (request, records) => {
     if (!records || typeof records !== 'object' || Array.isArray(records) || principalOf(request).kind === 'owner') return records
     return Object.fromEntries(Object.entries(records).filter(([key, record]) => {
@@ -5508,6 +5517,8 @@ function buildWizardServer(options, lifetime) {
     })) }
   }
 
+  // AI Look up (lookup.mjs): stateless fast-model explanation; the broker token lives only in this process's env.
+  const aiLookup = createLookup({ env: options.lookupEnv ?? process.env, fetchImpl: rawFetchImpl })
   const incognito = createIncognito({ registry: agents, runtime: agentRuntime, fetchImpl: rawFetchImpl,
     upstreamHost: options.agentUpstreamHost || '',
     proxyContext: { sendJson, isAllowedProxyRequest, secretGuard, mainSecrets: agentCtx?.mainSecrets || [],
@@ -6229,6 +6240,14 @@ function buildWizardServer(options, lifetime) {
       if (url.pathname === '/wizard/v1/apps' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         sendJson(response, 200, readApps({ appsJsonPath, launcherPath }), { 'Cache-Control': 'no-store' })
+        return
+      }
+      if (url.pathname === '/wizard/v1/lookup/stream') {
+        if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        await aiLookup.handle(request, response, { sendJson, readBody: readBoundedBody,
+          isPrivate: id => Boolean(agents) && isPrivateAgent(agents, id), isHiddenSession: key => hiddenSession(request, key) || sessionPinnedPrivate(key) })
         return
       }
       if ((url.pathname === '/wizard/v1/route' || (uxApi && url.pathname === `${uxPrefix}api/route`)) && request.method === 'POST') {
