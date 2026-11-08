@@ -36,6 +36,7 @@
   ],
   "features": [
     {
+<<<<<<< ours
       "id": "android-shell-recording-custody",
       "description": "The optional signed Android companion preserves each routed reply while asynchronously stopping and parking its native recording.",
       "layer": "ux",
@@ -43,6 +44,15 @@
       "source_refs": ["wizard-ux/web/app.js", "wizard-ux/web/core/device-recording.js"],
       "reference_tests": ["wizard-ux/tests/shell-recording-routes.test.mjs"],
       "fixture": null,
+=======
+      "id": "private-provider-admission",
+      "description": "Provider loss rejects new sessions/runs only for already migrated agents, without affecting other runtime kinds",
+      "layer": "server",
+      "how_to_test": "Use real Wizard HTTP for main, host-profile, legacy container and Unix restricted kinds. Admit a normal run with no provider app, then install a stopped capability and mark the synthetic container/restricted record as previously migrated. Assert 503 before upstream dispatch for marked agents; main/profile remain usable. Migration lifecycle is covered independently.",
+      "source_refs": ["server/agents-http.mjs", "server/agents.mjs"],
+      "reference_tests": ["tests/legacy-private-compat.test.ts", "tests/private-provider-launch.test.ts"],
+      "fixture": "private-provider-admission",
+>>>>>>> theirs
       "policy_exemptions": []
     },
     {
