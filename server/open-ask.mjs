@@ -43,6 +43,12 @@ export function resolveThreadSection({ replies = [], lastUserAt = 0, background 
   return { section: background ? 'Working' : 'Ready', attention, background: '' }
 }
 
+/** Returned helpers whose thread is waiting on a durable background job are waiting on that job, not stuck:
+ * no "no agent running" and no Resume (Continue would start a second agent beside the running job). */
+export function backgroundHelperStatus(h) {
+  return h && typeof h === 'object' && ['stalled', 'waiting'].includes(h.phase) ? { ...h, phase: 'background', resumeEligible: false } : h
+}
+
 // Shared by main and routed runtimes, including slim list windows. Do not turn
 // errors, stop requests or native approval gates into an ordinary Ready row.
 export function projectOpenAskSession(session, { replies, lastUserAt, background = '', heavyPending = background === 'heavy', inFlight = false, live = '' } = {}) {
@@ -74,6 +80,12 @@ export function projectOpenAskSession(session, { replies, lastUserAt, background
   if (decision.section === 'Working' && background) {
     row.status = 'running'
     if (background) row.wizard_waiting_on = heavyPending && replies?.at(-1)?.status?.state === 'check' ? 'heavy' : 'helper'
+    // A turn that handed off to a durable background job (queued heavy job or a detached deploy) is
+    // waiting on it. Helpers that returned earlier are not "stuck, no agent running" while the job
+    // runs, and Continue would start a second agent next to it: say what it waits on, offer no resume.
+    if (live === 'heavy' || heavyPending) {
+      if (row.wizard_helper_status) row.wizard_helper_status = backgroundHelperStatus(row.wizard_helper_status)
+    }
   } else if (decision.background) {
     row.status = 'completed'
     delete row.wizard_waiting_on

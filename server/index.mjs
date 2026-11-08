@@ -146,6 +146,8 @@ server = createWizardServer({
   runQueueInteractiveReserve: process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS === undefined ? undefined : Number(process.env.WIZARD_INTERACTIVE_RESERVED_SLOTS),
   // Disabled unless explicitly provisioned by the owner; no credentials in tool arguments.
   heavyStatePath: process.env.WIZARD_HEAVY_STATE_PATH || '',
+  // Receipts of deploys a turn handed off to (wizard_restart_report.py): a running one holds its thread in Working.
+  detachedJobDir: process.env.WIZARD_DETACHED_JOB_DIR || resolve(hermesHome, 'state', 'wizard-restart-report'),
   heavyToken: process.env.WIZARD_HEAVY_TOKEN || '',
   agentHeavy: process.env.WIZARD_AGENT_HEAVY || 'off',
   heavyRpcOrigin: process.env.WIZARD_HEAVY_RPC_ORIGIN || '',

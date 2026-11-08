@@ -1594,6 +1594,25 @@
         "tests/lookup-privacy.test.ts"
       ],
       "policy_exemptions": []
+    },
+    {
+      "id": "detached-job-wait",
+      "description": "A turn that handed off to a detached background job (a deploy started through wizard_restart_report.py) keeps its chat in Working, never Ready or Stuck, until the job reports; returned helpers read as waiting on a background job with no Resume.",
+      "layer": "server",
+      "fixture": "detached-job-wait",
+      "how_to_test": "Through real synthetic HTTP lists (full and slim) on main, host-profile, container and restricted Unix ingress: a done reply with a live deploy receipt is Working; the same thread settles once the receipt reports. Disposable receipts in a scene temp dir; no live deploy, owner write or browser proof. tests/detached-job-wait.test.ts covers the receipt reader, its age bounds and the stuck-vs-background helper phase.",
+      "source_refs": [
+        "server/detached-job-wait.mjs",
+        "server/heavy-wait.mjs",
+        "server/open-ask.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/detached-job-wait.test.ts",
+        "tests/detached-job-wait.node.mjs",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "policy_exemptions": []
     }
   ]
 }

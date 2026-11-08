@@ -134,10 +134,10 @@ const serviceHeavyStatus = async () => {
   const { heavyJobsForSession } = await import('../server/heavy-wait.mjs')
   let reads = 0
   const read = () => { reads++; return new Set(['synthetic']) }
-  const wrap = new Function('guardHeavyStatus', 'createHeavyStatusGuard', 'heavyJobsForSession', 'heavyWork', 'ownedWorkEvidence', 'runQueue', 'agents', `return (${expression})`)
+  const wrap = new Function('guardHeavyStatus', 'createHeavyStatusGuard', 'heavyJobsForSession', 'ledgerRows', 'ownedWorkEvidence', 'runQueue', 'agents', `return (${expression})`)
   const runQueue = { get: id => id === 'delivered' ? { upstreamRunId: 'synthetic-delivery' } : null }
   const agents = { runThread: (_agent, id) => id === 'delivered' ? { session_id: 'synthetic', heavy_origin: 'synthetic-origin' } : null }
-  return { run: wrap(guardHeavyStatus, createHeavyStatusGuard, heavyJobsForSession, undefined, { nonHolding: read }, runQueue, agents), reads: () => reads, guardHeavyStatus }
+  return { run: wrap(guardHeavyStatus, createHeavyStatusGuard, heavyJobsForSession, () => undefined, { nonHolding: read }, runQueue, agents), reads: () => reads, guardHeavyStatus }
 }
 
 test('heavy status decoration preserves main false-done guard and non-holding evidence for done rows', async () => {
