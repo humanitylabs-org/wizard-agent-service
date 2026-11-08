@@ -4096,6 +4096,7 @@ function buildWizardServer(options, lifetime) {
         return (await hermesRunTurnHeld(fetchImpl, upstreamOrigin, hermesKey, record.upstreamRunId).catch(() => null)) === false
       }),
       onRequeued: (record, replacement) => console.log(`[not-started-requeue] ${record.sessionId} run ${record.upstreamRunId} never started; resent as ${replacement.publicRunId}`),
+      onNotStartedGaveUp: (record, cancelled, stalledFor) => console.log(`[not-started-gave-up] ${record.sessionId} run ${record.upstreamRunId} never started after ${Math.round(stalledFor)} s and every resend; shown as failed with Retry (upstream cancel ${cancelled ? 'confirmed' : 'unconfirmed'})`),
       confirmAbandoned: async (record) => {
         if (!await runHasNoAgent(record.upstreamRunId)) return null
         const outcome = await (options.abandonedOutcomeReader ?? ((sessionId, startedAt) => readAbandonedRunOutcomeHttp((path) => hermesJson(path), sessionId, startedAt)))(record.sessionId, record.createdAt)

@@ -11,6 +11,8 @@ import { admissionFailure, retryDelaySeconds } from './hermes-compat.mjs'
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const TERMINAL_READ_TICK_MS = 5_000
 const ACTIVE = new Set(['launching', 'running', 'waiting_for_approval', 'stopping'])
+const WAITING_TO_LAUNCH = new Set(['queued', 'launching'])
+const HEAVY_COLUMNS = new Set(['body', 'dispatch_body', 'worker_dispatch_body'])
 const RETRIABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const PUBLIC_ID = /^wizardq_[0-9a-f]{32}$/
 const SAFE_KEY = /^[^\p{Cc}]{1,256}$/u
@@ -23,6 +25,9 @@ export const isBackgroundContinuation = record => Boolean(record.continuation)
 // threads ended as a blank "Worked for Ns" receipt). Such runs become `interrupted` (Needs retry)
 // and are resumed once, through normal admission, under this stable key prefix.
 export const NOT_STARTED_REQUEUE_PREFIX = 'wizard-not-started-requeue-'
+// A reply Hermes accepts but never starts is resent this many times, then fails visibly with Retry.
+export const NOT_STARTED_MAX_RESENDS = 3
+export const NOT_STARTED_SAFE_ERROR = 'Your agent took this message but never started on it, even after Wizard sent it again. Your message is saved. Tap Retry, or open Troubleshooter if it keeps happening.'
 export const INTERRUPT_RECOVERY_PREFIX = 'wizard-interrupt-recovery-'
 export const INTERRUPTED_SAFE_ERROR = 'Wizard restarted while this was running, so the reply was cut off.'
 // Pending steer replay: Hermes accepts a steer (POST /v1/runs/<id>/steer -> 200) and injects it at the
@@ -179,6 +184,7 @@ export class DurableRunQueue {
     leaseHeld = null,
     cancelUpstream = null,
     onRequeued = () => {},
+    onNotStartedGaveUp = () => {},
   }) {
     if (!statePath) throw new Error('Wizard run queue state path is required')
     if (!Number.isSafeInteger(maxActive) || maxActive < 1 || maxActive > 64) throw new Error('Wizard run queue capacity is invalid')
@@ -217,6 +223,11 @@ export class DurableRunQueue {
     this.leaseHeld = leaseHeld
     this.cancelUpstream = cancelUpstream
     this.onRequeued = onRequeued
+    this.onNotStartedGaveUp = onNotStartedGaveUp
+    this.stalledSince = new Map()
+    this.statements = new Map()
+    this.failureProjections = new Map()
+    this.gaveUpAt = []
     this.notStartedSince = new Map()
     this.refreshedAt = new Map()  // run id -> last lookup time; the 0.7 s throttle no longer relies on updated_at
     this.refreshing = new Map() // status polls share only this run's lookup, never the global tick
@@ -385,7 +396,52 @@ export class DurableRunQueue {
 
   get(publicRunId) {
     if (!PUBLIC_ID.test(String(publicRunId ?? ''))) return null
-    return this._record(this.database.prepare('SELECT * FROM wizard_run_queue WHERE public_run_id = ?').get(publicRunId))
+    return this._record(this._statement('SELECT * FROM wizard_run_queue WHERE public_run_id = ?').get(publicRunId))
+  }
+
+  // Saved request bodies carry attachments (up to MB each; 3.3k rows ~128 MB on 8 Nov 2026). Status scans run every
+  // 1.5 s tick and used to read every matching body into memory several times per tick (~0.3 core). Rows read for
+  // status work (_rows, latestForSession) leave the body columns behind; record.body (and the dispatch bodies) load
+  // on first access, while the queue is open. get() still returns a complete record for callers outside the queue.
+  _lightColumns() {
+    return this.lightColumns ??= this.database.prepare('PRAGMA table_info(wizard_run_queue)').all()
+      .map((column) => column.name).filter((name) => !HEAVY_COLUMNS.has(name)).join(', ')
+  }
+
+  _statement(sql) {
+    let statement = this.statements.get(sql)
+    if (!statement) {
+      if (this.statements.size > 200) this.statements.clear()
+      statement = this.database.prepare(sql)
+      this.statements.set(sql, statement)
+    }
+    return statement
+  }
+
+  _lazyRecord(row) {
+    if (!row) return null
+    const record = this._record({ ...row, body: '', dispatch_body: null, worker_dispatch_body: null })
+    let loaded = null
+    const load = () => loaded ??= this._statement('SELECT body, dispatch_body, worker_dispatch_body FROM wizard_run_queue WHERE public_run_id = ?').get(row.public_run_id)
+      ?? { body: '', dispatch_body: null, worker_dispatch_body: null }
+    for (const [field, column, fallback] of [['body', 'body', ''], ['dispatchBody', 'dispatch_body', null], ['workerDispatchBody', 'worker_dispatch_body', null]]) {
+      Object.defineProperty(record, field, { enumerable: true, configurable: true,
+        get: () => load()[column] ?? fallback,
+        set: (value) => Object.defineProperty(record, field, { value, writable: true, enumerable: true, configurable: true }) })
+    }
+    return record
+  }
+
+  // failureProjection parses the saved body; failed rows rarely change, so reuse the answer until the row does.
+  _failureProjection(record) {
+    if (record.status !== 'failed') return failureProjection(record)
+    const key = `${record.updatedAt}:${record.providerRecoveryAttempted ? 1 : 0}`
+    const cached = this.failureProjections.get(record.publicRunId)
+    if (cached?.key === key) return cached.value
+    const value = failureProjection(record)
+    if (this.failureProjections.size > 1000) this.failureProjections.clear()
+    this.failureProjections.set(record.publicRunId, { key, value })
+    return value
   }
 
   admittedForSession(runtime, sessionId) {
@@ -439,7 +495,7 @@ export class DurableRunQueue {
   }
 
   _rows(where = '1=1', ...params) {
-    return this.database.prepare(`SELECT * FROM wizard_run_queue WHERE ${where} ORDER BY CASE WHEN retry_order_at>0 THEN retry_order_at ELSE created_at END, CASE WHEN retry_source_id<>'' THEN retry_source_id ELSE public_run_id END, public_run_id`).all(...params).map((row) => this._record(row))
+    return this._statement(`SELECT ${this._lightColumns()} FROM wizard_run_queue WHERE ${where} ORDER BY CASE WHEN retry_order_at>0 THEN retry_order_at ELSE created_at END, CASE WHEN retry_source_id<>'' THEN retry_source_id ELSE public_run_id END, public_run_id`).all(...params).map((row) => this._lazyRecord(row))
   }
 
   _update(publicRunId, changes) {
@@ -535,7 +591,7 @@ export class DurableRunQueue {
       queuePosition: record.status === 'queued' ? this._position(record.publicRunId) : 0,
       queueReason: record.waitingReason,
       preview: queuedInputPreview(record.body),
-      ...failureProjection(record),
+      ...this._failureProjection(record),
       publicRunId: record.publicRunId,
       idempotencyKey: record.idempotencyKey,
       createdAt: record.createdAt,
@@ -651,9 +707,9 @@ export class DurableRunQueue {
 
   // Durable insertion order rather than UUID order for same-millisecond admissions.
   latestForSession(sessionId) {
-    const latest = this.database.prepare('SELECT MAX(rowid) AS rowid FROM wizard_run_queue WHERE session_id=?').get(sessionId)
-    const row = latest?.rowid == null ? null : this.database.prepare('SELECT * FROM wizard_run_queue WHERE rowid=?').get(latest.rowid)
-    return row ? this._record(row) : null
+    const latest = this._statement('SELECT MAX(rowid) AS rowid FROM wizard_run_queue WHERE session_id=?').get(sessionId)
+    const row = latest?.rowid == null ? null : this._statement(`SELECT ${this._lightColumns()} FROM wizard_run_queue WHERE rowid=?`).get(latest.rowid)
+    return row ? this._lazyRecord(row) : null
   }
 
   /** Retry references are scoped to the original thread; the queue, not display history, owns bytes. */
@@ -762,9 +818,9 @@ export class DurableRunQueue {
     ) AND +runtime='direct' AND +provider_recovery_attempted=0`, nowSeconds() - this.providerAccessWindowSeconds)) {
       // The unary + keeps the planner on the id list above. Left bare, runtime='direct' picks the
       // (runtime, idempotency_key) index and walks every direct row (3.3k, ~110 MB of bodies) per tick.
-      const diagnosis = failureProjection(source).reconnect
-      if (!diagnosis || this._ownerStopped(source) || this.savedRetry(source.sessionId)?.publicRunId !== source.publicRunId
-          || source.createdAt + this.providerAccessWindowSeconds <= nowSeconds()) continue
+      if (source.createdAt + this.providerAccessWindowSeconds <= nowSeconds()) continue
+      const diagnosis = this._failureProjection(source).reconnect
+      if (!diagnosis || this._ownerStopped(source) || this.savedRetry(source.sessionId)?.publicRunId !== source.publicRunId) continue
       let ready
       try { ready = await this.providerSignInReady(diagnosis.provider) === true } catch { continue }
       if (!ready) {
@@ -851,6 +907,7 @@ export class DurableRunQueue {
       provider_waiting: this._rows("status = 'queued' AND waiting_reason = 'provider_busy'").length,
       queue_stale: !fresh,
       ...this.launchState(),
+      ...this.notStartedState(),
     }
   }
 
@@ -934,6 +991,11 @@ export class DurableRunQueue {
     const insert = this.database.prepare('INSERT OR IGNORE INTO wizard_owner_stops(run_id, at) VALUES(?, ?)')
     for (const value of new Set([id, record?.publicRunId, record?.upstreamRunId].filter(Boolean))) insert.run(value, nowSeconds())
     this.database.prepare('DELETE FROM wizard_owner_stops WHERE at < ?').run(nowSeconds() - 7 * 24 * 3600)
+  }
+
+  _clearOwnerStop(record) {
+    const ids = [...new Set([record.publicRunId, record.upstreamRunId].filter(Boolean))]
+    for (const id of ids) this.database.prepare('DELETE FROM wizard_owner_stops WHERE run_id = ?').run(id)
   }
 
   _ownerStopped(record) {
@@ -1293,7 +1355,9 @@ export class DurableRunQueue {
   }
 
   // Cancel-and-resend a reply Hermes accepted but never started (see the constructor note). Bounded: a resent
-  // run that also never starts is resent at most twice more, then left to the stale-run guard.
+  // run that also never starts is resent at most twice more. 8 Nov 2026: after the third resend the row then
+  // sat on "running" for good while nothing worked on it. The last resend that also never starts now fails
+  // visibly, with the message saved and Retry, instead of pretending to work.
   async _requeueNotStarted() {
     if (!this.cancelUpstream || !this.leaseHeld) return
     const now = nowSeconds()
@@ -1305,12 +1369,33 @@ export class DurableRunQueue {
       if (!this.notStartedSince.has(record.publicRunId)) this.notStartedSince.set(record.publicRunId, now)
       if (now - this.notStartedSince.get(record.publicRunId) < this.notStartedSeconds) continue
       const generation = (record.idempotencyKey.match(/^wizard-not-started-requeue-(\d)-/)?.[1] ?? '0') | 0
-      if (generation >= 3) continue
       let held
       try { held = await this.leaseHeld(record) } catch { held = null }
-      if (held !== false) { this.notStartedSince.set(record.publicRunId, now); continue } // a turn is working on this thread: it is only waiting its turn
+      if (held !== false) { this.notStartedSince.set(record.publicRunId, now); this.stalledSince.delete(record.publicRunId); continue } // a turn is working on this thread: it is only waiting its turn
+      // Confirmed: Hermes took it, nothing works on this thread, and it has not started. The stall clock
+      // runs across resends so health reports how long the owner has really been waiting.
+      if (!this.stalledSince.has(record.publicRunId)) this.stalledSince.set(record.publicRunId, this.notStartedSince.get(record.publicRunId))
+      const stalledFor = now - this.stalledSince.get(record.publicRunId)
+      const ownerStoppedBefore = this._ownerStopped(record) // the owner's own Stop wins: never cleared below
       let cancelled = false
       try { cancelled = (await this.cancelUpstream(record)) === true } catch { cancelled = false }
+      // A cancel Hermes will not confirm cannot be resent safely; it must still not wait forever.
+      const giveUp = generation >= NOT_STARTED_MAX_RESENDS || (!cancelled && stalledFor >= (NOT_STARTED_MAX_RESENDS + 1) * this.notStartedSeconds)
+      if (giveUp) {
+        // Give up honestly. If Hermes does start it later, its answer lands in the thread and the failure stops
+        // showing (the failure predates that answer).
+        this._update(record.publicRunId, { status: 'failed', waitingReason: '', terminalAt: nowSeconds(),
+          payload: { ...(record.payload ?? {}), status: 'failed', last_event: 'run.not_started', reconciled_reason: 'not_started_gave_up',
+            upstream_cancelled: cancelled, safe_error: NOT_STARTED_SAFE_ERROR } })
+        // The production cancel marks the run owner-stopped so Hermes's `cancelled` is never resumed. This cancel
+        // was Wizard's, not the owner's: clear that marker or savedRetry/Retry would refuse the row (409).
+        if (!ownerStoppedBefore) this._clearOwnerStop(record)
+        this.notStartedSince.delete(record.publicRunId)
+        this.stalledSince.delete(record.publicRunId)
+        this.gaveUpAt.push(now)
+        try { this.onNotStartedGaveUp(record, cancelled, stalledFor) } catch { /* logging only */ }
+        continue
+      }
       if (!cancelled) continue
       const key = `${NOT_STARTED_REQUEUE_PREFIX}${generation + 1}-${record.publicRunId}`
       try {
@@ -1325,10 +1410,34 @@ export class DurableRunQueue {
           this.database.exec('COMMIT')
         } catch (error) { this.database.exec('ROLLBACK'); throw error }
         this.notStartedSince.delete(record.publicRunId)
+        // The owner is still waiting on the same message: the resend inherits the stall clock.
+        this.stalledSince.set(admitted.record.publicRunId, this.stalledSince.get(record.publicRunId) ?? now)
+        this.stalledSince.delete(record.publicRunId)
         try { this.onRequeued(record, admitted.record) } catch { /* logging only */ }
       } catch { /* the next tick tries again */ }
     }
     for (const id of this.notStartedSince.keys()) if (!seen.has(id)) this.notStartedSince.delete(id)
+    // Keep the stall clock only for a resend still waiting to launch; once Hermes leaves `queued` (or the row ends)
+    // the reply has started and health stops counting it.
+    for (const id of this.stalledSince.keys()) if (!seen.has(id) && !WAITING_TO_LAUNCH.has(this._statusOf(id))) this.stalledSince.delete(id)
+    const horizon = now - 15 * 60
+    while (this.gaveUpAt.length && this.gaveUpAt[0] < horizon) this.gaveUpAt.shift()
+  }
+
+  _statusOf(publicRunId) {
+    return this.database.prepare('SELECT status FROM wizard_run_queue WHERE public_run_id = ?').get(publicRunId)?.status ?? ''
+  }
+
+  // Replies Hermes accepted and confirmed nothing is working on, that have still not started (across resends),
+  // plus replies given up on in the last 15 minutes. Read by /wizard/health and the Troubleshooter's
+  // "replies are starting" check: health can be green while no reply starts (8 Nov 2026).
+  notStartedState() {
+    const now = nowSeconds()
+    let oldest = 0
+    for (const since of this.stalledSince.values()) oldest = Math.max(oldest, now - since)
+    const horizon = now - 15 * 60
+    return { replies_not_started: this.stalledSince.size, replies_not_started_s: Math.max(0, Math.round(oldest)),
+      replies_given_up_15m: this.gaveUpAt.filter((at) => at >= horizon).length }
   }
 
   async _reconcileStale() {
