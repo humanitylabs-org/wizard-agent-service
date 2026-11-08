@@ -9,6 +9,7 @@ import { annotateProviderSignOut } from './provider-reconnect.mjs'
 import { admissionFailure, retryDelaySeconds } from './hermes-compat.mjs'
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
+const TERMINAL_READ_TICK_MS = 5_000
 const ACTIVE = new Set(['launching', 'running', 'waiting_for_approval', 'stopping'])
 const RETRIABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const PUBLIC_ID = /^wizardq_[0-9a-f]{32}$/
@@ -758,7 +759,9 @@ export class DurableRunQueue {
     for (const source of this._rows(`public_run_id IN (
       SELECT public_run_id FROM wizard_run_queue INDEXED BY wizard_run_queue_fifo
       WHERE status='failed' AND created_at>?
-    ) AND runtime='direct' AND provider_recovery_attempted=0`, nowSeconds() - this.providerAccessWindowSeconds)) {
+    ) AND +runtime='direct' AND +provider_recovery_attempted=0`, nowSeconds() - this.providerAccessWindowSeconds)) {
+      // The unary + keeps the planner on the id list above. Left bare, runtime='direct' picks the
+      // (runtime, idempotency_key) index and walks every direct row (3.3k, ~110 MB of bodies) per tick.
       const diagnosis = failureProjection(source).reconnect
       if (!diagnosis || this._ownerStopped(source) || this.savedRetry(source.sessionId)?.publicRunId !== source.publicRunId
           || source.createdAt + this.providerAccessWindowSeconds <= nowSeconds()) continue
@@ -1135,6 +1138,14 @@ export class DurableRunQueue {
     const record = this.get(publicRunId)
     if (!record || this.closed) return record
     if (!record.upstreamRunId || TERMINAL.has(record.status)) {
+      // A run that is already terminal has nothing of its own left to reconcile; the 1.5 s poll tick
+      // owns admission and capacity. Re-reading a finished run (a client polling many old runs) must not
+      // force a whole-queue tick each time, so those reads share one forced tick per few seconds.
+      if (record.upstreamRunId && TERMINAL.has(record.status)) {
+        const at = performance.now()
+        if (this.terminalReadTickAt !== undefined && at - this.terminalReadTickAt < TERMINAL_READ_TICK_MS) return this.get(publicRunId)
+        this.terminalReadTickAt = at
+      }
       await this.tick(true)
       return this.get(publicRunId)
     }
