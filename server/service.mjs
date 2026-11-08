@@ -3118,9 +3118,9 @@ function buildWizardServer(options, lifetime) {
       if (candidate) agentChatInputs.note(agent.id, sessionId, runId, body, candidate.admittedAt)
     },
     forgetAgentInput: (agent, sessionId) => agentChatInputs.forget(agent.id, sessionId),
-    ingestThreadItems: (agentId, sessionId, result) => trackerOn() ? ingestHistory(threadItems, agentId, sessionId, result, parseStatus) : 0,
-    expandReplyTo: (agentId, sessionId, input) => trackerOn() ? expandReplyToInput(input, id => threadItems.titleOf(agentId, sessionId, id)) : input,
-    trackerOn: () => trackerOn(),
+    ingestThreadItems: (agentId, sessionId, result) => trackerFor(agentId) ? ingestHistory(threadItems, agentId, sessionId, result, parseStatus) : 0,
+    expandReplyTo: (agentId, sessionId, input) => trackerFor(agentId) ? expandReplyToInput(input, id => threadItems.titleOf(agentId, sessionId, id)) : input,
+    trackerOn: (agentId = MAIN_AGENT_ID) => trackerFor(agentId),
     responseStyle: () => readSettings(settingsPath).settings.response_style,
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
     incognitoAvailable: agent => Boolean(agentRuntime?.incognitoStart && agent.privacy === 'private' && agent.model?.provider === 'tinfoil' && agent.runtime?.kind === 'container' && !agents.agentRestricted?.(agent.id) && !agent.imported),
@@ -3422,7 +3422,11 @@ function buildWizardServer(options, lifetime) {
     trackerRead = { at: Date.now(), on }
     return on
   }
-  const trackerNote = (agent, thread) => trackerOn() ? [ITEMS_INSTRUCTIONS, threadItems.runNote(agent, thread)].filter(Boolean).join('\n') : ''
+  // The tracker is the main builder agent's only (James, 9 Nov 2026: "This is for our builder agent, which wouldn't
+  // apply to all agents"). Every other agent (Philosopher, host profiles, containers, restricted) runs, ingests and
+  // reads exactly as with the tweak off; its stored ledger rows are kept, just never served.
+  const trackerFor = agent => trackerOn() && (agent || MAIN_AGENT_ID) === MAIN_AGENT_ID
+  const trackerNote = (agent, thread) => trackerFor(agent) ? [ITEMS_INSTRUCTIONS, threadItems.runNote(agent, thread)].filter(Boolean).join('\n') : ''
   // A finished run that listed asks: read its real reply row back so the ledger anchors on the message id.
   const itemsInFlight = new Set()
   const noteRunItems = (sessionId, output) => {
@@ -5853,7 +5857,7 @@ function buildWizardServer(options, lifetime) {
           const t = url.searchParams.get('thread') || ''
           sendJson(response, 200, { thread: t, agent: url.searchParams.get('agent') || 'hermes', items: [], counts: countItems([]) }, { 'Cache-Control': 'no-store' }); return
         }
-        if (counts) { sendJson(response, 200, { threads: threadItems.allCounts() }, { 'Cache-Control': 'no-store' }); return }
+        if (counts) { sendJson(response, 200, { threads: Object.fromEntries(Object.entries(threadItems.allCounts()).filter(([k]) => k.startsWith(`${MAIN_AGENT_ID}/`))) }, { 'Cache-Control': 'no-store' }); return }
         let thread = url.searchParams.get('thread') || '', agent = url.searchParams.get('agent') || ''
         let ids = [], versioned = false
         if (seen) {
@@ -5869,6 +5873,8 @@ function buildWizardServer(options, lifetime) {
         }
         agent ||= 'hermes'
         if (!/^[a-z][a-z0-9-]{0,30}$/u.test(agent) || !/^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/u.test(thread)) { sendJson(response, 400, { error: 'invalid_thread' }); return }
+        // Another agent's thread: answered as with the tweak off (nothing served, nothing written; stored rows kept).
+        if (agent !== MAIN_AGENT_ID) { sendJson(response, 200, { thread, agent, items: [], counts: countItems([]), ...(seen && versioned ? { results: [] } : {}) }, { 'Cache-Control': 'no-store' }); return }
         const results = seen ? threadItems.markSeen(agent, thread, ids, { versioned }) : undefined
         sendJson(response, 200, { thread, agent, items: threadItems.list(agent, thread), counts: threadItems.counts(agent, thread), ...(seen && versioned ? { results } : {}) }, { 'Cache-Control': 'no-store' })
         return

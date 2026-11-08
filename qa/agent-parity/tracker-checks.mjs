@@ -24,8 +24,34 @@ const items = async s => (await s.raw(`/wizard/v1/thread-items?thread=wizard_par
 const sentInput = s => JSON.stringify(s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body.input)
 const sentInstructions = s => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body.instructions || ''
 
+// The tracker is the main builder agent's only (James, 9 Nov 2026: "these should not be displaying in the
+// philosopher chat ... This is for our builder agent, which wouldn't apply to all agents"). Every other runtime
+// kind gets no tracker instructions, records nothing and is served nothing, even with the tweak on.
+const otherAgentScopedOut = async s => {
+  await prime(s)
+  assert.ok(!JSON.stringify(await read(s)).includes('"items"'), `${s.kind}: the status line still never shows in the transcript`)
+  assert.equal((await counts(s))[key(s)], undefined, `${s.kind}: no Chats dots for another agent's thread`)
+  assert.deepEqual((await items(s)).items, [], `${s.kind}: no strip for another agent's thread`)
+  const seenOther = await s.raw('/wizard/v1/thread-items/seen', post({ thread: 'wizard_parity', agent: s.id, ids: ['logo'], items: [{ id: 'logo', updated_at: 1 }] }))
+  assert.equal(seenOther.status, 200); assert.deepEqual((await seenOther.json()).items, [])
+  const sent = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'hello' })); assert.equal(sent.status, 202)
+  assert.ok(!sentInstructions(s).includes('Thread tracker'), `${s.kind}: no tracker instructions reach another agent`)
+  assert.ok(!sentInstructions(s).includes(ITEMS_INSTRUCTIONS), `${s.kind}: no items contract reaches another agent`)
+  assert.equal((await s.request('/api/sessions', post({ id: 'wizard_quote', source: 'wizard-mobile', hidden: true }))).status, 201)
+  const quoted = await s.request('/v1/runs', post({ session_id: 'wizard_quote', input: quote('a1') })); assert.equal(quoted.status, 202)
+  assert.ok(sentInput(s).includes('WIZARD_REPLY_TO_V1') && !sentInput(s).includes('Replying to an earlier message'), `${s.kind}: a quote reaches another agent exactly as sent (tweak-off behaviour)`)
+  const other = await s.request('/api/sessions', post({ id: 'wizard_done', source: 'wizard-mobile', hidden: true })); assert.equal(other.status, 201)
+  s.sessions.get('wizard_done').messages.push({ id: 'd1', role: 'assistant', content: `Finished.\n${status}`, timestamp: Date.now() / 1000 - 1 })
+  const run = await (await s.request('/v1/runs', post({ session_id: 'wizard_done', input: 'Do it' }))).json()
+  Object.assign([...s.runs.values()].at(-1), { status: 'completed', session_id: 'wizard_done', output: `Finished.\n${status}`, updated_at: Date.now() / 1000 })
+  assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
+  await new Promise(r => setTimeout(r, 100))
+  assert.deepEqual(await counts(s), {}, `${s.kind}: a finished run of another agent records nothing`)
+}
+
 export const trackerChecks = {
   'thread-tracker': async s => {
+    if (s.kind !== 'main') return otherAgentScopedOut(s)
     await prime(s)
     const history = await read(s)
     assert.ok(!JSON.stringify(history).includes('"items"'), 'the asks never show in the transcript')
