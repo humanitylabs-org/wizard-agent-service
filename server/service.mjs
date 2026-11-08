@@ -60,7 +60,7 @@ import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, g
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { heavyJobsForSession, pendingHeavyJobs } from './heavy-wait.mjs'
-import { createDetachedJobReader, createLedger } from './detached-job-wait.mjs'
+import { createDetachedJobReader, createLedger, detachedRowsFor } from './detached-job-wait.mjs'
 import { readSupervisorBuildWaits, readSupervisorWaitRevision } from './supervisor-wait.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
@@ -3044,7 +3044,7 @@ function buildWizardServer(options, lifetime) {
   const ownedWorkEvidence = createOwnedOpenWorkReader(hermesStatePath)
   lifetime.own(() => ownedWorkEvidence.close())
   // The heavy ledger plus detached background jobs (deploys) a turn handed off to: both own a thread's result.
-  const detachedJobs = createDetachedJobReader(options.detachedJobDir ?? (hermesStatePath ? join(dirname(hermesStatePath), 'state', 'wizard-restart-report') : ''))
+  const detachedJobs = createDetachedJobReader(options.detachedJobDir ?? (hermesStatePath ? join(dirname(hermesStatePath), 'state', 'wizard-restart-report') : ''), { ttlMs: options.detachedJobTtlMs })
   const ledgerRows = createLedger(() => heavyWork?.queue.rows(), () => detachedJobs.rows())
   const heavyStatus = createHeavyStatusGuard({ rows: ledgerRows,
     nonHolding: (_agentId, sessionId) => ownedWorkEvidence.nonHolding(sessionId),
@@ -3099,7 +3099,8 @@ function buildWizardServer(options, lifetime) {
       for (const id of readSupervisorBuildWaits(options.supervisorStatePath, path, batch, now, { includeOwnerGates: true }).keys()) if (evidence.has(id)) evidence.get(id).supervisorPending = true
     }
     // One heavy-ledger snapshot for the whole list as well.
-    evidence.heavyJobs = ledgerRows()
+    // The snapshot is addressed to this agent's threads: a detached deploy names only its thread.
+    evidence.heavyJobs = [...(heavyWork?.queue.rows() ?? []), ...detachedRowsFor(detachedJobs.rows(), agent.id)]
     return evidence
   }
   const agentCtx = agents ? {

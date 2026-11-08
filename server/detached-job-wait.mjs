@@ -30,32 +30,46 @@ export function detachedJobRow(job, nowMs = Date.now()) {
 }
 
 /** Reader with a short memo; the returned array keeps its identity while nothing changed, so
- * per-snapshot indexes (heavyJobsForSession) are built once, not per listed row. */
+ * per-snapshot indexes (heavyJobsForSession) are built once, not per listed row. The parsed receipts
+ * are kept, and every refresh re-ages them, so an unreadable or deleted directory can never keep a
+ * thread waiting past the job's own bound. */
 export function createDetachedJobReader(dir, { ttlMs = TTL_MS } = {}) {
-  let at = 0, last = [], sig = ''
+  let at = 0, last = [], sig = '[]', jobs = []
+  const publish = (nowMs) => {
+    const next = jobs.map(job => detachedJobRow(job, nowMs)).filter(Boolean)
+    const nextSig = JSON.stringify(next)
+    if (nextSig !== sig) { sig = nextSig; last = next }
+    return last
+  }
   const rows = (nowMs = Date.now()) => {
     if (!dir) return last
     if (nowMs - at < ttlMs) return last
     at = nowMs
-    const next = []
     try {
+      const found = []
       for (const name of readdirSync(dir)) {
         if (!name.endsWith('.json')) continue
         const file = join(dir, name)
         try {
           // Only recent files can still be live; skip the archive without parsing it.
           if (nowMs - statSync(file).mtimeMs > HEAVY_WAIT_CAP_SECONDS * 1000) continue
-          const row = detachedJobRow(JSON.parse(readFileSync(file, 'utf8')), nowMs)
-          if (row) next.push(row)
+          const job = JSON.parse(readFileSync(file, 'utf8'))
+          if (detachedJobRow(job, nowMs)) found.push(job)
         } catch { /* one unreadable receipt must not hide the rest */ }
       }
-    } catch { return last }
-    const nextSig = JSON.stringify(next)
-    if (nextSig !== sig) { sig = nextSig; last = next }
-    return last
+      jobs = found
+    } catch (error) {
+      // A missing directory means no deploy was ever started; any other failure keeps the last known
+      // receipts, aged below, rather than guessing.
+      if (error?.code === 'ENOENT') jobs = []
+    }
+    return publish(nowMs)
   }
   return { rows }
 }
+
+/** The same rows addressed to one agent: a receipt names only its thread, and thread ids are unique. */
+export const detachedRowsFor = (rows, agentId) => rows.length ? rows.map(row => ({ ...row, agent_id: agentId })) : rows
 
 /** Heavy ledger + detached jobs as one snapshot; identity-stable while neither side changed. */
 export function combineLedgers(heavyRows, detachedRows) {

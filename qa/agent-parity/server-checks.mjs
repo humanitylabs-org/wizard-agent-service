@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
+import { mkdtempSync, rmSync } from 'node:fs'
 import { post, png, scene } from './fixture.mjs'
 import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
@@ -134,6 +135,31 @@ export const serverChecks = {
       const ended = await s.request('/v1/runs/' + id); assert.equal((await ended.json()).status, 'completed')
       await check(false)
     } finally { db.close(); await s.close() }
+  },
+  'detached-job-wait': async outer => {
+    // A turn that handed off to a detached deploy is waiting on it: Working while the receipt is live,
+    // settled on its own message once the deploy reports. Same through the full and slim lists, per kind.
+    const dir = mkdtempSync(join(outer.root, 'deploys-')), sid = 'wizard_parity_deploy', now = Date.now() / 1000
+    const receipt = status => writeFileSync(join(dir, 'deploy.json'), JSON.stringify({ id: 'deploy', requested_by_session: sid, status,
+      created_at: new Date(now * 1000 - 240_000).toISOString(), timeout: 5400, verify_s: 300, what: 'Synthetic deploy' }))
+    const s = await scene(outer.kind, { detachedJobDir: dir, detachedJobTtlMs: 0 })
+    try {
+      s.sessions.set(sid, { id: sid, source: 'wizard-mobile', title: 'Synthetic · Deploy', created_at: now - 600, messages: [
+        { role: 'user', content: 'Ship the fix', timestamp: now - 500 },
+        { role: 'assistant', timestamp: now - 300, content: 'Fix merged; the deploy is running.\n[WIZARD_STATUS_V1]{"state":"done","ask":"Deploy started; nothing needed from you","subject":"Parity QA"}[/WIZARD_STATUS_V1]' }] })
+      const listed = async () => {
+        const rows = []
+        for (const query of ['?limit=100', '?view=list&window=archive-50']) {
+          const r = await s.request('/api/sessions' + query); assert.equal(r.status, 200, `${s.kind} ${query}`)
+          rows.push((await r.json()).data.find(x => x.id === sid))
+        }
+        return rows
+      }
+      receipt('running')
+      for (const row of await listed()) { assert.ok(row, s.kind); assert.equal(ACTIVE.has(row.status), true, `${s.kind} running deploy keeps the thread Working: ${JSON.stringify(row)}`) }
+      receipt('reported')
+      for (const row of await listed()) assert.equal(ACTIVE.has(row.status), false, `${s.kind} a reported deploy no longer holds the thread: ${JSON.stringify(row)}`)
+    } finally { await s.close(); rmSync(dir, { recursive: true, force: true }) }
   },
   'coalesced-owner-history': async s => {
     const row = s.sessions.get('wizard_parity')
