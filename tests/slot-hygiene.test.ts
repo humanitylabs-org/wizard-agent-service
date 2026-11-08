@@ -60,3 +60,13 @@ it('an unreadable or true turn state never frees a slot', async () => {
     expect(s.launches).not.toContain('late')
   }
 })
+it('remembers an accepted reply while its run is unfinished, and forgets it once the run ends', async () => {
+  const s = await setup()
+  await s.q.admit(request('thread'))
+  const run = s.q.latestForSession('thread')
+  expect(s.q.noteAcceptedSteer(run.upstreamRunId, '  also the footer ')).toBe(true)
+  expect(s.q.noteAcceptedSteer('run_unknown', 'x')).toBe(false)
+  expect(s.q.acceptedSteersForSession('thread')).toEqual([expect.objectContaining({ text: 'also the footer', publicRunId: run.publicRunId })])
+  s.states.set('thread', 'completed'); await s.q.tick(true)
+  expect(s.q.acceptedSteersForSession('thread')).toEqual([])
+})

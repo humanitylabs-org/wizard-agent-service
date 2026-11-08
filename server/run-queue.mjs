@@ -261,6 +261,11 @@ export class DurableRunQueue {
         public_run_id TEXT PRIMARY KEY, state TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
         replay_run_id TEXT NOT NULL DEFAULT '', at REAL NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS wizard_accepted_steers (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, public_run_id TEXT NOT NULL,
+        text TEXT NOT NULL, at REAL NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS wizard_accepted_steers_session ON wizard_accepted_steers(session_id, at);
     `)
     if (!this.database.prepare('PRAGMA table_info(wizard_run_queue)').all().some(row => row.name === 'agent_id')) {
 
@@ -875,6 +880,32 @@ export class DurableRunQueue {
       throw error
     }
     return { record: this.get(publicRunId), replayed: false }
+  }
+
+  /** A reply sent into a running turn is held by Hermes until the agent reads it, so no other client can see it.
+   *  Remember the exact text so every client's thread shows it right away (until Hermes shows it itself). */
+  noteAcceptedSteer(runId, text) {
+    const id = String(runId ?? '')
+    const body = String(text ?? '').trim().slice(0, 20_000)
+    if (!id || id.length > 256 || !body) return false
+    const record = this.get(id) ?? this._record(this.database.prepare('SELECT * FROM wizard_run_queue WHERE upstream_run_id = ? OR worker_run_id = ?').get(id, id))
+    if (!record || record.runtime !== 'direct') return false
+    const now = nowSeconds()
+    this.database.prepare('INSERT INTO wizard_accepted_steers(session_id, public_run_id, text, at) VALUES(?, ?, ?, ?)').run(record.sessionId, record.publicRunId, body, now)
+    this.database.prepare('DELETE FROM wizard_accepted_steers WHERE at < ?').run(now - 24 * 3600)
+    return true
+  }
+
+  /** Accepted replies on this thread whose run has not finished: [{ publicRunId, text, at, status }]. */
+  acceptedSteersForSession(sessionId) {
+    if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) return []
+    const rows = this.database.prepare('SELECT public_run_id, text, at FROM wizard_accepted_steers WHERE session_id = ? AND at > ? ORDER BY at, id').all(sessionId, nowSeconds() - 6 * 3600)
+    const out = []
+    for (const row of rows) {
+      const record = this.get(row.public_run_id)
+      if (record && !TERMINAL.has(record.status)) out.push({ publicRunId: row.public_run_id, text: row.text, at: row.at, status: record.status })
+    }
+    return out
   }
 
   /** The owner pressed Stop: a later `cancelled` for this run is deliberate, never resumed. */

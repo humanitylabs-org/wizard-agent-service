@@ -1090,6 +1090,12 @@ export function projectInFlightOwnerTurns(result, runQueue, sessionId) {
       && (Array.isArray(body?.input) || (typeof body?.input === 'string' && !MACHINE_INPUT.test(input)))
     if (owner && Number.isFinite(at)) turns.push({ input, at, status, reason: String(record?.waitingReason ?? ''), publicRunId: String(record.publicRunId) })
   }
+  try {
+    for (const steer of typeof runQueue.acceptedSteersForSession === 'function' ? runQueue.acceptedSteersForSession(sessionId) : []) {
+      const input = visibleInputText(steer.text).trim()
+      if (input) turns.push({ input, at: steer.at, status: 'steered', reason: '', publicRunId: `${steer.publicRunId}-${Math.round(steer.at * 1000)}`, steered: true })
+    }
+  } catch { /* an unreadable steer log never hides history */ }
   if (!turns.length) return result
   let payload
   try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
@@ -7102,6 +7108,9 @@ function buildWizardServer(options, lifetime) {
               if (runTrustedPaths.size > 100) runTrustedPaths.delete(runTrustedPaths.keys().next().value)
             }
           } catch { /* admission validation remains the browser client's job */ }
+        }
+        if (upstream.ok && steerPathId && !operator && request.method === 'POST' && runQueue && body) {
+          try { runQueue.noteAcceptedSteer(steerPathId, inputText(parseJsonBody(body).input)) } catch { /* the reply still reached Hermes */ }
         }
         if (upstream.ok && steerPathId && request.method === 'POST' && trustedPaths.length) {
           const existing = runTrustedPaths.get(steerPathId) ?? []

@@ -44,3 +44,15 @@ describe('projectInFlightOwnerTurns', () => {
     expect(out.data[0].wizard_queue).toMatchObject({ status: 'queued', reason: 'interactive_reserve' })
   })
 })
+describe('replies sent into a running turn', () => {
+  const withSteers = (rows: any[], steers: any[]) => ({ queuedForSession: () => rows, acceptedSteersForSession: () => steers })
+  it('shows an accepted reply on every client until Hermes shows it, once', () => {
+    const q = withSteers([row('wizardq_1', 'start', 'running', 100)], [{ publicRunId: 'wizardq_1', text: 'also check the footer', at: 200, status: 'running' }])
+    const history = [{ id: 1, role: 'user', content: 'start', timestamp: 101 }]
+    const out = JSON.parse(projectInFlightOwnerTurns(page(history), q, SID).toString())
+    expect(out.data.map((r: any) => r.content)).toEqual(['start', 'also check the footer'])
+    expect(out.data[1].wizard_queue.status).toBe('steered')
+    const landed = [...history, { id: 2, role: 'user', content: 'also check the footer', timestamp: 205 }]
+    expect(JSON.parse(projectInFlightOwnerTurns(page(landed), q, SID).toString()).data).toHaveLength(2)
+  })
+})
