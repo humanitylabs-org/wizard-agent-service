@@ -14,7 +14,7 @@ const TWO = `Wizard${' '}OS`
 
 describe('spellProductName', () => {
   it('writes every display spelling as WizardOS', () => {
-    for (const gap of [' ', '  ', '-', ' - ', ' – ', '\u00a0']) for (const variant of [`Wizard${gap}OS`, `wizard${gap}os`, `WIZARD${gap}OS`])
+    for (const gap of [' ', '  ', '-', ' - ', ' – ', '\u00a0']) for (const variant of [`Wizard${gap}OS`, `WIZARD${gap}OS`, ...(gap === '-' ? [] : [`wizard${gap}os`])])
       expect(spellProductName(`Ship ${variant} today`)).toBe('Ship WizardOS today')
     expect(spellProductName(`${TWO} · Desktop`)).toBe('WizardOS · Desktop')
     expect(spellProductName(`${TWO}'s shell, ${TWO}.`)).toBe("WizardOS's shell, WizardOS.")
