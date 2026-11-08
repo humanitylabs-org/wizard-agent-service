@@ -18,7 +18,7 @@ const photoPin = (registry, id) => {
   const ids = registry.pinnedAgents?.(id)
   return ids ? (ids.some(agent => agent !== 'hermes') ? 'non-main' : ids[0] || '') : registry.pinnedAgent(id)
 }
-export function createPhotoRuntimeVerifier({ database, registry, ownerId, upstreamOrigin, hermesKey, fetchImpl = fetch }) {
+export function createPhotoRuntimeVerifier({ database, registry, ownerId, upstreamOrigin, hermesKey, appChats = false, fetchImpl = fetch }) {
   let verifiedUntil = 0
   return async () => {
     if (Date.now() < verifiedUntil) return
@@ -26,7 +26,7 @@ export function createPhotoRuntimeVerifier({ database, registry, ownerId, upstre
     let session
     try {
       const rows = db.prepare("SELECT id,source,user_id,chat_id,chat_type,profile_name,hidden,parent_session_id,title,model_config,origin_json,created_source,transport_profile FROM sessions WHERE hidden=0 AND parent_session_id IS NULL ORDER BY rowid DESC LIMIT 200").all()
-      session = rows.find(s => eligiblePhotoSession(s, ownerId, photoPin(registry, s.id)))
+      session = rows.find(s => eligiblePhotoSession(s, ownerId, photoPin(registry, s.id), { appChats }))
     } finally { db.close() }
     if (!session) throw new Error('no canonical owner session to authenticate')
     const response = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(session.id)}`, { headers: { Authorization: `Bearer ${hermesKey}` }, redirect: 'manual', signal: AbortSignal.timeout(5000) })
@@ -38,9 +38,13 @@ export function createPhotoRuntimeVerifier({ database, registry, ownerId, upstre
     verifiedUntil = Date.now() + 60000
   }
 }
-export function eligiblePhotoSession(s, ownerId, pinnedAgent) {
+// Wizard app chats arrive through the Hermes API server, which records user_id='api'
+// for every caller it admits with the runtime key (issue 400). Behind the off-by-default
+// appChats switch, that one marker counts as the owner, only for api_server wizard_ sessions.
+export const appChatOwner = (s, appChats) => appChats === true && s.user_id === 'api' && s.source === 'api_server' && /^wizard_\d+_[a-f0-9]+$/.test(s.id || '')
+export function eligiblePhotoSession(s, ownerId, pinnedAgent, { appChats = false } = {}) {
   if (!s || !mainPhotoAgent(pinnedAgent) || s.hidden || s.parent_session_id || ![null, '', 'default'].includes(s.profile_name)) return false
-  if (s.user_id && s.user_id !== ownerId) return false
+  if (s.user_id && s.user_id !== ownerId && !appChatOwner(s, appChats)) return false
   let config, origin
   try { config = JSON.parse(s.model_config || '{}'); origin = JSON.parse(s.origin_json || '{}') } catch { return false }
   if (!config || !origin || config._delegate_from) return false
@@ -52,7 +56,7 @@ export function eligiblePhotoSession(s, ownerId, pinnedAgent) {
   if (s.source === 'webui') return true
   return ['api_server', 'wizard-mobile'].includes(s.source) && /^wizard_\d+_[a-f0-9]+$/.test(s.id)
 }
-export function createCanonicalChatPhotoResolver({ database, ownerId, authorityId, registry, resolveFiles, resolveHelm, artifactRoots, aliases = [] }) {
+export function createCanonicalChatPhotoResolver({ database, ownerId, authorityId, registry, resolveFiles, resolveHelm, artifactRoots, aliases = [], appChats = false }) {
   if (!/^[0-9a-f]{64}$/.test(authorityId || '') || !ownerId || !registry?.pinnedAgent) throw new Error('canonical owner registry required')
   const databasePath = realpathSync(database)
   return async candidate => {
@@ -64,7 +68,7 @@ export function createCanonicalChatPhotoResolver({ database, ownerId, authorityI
     let s, m
     try {
       s = db.prepare('SELECT id,source,user_id,chat_id,chat_type,profile_name,hidden,parent_session_id,title,model_config,origin_json,created_source,transport_profile FROM sessions WHERE id=?').get(candidate.thread_id)
-      if (!eligiblePhotoSession(s, ownerId, pin)) return denied('not_owner_visible_main')
+      if (!eligiblePhotoSession(s, ownerId, pin, { appChats })) return denied('not_owner_visible_main')
       // Read content only after thread authority. Revalidate row identity, role and finality.
       m = db.prepare('SELECT id,session_id,role,content,timestamp,display_kind,tool_calls,_compressed_summary FROM messages WHERE id=? AND session_id=?').get(candidate.message_id, candidate.thread_id)
     } finally { db.close() }

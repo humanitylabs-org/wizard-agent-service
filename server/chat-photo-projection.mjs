@@ -131,7 +131,7 @@ export function createPhotoProjection({ root, ownerId, authorityId, ownerLabel, 
 // logs once per window and spawns nothing; a completed scan relaxes the periodic repair to idle
 // cadence, and event kicks are coalesced to at most one scan per eventMinMs.
 export const CHAT_PHOTO_PACING = { tickMs: 3000, backoffBaseMs: 3000, backoffMaxMs: 300000, idleMs: 60000, eventMinMs: 10000 }
-export function createChatPhotoReconciler({ database, registryPath, statePath, ownerId, authorityId, projection, resolveMessage, verifyAuthority, scanBatch, log = console.error, pacing = {}, now = Date.now }) {
+export function createChatPhotoReconciler({ database, registryPath, statePath, ownerId, authorityId, projection, resolveMessage, verifyAuthority, scanBatch, appChats = false, log = console.error, pacing = {}, now = Date.now }) {
   if (typeof resolveMessage !== 'function' || !ownerId || !SHA.test(authorityId || '')) throw new Error('canonical owner history adapter required')
   if (typeof verifyAuthority !== 'function') throw new Error('authenticated runtime verification required')
   if (!scanBatch && !registryPath) throw new Error('canonical registry path required')
@@ -140,7 +140,7 @@ export function createChatPhotoReconciler({ database, registryPath, statePath, o
   let failures = 0, backoffUntil = 0, lastRunAt = 0, lastResult = null
   const pendingEvents = {}
   const scan = scanBatch || (async state => {
-    const { stdout } = await exec('python3', [fileURLToPath(new URL('./read-chat-photos.py', import.meta.url)), database, String(state.cursor), String(state.ceiling), ownerId, '250', registryPath], { maxBuffer: 32 * 1024 * 1024, timeout: 30000 })
+    const { stdout } = await exec('python3', [fileURLToPath(new URL('./read-chat-photos.py', import.meta.url)), database, String(state.cursor), String(state.ceiling), ownerId, '250', registryPath, appChats === true ? '1' : '0'], { maxBuffer: 32 * 1024 * 1024, timeout: 30000 })
     return JSON.parse(stdout)
   })
   function step() {

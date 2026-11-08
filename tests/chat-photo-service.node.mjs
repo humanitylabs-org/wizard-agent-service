@@ -8,14 +8,14 @@ import { DatabaseSync } from 'node:sqlite'
 import { createWizardServer, listen } from '../server/service.mjs'
 const pause=ms=>new Promise(r=>setTimeout(r,ms))
 async function until(fn) { for(let i=0;i<120;i++){ if(await fn())return; await pause(100) };throw new Error('condition timed out') }
-test('full service accepted user and completed assistant hooks project both roles; history delivers same bytes', {timeout:25000}, async t=>{
+async function projectsBothRoles(t,{userId=null,appChats=false}={}){
  const root=mkdtempSync(join(tmpdir(),'photo-service-')); const servers=[]
  t.after(async()=>{await Promise.all(servers.map(s=>new Promise(r=>s.close(r))));rmSync(root,{recursive:true,force:true})})
  const statePath=join(root,'history.db'), db=new DatabaseSync(statePath), sid='wizard_123_abc'
  db.exec(`CREATE TABLE sessions(id TEXT PRIMARY KEY,source TEXT,user_id TEXT,chat_id TEXT,chat_type TEXT,profile_name TEXT,hidden INTEGER,parent_session_id TEXT,title TEXT,model_config TEXT,origin_json TEXT,created_source TEXT,transport_profile TEXT,archived INTEGER,message_count INTEGER,started_at REAL,last_activity_at REAL,last_activity_description TEXT,pinned INTEGER);
  CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,content TEXT,timestamp REAL,display_kind TEXT,tool_calls TEXT,_compressed_summary INTEGER,platform_message_id TEXT,active INTEGER,finish_reason TEXT);
  CREATE TABLE session_turn_leases(conversation_id TEXT,expires_at REAL);
- INSERT INTO sessions VALUES('${sid}','api_server',NULL,NULL,NULL,'default',0,NULL,'Owner conversation','{}',NULL,'human',NULL,0,1,1,1,'',0);`)
+ INSERT INTO sessions VALUES('${sid}','api_server',${userId?`'${userId}'`:'NULL'},NULL,NULL,'default',0,NULL,'Owner conversation','{}',NULL,'human',NULL,0,1,1,1,'',0);`)
  const picture=join(root,'photo.png'), bytes=Buffer.from('89504e470d0a1a0a0000000049454e44ae426082','hex');writeFileSync(picture,bytes)
  const insert=(id,role,content)=>db.prepare('INSERT INTO messages VALUES (?,?,?,?,?,NULL,NULL,0,NULL,1,?)').run(id,sid,role,content,Date.now()/1000,role==='assistant'?'stop':null)
  const session=()=>db.prepare('SELECT * FROM sessions WHERE id=?').get(sid)
@@ -42,7 +42,7 @@ test('full service accepted user and completed assistant hooks project both role
  const wizard=createWizardServer({upstreamOrigin:`http://127.0.0.1:${addr.port}`,hermesKey:'fixture-key',requireAccess:false,requireJoinedDelegationCapability:false,
   wizardOsHome:osHome,hermesStatePath:statePath,agentArtifactDir:join(root,'artifacts'),agentArtifactRoots:[root],userFilesRoot:media,followThrough:false,
   runQueueStatePath:join(root,'queue.sqlite3'),runQueuePollIntervalMs:100,activeSessionReader:async()=>[],dispatchHealthReader:()=>true,canonicalSessionReader:async()=>[session()],
-  chatPhotos:{enabled:true,pacing:{eventMinMs:200},singleOwner:true,ownerId:'123',ownerLabel:'Owner',agentLabel:'Agent',statePath:stateFile,maxBytes:1024*1024}})
+  chatPhotos:{enabled:true,pacing:{eventMinMs:200},singleOwner:true,ownerId:'123',ownerLabel:'Owner',agentLabel:'Agent',statePath:stateFile,maxBytes:1024*1024,appChats}})
  servers.push(wizard);const w=await listen(wizard),base=`http://127.0.0.1:${w.port}`
  await until(()=>existsSync(stateFile))
  const response=await fetch(`${base}/wizard/hermes/v1/runs`,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':'photo-owner-turn'},body:JSON.stringify({session_id:sid,input:'An image'})})
@@ -58,4 +58,7 @@ test('full service accepted user and completed assistant hooks project both role
  assert.equal(files.length,1);assert.deepEqual(new Set(files[0].sources.map(s=>s.role)),new Set(['user','assistant']))
  assert.deepEqual(readFileSync(join(media,files[0].path)),bytes)
  db.close()
-})
+}
+test('full service accepted user and completed assistant hooks project both roles; history delivers same bytes', {timeout:25000}, t=>projectsBothRoles(t))
+// issue 400: Wizard app chats stored by the Hermes API server as user_id 'api', with the appChats switch on.
+test('app chat recorded as user_id api projects both roles when appChats is on', {timeout:25000}, t=>projectsBothRoles(t,{userId:'api',appChats:true}))

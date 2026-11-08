@@ -5000,14 +5000,15 @@ function buildWizardServer(options, lifetime) {
   if (options.chatPhotos?.enabled === true) {
     if (!hermesStatePath || !options.userFilesRoot || !options.chatPhotos.statePath || !agents) throw new Error('chat photos require explicit owner media, registry and state paths')
     const authorityId = photoAuthorityId({ database: hermesStatePath, runtimeHome: bridgeOsHome, registryPath: agents.agentsDir, upstreamOrigin, hermesKey, ownerId: options.chatPhotos.ownerId, singleOwner: options.chatPhotos.singleOwner })
+    const appChats = options.chatPhotos.appChats === true
     chatPhotos = createChatPhotoReconciler({ database: hermesStatePath, registryPath: agents.agentsDir,
-      pacing: options.chatPhotos.pacing,
-      verifyAuthority: createPhotoRuntimeVerifier({ database: hermesStatePath, registry: agents, ownerId: options.chatPhotos.ownerId, upstreamOrigin, hermesKey, fetchImpl }),
+      pacing: options.chatPhotos.pacing, appChats,
+      verifyAuthority: createPhotoRuntimeVerifier({ database: hermesStatePath, registry: agents, ownerId: options.chatPhotos.ownerId, upstreamOrigin, hermesKey, appChats, fetchImpl }),
       statePath: options.chatPhotos.statePath, ownerId: options.chatPhotos.ownerId, authorityId,
       projection: createPhotoProjection({ root: options.userFilesRoot, ownerId: options.chatPhotos.ownerId, authorityId,
         ownerLabel: options.chatPhotos.ownerLabel, agentLabel: options.chatPhotos.agentLabel, maxBytes: options.chatPhotos.maxBytes }),
       resolveMessage: createCanonicalChatPhotoResolver({ database: hermesStatePath, ownerId: options.chatPhotos.ownerId, authorityId,
-        registry: agents, resolveFiles, artifactRoots: agentArtifactRoots, aliases: agentPathAliases,
+        registry: agents, resolveFiles, artifactRoots: agentArtifactRoots, aliases: agentPathAliases, appChats,
         resolveHelm: createCanonicalHelmPhotoResolver({ artifactDir: agentArtifactDir, helmOrigin, legacyRoot: options.helmAttachmentsRoot, fetchImpl }) }),
     })
   }

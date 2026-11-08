@@ -14,8 +14,13 @@ TEST = re.compile(r'(?i)(?:\bqa\b|canary|smoke|fixture|probe|test[-_ ]session)')
 INTERNAL = ('[CONTEXT ', '[CONTEXT_', '[PRIOR CONTEXT', '[ASYNC ', '[IMPORTANT: Background', '[OUT-OF-BAND', '[Your active task', '[Your previous agent')
 
 
-def session_reason(s, owner_id):
-    if s.get('user_id') not in (None, '', owner_id):
+def app_chat_owner(s, app_chats):
+    # Same rule as appChatOwner in chat-photo-authority.mjs (issue 400); off by default.
+    return bool(app_chats) and s.get('user_id') == 'api' and s.get('source') == 'api_server' and bool(re.fullmatch(r'wizard_\d+_[a-f0-9]+', s.get('id') or ''))
+
+
+def session_reason(s, owner_id, app_chats=False):
+    if s.get('user_id') not in (None, '', owner_id) and not app_chat_owner(s, app_chats):
         return 'not_owner'
     if s['hidden'] or s['parent_session_id'] or s['profile_name'] not in (None, '', 'default'):
         return 'internal_or_private'
@@ -120,7 +125,7 @@ def registry_pins(value):
     return {sid: 'hermes' if agents == {'hermes'} else 'non-main' for sid, agents in pairs.items()}
 
 
-def scan(path, cursor, ceiling, owner_id, limit=250, registry_path=''):
+def scan(path, cursor, ceiling, owner_id, limit=250, registry_path='', app_chats=False):
     c = sqlite3.connect('file:' + path + '?mode=ro', uri=True, timeout=2)
     c.row_factory = sqlite3.Row
     c.execute('PRAGMA query_only=ON')
@@ -136,7 +141,7 @@ def scan(path, cursor, ceiling, owner_id, limit=250, registry_path=''):
                 if os.fstat(stream.fileno()).st_size > 8 * 1024 * 1024:
                     raise ValueError('registry metadata too large')
                 pins = registry_pins(json.load(stream))
-    eligible_ids = [sid for sid, s in sessions.items() if not session_reason(s, owner_id) and pins.get(sid, '') in ('', 'main', 'hermes')]
+    eligible_ids = [sid for sid, s in sessions.items() if not session_reason(s, owner_id, app_chats) and pins.get(sid, '') in ('', 'main', 'hermes')]
     ceiling = ceiling or c.execute('SELECT coalesce(max(id),0) FROM messages').fetchone()[0]
     # Fetch metadata first; do not read tool content or excluded/private messages.
     # Force the integer primary-key range walk: repeated session-index scans sort
@@ -146,7 +151,7 @@ def scan(path, cursor, ceiling, owner_id, limit=250, registry_path=''):
     reasons = {}; evidence = []
     for m in rows:
         s = sessions.get(m['session_id'])
-        reason = session_reason(s, owner_id) if s else 'missing_session'
+        reason = session_reason(s, owner_id, app_chats) if s else 'missing_session'
         if not reason and (m['role'] not in ('user', 'assistant') or m['_compressed_summary'] or m['display_kind'] not in (None, '', 'final') or (m['role'] == 'assistant' and m['has_tools'])):
             reason = 'not_delivered_human_message'
         if reason:
@@ -169,4 +174,4 @@ if __name__ == '__main__':
         os.nice(10)  # background history scan: yield CPU to the live service
     except OSError:
         pass
-    print(json.dumps(scan(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], int(sys.argv[5]) if len(sys.argv)>5 else 250, sys.argv[6] if len(sys.argv)>6 else ''), separators=(',', ':')))
+    print(json.dumps(scan(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], int(sys.argv[5]) if len(sys.argv)>5 else 250, sys.argv[6] if len(sys.argv)>6 else '', len(sys.argv)>7 and sys.argv[7] == '1'), separators=(',', ':')))

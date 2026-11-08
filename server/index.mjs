@@ -202,6 +202,8 @@ server = createWizardServer({
     maxBytes: Number(process.env.WIZARD_CHAT_PHOTOS_MAX_BYTES || 0),
     ownerLabel: process.env.WIZARD_CHAT_PHOTOS_OWNER_LABEL || '',
     agentLabel: process.env.WIZARD_CHAT_PHOTOS_AGENT_LABEL || '',
+    // Also copy photos from Wizard app chats that Hermes records as user_id 'api' (issue 400). Off by default.
+    appChats: process.env.WIZARD_CHAT_PHOTOS_APP_CHATS === '1',
 
   },
   userFilesIndexPath: process.env.WIZARD_USER_FILES_INDEX_PATH || '',
