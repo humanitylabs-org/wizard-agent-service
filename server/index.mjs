@@ -184,6 +184,9 @@ server = createWizardServer({
   kernelJobMap: process.env.WIZARD_KERNEL_JOB_MAP === '1',
   // Routed agents' owner turns stamped internal_notification by Hermes 0.22.7 (issue 379). Off by default.
   routedOwnerTurns: process.env.WIZARD_ROUTED_OWNER_TURNS === '1',
+  // Alongside boxes (host Tailscale, no helper): a phone visit through the shell's tailnet address marks the
+  // phone step seen (issue 146). Off by default.
+  hostPhoneSeen: process.env.WIZARD_HOST_PHONE_SEEN === '1',
   filesRoot: process.env.WIZARD_FILES_ROOT || '',
   // The owner's user-files root on this host (Runtipi's media/ folder on a Wizard OS box). When set, an
   // upload created with a destination is placed there, and the Files app can list it. Separate from
