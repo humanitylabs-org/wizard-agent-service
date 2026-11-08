@@ -32,7 +32,7 @@ import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, fullStatusAsk, askMaxFor, withAskMax, createHeavyStatusGuard, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
-import { ThreadTitleStore, provisionalTitleFrom, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
+import { ThreadTitleStore, clashCandidates, provisionalTitleFrom, readSessionTitle, titleContextLine, titleKey, titleToApply, topicFor } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
 import { createRoutedQueues } from './routed-run-queue.mjs'
 import { Supervisor } from './supervisor.mjs'
@@ -4350,7 +4350,8 @@ function buildWizardServer(options, lifetime) {
     return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId)].filter(Boolean).join('\n')
   }
   const patchHermesTitle = async (sessionId, title) => {
-    for (const candidate of [title, `${title} #2`, `${title} #3`, `${title} #4`]) {
+    // A title another thread holds is dated, never numbered (James, 8 Nov: no #N).
+    for (const candidate of clashCandidates(title)) {
       const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'application/json' })
       if (hermesKey) headers.set('Authorization', ['Bearer', hermesKey].join(' '))
       const reply = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, {
@@ -4363,7 +4364,7 @@ function buildWizardServer(options, lifetime) {
     return ''
   }
   const titleInFlight = new Set()
-  const applyAgentTitle = async (sessionId, proposed, assistantAt) => {
+  const applyAgentTitle = async (sessionId, proposed, assistantAt, status = null) => {
     if (titleInFlight.has(sessionId)) return
     const known = threadTitleStore.get(sessionId)
     if (known && known.appliedFor === assistantAt) return
@@ -4372,7 +4373,9 @@ function buildWizardServer(options, lifetime) {
       const current = readSessionTitle(titleDbPath(), sessionId)
       if (!current) return
       const record = known ?? null
-      const next = titleToApply({ currentTitle: current.title, proposed, record: { ...(record ?? {}), locked: titleLocked(current, record) }, assistantAt })
+      // The topic (app or area) stands in when the agent echoes the opener placeholder or proposes opener words.
+      const topic = topicFor({ appId: status?.app_id, catalog: appCatalog(), texts: [record?.title, current.title, status?.ask], subject: status?.subject })
+      const next = titleToApply({ currentTitle: current.title, proposed, record: { ...(record ?? {}), locked: titleLocked(current, record) }, assistantAt, topic })
       if (!next) { threadTitleStore.markConsidered(sessionId, assistantAt); return }
       const applied = await patchHermesTitle(sessionId, next)
       if (!applied) { threadTitleStore.markConsidered(sessionId, assistantAt); return }
@@ -4407,7 +4410,7 @@ function buildWizardServer(options, lifetime) {
       if (!text || (typeof body?.input === 'string' && MACHINE_INPUT.test(text))) return
       const current = readSessionTitle(titleDbPath(), sessionId)
       if (current?.title) return
-      const title = provisionalTitleFrom(text)
+      const title = provisionalTitleFrom(text, appCatalog())
       if (title && threadTitleStore.setProvisional(sessionId, title)) void lifetime.track(pushProvisionalTitle(sessionId).catch(() => undefined))
     } catch { /* a missing placeholder never blocks a send */ }
   }
@@ -4477,7 +4480,7 @@ function buildWizardServer(options, lifetime) {
             if (sessionMessageCache.size > 256) sessionMessageCache.delete(sessionMessageCache.keys().next().value)
           }
           const attention = !operator ? (messages.status ?? (messages.latest?.role === 'assistant' ? statusBackfill.lookup(session.id, messages.latestAssistantAt) : null)) : null
-          if (!operator && messages.status?.title && messages.latest?.role === 'assistant') void lifetime.track(applyAgentTitle(session.id, messages.status.title, messages.latestAssistantAt ?? null))
+          if (!operator && messages.status?.title && messages.latest?.role === 'assistant') void lifetime.track(applyAgentTitle(session.id, messages.status.title, messages.latestAssistantAt ?? null, messages.status))
           return {
             ...session,
             ...(messages.suppressedAgentTurns ? { latest_message: null, last_user_message: null, preview: messages.latest?.content ?? '' } : {}),
