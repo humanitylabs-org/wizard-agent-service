@@ -127,11 +127,17 @@ export function createPhotoProjection({ root, ownerId, authorityId, ownerLabel, 
 
 // One bounded transaction: publication is idempotent, cursor+retry admission atomic.
 // A failed commit replays the page; transient failures cannot disappear behind cursor.
-export function createChatPhotoReconciler({ database, registryPath, statePath, ownerId, authorityId, projection, resolveMessage, verifyAuthority, scanBatch, log = console.error }) {
+// Pacing: a persistent failure (e.g. owner-authority verification) backs off exponentially so it
+// logs once per window and spawns nothing; a completed scan relaxes the periodic repair to idle
+// cadence, and event kicks are coalesced to at most one scan per eventMinMs.
+export const CHAT_PHOTO_PACING = { tickMs: 3000, backoffBaseMs: 3000, backoffMaxMs: 300000, idleMs: 60000, eventMinMs: 10000 }
+export function createChatPhotoReconciler({ database, registryPath, statePath, ownerId, authorityId, projection, resolveMessage, verifyAuthority, scanBatch, log = console.error, pacing = {}, now = Date.now }) {
   if (typeof resolveMessage !== 'function' || !ownerId || !SHA.test(authorityId || '')) throw new Error('canonical owner history adapter required')
   if (typeof verifyAuthority !== 'function') throw new Error('authenticated runtime verification required')
   if (!scanBatch && !registryPath) throw new Error('canonical registry path required')
-  let busy = false, stopped = false, timer, pending
+  const pace = { ...CHAT_PHOTO_PACING, ...pacing }
+  let busy = false, stopped = false, timer, pending, trailing
+  let failures = 0, backoffUntil = 0, lastRunAt = 0, lastResult = null
   const pendingEvents = {}
   const scan = scanBatch || (async state => {
     const { stdout } = await exec('python3', [fileURLToPath(new URL('./read-chat-photos.py', import.meta.url)), database, String(state.cursor), String(state.ceiling), ownerId, '250', registryPath], { maxBuffer: 32 * 1024 * 1024, timeout: 30000 })
@@ -139,8 +145,40 @@ export function createChatPhotoReconciler({ database, registryPath, statePath, o
   })
   function step() {
     if (stopped) return Promise.resolve(null)
-    if (!pending) pending = runStep().finally(() => { pending = null })
+    if (!pending) {
+      lastRunAt = now()
+      pending = runStep().then(result => {
+        if (result) { failures = 0; backoffUntil = 0; lastResult = result }
+        return result
+      }, error => {
+        failures += 1
+        error.retryInMs = Math.min(pace.backoffMaxMs, pace.backoffBaseMs * 2 ** (failures - 1))
+        backoffUntil = now() + error.retryInMs
+        throw error
+      }).finally(() => { pending = null })
+    }
     return pending
+  }
+  // Minimum gap since the last run before another scan may start. Zero while a scan is still
+  // making progress; relaxed once the history has been fully read.
+  function gap(isEvent) {
+    if (lastResult?.done) return isEvent ? pace.eventMinMs : pace.idleMs
+    if (lastResult?.scanDone) return pace.eventMinMs
+    return 0
+  }
+  function attempt(reason, isEvent, counted = true) {
+    if (stopped) return
+    const t = now()
+    if (t < backoffUntil) return
+    const wait = lastRunAt + gap(isEvent) - t
+    if (wait > 0) {
+      if (!isEvent) return // the periodic repair simply tries again on its next tick
+      if (counted) pendingEvents[reason] = (pendingEvents[reason] || 0) + 1
+      if (!trailing) { trailing = setTimeout(() => { trailing = null; attempt(reason, true, false) }, wait); trailing.unref?.() }
+      return
+    }
+    if (counted) pendingEvents[reason] = (pendingEvents[reason] || 0) + 1
+    void step().catch(e => log(`[chat-photos] ${e.code || e.message} (retry in ${Math.round((e.retryInMs || 0) / 1000)}s)`))
   }
   async function runStep() {
     if (busy || stopped) return null
@@ -204,9 +242,9 @@ export function createChatPhotoReconciler({ database, registryPath, statePath, o
       for (const [name, count] of Object.entries(events)) state.event_counts[name] = (state.event_counts[name] || 0) + count
       atomicPhotoJson(statePath, state)
       for (const [name, count] of Object.entries(events)) pendingEvents[name] -= count
-      return { done: batch.done && !state.pending.length, cursor: state.cursor, pending: state.pending.length, counts: state.counts }
+      return { done: batch.done && !state.pending.length, scanDone: batch.done, cursor: state.cursor, pending: state.pending.length, counts: state.counts }
     } finally { if (release) await release(); busy = false }
   }
-  return { step, kick(reason = 'repair') { if (!stopped) { pendingEvents[reason] = (pendingEvents[reason] || 0) + 1; void step().catch(e => log(`[chat-photos] ${e.code || e.message}`)) } },
-    start() { timer = setInterval(() => this.kick('repair'), 3000); timer.unref(); this.kick('startup') }, stop() { stopped = true; clearInterval(timer); return pending } }
+  return { step, kick(reason = 'repair') { attempt(reason, reason !== 'repair') },
+    start() { timer = setInterval(() => this.kick('repair'), pace.tickMs); timer.unref(); this.kick('startup') }, stop() { stopped = true; clearInterval(timer); clearTimeout(trailing); return pending } }
 }

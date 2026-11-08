@@ -165,4 +165,8 @@ def scan(path, cursor, ceiling, owner_id, limit=250, registry_path=''):
 
 
 if __name__ == '__main__':
+    try:
+        os.nice(10)  # background history scan: yield CPU to the live service
+    except OSError:
+        pass
     print(json.dumps(scan(sys.argv[1], int(sys.argv[2]), int(sys.argv[3]), sys.argv[4], int(sys.argv[5]) if len(sys.argv)>5 else 250, sys.argv[6] if len(sys.argv)>6 else ''), separators=(',', ':')))
