@@ -21,6 +21,7 @@ export const isBackgroundContinuation = record => Boolean(record.continuation)
 // or gateway restart dropped the SSE stream and Hermes interrupted the turn (19 Oct 2026: four
 // threads ended as a blank "Worked for Ns" receipt). Such runs become `interrupted` (Needs retry)
 // and are resumed once, through normal admission, under this stable key prefix.
+export const NOT_STARTED_REQUEUE_PREFIX = 'wizard-not-started-requeue-'
 export const INTERRUPT_RECOVERY_PREFIX = 'wizard-interrupt-recovery-'
 export const INTERRUPTED_SAFE_ERROR = 'Wizard restarted while this was running, so the reply was cut off.'
 // Pending steer replay: Hermes accepts a steer (POST /v1/runs/<id>/steer -> 200) and injects it at the
@@ -169,6 +170,14 @@ export class DurableRunQueue {
     // sends may use interactiveOverflow slots beyond maxActive (Hermes admits more than Wizard's 8).
     ghostGraceSeconds = 90,
     interactiveOverflow = 0,
+    // 8 Nov 2026: Hermes accepted a reply (status `queued`, admission, no turn lease) and never started it, yet the
+    // row stayed `running` for 20+ min, held a slot, and the owner's reply sat on "Queued". A run Hermes still calls
+    // `queued` with no lease on its thread for notStartedSeconds is cancelled upstream (cancelUpstream -> true only
+    // when Hermes confirms it is gone) and its exact message is sent again as a fresh run.
+    notStartedSeconds = 60,
+    leaseHeld = null,
+    cancelUpstream = null,
+    onRequeued = () => {},
   }) {
     if (!statePath) throw new Error('Wizard run queue state path is required')
     if (!Number.isSafeInteger(maxActive) || maxActive < 1 || maxActive > 64) throw new Error('Wizard run queue capacity is invalid')
@@ -203,6 +212,11 @@ export class DurableRunQueue {
     this.ghostGraceSeconds = Math.max(15, Number(ghostGraceSeconds) || 90)
     this.interactiveOverflow = Math.max(0, Math.min(8, Number.isSafeInteger(interactiveOverflow) ? interactiveOverflow : 0))
     this.ghostSessions = new Set()
+    this.notStartedSeconds = Math.max(5, Number(notStartedSeconds) || 60)
+    this.leaseHeld = leaseHeld
+    this.cancelUpstream = cancelUpstream
+    this.onRequeued = onRequeued
+    this.notStartedSince = new Map()
     this.refreshedAt = new Map()  // run id -> last lookup time; the 0.7 s throttle no longer relies on updated_at
     this.refreshing = new Map() // status polls share only this run's lookup, never the global tick
     this.launches = new Map() // run id -> { promise, startedAt }: one in-flight Hermes admission per run
@@ -1261,6 +1275,49 @@ export class DurableRunQueue {
     }
   }
 
+  _hermesNotStarted(record) {
+    return record.status === 'running' && Boolean(record.upstreamRunId) && !record.workerRunId && record.payload?.status === 'queued'
+  }
+
+  // Cancel-and-resend a reply Hermes accepted but never started (see the constructor note). Bounded: a resent
+  // run that also never starts is resent at most twice more, then left to the stale-run guard.
+  async _requeueNotStarted() {
+    if (!this.cancelUpstream || !this.leaseHeld) return
+    const now = nowSeconds()
+    const rows = this._rows("status = 'running' AND upstream_run_id <> '' AND worker_run_id = ''")
+    const seen = new Set()
+    for (const record of rows) {
+      if (!this._hermesNotStarted(record)) continue
+      seen.add(record.publicRunId)
+      if (!this.notStartedSince.has(record.publicRunId)) this.notStartedSince.set(record.publicRunId, now)
+      if (now - this.notStartedSince.get(record.publicRunId) < this.notStartedSeconds) continue
+      const generation = (record.idempotencyKey.match(/^wizard-not-started-requeue-(\d)-/)?.[1] ?? '0') | 0
+      if (generation >= 3) continue
+      let held
+      try { held = await this.leaseHeld(record) } catch { held = null }
+      if (held !== false) { this.notStartedSince.set(record.publicRunId, now); continue } // a turn is working on this thread: it is only waiting its turn
+      let cancelled = false
+      try { cancelled = (await this.cancelUpstream(record)) === true } catch { cancelled = false }
+      if (!cancelled) continue
+      const key = `${NOT_STARTED_REQUEUE_PREFIX}${generation + 1}-${record.publicRunId}`
+      try {
+        this.database.exec('BEGIN IMMEDIATE')
+        let admitted
+        try {
+          admitted = this._admitRow({ runtime: record.runtime, sessionId: record.sessionId, idempotencyKey: key,
+            requestHash: queueRequestHash(record.runtime, record.body), body: record.body, trustedPaths: record.trustedPaths ?? [],
+            continuation: record.continuation, recoveryAuthorized: record.recoveryAuthorized, agent_id: record.agent_id }, true)
+          this._update(admitted.record.publicRunId, { retrySourceId: record.retrySourceId || record.publicRunId, retryOrderAt: record.retryOrderAt || record.createdAt })
+          this._update(record.publicRunId, { status: 'cancelled', payload: { ...(record.payload ?? {}), status: 'cancelled', last_event: 'run.requeued', reconciled_reason: 'not_started' }, waitingReason: '', terminalAt: nowSeconds() })
+          this.database.exec('COMMIT')
+        } catch (error) { this.database.exec('ROLLBACK'); throw error }
+        this.notStartedSince.delete(record.publicRunId)
+        try { this.onRequeued(record, admitted.record) } catch { /* logging only */ }
+      } catch { /* the next tick tries again */ }
+    }
+    for (const id of this.notStartedSince.keys()) if (!seen.has(id)) this.notStartedSince.delete(id)
+  }
+
   async _reconcileStale() {
     if (!this.turnHeld || !this.confirmAbandoned) return
     const now = nowSeconds()
@@ -1298,7 +1355,7 @@ export class DurableRunQueue {
   // and that no other Hermes surface is working on. They keep their thread fenced but free their slot.
   async _findGhostSessions(external) {
     const ghosts = new Set()
-    if (!this.turnHeld) return ghosts
+    if (!this.turnHeld && !this.leaseHeld) return ghosts
     const now = nowSeconds()
     const bySession = new Map()
     for (const record of this._rows("status IN ('launching','running','waiting_for_approval','stopping')")) {
@@ -1311,6 +1368,8 @@ export class DurableRunQueue {
       if (outside.has(sessionId)) continue
       const verdicts = await Promise.all(records.map(async (record) => {
         if (record.status !== 'running' || !record.upstreamRunId || record.workerRunId || now - record.createdAt < this.ghostGraceSeconds) return false
+        if (this._hermesNotStarted(record) && this.leaseHeld) { try { if ((await this.leaseHeld(record)) === false) return true } catch { /* fall through */ } }
+        if (!this.turnHeld) return false
         try { return (await this.turnHeld(record)) === false } catch { return false }
       }))
       if (verdicts.every(Boolean)) ghosts.add(sessionId)
@@ -1330,6 +1389,7 @@ export class DurableRunQueue {
     await this._resumeDiagnosedSignIns()
     this._resumeProviderAccess()
     await this._reconcileStale()
+    await this._requeueNotStarted()
     await this._recoverInterrupted()
     await this._replayPendingSteers()
 

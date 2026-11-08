@@ -4049,6 +4049,22 @@ function buildWizardServer(options, lifetime) {
       lookup: lookupQueuedRun,
       staleAfterSeconds: Number(options.staleRunAfterSeconds ?? 300),
       turnHeld: options.turnHeldReader ?? ((record) => runTurnHeld(record.upstreamRunId)),
+      notStartedSeconds: Number(options.runQueueNotStartedSeconds ?? 60),
+      // True while any turn holds this thread (the reply is only waiting its turn); false when none does; throws when unreadable.
+      leaseHeld: options.sessionLeaseReader ?? (async (record) => {
+        if (!hermesStatePath) throw new Error('turn leases unavailable')
+        const database = new DatabaseSync(hermesStatePath, { readOnly: true })
+        try { return Boolean(database.prepare('SELECT 1 FROM session_turn_leases WHERE conversation_id = ? AND expires_at > ? LIMIT 1').get(record.sessionId, Date.now() / 1000)) }
+        finally { database.close() }
+      }),
+      // Cancel a never-started Hermes run; true only once Hermes confirms the run is gone, so the resend cannot double up.
+      cancelUpstream: options.cancelNotStartedRun ?? (async (record) => {
+        const headers = { Authorization: `Bearer ${hermesKey}` }
+        await fetchImpl(`${upstreamOrigin}/v1/runs/${encodeURIComponent(record.upstreamRunId)}/stop`, { method: 'POST', redirect: 'manual', headers }).catch(() => null)
+        runQueue?.markOwnerStop(record.upstreamRunId)
+        return (await hermesRunTurnHeld(fetchImpl, upstreamOrigin, hermesKey, record.upstreamRunId).catch(() => null)) === false
+      }),
+      onRequeued: (record, replacement) => console.log(`[not-started-requeue] ${record.sessionId} run ${record.upstreamRunId} never started; resent as ${replacement.publicRunId}`),
       confirmAbandoned: async (record) => {
         if (!await runHasNoAgent(record.upstreamRunId)) return null
         const outcome = await (options.abandonedOutcomeReader ?? ((sessionId, startedAt) => readAbandonedRunOutcomeHttp((path) => hermesJson(path), sessionId, startedAt)))(record.sessionId, record.createdAt)
