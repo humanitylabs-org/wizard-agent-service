@@ -911,7 +911,19 @@ const sameTurnText = (left, right) => left === right || (left.length >= 60 && ri
 // Unambiguous machine-tagged inputs the Service itself queues (follow-through, heavy, scheduler, reporter, relays).
 const MACHINE_INPUT = /^\[(?:Wizard\b|reporter\]|Relayed by\b|ASYNC\b|System\b)/i
 const PYTHON_REPR_PARTS = /^\s*\[\{'(?:text|type)':/
-export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null) {
+// The owner's words in a Hermes row without its appended "[System: ...]" part, also from the multipart list's Python
+// repr. Used only when the row's ids cannot be read (a restricted agent's sandboxed state.db), behind `ownerText`.
+const REPR_TEXT = /['"]text['"]:\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")/g
+const unrepr = (value) => value.replace(/\\(n|t|'|"|\\)/g, (_, c) => ({ n: '\n', t: '\t' })[c] ?? c)
+function ownerRowText(content) {
+  const owner = (text) => typeof text === 'string' && !text.startsWith('[System:')
+  if (Array.isArray(content)) return visibleInputText(content.filter((part) => !(typeof part?.text === 'string' && !owner(part.text))))
+  if (typeof content === 'string' && PYTHON_REPR_PARTS.test(content)) {
+    return [...content.matchAll(REPR_TEXT)].map((m) => unrepr(m[1] ?? m[2] ?? '')).filter(owner).join('\n')
+  }
+  return visibleInputText(content)
+}
+export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, { ownerText = false } = {}) {
   if (!runQueue || typeof sessionId !== 'string' || !sessionId) return result
   let records
   try { records = runQueue.admittedForSession('direct', sessionId) } catch { return result }
@@ -968,7 +980,7 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null) {
     // A row Hermes tied to a submission we know only as a superseded retry stays hidden rather than guessing by text.
     const submission = metaById.get(row.id)?.submission_id
     if (submission && pending.some((p) => p.run === submission)) return null
-    const text = visibleInputText(row.content).trim()
+    const text = (ownerText ? ownerRowText(row.content) : visibleInputText(row.content)).trim()
     const at = Number(row.timestamp ?? row.created_at)
     if (!text || !Number.isFinite(at)) return null
     // Closest admission at or before the row.
@@ -2971,7 +2983,8 @@ function buildWizardServer(options, lifetime) {
   const routedOwnerTurns = options.routedOwnerTurns === true
     ? (raw, queue, sessionId, agent) => {
         const home = routedAgentMedia(agent)?.home
-        return restoreOwnerTurns(raw, queue, sessionId, ownerTurnRowMetaAt(home ? join(home, 'state.db') : ''))
+        // A restricted agent's home is unreadable here, so its rows also match on the owner's words alone.
+        return restoreOwnerTurns(raw, queue, sessionId, ownerTurnRowMetaAt(home ? join(home, 'state.db') : ''), { ownerText: true })
       }
     : null
   const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, queuedHistory: queuedOwnerHistory, restoreOwnerTurns: routedOwnerTurns, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
