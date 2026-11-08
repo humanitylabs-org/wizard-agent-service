@@ -4363,9 +4363,10 @@ function buildWizardServer(options, lifetime) {
     if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote, trackerNote('hermes', '')].filter(Boolean).join('\n')
     return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId)].filter(Boolean).join('\n')
   }
-  const patchHermesTitle = async (sessionId, title, { exact = false } = {}) => {
+  const patchHermesTitle = async (sessionId, title, { exact = false, datedAt = null } = {}) => {
     // A title another thread holds is dated, never numbered (James, 8 Nov: no #N). An exact patch never is.
-    for (const candidate of exact ? [title] : clashCandidates(title, new Date(), sessionId)) {
+    // `datedAt` dates a clash with that moment (a respelled thread's own start) instead of now.
+    for (const candidate of exact ? [title] : clashCandidates(title, datedAt ?? new Date(), sessionId)) {
       const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'application/json' })
       if (hermesKey) headers.set('Authorization', ['Bearer', hermesKey].join(' '))
       const reply = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, {
@@ -4401,23 +4402,31 @@ function buildWizardServer(options, lifetime) {
   }
   // WizardOS is one word (James, 8 Nov 2026). A stored title that spells it as two is fixed in Hermes through the same
   // session PATCH as any rename, keeping its owner: an owner's title stays locked, an agent's stays the agent's.
-  const respellInFlight = new Set()
+  // A respell already running for a thread is awaited, not counted as a failure (the one-time pass and a list read can
+  // reach the same thread together).
+  const respellInFlight = new Map()
   const respelledAt = new Map()
-  const respellTitle = async (sessionId) => {
-    if (respellInFlight.has(sessionId)) return null
-    respellInFlight.add(sessionId)
-    try {
+  const respellTitle = (sessionId) => {
+    const running = respellInFlight.get(sessionId)
+    if (running) return running
+    const work = (async () => {
       const current = readSessionTitle(titleDbPath(), sessionId)
       if (!current?.title || !misspellsProductName(current.title)) return null
       const record = threadTitleStore.get(sessionId)
       const locked = titleLocked(current, record)
-      // An owner's title changes in spelling only; an agent title that clashes is dated like any agent title.
-      const applied = await patchHermesTitle(sessionId, spellProductName(current.title), { exact: locked })
+      const spelled = spellProductName(current.title)
+      // An owner's title changes in spelling only. When another thread already holds that exact spelling (Hermes keeps
+      // titles unique), it is dated with this thread's own start day, like any clashing title; an agent title the same.
+      const since = current.startedAt > 0 ? new Date(current.startedAt * 1000) : null
+      let applied = locked ? await patchHermesTitle(sessionId, spelled, { exact: true }) : ''
+      if (!applied) applied = await patchHermesTitle(sessionId, spelled, { datedAt: since })
       if (!applied) return null
       threadTitleStore.respell(sessionId, { from: current.title, to: applied, locked })
       canonicalSessionCache.expiresAt = 0
       return { id: sessionId, from: current.title, to: applied, locked }
-    } finally { respellInFlight.delete(sessionId) }
+    })()
+    respellInFlight.set(sessionId, work)
+    return work.finally(() => { respellInFlight.delete(sessionId) })
   }
   const queueRespell = (sessionId) => {
     if (Date.now() - (respelledAt.get(sessionId) ?? 0) < 60_000) return
@@ -4447,7 +4456,8 @@ function buildWizardServer(options, lifetime) {
     for (const row of found) {
       try {
         const done = await respellTitle(row.id)
-        if (done) receipt.renamed.push(done); else failed.push(row.id)
+        if (done) { if (!receipt.renamed.some((entry) => entry.id === done.id)) receipt.renamed.push(done) }
+        else if (misspellsProductName(readSessionTitle(titleDbPath(), row.id)?.title)) failed.push(row.id)
       } catch { failed.push(row.id) }
       await new Promise((resolveGap) => setTimeout(resolveGap, 15))
     }
