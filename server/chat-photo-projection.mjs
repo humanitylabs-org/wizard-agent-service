@@ -136,7 +136,7 @@ export function createChatPhotoReconciler({ database, registryPath, statePath, o
   if (typeof verifyAuthority !== 'function') throw new Error('authenticated runtime verification required')
   if (!scanBatch && !registryPath) throw new Error('canonical registry path required')
   const pace = { ...CHAT_PHOTO_PACING, ...pacing }
-  let busy = false, stopped = false, timer, pending, trailing
+  let busy = false, stopped = false, timer, pending, trailing, rerun
   let failures = 0, backoffUntil = 0, lastRunAt = 0, lastResult = null
   const pendingEvents = {}
   const scan = scanBatch || (async state => {
@@ -155,7 +155,10 @@ export function createChatPhotoReconciler({ database, registryPath, statePath, o
         error.retryInMs = Math.min(pace.backoffMaxMs, pace.backoffBaseMs * 2 ** (failures - 1))
         backoffUntil = now() + error.retryInMs
         throw error
-      }).finally(() => { pending = null })
+      }).finally(() => {
+        pending = null
+        if (rerun && !stopped) { const reason = rerun; rerun = null; attempt(reason, true, false) }
+      })
     }
     return pending
   }
@@ -170,6 +173,9 @@ export function createChatPhotoReconciler({ database, registryPath, statePath, o
     if (stopped) return
     const t = now()
     if (t < backoffUntil) return
+    // An event that lands mid-scan may postdate that scan's ceiling: never fold it into the running
+    // scan, remember it and run one more scan when this one ends.
+    if (pending) { if (isEvent) { if (counted) pendingEvents[reason] = (pendingEvents[reason] || 0) + 1; rerun = reason }; return }
     const wait = lastRunAt + gap(isEvent) - t
     if (wait > 0) {
       if (!isEvent) return // the periodic repair simply tries again on its next tick

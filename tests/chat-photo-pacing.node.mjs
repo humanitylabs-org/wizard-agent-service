@@ -75,3 +75,15 @@ test('an incomplete scan keeps the fast 3 s cadence', async t => {
   for (let i = 0; i < 4; i++) { reconciler.kick('repair'); await settle(); clock.t += 3000 }
   assert.equal(calls.scan, 4)
 })
+
+test('an event arriving during a running scan triggers one more scan afterwards', async t => {
+  const root = mkdtempSync(join(tmpdir(), 'photo-pacing-')); t.after(() => rmSync(root, { recursive: true, force: true }))
+  let scans = 0, release
+  const r = createChatPhotoReconciler({ ...config, statePath: join(root, 's.json'), pacing: { eventMinMs: 20 }, verifyAuthority: async () => {},
+    scanBatch: async () => { scans++; if (scans === 1) await new Promise(res => { release = res }); return { evidence: [], counts: {}, cursor: 1, ceiling: 1, done: true } } })
+  t.after(() => r.stop())
+  r.kick('startup'); await settle(); assert.equal(scans, 1) // first scan is blocked mid-flight
+  r.kick('completed_assistant'); r.kick('accepted_user'); await settle(); assert.equal(scans, 1)
+  release(); await settle(); await settle()
+  assert.equal(scans, 2) // exactly one follow-up scan covers both events
+})
