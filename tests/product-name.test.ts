@@ -14,7 +14,7 @@ const TWO = `Wizard${' '}OS`
 
 describe('spellProductName', () => {
   it('writes every display spelling as WizardOS', () => {
-    for (const variant of [TWO, `Wizard${'  '}OS`, 'wizard os', 'WIZARD OS', 'Wizard-OS', 'Wizard - OS', 'Wizard – OS', 'Wizard\u00a0OS'])
+    for (const gap of [' ', '  ', '-', ' - ', ' – ', '\u00a0']) for (const variant of [`Wizard${gap}OS`, `wizard${gap}os`, `WIZARD${gap}OS`])
       expect(spellProductName(`Ship ${variant} today`)).toBe('Ship WizardOS today')
     expect(spellProductName(`${TWO} · Desktop`)).toBe('WizardOS · Desktop')
     expect(spellProductName(`${TWO}'s shell, ${TWO}.`)).toBe("WizardOS's shell, WizardOS.")
@@ -30,7 +30,7 @@ describe('spellProductName', () => {
 describe('titles, subjects and asks', () => {
   it('normalizes agent, provisional and topic titles', () => {
     expect(normalizeTitle(`${TWO} · Desktop`)).toBe('WizardOS · Desktop')
-    expect(normalizeTitle(`wizard os: Voice`)).toBe('WizardOS · Voice')
+    expect(normalizeTitle(`${TWO.toLowerCase()}: Voice`)).toBe('WizardOS · Voice')
     expect(provisionalTitleFrom(`fix the ${TWO} chats list`)).not.toMatch(/wizard\s+os/iu)
     expect(appTopicInText(`something about ${TWO} desks`, [])).toBe('WizardOS')
     expect(provisionalTitleFrom(`the ${TWO} desks keep jumping`)).toBe('WizardOS desks keep jumping')

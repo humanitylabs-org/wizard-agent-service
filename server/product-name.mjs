@@ -1,7 +1,7 @@
 // The product is spelled WizardOS: one word, always (James, 8 Nov 2026). Titles, subjects, Ready asks and
 // voice transcripts that arrive with the two-word spelling are stored and shown as WizardOS.
 //
-// Only display spellings change: "Wizard OS", "Wizard  OS", "wizard os", "WIZARD OS", "Wizard-OS", "Wizard – OS".
+// Only display spellings change: the two words in any case, with any spaces, a hyphen or a dash between them.
 // The lowercase identifier wizard-os (repository, paths, slugs, ids) and anything joined to a path, an id or a
 // longer word (humanitylabs-org/wizard-os, wizard-os-home, wizard_os, ~/.wizard-os) stays exactly as written.
 
