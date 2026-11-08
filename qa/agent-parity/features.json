@@ -97,6 +97,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "owner-screenshot-turns",
+      "description": "The owner's own message with an inline screenshot stays visible when Hermes stores it as its words plus \"[screenshot]\" and stamps it internal_notification: each kind matches the queued multipart turn by its screenshot-marked text (behind WIZARD_OWNER_SCREENSHOT_TURNS=1, off by default; routed kinds also need WIZARD_ROUTED_OWNER_TURNS=1).",
+      "layer": "server",
+      "fixture": "owner-screenshot-turns",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile /p/<profile>, container TCP, restricted Unix ingress) with routedOwnerTurns and ownerScreenshotTurns on: admit a synthetic owner turn with text and an inline PNG, store its upstream row as the words plus [screenshot] stamped internal_notification, add a [Wizard follow-through] wake, then read ?view=wizard history. Require the owner row exactly once as a normal user row, the wake still internal and upstream rows unchanged. tests/owner-screenshot-turns.test.ts covers screenshot-only rows, missing rows, whitespace and the switch off. Synthetic HTTP fixture evidence, not live/provider/browser proof.",
+      "source_refs": [
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/owner-screenshot-turns.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "policy_exemptions": []
+    },
+    {
       "id": "reply-summary-preferences",
       "description": "Reopening the shell short-answer view accepts and persists its existing box-wide choice while main, host-profile, container and restricted chats retain their own unchanged transcripts and admit no reply.",
       "layer": "server",

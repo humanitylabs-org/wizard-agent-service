@@ -184,6 +184,8 @@ server = createWizardServer({
   kernelJobMap: process.env.WIZARD_KERNEL_JOB_MAP === '1',
   // Routed agents' owner turns stamped internal_notification by Hermes 0.22.7 (issue 379). Off by default.
   routedOwnerTurns: process.env.WIZARD_ROUTED_OWNER_TURNS === '1',
+  // Owner turns with an inline screenshot, which Hermes flattens to "[screenshot]" (issue 145). Off by default.
+  ownerScreenshotTurns: process.env.WIZARD_OWNER_SCREENSHOT_TURNS === '1',
   // Alongside boxes (host Tailscale, no helper): a phone visit through the shell's tailnet address marks the
   // phone step seen (issue 146). Off by default.
   hostPhoneSeen: process.env.WIZARD_HOST_PHONE_SEEN === '1',
