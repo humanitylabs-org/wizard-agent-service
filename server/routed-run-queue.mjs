@@ -11,7 +11,16 @@ export function createRoutedQueues({ registry, own, pollIntervalMs = 1500, maxAc
   const entries = new Map()
   const get = async agent => {
     if (!entries.has(agent.id)) {
-      const direct = async (path,init={}) => { const headers=new Headers(init.headers);headers.set('Authorization', `Bearer ${registry.apiKey(agent.id)}`);return registry.fetchAgent(agent,path,{...init,headers,redirect:'manual',signal:init.signal||AbortSignal.timeout(10000)}) }
+      const direct = async (path,init={}) => {
+        // Queues outlive registry rewrites. Resolve the exact admitted identity
+        // for every dispatch/lookup: migration removes the old TCP listener.
+        // Never retain a legacy transport as fallback, even on restart.
+        const current = registry.read(agent.id)
+        if (!current) throw Object.assign(new Error('routed agent removed'), { status: 410, upstreamError: 'agent_not_found' })
+        const headers = new Headers(init.headers)
+        headers.set('Authorization', `Bearer ${registry.apiKey(agent.id)}`)
+        return registry.fetchAgent(current,path,{...init,headers,redirect:'manual',signal:init.signal||AbortSignal.timeout(10000)})
+      }
       const call = async (path,init={}) => {
         const response = await direct(path,init)
         const payload = await response.json()
