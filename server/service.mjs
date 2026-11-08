@@ -32,7 +32,7 @@ import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, fullStatusAsk, askMaxFor, withAskMax, createHeavyStatusGuard, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
-import { ThreadTitleStore, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
+import { ThreadTitleStore, provisionalTitleFrom, readSessionTitle, titleContextLine, titleKey, titleToApply } from './thread-titles.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
 import { createRoutedQueues } from './routed-run-queue.mjs'
 import { Supervisor } from './supervisor.mjs'
@@ -1060,9 +1060,65 @@ export function queuedOwnerHistory(runQueue, sessionId) {
       && (Array.isArray(body?.input) || (typeof body?.input === 'string' && !MACHINE_INPUT.test(input)))
     if (!owner || !Number.isFinite(at)) continue
     if (SUPERSEDED_STATUSES.has(String(record?.status ?? '')) && retried.has(record?.publicRunId)) continue
-    data.push({ id: `queue-${record.publicRunId}`, session_id: sessionId, role: 'user', timestamp: at, content: input })
+    data.push({ id: `queue-${record.publicRunId}`, session_id: sessionId, role: 'user', timestamp: at, content: input,
+      ...(TERMINAL_STATUSES.has(String(record?.status ?? '')) ? {} : { wizard_queue: { status: String(record.status), reason: String(record.waitingReason || (record.status === 'queued' ? 'capacity' : '')), public_run_id: String(record.publicRunId) } }) })
   }
   return Buffer.from(JSON.stringify({ object: 'list', session_id: sessionId, data, pagination: { limit: 500, offset: 0, order: 'oldest', returned: data.length } }))
+}
+
+// A turn Hermes has not started yet (waiting in the Wizard queue, or accepted while the thread's earlier reply runs)
+// has no message row in state.db, so every client that reads the thread sees an empty chat and the owner's own
+// send is missing on the other device. Show each unfinished owner turn from the queue row, which holds the exact
+// text, unless Hermes already shows it. `wizard_queue` tells the client to paint it as Queued / Waiting for a slot.
+const sameInFlightText = (left, right) => Boolean(left) && Boolean(right)
+  && (sameTurnText(left, right) || (left.length >= 8 && right.startsWith(left) && /^\s/u.test(right.slice(left.length))))
+export function projectInFlightOwnerTurns(result, runQueue, sessionId) {
+  if (!runQueue || typeof sessionId !== 'string' || !sessionId || typeof runQueue.queuedForSession !== 'function') return result
+  let records
+  try { records = runQueue.queuedForSession('direct', sessionId) } catch { return result }
+  if (!Array.isArray(records)) return result
+  const retried = new Set(records.map((record) => record?.retrySourceId).filter(Boolean))
+  const turns = []
+  for (const record of records) {
+    const status = String(record?.status ?? '')
+    if (!status || TERMINAL_STATUSES.has(status) || retried.has(record?.publicRunId)) continue
+    let body = null
+    try { body = JSON.parse(String(record?.body ?? '{}')) } catch { /* unreadable body */ }
+    const input = visibleInputText(body?.input).trim()
+    const at = Number(record?.createdAt)
+    const owner = !body?._wizard_background_recovery && !record?.continuation && Boolean(input)
+      && (Array.isArray(body?.input) || (typeof body?.input === 'string' && !MACHINE_INPUT.test(input)))
+    if (owner && Number.isFinite(at)) turns.push({ input, at, status, reason: String(record?.waitingReason ?? ''), publicRunId: String(record.publicRunId) })
+  }
+  try {
+    for (const steer of typeof runQueue.acceptedSteersForSession === 'function' ? runQueue.acceptedSteersForSession(sessionId) : []) {
+      const input = visibleInputText(steer.text).trim()
+      if (input) turns.push({ input, at: steer.at, status: 'steered', reason: '', publicRunId: `${steer.publicRunId}-${Math.round(steer.at * 1000)}`, steered: true })
+    }
+  } catch { /* an unreadable steer log never hides history */ }
+  if (!turns.length) return result
+  let payload
+  try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
+  if (!payload || typeof payload !== 'object' || !Array.isArray(payload.data)) return result
+  const page = payload.pagination && typeof payload.pagination === 'object' ? payload.pagination : null
+  const newestIncluded = !page || (page.order === 'oldest' ? Number(page.returned) < Number(page.limit) : Number(page.offset || 0) === 0)
+  if (!newestIncluded) return result
+  const shown = payload.data
+    .filter((row) => row && typeof row === 'object' && (row.role ?? row.author) === 'user' && row.display_kind !== 'hidden')
+    .map((row) => ({ text: visibleInputText(row.content).trim(), at: Number(row.timestamp ?? row.created_at) }))
+  let changed = false
+  for (const turn of turns.sort((a, b) => a.at - b.at)) {
+    const landed = shown.some((row) => sameInFlightText(turn.input, row.text) && Number.isFinite(row.at) && row.at >= turn.at - 5)
+    if (landed) continue
+    const row = { id: `queue-${turn.publicRunId}`, session_id: sessionId, role: 'user', timestamp: turn.at, content: turn.input,
+      wizard_queue: { status: turn.status, reason: turn.reason || (turn.status === 'queued' ? 'capacity' : ''), public_run_id: turn.publicRunId } }
+    const anchor = payload.data.findIndex((existing) => existing && typeof existing === 'object' && Number(existing.timestamp ?? existing.created_at) > turn.at)
+    payload.data.splice(anchor < 0 ? payload.data.length : anchor, 0, row)
+    shown.push({ text: turn.input, at: turn.at })
+    changed = true
+  }
+  if (changed && payload.pagination && typeof payload.pagination === 'object' && Number.isFinite(Number(payload.pagination.returned))) payload.pagination.returned = payload.data.length
+  return changed ? Buffer.from(JSON.stringify(payload)) : result
 }
 
 function restoreDurableScreenshots(result, runQueue, sessionId) {
@@ -3981,6 +4037,9 @@ function buildWizardServer(options, lifetime) {
       statePath: runQueueStatePath,
       maxActive,
       reservedInteractive: Number(options.runQueueInteractiveReserve ?? Math.min(2, maxActive - 1)),
+      // People's sends may exceed the global cap by this many; accepted-but-unheld runs release their slot after the grace.
+      interactiveOverflow: Number(options.runQueueInteractiveOverflow ?? 0),
+      ghostGraceSeconds: Number(options.runQueueGhostGraceSeconds ?? 90),
       pollIntervalMs: Number(options.runQueuePollIntervalMs ?? 1_500),
       retryDelayMs: Number(options.runQueueRetryDelayMs ?? 2_000),
       ...(options.runQueueLaunchWaitMs !== undefined ? { launchWaitMs: Number(options.runQueueLaunchWaitMs) } : {}),
@@ -3990,6 +4049,22 @@ function buildWizardServer(options, lifetime) {
       lookup: lookupQueuedRun,
       staleAfterSeconds: Number(options.staleRunAfterSeconds ?? 300),
       turnHeld: options.turnHeldReader ?? ((record) => runTurnHeld(record.upstreamRunId)),
+      notStartedSeconds: Number(options.runQueueNotStartedSeconds ?? 60),
+      // True while any turn holds this thread (the reply is only waiting its turn); false when none does; throws when unreadable.
+      leaseHeld: options.sessionLeaseReader ?? (async (record) => {
+        if (!hermesStatePath) throw new Error('turn leases unavailable')
+        const database = new DatabaseSync(hermesStatePath, { readOnly: true })
+        try { return Boolean(database.prepare('SELECT 1 FROM session_turn_leases WHERE conversation_id = ? AND expires_at > ? LIMIT 1').get(record.sessionId, Date.now() / 1000)) }
+        finally { database.close() }
+      }),
+      // Cancel a never-started Hermes run; true only once Hermes confirms the run is gone, so the resend cannot double up.
+      cancelUpstream: options.cancelNotStartedRun ?? (async (record) => {
+        const headers = { Authorization: `Bearer ${hermesKey}` }
+        await fetchImpl(`${upstreamOrigin}/v1/runs/${encodeURIComponent(record.upstreamRunId)}/stop`, { method: 'POST', redirect: 'manual', headers }).catch(() => null)
+        runQueue?.markOwnerStop(record.upstreamRunId)
+        return (await hermesRunTurnHeld(fetchImpl, upstreamOrigin, hermesKey, record.upstreamRunId).catch(() => null)) === false
+      }),
+      onRequeued: (record, replacement) => console.log(`[not-started-requeue] ${record.sessionId} run ${record.upstreamRunId} never started; resent as ${replacement.publicRunId}`),
       confirmAbandoned: async (record) => {
         if (!await runHasNoAgent(record.upstreamRunId)) return null
         const outcome = await (options.abandonedOutcomeReader ?? ((sessionId, startedAt) => readAbandonedRunOutcomeHttp((path) => hermesJson(path), sessionId, startedAt)))(record.sessionId, record.createdAt)
@@ -4237,7 +4312,7 @@ function buildWizardServer(options, lifetime) {
     if (!current?.title) return false
     // Hermes's user-authority titles (named in a client, a CLI or by code) are the owner's unless the
     // last rename on record was the agent's and still stands.
-    const agentOwned = record?.history?.at(-1)?.by === 'agent' && titleKey(record.title) === titleKey(current.title)
+    const agentOwned = (record?.history?.at(-1)?.by === 'agent' || record?.provisional === true) && titleKey(record.title) === titleKey(current.title)
     return (current.source === 'user' || current.source === null) && !agentOwned
   }
   const titleNote = (sessionId) => {
@@ -4285,6 +4360,35 @@ function buildWizardServer(options, lifetime) {
     } catch { /* the next final reply proposes again */ }
     finally { titleInFlight.delete(sessionId) }
   }
+  // A placeholder title from the owner's first message, set the moment it is queued (not when the first reply ends).
+  // It shows on every list/detail read at once, is copied into Hermes's own title as soon as that session exists, and
+  // never replaces an existing title, an owner's rename or the agent's status-line title (which supersedes it).
+  const provisionalPushedAt = new Map()
+  const pushProvisionalTitle = async (sessionId) => {
+    const record = threadTitleStore.get(sessionId)
+    if (!record?.provisional || record.locked || !record.title) return
+    const current = readSessionTitle(titleDbPath(), sessionId)
+    if (!current || current.title) return
+    const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'application/json' })
+    if (hermesKey) headers.set('Authorization', ['Bearer', hermesKey].join(' '))
+    const reply = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'PATCH', headers, body: JSON.stringify({ title: record.title }), signal: AbortSignal.timeout(5_000),
+    })
+    if (reply.ok) { threadTitleStore.markProvisionalApplied(sessionId, record.title); canonicalSessionCache.expiresAt = 0 }
+  }
+  const noteProvisionalTitle = (sessionId, bodyText) => {
+    try {
+      if (typeof sessionId !== 'string' || !sessionId) return
+      const body = JSON.parse(bodyText)
+      if (body?._wizard_background_recovery) return
+      const text = visibleInputText(body?.input).trim()
+      if (!text || (typeof body?.input === 'string' && MACHINE_INPUT.test(text))) return
+      const current = readSessionTitle(titleDbPath(), sessionId)
+      if (current?.title) return
+      const title = provisionalTitleFrom(text)
+      if (title && threadTitleStore.setProvisional(sessionId, title)) void lifetime.track(pushProvisionalTitle(sessionId).catch(() => undefined))
+    } catch { /* a missing placeholder never blocks a send */ }
+  }
   const decorateSessionTitles = (result, operator) => {
     if (operator) return result
     try {
@@ -4296,6 +4400,17 @@ function buildWizardServer(options, lifetime) {
         if (guarded !== session.wizard_attention) session = { ...session, wizard_attention: guarded, status: 'running', wizard_waiting_on: 'heavy' }
         session = projectOwnedOpenWork(session, ownedOpenWork?.evidenceFor(session.id))
         const renames = threadTitleStore.visibleHistory(session.id)
+        if (!session.title) {
+          const placeholder = threadTitleStore.get(session.id)
+          if (placeholder?.provisional && !placeholder.locked && placeholder.title) {
+            session = { ...session, title: placeholder.title, wizard_title_provisional: true }
+            if (Date.now() - (provisionalPushedAt.get(session.id) ?? 0) > 20_000) {
+              provisionalPushedAt.set(session.id, Date.now())
+              if (provisionalPushedAt.size > 500) provisionalPushedAt.delete(provisionalPushedAt.keys().next().value)
+              void lifetime.track(pushProvisionalTitle(session.id).catch(() => undefined))
+            }
+          }
+        }
         // Fold the agent's subject into the owner's list (subjects.json) for Ready's By subject order.
         spaceFiling.apply('hermes', session.id, session.wizard_attention)
         const attention = session.wizard_attention ? subjectCatalog.apply(session.id, session.wizard_attention) : null
@@ -6838,6 +6953,7 @@ function buildWizardServer(options, lifetime) {
             return
           }
           heavyWork?.supersede(queuedAdmission.sessionId)
+          if (queuedAdmission.runtime === 'direct' && !quietWatcherAdmission && !queuedAdmission.continuation) noteProvisionalTitle(queuedAdmission.sessionId, body.toString('utf8'))
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
           // A durable queue receipt is not proof that Hermes has materialized this session.
           if (await agents?.catalogContains(MAIN_AGENT_ID, queuedAdmission.sessionId) === true) agents.pin(queuedAdmission.sessionId, MAIN_AGENT_ID, 'runtime_verified')
@@ -7009,6 +7125,9 @@ function buildWizardServer(options, lifetime) {
             }
           } catch { /* admission validation remains the browser client's job */ }
         }
+        if (upstream.ok && steerPathId && !operator && request.method === 'POST' && runQueue && body) {
+          try { runQueue.noteAcceptedSteer(steerPathId, inputText(parseJsonBody(body).input)) } catch { /* the reply still reached Hermes */ }
+        }
         if (upstream.ok && steerPathId && request.method === 'POST' && trustedPaths.length) {
           const existing = runTrustedPaths.get(steerPathId) ?? []
           runTrustedPaths.set(steerPathId, [...new Set([...existing, ...trustedPaths])])
@@ -7102,6 +7221,7 @@ function buildWizardServer(options, lifetime) {
           }
           if (messageHistory && !operator && url.searchParams.get('view') === 'wizard') {
             result = restoreOwnerTurns(result, runQueue, decodeURIComponent(upstreamPath.split('/')[3]), ownerTurnRowMeta)
+            result = projectInFlightOwnerTurns(result, runQueue, decodeURIComponent(upstreamPath.split('/')[3]))
             result = projectProviderSignInHistory(result, runQueue?.latestForSession(decodeURIComponent(upstreamPath.split('/')[3])), url.searchParams)
             result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])
           }
