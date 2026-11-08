@@ -4457,7 +4457,11 @@ function buildWizardServer(options, lifetime) {
       try {
         const done = await respellTitle(row.id)
         if (done) { if (!receipt.renamed.some((entry) => entry.id === done.id)) receipt.renamed.push(done) }
-        else if (misspellsProductName(readSessionTitle(titleDbPath(), row.id)?.title)) failed.push(row.id)
+        else {
+          // Dropped only after a successful read shows the title no longer needs respelling; an unreadable one is retried.
+          const now = readSessionTitle(titleDbPath(), row.id)
+          if (!now || misspellsProductName(now.title)) failed.push(row.id)
+        }
       } catch { failed.push(row.id) }
       await new Promise((resolveGap) => setTimeout(resolveGap, 15))
     }
