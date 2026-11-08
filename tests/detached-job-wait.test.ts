@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { detachedJobRow, createDetachedJobReader, createLedger } from '../server/detached-job-wait.mjs'
 import { pendingHeavyJobs, heavyResultOwed } from '../server/heavy-wait.mjs'
 import { guardHeavyStatus } from '../server/thread-status.mjs'
-import { projectOpenAskSession, threadBackground, liveWorker } from '../server/open-ask.mjs'
+import { projectOpenAskSession, backgroundHelperStatus, threadBackground, liveWorker } from '../server/open-ask.mjs'
 
 const sid = 'wizard_deploy_fixture'
 const now = Date.now()
@@ -69,7 +69,7 @@ test('returned helpers plus a running deploy: Working on background work, not St
   const truth = { heavyPending: true, helperStatus: stalled }
   const row = projectOpenAskSession(session(), { replies, lastUserAt: 100, background: threadBackground(truth), heavyPending: true, live: liveWorker(truth) })
   assert.equal(row.status, 'running')
-  assert.equal(row.wizard_background, 'heavy')
+  assert.equal(row.wizard_waiting_on, 'helper')
   assert.equal(row.wizard_helper_status.phase, 'background')
   assert.equal(row.wizard_helper_status.resumeEligible, false)
 })
@@ -79,5 +79,10 @@ test('the same thread with no running job is unchanged: a genuinely stuck chat s
   const row = projectOpenAskSession(session(), { replies, lastUserAt: 100, background: threadBackground(truth), heavyPending: false, live: liveWorker(truth) })
   assert.equal(row.wizard_helper_status.phase, 'stalled')
   assert.equal(row.wizard_helper_status.resumeEligible, true)
-  assert.notEqual(row.wizard_background, 'heavy')
+})
+
+test('only returned-helper phases turn into background; running, held, uncertain and failed ones are left alone', () => {
+  for (const phase of ['stalled', 'waiting']) assert.deepEqual(backgroundHelperStatus({ phase, resumeEligible: true, pending: 0 }), { phase: 'background', resumeEligible: false, pending: 0 })
+  for (const phase of ['running', 'integrating', 'held', 'uncertain']) { const h = { phase, pending: 1 }; assert.equal(backgroundHelperStatus(h), h) }
+  assert.equal(backgroundHelperStatus(undefined), undefined)
 })

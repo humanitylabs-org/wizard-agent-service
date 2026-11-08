@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
 import { createDevices, devicesTool } from './devices.mjs'
-import { projectOpenAskSession, threadBackground, liveWorker, ENDED_WITH_ERROR, replyEpoch } from './open-ask.mjs'
+import { projectOpenAskSession, backgroundHelperStatus, threadBackground, liveWorker, ENDED_WITH_ERROR, replyEpoch } from './open-ask.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, createHermesSessionTruthReader, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, directRunStamps, heavyJobStamps, listCacheMode, mergeStamps, projectListSlices, createJoinedListCheck } from './session-list-cache.mjs'
@@ -701,6 +701,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               && !['failed', 'interrupted', 'waiting_for_approval'].includes(String(projected.status ?? ''))) {
               projected.status = 'running'
               projected.wizard_waiting_on = 'helper'
+              if (truth.heavyPending && projected.wizard_helper_status) projected.wizard_helper_status = backgroundHelperStatus(projected.wizard_helper_status)
             } else if (ENDED_WITH_ERROR.has(String(projected.status ?? '')) && liveWorker(truth)) {
               // The last run ended in an error, but a helper is still running: keep the
               // error status (and its card) while the row stays in Working until it stops.
