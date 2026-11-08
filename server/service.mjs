@@ -4374,7 +4374,7 @@ function buildWizardServer(options, lifetime) {
       if (!current) return
       const record = known ?? null
       // The topic (app or area) stands in when the agent echoes the opener placeholder or proposes opener words.
-      const topic = topicFor({ appId: status?.app_id, catalog: appCatalog(), texts: [record?.title, current.title, status?.ask], subject: status?.subject })
+      const topic = topicFor({ appId: status?.app_id, catalog: appCatalog(), texts: [record?.title, current.title], subject: status?.subject })
       const next = titleToApply({ currentTitle: current.title, proposed, record: { ...(record ?? {}), locked: titleLocked(current, record) }, assistantAt, topic })
       if (!next) { threadTitleStore.markConsidered(sessionId, assistantAt); return }
       const applied = await patchHermesTitle(sessionId, next)
