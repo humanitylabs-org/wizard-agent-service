@@ -913,6 +913,7 @@ export class DurableRunQueue {
   /** Accepted replies on this thread whose run has not finished: [{ publicRunId, text, at, status }]. */
   acceptedSteersForSession(sessionId) {
     if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) return []
+    this.database.prepare('DELETE FROM wizard_accepted_steers WHERE at < ?').run(nowSeconds() - 24 * 3600)
     const rows = this.database.prepare('SELECT public_run_id, text, at FROM wizard_accepted_steers WHERE session_id = ? AND at > ? ORDER BY at, id').all(sessionId, nowSeconds() - 6 * 3600)
     const out = []
     for (const row of rows) {

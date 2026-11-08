@@ -56,3 +56,8 @@ describe('replies sent into a running turn', () => {
     expect(JSON.parse(projectInFlightOwnerTurns(page(landed), q, SID).toString()).data).toHaveLength(2)
   })
 })
+it('keeps a longer queued message visible when Hermes only shows a shorter one it starts with', () => {
+  const history = [{ id: 1, role: 'user', content: 'also check', timestamp: 101 }]
+  const out = run(page(history), [row('wizardq_3', 'also check the footer', 'running', 102)])
+  expect(out.data.map((r: any) => r.content)).toEqual(['also check', 'also check the footer'])
+})

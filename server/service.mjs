@@ -1071,7 +1071,7 @@ export function queuedOwnerHistory(runQueue, sessionId) {
 // send is missing on the other device. Show each unfinished owner turn from the queue row, which holds the exact
 // text, unless Hermes already shows it. `wizard_queue` tells the client to paint it as Queued / Waiting for a slot.
 const sameInFlightText = (left, right) => Boolean(left) && Boolean(right)
-  && (sameTurnText(left, right) || (Math.min(left.length, right.length) >= 8 && (left.startsWith(right) || right.startsWith(left))))
+  && (sameTurnText(left, right) || (left.length >= 8 && right.startsWith(left) && /^\s/u.test(right.slice(left.length))))
 export function projectInFlightOwnerTurns(result, runQueue, sessionId) {
   if (!runQueue || typeof sessionId !== 'string' || !sessionId || typeof runQueue.queuedForSession !== 'function') return result
   let records
@@ -4312,7 +4312,7 @@ function buildWizardServer(options, lifetime) {
     if (!current?.title) return false
     // Hermes's user-authority titles (named in a client, a CLI or by code) are the owner's unless the
     // last rename on record was the agent's and still stands.
-    const agentOwned = record?.history?.at(-1)?.by === 'agent' && titleKey(record.title) === titleKey(current.title)
+    const agentOwned = (record?.history?.at(-1)?.by === 'agent' || record?.provisional === true) && titleKey(record.title) === titleKey(current.title)
     return (current.source === 'user' || current.source === null) && !agentOwned
   }
   const titleNote = (sessionId) => {
