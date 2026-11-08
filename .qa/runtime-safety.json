@@ -1,0 +1,76 @@
+{
+  "checked_at_epoch": 1791971862.783344,
+  "wizard_service_pid": "3664026",
+  "wizard_service_cgroup": "0::/user.slice/user-1000.slice/user@1000.service/app.slice/wizard-mobile.service",
+  "release": "/home/telos/.local/share/wizard-mobile-server/releases/was-c02a39a23a3f01560fd74f5fbe91b10e4948a701",
+  "upstream": "http://127.0.0.1:8642",
+  "service_children": [],
+  "queue_active": [
+    {
+      "public_run_id": "wizardq_a92f9af377274b61a1e427252e088a9e",
+      "session_id": "wizard_1791959611257_ceb7520817ac",
+      "runtime": "direct",
+      "status": "queued",
+      "upstream_run_id": "",
+      "worker_run_id": ""
+    },
+    {
+      "public_run_id": "wizardq_43f967b066eb4ae6a17254a763589b5b",
+      "session_id": "wizard_1791968419374_2f8255975cbd",
+      "runtime": "direct",
+      "status": "queued",
+      "upstream_run_id": "",
+      "worker_run_id": ""
+    },
+    {
+      "public_run_id": "wizardq_5adafb8c5e2947e48aebc756d6c67dee",
+      "session_id": "wizard_1791959952254_afb71e4e0d06",
+      "runtime": "direct",
+      "status": "queued",
+      "upstream_run_id": "",
+      "worker_run_id": ""
+    },
+    {
+      "public_run_id": "wizardq_b47db8f14fce4b318b172d57bffdf66b",
+      "session_id": "wizard_1791806534522_c6376aa5bf90",
+      "runtime": "direct",
+      "status": "queued",
+      "upstream_run_id": "",
+      "worker_run_id": ""
+    },
+    {
+      "public_run_id": "wizardq_88cbdf2495ed4131b9bf307dd9e9ae03",
+      "session_id": "wizard_1791968419374_2f8255975cbd",
+      "runtime": "direct",
+      "status": "running",
+      "upstream_run_id": "run_6c5ce0061d9749658fb36da84b508121",
+      "worker_run_id": "",
+      "gateway_status": "running",
+      "gateway_run_id": "run_6c5ce0061d9749658fb36da84b508121",
+      "gateway_session_id": "wizard_1791968419374_2f8255975cbd"
+    },
+    {
+      "public_run_id": "wizardq_6c11ef7a87184020ad299181b65aac2c",
+      "session_id": "wizard_1791964226858_9e870f732593",
+      "runtime": "direct",
+      "status": "running",
+      "upstream_run_id": "run_49d47200971049c69a4f50434c6cb870",
+      "worker_run_id": "",
+      "gateway_status": "running",
+      "gateway_run_id": "run_49d47200971049c69a4f50434c6cb870",
+      "gateway_session_id": "wizard_1791964226858_9e870f732593"
+    },
+    {
+      "public_run_id": "wizardq_5c2060f800224d6db355099b847ac628",
+      "session_id": "wizard_1791971548811_3a2aba926f8c",
+      "runtime": "direct",
+      "status": "running",
+      "upstream_run_id": "run_f41f3045a0314447acdaca3cf2e1b0e8",
+      "worker_run_id": "",
+      "gateway_status": "running",
+      "gateway_run_id": "run_f41f3045a0314447acdaca3cf2e1b0e8",
+      "gateway_session_id": "wizard_1791971548811_3a2aba926f8c"
+    }
+  ],
+  "no_restart_performed": true
+}
