@@ -178,7 +178,8 @@ describe('the ledger', () => {
 })
 
 describe('the gate', () => {
-  for (const kind of kinds) it(`delivers the mandatory every-ask contract only when enabled / ${kind}`, async () => {
+  // James, 9 Nov 2026: the tracker is the main builder agent's only; every other kind is checked scoped out.
+  for (const kind of kinds) it(`delivers the mandatory every-ask contract only when enabled, to the main agent only / ${kind}`, async () => {
     const s = await scene(kind, { threadTracker: true })
     try { await trackerChecks['thread-tracker'](s) }
     finally { await s.close() }
@@ -209,6 +210,21 @@ describe('the gate', () => {
 })
 
 describe('the counts, items and seen endpoints', () => {
+  it('serve nothing for another agent (e.g. Philosopher) and keep its stored rows untouched', async () => {
+    const d = tmp(), path = join(d, 'items.json'), before = new ThreadItemStore(path)
+    before.ingest('philosopher', 'p1', { items: [item('q', 'needs_you', 'Pick a reading')], at: 1_700_000_100 })
+    before.ingest('hermes', 'm1', { items: [item('b', 'running', 'Build it')], at: 1_700_000_100 })
+    const stored = readFileSync(path, 'utf8')
+    const s: any = await scene('main', { threadItemsStatePath: path, threadTracker: true })
+    try {
+      expect(Object.keys((await (await api(s, '/wizard/v1/thread-items/counts')).json()).threads)).toEqual(['hermes/m1'])
+      expect((await (await api(s, '/wizard/v1/thread-items?thread=p1&agent=philosopher')).json()).items).toEqual([])
+      const seen = await (await api(s, '/wizard/v1/thread-items/seen', post({ thread: 'p1', agent: 'philosopher', ids: ['q'], items: [{ id: 'q', updated_at: 1_700_000_100_000 }] }))).json()
+      expect(seen.items).toEqual([])
+      expect((await (await api(s, '/wizard/v1/thread-items?thread=m1')).json()).items.map((i: any) => i.id)).toEqual(['b'])
+      expect(readFileSync(path, 'utf8')).toBe(stored)
+    } finally { await s.close() }
+  }, 30_000)
   it('validates the exact loaded version at the write, preserves legacy ids and enforces the tweak gate', async () => {
     const { s, d } = await runs(true)
     try {

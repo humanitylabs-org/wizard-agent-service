@@ -841,7 +841,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     }
     const historySource = result
     // A routed run that finishes while no one has its thread open still lists its asks: read its reply back once.
-    if (method === 'GET' && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath) && ctx.trackerOn?.() && ctx.ingestThreadItems) {
+    if (method === 'GET' && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath) && ctx.trackerOn?.(agent.id) && ctx.ingestThreadItems) {
       try {
         const run = JSON.parse(result.toString('utf8')), sid = run?.session_id
         const mark = `${agent.id}/${upstreamPath}`
