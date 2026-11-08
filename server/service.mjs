@@ -5525,6 +5525,9 @@ function buildWizardServer(options, lifetime) {
       }
       // An agent credential reaches only the agent surfaces; the rest is the owner's.
       if (principal.kind === 'agent' && !agentPathAllowed(url.pathname) && !(url.pathname === '/wizard/v1/settings' && request.method === 'PUT')) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
+      // Alongside boxes have no tailnet verifier: the owner's phone reaches this box-local listener through host
+      // Tailscale Serve and the shell, so its visit is noticed here (phone-setup.mjs noteHostRequest; off by default).
+      if (options.hostPhoneSeen === true && !tailnetIngress && !baseRequireAccess && principal.kind === 'owner') phoneSetup?.noteHostRequest?.(request)
       if (tailnetIngress) {
         // One gate for everything that reaches the Serve listener: the owner, through Serve, on this box's
         // tailnet origin, same-origin writes (tailnet-access.mjs). The tool gateway stays box-only.

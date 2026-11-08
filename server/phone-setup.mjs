@@ -314,6 +314,20 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
       // WIZARD_TAILNET_ORIGIN/LOGIN pin tailnet access in the environment: settings do not grant or revoke it.
       return view(status, error || (accessPinned ? 'access_pinned_by_environment' : null))
     }),
+    /**
+     * Alongside boxes (host Tailscale, no helper, nothing enrolled): called for owner requests on the box-local
+     * listener. A phone browser whose request came through host Tailscale Serve (a tailnet client address in
+     * X-Forwarded-For) to the shell's own tailnet host from apps.json marks the phone seen. Cheap checks first:
+     * most requests are not from a phone.
+     */
+    noteHostRequest(request) {
+      if (!mobileUserAgent(request) || !tailnetClient(request)) return
+      const shell = hostShellLink(hostShellUrl)
+      if (!shell || requestHostname(request) !== shell.host || existsSync(socketPath)) return
+      const quiet = (s) => !s.setup.phone_seen_at && !s.setup.phone_started_at && !s.access.tailscale.origin && !accessPinned
+      if (!quiet(settings())) return
+      serial(async () => { if (quiet(settings())) markSetup('phone_seen_at', nowIso(now)) }).catch(() => {})
+    },
     /** Called for every request the tailnet verifier accepted: a phone browser reaching Serve as the owner. */
     noteOwnerRequest(request) {
       if (!mobileUserAgent(request)) return
@@ -325,6 +339,26 @@ export function createPhoneSetup({ settingsPath, socketPath = DEFAULT_PRIVATE_AC
       }).catch(() => {})
     },
   }
+}
+
+/** True when the first X-Forwarded-For hop is a Tailscale address (its shared IPv4 /10 range or its IPv6 /48). */
+export function tailnetClient(request) {
+  const raw = request?.headers?.['x-forwarded-for']
+  const first = (typeof raw === 'string' ? raw : '').split(',')[0].trim().toLowerCase()
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/u.exec(first)
+  if (v4) {
+    const parts = v4.slice(1).map(Number)
+    return parts.every((n) => n <= 255) && parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127
+  }
+  return /^fd7a:115c:a1e0:[0-9a-f:]*$/u.test(first)
+}
+
+/** The hostname the browser asked for: X-Forwarded-Host from a local proxy, else Host (lowercase, no port). */
+function requestHostname(request) {
+  const forwarded = request?.headers?.['x-forwarded-host']
+  const value = typeof forwarded === 'string' && forwarded ? forwarded.split(',')[0].trim() : request?.headers?.host
+  if (typeof value !== 'string' || !value) return ''
+  try { return new URL(`http://${value}`).hostname.toLowerCase() } catch { return '' }
 }
 
 /** The shell's private tailnet link (https://<box>.<tailnet>.ts.net[:port]/path/) from apps.json, or null. */

@@ -476,6 +476,63 @@ describe('setup API (box-local listener)', () => {
     expect((await call(port, '/wizard/v1/setup')).body.items[0]).toEqual({ id: 'phone', title: 'Use Wizard on your phone', state: 'done' })
   })
 
+  describe('alongside box: a phone visit through the shell address marks the phone seen (issue 146)', () => {
+    // Built at runtime: no tailnet address literals in the repo.
+    const phoneIp = [100, 101, 7, 9].join('.')
+    const lanIp = [192, 168, 1, 20].join('.')
+    async function alongside(options: Record<string, unknown> = {}) {
+      const dir = tempDir()
+      const appsJsonPath = join(dir, 'apps.json')
+      writeFileSync(appsJsonPath, JSON.stringify({ apps: [{ id: 'wizard-ux', provides: ['shell'], view: { url: `https://${DNS}:8796/wizard-os-home/` } }] }))
+      const settingsPath = join(dir, 'settings.json')
+      const { port } = await startLocal({ settingsPath, appsJsonPath, privateAccessSocket: join(dir, 'missing.sock'), ...options })
+      const seen = () => readSettings(settingsPath).settings.setup.phone_seen_at
+      return { port, settingsPath, seen }
+    }
+    const settle = () => new Promise((r) => setTimeout(r, 30))
+    const phoneVisit = (extra: Record<string, string> = {}) => ({ headers: { host: `${DNS}:8796`, 'user-agent': IPHONE_UA, 'x-forwarded-for': phoneIp, ...extra } })
+
+    it('records an owner request from the phone tailnet address and completes the phone step', async () => {
+      const box = await alongside({ hostPhoneSeen: true })
+      expect((await call(box.port, '/wizard/v1/setup/phone')).body.step).toBe('serving')
+      await call(box.port, '/wizard/v1/setup', phoneVisit())
+      await settle()
+      expect(box.seen()).toMatch(/^\d{4}-\d\d-\d\dT/)
+      expect((await call(box.port, '/wizard/v1/setup/phone')).body).toMatchObject({ step: 'phone_seen', managed: 'host' })
+      expect((await call(box.port, '/wizard/v1/setup')).body.items[0]).toEqual({ id: 'phone', title: 'Use Wizard on your phone', state: 'done' })
+    })
+
+    it('stays off by default', async () => {
+      const box = await alongside()
+      await call(box.port, '/wizard/v1/setup', phoneVisit())
+      await settle()
+      expect(box.seen()).toBe('')
+      expect((await call(box.port, '/wizard/v1/setup/phone')).body.step).toBe('serving')
+    })
+
+    it('ignores desktops, non-tailnet clients, other hosts and missing forwarding', async () => {
+      const box = await alongside({ hostPhoneSeen: true })
+      await call(box.port, '/wizard/v1/setup', phoneVisit({ 'user-agent': DESKTOP_UA }))
+      await call(box.port, '/wizard/v1/setup', phoneVisit({ 'x-forwarded-for': lanIp }))
+      await call(box.port, '/wizard/v1/setup', { headers: { host: `${DNS}:8796`, 'user-agent': IPHONE_UA } })
+      await call(box.port, '/wizard/v1/setup', phoneVisit({ host: '127.0.0.1' }))
+      await settle()
+      expect(box.seen()).toBe('')
+      // A local proxy that forwards the browser's host still counts.
+      await call(box.port, '/wizard/v1/setup', phoneVisit({ host: '127.0.0.1:8799', 'x-forwarded-host': `${DNS}:8796` }))
+      await settle()
+      expect(box.seen()).not.toBe('')
+    })
+
+    it('never marks a box whose enrollment was started through the helper', async () => {
+      const box = await alongside({ hostPhoneSeen: true })
+      updateSettings(box.settingsPath, (raw: any) => { raw.setup = { phone_started_at: new Date().toISOString() } })
+      await call(box.port, '/wizard/v1/setup', phoneVisit())
+      await settle()
+      expect(box.seen()).toBe('')
+    })
+  })
+
   it('never offers a non-tailnet or plain-http shell link as the phone address', async () => {
     const dir = tempDir()
     for (const url of ['http://127.0.0.1:8796/wizard-os-home/', 'https://example.com/wizard-os-home/', 'https://u:p@box.tail1234.ts.net/']) {
