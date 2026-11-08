@@ -101,7 +101,7 @@ describe('when a title changes', () => {
 })
 
 describe('the Agent Service applies titles through Hermes', () => {
-  async function fixture({ titleSource = 'llm', startedAgo = 5 * 86400 } = {}) {
+  async function fixture({ titleSource = 'llm', startedAgo = 5 * 86400, title = 'Review 0xMovez post on X' as string | null, queued = false } = {}) {
     const directory = await tempDir()
     const now = Date.now() / 1000
     const statePath = join(directory, 'state.db')
@@ -111,9 +111,10 @@ describe('the Agent Service applies titles through Hermes', () => {
       CREATE TABLE messages (session_id TEXT, role TEXT, finish_reason TEXT, content TEXT, display_kind TEXT, timestamp REAL, active INTEGER DEFAULT 1);
       CREATE TABLE session_turn_leases (conversation_id TEXT, expires_at REAL);
     `)
-    state.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?)').run('wizard_t1', now - startedAgo, 'Review 0xMovez post on X', titleSource)
+    state.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?)').run('wizard_t1', now - startedAgo, title, title === null ? null : titleSource)
     state.close()
     const reply = { title: 'DeFleur' }
+    const clock = { bump: 0 }
     const patches: Array<{ id: string, body: any }> = []
     const runs: any[] = []
     const upstream = createServer(async (req, res) => {
@@ -144,7 +145,7 @@ describe('the Agent Service applies titles through Hermes', () => {
       if (/^\/api\/sessions\/wizard_t1\/messages$/.test(url.pathname)) {
         res.end(JSON.stringify({ data: [
           { role: 'user', timestamp: now - 60, content: 'Go' },
-          { role: 'assistant', display_kind: 'final', timestamp: now - 10, content: tag({ state: 'done', ask: 'Shipped captions', subject: 'DeFleur', ...reply }) },
+          { role: 'assistant', display_kind: 'final', timestamp: now - 10 + clock.bump, content: tag({ state: 'done', ask: 'Shipped captions', subject: 'DeFleur', ...reply }) },
         ] }))
         return
       }
@@ -160,11 +161,12 @@ describe('the Agent Service applies titles through Hermes', () => {
       hermesStatePath: statePath,
       archivedSessionReader: () => [],
       threadTitleStatePath: join(directory, 'titles.json'),
+      ...(queued ? { runQueueStatePath: join(directory, 'queue.sqlite3'), dispatchHealthReader: () => true, activeSessionReader: () => [] } : {}),
     })
     servers.push(app)
     const origin = `http://127.0.0.1:${(await listen(app) as any).port}`
     const list = async () => (await (await fetch(`${origin}/wizard/hermes/api/sessions?limit=20`)).json()).data[0]
-    return { origin, list, patches, runs, reply, statePath }
+    return { origin, list, patches, runs, reply, statePath, clock }
   }
   const settle = () => new Promise((resolve) => setTimeout(resolve, 150))
 
@@ -189,6 +191,30 @@ describe('the Agent Service applies titles through Hermes', () => {
     expect(row.title).toBe('Movez thread')
     expect(row.wizard_title_was).toBeUndefined()
     expect(patches).toHaveLength(1)
+  })
+
+  it('names a new thread from its first message within the send, then lets the agent title replace it', async () => {
+    const { origin, list, patches, reply } = await fixture({ title: null, startedAgo: 5, queued: true })
+    reply.title = 'Calendar'
+    const sent = await fetch(`${origin}/wizard/hermes/v1/runs`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'first-send-1' }, body: JSON.stringify({ session_id: 'wizard_t1', input: [{ role: 'user', content: [{ type: 'text', text: 'Hey, can you fix the calendar sync bug please' }] }] }) })
+    expect(sent.ok).toBe(true)
+    await settle()
+    expect(patches).toEqual([{ id: 'wizard_t1', body: { title: 'Fix the calendar sync bug' } }])
+    const row = await list(); await settle()
+    expect(row.title).toBe('Fix the calendar sync bug') // the list shows the placeholder before the first reply ends
+    // The first final reply carries the agent's own title: it replaces the placeholder, never the reverse.
+    expect(patches.map((patch) => patch.body.title)).toEqual(['Fix the calendar sync bug', 'Calendar'])
+    const after = await list()
+    expect(after.title).toBe('Calendar')
+    expect(after.wizard_title_provisional).toBeUndefined()
+    expect(patches).toHaveLength(2)
+  })
+
+  it('never puts a placeholder over a title that exists or one James set', async () => {
+    const { origin, patches } = await fixture({ titleSource: 'user', queued: true })
+    await fetch(`${origin}/wizard/hermes/v1/runs`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'first-send-2' }, body: JSON.stringify({ session_id: 'wizard_t1', input: [{ role: 'user', content: [{ type: 'text', text: 'Fix the calendar sync bug' }] }] }) })
+    await settle()
+    expect(patches).toEqual([])
   })
 
   it('tells the next run the current title', async () => {

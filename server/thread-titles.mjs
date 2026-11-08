@@ -39,6 +39,35 @@ export function normalizeTitle(value) {
   return title
 }
 
+// A quick placeholder title from the owner's first message, so a new thread is never "Untitled chat" while its
+// first reply is still being written. Deterministic and instant; the agent's own status-line title replaces it.
+const FIRST_FILLER = /^(?:(?:hey|hi|hello|ok(?:ay)?|so|well|um+|uh+|right|yeah|yes|no|what\??|please|pls|can you|could you|would you|will you|i(?:'d| would)? (?:like|want|need) (?:you )?to|i want|i need|i(?:'m| am) (?:trying|going) to|let's|lets|just|also|and|then|the|a|an)\b[\s,.!?:;-]*)+/iu
+const LAST_FILLER = /[\s,.;:!?-]+(?:and|or|but|the|a|an|to|of|for|in|on|at|with|so|that|is|it|i|my|me)$/iu
+export function provisionalTitleFrom(text) {
+  let line = String(text ?? '')
+    .replace(/\[(WIZARD_[A-Z0-9_]+)\][\s\S]*?\[\/\1\]/gu, ' ')
+    .replace(/\[Wizard OS context\][\s\S]*$/u, ' ')
+    .replace(/```[\s\S]*?```/gu, ' ')
+    .replace(/https?:\/\/\S+/gu, ' ')
+    .replace(/[*_#>`~]+/gu, ' ')
+  line = squash(line.split(/\n/u).map(part => part.trim()).find(part => /[\p{L}\p{N}]{2,}/u.test(part)) ?? '')
+  if (!line) return ''
+  line = line.split(/(?<=[.!?])\s/u).find(part => /[\p{L}\p{N}]{3,}/u.test(part.replace(FIRST_FILLER, ''))) ?? line
+  line = line.replace(FIRST_FILLER, '').trim()
+  const words = line.split(/\s+/u).filter(Boolean).slice(0, 5)
+  if (words.length < 1) return ''
+  let title = words.join(' ')
+  if (title.length > TITLE_MAX) {
+    const cut = title.slice(0, TITLE_MAX + 1)
+    const space = cut.lastIndexOf(' ')
+    title = space > 8 ? cut.slice(0, space) : cut.slice(0, TITLE_MAX)
+  }
+  title = title.replace(LAST_FILLER, '').replace(/[\s·,;:–—'"“”‘’!?.-]+$/u, '').trim()
+  title = normalizeTitle(title)
+  if (title.length < 3) return ''
+  return title.charAt(0).toLocaleUpperCase() + title.slice(1)
+}
+
 export const titleKey = (value) => squash(value).toLocaleLowerCase().replace(/\s*(?:#\d+)$/u, '')
 
 // Sentence-like titles (the opener's auto title) that should give way to a project label.
@@ -74,6 +103,7 @@ export function titleContextLine(current, record) {
   const title = squash(current)
   // No person's name here: this line reaches every owner's agent, and a fixed title may come from code (onboarding).
   if (record?.locked) return `This thread is titled “${title}”, and that title is fixed: put exactly that in the status line's title.`
+  if (record?.provisional && title) return `This thread's title “${title}” is only a placeholder cut from the first message: give its broad project label in the status line's title.`
   if (!title) return 'This thread has no title yet: give its broad project label in the status line.'
   return `This thread is currently titled “${title}”. Keep it exactly for all work in this project; rename only for a different project, or broaden a legacy feature/sentence title once to its project.`
 }
@@ -108,6 +138,7 @@ export class ThreadTitleStore {
             agent_id: record.agent_id ?? 'hermes', session_id: record.session_id ?? id,
             title: typeof record.title === 'string' ? record.title : '',
             locked: record.locked === true,
+            ...(record.provisional === true ? { provisional: true } : {}),
             appliedFor: Number.isFinite(record.appliedFor) ? record.appliedFor : null,
             history: Array.isArray(record.history) ? record.history.filter(validEntry).slice(-HISTORY_MAX) : [],
           }
@@ -138,6 +169,22 @@ export class ThreadTitleStore {
     record = { ...record, agent_id: 'hermes', session_id: sessionId }
     this._save({ ...this.load(), [sessionId]: record })
     return structuredClone(record)
+  }
+
+  // A placeholder title from the first message. Never replaces a title that exists, an owner's lock or an agent title.
+  setProvisional(sessionId, title) {
+    const next = normalizeTitle(title)
+    const current = this.get(sessionId)
+    if (!next || current?.locked || current?.title || current?.history?.length) return null
+    return this._put(sessionId, { title: next, locked: false, provisional: true, appliedFor: current?.appliedFor ?? null, history: [] })
+  }
+
+  // The placeholder reached Hermes's own session title; remember it as the agent's so the owner's lock rules stay clean.
+  markProvisionalApplied(sessionId, title) {
+    const current = this.get(sessionId)
+    if (!current?.provisional) return null
+    const at = this.now()
+    return this._put(sessionId, { ...current, title, history: [{ from: '', to: title, at, by: 'agent', quiet: true }] })
   }
 
   // The agent's proposal for this reply was considered; nothing changed.
@@ -181,6 +228,6 @@ export function titleToApply({ currentTitle, proposed, record, assistantAt }) {
   // A narrower proposal is not evidence of a project change. Keep the existing home
   // even if the model drifts into Project · Feature (including suffixed canonical titles).
   // Semantic project changes and legacy broadening remain the shared prompt's job.
-  if (currentKey && nextKey.startsWith(`${currentKey} · `)) return ''
+  if (currentKey && !record?.provisional && nextKey.startsWith(`${currentKey} · `)) return ''
   return next
 }
