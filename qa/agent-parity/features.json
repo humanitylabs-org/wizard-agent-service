@@ -761,9 +761,9 @@
     },
     {
       "id": "automatic-titles",
-      "description": "Project-home titles stay stable for sub-asks, broaden legacy feature labels once, change for a new project and respect owner locks",
+      "description": "Project-home titles stay stable for sub-asks, broaden legacy feature labels once, change for a new project and respect owner locks; the app-name rule reaches every runtime and main chats replace an echoed opener placeholder with the app topic",
       "layer": "server",
-      "how_to_test": "Project-home titles stay stable for sub-asks, broaden legacy feature labels once, change for a new project and respect owner locks.",
+      "how_to_test": "Project-home titles stay stable for sub-asks, broaden legacy feature labels once, change for a new project and respect owner locks; every runtime receives the app-name, no-opener-words rule (main also replaces an echoed placeholder: tests/thread-titles.test.ts).",
       "source_refs": [
         "server/thread-titles.mjs"
       ],

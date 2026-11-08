@@ -72,7 +72,7 @@ export function provisionalTitleFrom(text, catalog = null) {
 }
 
 // Stripped when comparing, so a numbered or dated clash suffix never reads as a different project.
-const CLASH_SUFFIX = /\s*(?:#\d+|\(\d{1,2} [A-Za-z]{3}(?: \d{2}:\d{2})?\))$/u
+const CLASH_SUFFIX = /\s*(?:#\d+|\(\d{1,2} [A-Za-z]{3}(?: \d{2}:\d{2}(?: [a-z0-9]{1,4})?)?\))$/u
 export const titleKey = (value) => squash(value).toLocaleLowerCase().replace(CLASH_SUFFIX, '')
 
 // Sentence-like titles (the opener's auto title) that should give way to a project label.
@@ -140,12 +140,14 @@ export function topicFor({ appId = '', catalog = [], texts = [], subject = '' } 
 
 // A clash-free spelling of a title another thread already holds: dated, never numbered.
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-export function clashCandidates(title, now = new Date()) {
+export function clashCandidates(title, now = new Date(), salt = '') {
   const base = squash(title).replace(CLASH_SUFFIX, '')
   const day = `${now.getUTCDate()} ${MONTHS[now.getUTCMonth()]}`
   const time = `${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`
   const fit = (suffix) => `${base.slice(0, Math.max(3, TITLE_MAX - suffix.length - 1)).trimEnd()} ${suffix}`
-  return [...new Set([base, fit(`(${day})`), fit(`(${day} ${time})`)])]
+  // The last candidate carries a per-thread tail, so two same-topic threads in one minute never share it.
+  const tail = String(salt ?? '').replace(/[^a-z0-9]/giu, '').slice(-4).toLowerCase()
+  return [...new Set([base, fit(`(${day})`), fit(`(${day} ${time})`), ...(tail ? [fit(`(${day} ${time} ${tail})`)] : [])])]
 }
 
 export function readSessionTitle(sessionDbPath, sessionId) {

@@ -4341,7 +4341,7 @@ function buildWizardServer(options, lifetime) {
     const current = readSessionTitle(titleDbPath(), sessionId)
     if (!current) return ''
     const record = threadTitleStore.get(sessionId)
-    return titleContextLine(current.title, { locked: titleLocked(current, record) })
+    return titleContextLine(current.title, { locked: titleLocked(current, record), provisional: record?.provisional === true })
   }
   // Appended to every direct run: the thread's current title and the owner's subject list.
   const runTitleNote = (sessionId) => {
@@ -4351,7 +4351,7 @@ function buildWizardServer(options, lifetime) {
   }
   const patchHermesTitle = async (sessionId, title) => {
     // A title another thread holds is dated, never numbered (James, 8 Nov: no #N).
-    for (const candidate of clashCandidates(title)) {
+    for (const candidate of clashCandidates(title, new Date(), sessionId)) {
       const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'application/json' })
       if (hermesKey) headers.set('Authorization', ['Bearer', hermesKey].join(' '))
       const reply = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, {
