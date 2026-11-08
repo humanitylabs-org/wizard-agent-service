@@ -42,7 +42,7 @@ test('full service accepted user and completed assistant hooks project both role
  const wizard=createWizardServer({upstreamOrigin:`http://127.0.0.1:${addr.port}`,hermesKey:'fixture-key',requireAccess:false,requireJoinedDelegationCapability:false,
   wizardOsHome:osHome,hermesStatePath:statePath,agentArtifactDir:join(root,'artifacts'),agentArtifactRoots:[root],userFilesRoot:media,followThrough:false,
   runQueueStatePath:join(root,'queue.sqlite3'),runQueuePollIntervalMs:100,activeSessionReader:async()=>[],dispatchHealthReader:()=>true,canonicalSessionReader:async()=>[session()],
-  chatPhotos:{enabled:true,singleOwner:true,ownerId:'123',ownerLabel:'Owner',agentLabel:'Agent',statePath:stateFile,maxBytes:1024*1024}})
+  chatPhotos:{enabled:true,pacing:{eventMinMs:200},singleOwner:true,ownerId:'123',ownerLabel:'Owner',agentLabel:'Agent',statePath:stateFile,maxBytes:1024*1024}})
  servers.push(wizard);const w=await listen(wizard),base=`http://127.0.0.1:${w.port}`
  await until(()=>existsSync(stateFile))
  const response=await fetch(`${base}/wizard/hermes/v1/runs`,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':'photo-owner-turn'},body:JSON.stringify({session_id:sid,input:'An image'})})
