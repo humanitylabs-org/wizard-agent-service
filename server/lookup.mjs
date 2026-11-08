@@ -12,6 +12,7 @@
 //
 // Privacy: text of a private (Tinfoil) agent or an incognito thread never leaves for a cloud model: refused with 403.
 import { randomBytes } from 'node:crypto'
+import { StringDecoder } from 'node:string_decoder'
 
 export const LOOKUP_MODEL = 'claude-haiku-4-5'
 export const LOOKUP_DEADLINE_MS = 30_000
@@ -143,7 +144,7 @@ export function createLookup({ env = process.env, fetchImpl = fetch, slots = 3 }
       if (!upstream.ok || !upstream.body) { await upstream.body?.cancel?.().catch(() => undefined); fail(); return true }
       response.writeHead(200, { 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff', 'X-Accel-Buffering': 'no' })
       started = true
-      const decoder = new TextDecoder()
+      const decoder = new StringDecoder('utf8') // keeps a multi-byte character split across chunks whole
       let buffer = ''
       let total = 0
       let streamed = 0
@@ -151,7 +152,7 @@ export function createLookup({ env = process.env, fetchImpl = fetch, slots = 3 }
       for await (const chunk of upstream.body) {
         total += chunk.length
         if (total > 65_536) throw new Error('oversized')
-        buffer += decoder.decode(chunk, { stream: true })
+        buffer += decoder.write(Buffer.from(chunk))
         let at
         while ((at = buffer.indexOf('\n')) >= 0) {
           const line = buffer.slice(0, at); buffer = buffer.slice(at + 1)
