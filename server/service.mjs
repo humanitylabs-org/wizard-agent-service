@@ -3118,7 +3118,7 @@ function buildWizardServer(options, lifetime) {
     },
     forgetAgentInput: (agent, sessionId) => agentChatInputs.forget(agent.id, sessionId),
     ingestThreadItems: (agentId, sessionId, result) => trackerFor(agentId) ? ingestHistory(threadItems, agentId, sessionId, result, parseStatus) : 0,
-    expandReplyTo: (agentId, sessionId, input) => trackerOn() ? expandReplyToInput(input, id => threadItems.titleOf(agentId, sessionId, id)) : input,
+    expandReplyTo: (agentId, sessionId, input) => trackerFor(agentId) ? expandReplyToInput(input, id => threadItems.titleOf(agentId, sessionId, id)) : input,
     trackerOn: (agentId = MAIN_AGENT_ID) => trackerFor(agentId),
     responseStyle: () => readSettings(settingsPath).settings.response_style,
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
