@@ -4362,9 +4362,9 @@ function buildWizardServer(options, lifetime) {
     if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote, trackerNote('hermes', '')].filter(Boolean).join('\n')
     return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId)].filter(Boolean).join('\n')
   }
-  const patchHermesTitle = async (sessionId, title) => {
-    // A title another thread holds is dated, never numbered (James, 8 Nov: no #N).
-    for (const candidate of clashCandidates(title, new Date(), sessionId)) {
+  const patchHermesTitle = async (sessionId, title, { exact = false } = {}) => {
+    // A title another thread holds is dated, never numbered (James, 8 Nov: no #N). An exact patch never is.
+    for (const candidate of exact ? [title] : clashCandidates(title, new Date(), sessionId)) {
       const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'application/json' })
       if (hermesKey) headers.set('Authorization', ['Bearer', hermesKey].join(' '))
       const reply = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, {
@@ -4410,7 +4410,8 @@ function buildWizardServer(options, lifetime) {
       if (!current?.title || !misspellsProductName(current.title)) return null
       const record = threadTitleStore.get(sessionId)
       const locked = titleLocked(current, record)
-      const applied = await patchHermesTitle(sessionId, spellProductName(current.title))
+      // An owner's title changes in spelling only; an agent title that clashes is dated like any agent title.
+      const applied = await patchHermesTitle(sessionId, spellProductName(current.title), { exact: locked })
       if (!applied) return null
       threadTitleStore.respell(sessionId, { from: current.title, to: applied, locked })
       canonicalSessionCache.expiresAt = 0
@@ -4437,6 +4438,7 @@ function buildWizardServer(options, lifetime) {
         const done = await respellTitle(row.id)
         if (done) receipt.renamed.push(done); else receipt.failed.push(row.id)
       } catch { receipt.failed.push(row.id) }
+      await new Promise((resolveGap) => setTimeout(resolveGap, 15))
     }
     receipt.finished_at = new Date().toISOString()
     writeFileSync(receiptPath, JSON.stringify(receipt), { mode: 0o600 })
