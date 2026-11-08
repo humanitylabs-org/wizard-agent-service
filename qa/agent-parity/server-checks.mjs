@@ -49,7 +49,7 @@ const finishedRunLeavesWorking = async (s, fresh = true) => {
 const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].flatMap(match => JSON.parse(match[1]).items || [])
 
 export const serverChecks = {
-  // #379: Hermes 0.22.7 stamps every /v1/runs admission's user row internal_notification, the owner's own
+  // Issue 379: Hermes 0.22.7 stamps every /v1/runs admission's user row internal_notification, the owner's own
   // messages included. Every kind restores the owner's turn from its own queue (routed kinds behind
   // WIZARD_ROUTED_OWNER_TURNS); a machine wake with the same kind stays hidden; raw upstream rows are untouched.
   'routed-owner-turns': async s => {

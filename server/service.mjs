@@ -2967,7 +2967,7 @@ function buildWizardServer(options, lifetime) {
   const providerRecoveryOptions = { providerSignInReady, providerFailureDismissed,
     providerAccessRecovery: options.providerAccessRecovery ?? process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
     providerAccessWindowSeconds: options.providerAccessWindowSeconds }
-  // Routed owner turns (#379): off unless WIZARD_ROUTED_OWNER_TURNS=1. Each agent's own queue and state.db, never main's.
+  // Routed owner turns (issue 379): off unless WIZARD_ROUTED_OWNER_TURNS=1. Each agent's own queue and state.db, never main's.
   const routedOwnerTurns = options.routedOwnerTurns === true
     ? (raw, queue, sessionId, agent) => {
         const home = routedAgentMedia(agent)?.home

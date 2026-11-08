@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 // @ts-ignore -- plain ESM fixture shared with qa/agent-parity
 import { scene, post } from '../qa/agent-parity/fixture.mjs'
 
-// #379: Hermes 0.22.7 stamps every /v1/runs admission's user row internal_notification, the owner's own messages
+// Issue 379: Hermes 0.22.7 stamps every /v1/runs admission's user row internal_notification, the owner's own messages
 // included. Main restores them from its run queue (restoreOwnerTurns); routed agents do the same from their own
 // queue only with WIZARD_ROUTED_OWNER_TURNS=1 (routedOwnerTurns), which is off by default.
 const words = 'Synthetic routed owner turn stamped as an internal notification.'
@@ -22,7 +22,7 @@ async function ownerRow(kind: string, options: Record<string, unknown>) {
   return history.data.filter((m: any) => m.role === 'user' && JSON.stringify(m.content).includes(words))
 }
 
-describe('routed owner turns (#379)', () => {
+describe('routed owner turns (issue 379)', () => {
   for (const kind of ['host-profile', 'container', 'restricted']) {
     it(`${kind}: switch off by default leaves the routed history as Hermes sent it`, async () => {
       const rows = await ownerRow(kind, {})
