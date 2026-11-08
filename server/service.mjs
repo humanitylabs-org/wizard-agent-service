@@ -923,7 +923,24 @@ function ownerRowText(content) {
   }
   return visibleInputText(content)
 }
-export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, { ownerText = false } = {}) {
+// Hermes' text-only projection turns each inline image into "[screenshot]" (issue 145), so a screenshot turn's row
+// text is the owner's words plus that marker, or the marker alone. Mirrors visibleInputText with the marker kept.
+const IMAGE_PART_TYPES = new Set(['image', 'image_url', 'input_image'])
+function screenshotInputText(input) {
+  if (typeof input === 'string') return input
+  if (!Array.isArray(input)) return ''
+  return input.flatMap((item) => {
+    if (IMAGE_PART_TYPES.has(item?.type)) return [DURABLE_SCREENSHOT_MARKER]
+    if (typeof item?.text === 'string' && ['text', 'input_text', 'output_text'].includes(item.type)) return [item.text]
+    if (typeof item?.content === 'string') return [item.content]
+    return Array.isArray(item?.content) ? [screenshotInputText(item.content)] : []
+  }).filter(Boolean).join('\n')
+}
+const squashSpace = (text) => String(text ?? '').replace(/\s+/g, '')
+// A queued turn matches a row on its visible words or, with `screenshots`, on its screenshot-marked form.
+const sameOwnerTurn = (p, text) => Boolean(text) && ((p.input && sameTurnText(p.input, text))
+  || (p.shot && (sameTurnText(p.shot, text) || squashSpace(p.shot) === squashSpace(text))))
+export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, { ownerText = false, screenshots = false } = {}) {
   if (!runQueue || typeof sessionId !== 'string' || !sessionId) return result
   let records
   try { records = runQueue.admittedForSession('direct', sessionId) } catch { return result }
@@ -932,14 +949,17 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, {
     let body = null
     try { body = JSON.parse(String(record?.body ?? '{}')) } catch { /* unreadable body */ }
     const input = visibleInputText(body?.input).trim()
+    // Only set when the input carries an image, so text-only turns match exactly as before.
+    const marked = screenshots && Array.isArray(body?.input) ? screenshotInputText(body.input).trim() : ''
+    const shot = marked.includes(DURABLE_SCREENSHOT_MARKER) && marked !== input ? marked : ''
     const at = Number(record?.payload?.created_at ?? record?.createdAt)
     const id = typeof record?.payload?.admission_id === 'string' ? record.payload.admission_id : ''
     const run = typeof record?.upstreamRunId === 'string' ? record.upstreamRunId : ''
     // The owner's app sends list-shaped input (or a plain sentence typed in older builds); every machine message
     // (follow-through, heavy, scheduler, reporter) is a bracketed string and never an owner turn.
     const listShaped = Array.isArray(body?.input)
-    const owner = !body?._wizard_background_recovery && Boolean(input) && (listShaped || (typeof body?.input === 'string' && !MACHINE_INPUT.test(input)))
-    if ((input || id) && owner && Number.isFinite(at)) pending.push({ input, at, id, run, owner, listShaped, status: String(record?.status ?? ''), publicRunId: String(record?.publicRunId ?? ''), used: false })
+    const owner = !body?._wizard_background_recovery && Boolean(input || shot) && (listShaped || (typeof body?.input === 'string' && !MACHINE_INPUT.test(input)))
+    if ((input || shot || id) && owner && Number.isFinite(at)) pending.push({ input, shot, at, id, run, owner, listShaped, status: String(record?.status ?? ''), publicRunId: String(record?.publicRunId ?? ''), used: false })
   }
   // An interrupted/failed attempt that a later queued run retried (the queue records the retry source) is the same
   // message: show it once, through the retry.
@@ -967,7 +987,7 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, {
     if (row.display_kind && row.display_kind !== 'final') continue
     const text = visibleInputText(row.content).trim()
     const at = Number(row.timestamp ?? row.created_at)
-    const seen = pending.find((p) => !p.used && p.input && sameTurnText(p.input, text) && Number.isFinite(at) && at >= p.at - 5 && at - p.at <= OWNER_TURN_WINDOW_SECONDS)
+    const seen = pending.find((p) => !p.used && sameOwnerTurn(p, text) && Number.isFinite(at) && at >= p.at - 5 && at - p.at <= OWNER_TURN_WINDOW_SECONDS)
     if (seen) seen.used = true
   }
   const strongClaim = (row) => {
@@ -986,7 +1006,7 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, {
     // Closest admission at or before the row.
     let best = null
     for (const p of pending) {
-      if (p.used || p.superseded || !p.input || !sameTurnText(p.input, text) || at < p.at - 5 || at - p.at > OWNER_TURN_WINDOW_SECONDS) continue
+      if (p.used || p.superseded || !sameOwnerTurn(p, text) || at < p.at - 5 || at - p.at > OWNER_TURN_WINDOW_SECONDS) continue
       if (!best || p.at > best.at) best = p
     }
     return best
@@ -1009,7 +1029,7 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, {
     if (!match) return row
     changed = true
     const { display_kind: _kind, ...rest } = row
-    if (typeof rest.content === 'string' && PYTHON_REPR_PARTS.test(rest.content)) rest.content = match.input
+    if (typeof rest.content === 'string' && PYTHON_REPR_PARTS.test(rest.content)) rest.content = match.shot || match.input
     // Hermes appends its own "[System: ...]" notices to the multipart list; they are not the owner's words.
     else if (Array.isArray(rest.content)) rest.content = rest.content.filter((part) => !(typeof part?.text === 'string' && part.text.startsWith('[System:')))
     return rest
@@ -1025,12 +1045,12 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, {
     if (stamped.length) {
       const low = Math.min(...stamped)
       const high = Math.max(...stamped)
-      const missing = pending.filter((p) => p.listShaped && !p.used && !p.superseded && p.input && TERMINAL_STATUSES.has(p.status)
+      const missing = pending.filter((p) => p.listShaped && !p.used && !p.superseded && (p.input || p.shot) && TERMINAL_STATUSES.has(p.status)
         && p.at <= high && (coversOldest || p.at >= low)).sort((left, right) => left.at - right.at)
       for (const p of missing) {
         const anchor = payload.data.findIndex((row) => row && typeof row === 'object' && row.display_kind !== 'hidden'
           && !String(row.content ?? '').startsWith('[CONTEXT COMPACTION') && Number(row.timestamp ?? row.created_at) > p.at)
-        const row = { id: `queue-${p.publicRunId}`, session_id: sessionId, role: 'user', timestamp: p.at, content: p.input }
+        const row = { id: `queue-${p.publicRunId}`, session_id: sessionId, role: 'user', timestamp: p.at, content: p.shot || p.input }
         payload.data.splice(anchor < 0 ? payload.data.length : anchor, 0, row)
         p.used = true
         changed = true
@@ -3036,11 +3056,13 @@ function buildWizardServer(options, lifetime) {
     providerAccessRecovery: options.providerAccessRecovery ?? process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
     providerAccessWindowSeconds: options.providerAccessWindowSeconds }
   // Routed owner turns (issue 379): off unless WIZARD_ROUTED_OWNER_TURNS=1. Each agent's own queue and state.db, never main's.
+  // Screenshot owner turns (issue 145): off unless WIZARD_OWNER_SCREENSHOT_TURNS=1.
+  const ownerScreenshotTurns = options.ownerScreenshotTurns === true
   const routedOwnerTurns = options.routedOwnerTurns === true
     ? (raw, queue, sessionId, agent) => {
         const home = routedAgentMedia(agent)?.home
         // A restricted agent's home is unreadable here, so its rows also match on the owner's words alone.
-        return restoreOwnerTurns(raw, queue, sessionId, ownerTurnRowMetaAt(home ? join(home, 'state.db') : ''), { ownerText: true })
+        return restoreOwnerTurns(raw, queue, sessionId, ownerTurnRowMetaAt(home ? join(home, 'state.db') : ''), { ownerText: true, screenshots: ownerScreenshotTurns })
       }
     : null
   const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, queuedHistory: queuedOwnerHistory, restoreOwnerTurns: routedOwnerTurns, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
@@ -7224,7 +7246,7 @@ function buildWizardServer(options, lifetime) {
             if (queued) { result = queued; responseStatus = 200 }
           }
           if (messageHistory && !operator && url.searchParams.get('view') === 'wizard') {
-            result = restoreOwnerTurns(result, runQueue, decodeURIComponent(upstreamPath.split('/')[3]), ownerTurnRowMeta)
+            result = restoreOwnerTurns(result, runQueue, decodeURIComponent(upstreamPath.split('/')[3]), ownerTurnRowMeta, { screenshots: ownerScreenshotTurns })
             result = projectInFlightOwnerTurns(result, runQueue, decodeURIComponent(upstreamPath.split('/')[3]))
             result = projectProviderSignInHistory(result, runQueue?.latestForSession(decodeURIComponent(upstreamPath.split('/')[3])), url.searchParams)
             result = restoreDurableScreenshots(result, runQueue, upstreamPath.split('/')[3])

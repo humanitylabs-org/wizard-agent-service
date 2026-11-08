@@ -80,6 +80,29 @@ export const serverChecks = {
     const raw = await (await s.request('/api/sessions/wizard_parity/messages?order=oldest')).json()
     assert.equal(raw.data.find(m => JSON.stringify(m.content).includes(words)).display_kind, 'internal_notification', 'raw (non-wizard) history is not projected')
   },
+  // Issue 145: an owner turn with an inline screenshot is stored by Hermes' text-only projection as the words plus
+  // "[screenshot]"; with WIZARD_OWNER_SCREENSHOT_TURNS it is still the owner's own message on every kind.
+  'owner-screenshot-turns': async s => {
+    const words = 'Synthetic screenshot owner turn.'
+    await admit(s, { input: [{ role: 'user', content: [{ type: 'text', text: words }, { type: 'image_url', image_url: { url: `data:image/png;base64,${png.toString('base64')}` } }] }] })
+    for (let i = 0; i < 40 && !s.sessions.get('wizard_parity').messages.length; i++) await new Promise(r => setTimeout(r, 25))
+    const row = s.sessions.get('wizard_parity')
+    const owner = row.messages.findLast(m => m.role === 'user')
+    assert.ok(owner, 'the queued owner turn reached this kind\'s runtime')
+    Object.assign(owner, { display_kind: 'internal_notification', content: `${words}\n[screenshot]` })
+    const at = Number(owner.timestamp)
+    for (const run of s.runs.values()) Object.assign(run, { status: 'completed', output: 'Synthetic reply' })
+    row.messages.push({ id: 'synthetic-reply', role: 'assistant', content: 'Synthetic reply', timestamp: at + 1 },
+      { id: 'synthetic-wake', role: 'user', display_kind: 'internal_notification', content: '[Wizard follow-through] Synthetic machine wake', timestamp: at + 2 })
+    const before = JSON.stringify(row.messages)
+    const output = await history(s)
+    const mine = output.filter(m => m.role === 'user' && JSON.stringify(m.content).includes(words))
+    assert.equal(mine.length, 1, `${s.kind}: the owner's screenshot message shows exactly once`)
+    assert.notEqual(mine[0].display_kind, 'internal_notification', `${s.kind}: the owner's screenshot message is a normal user row`)
+    const wake = output.find(m => JSON.stringify(m.content ?? '').includes('Synthetic machine wake'))
+    assert.ok(!wake || wake.display_kind === 'internal_notification', 'a machine wake is never turned into an owner turn')
+    assert.equal(JSON.stringify(row.messages), before, 'upstream rows are unchanged')
+  },
   'in-flight-notice': async outer => {
     const path = join(outer.root, 'in-flight-heavy.db')
     const s = await scene(outer.kind, { heavyStatePath: path, heavyToken: 'synthetic-in-flight-notice-token', heavyPollIntervalMs: 3_600_000,
