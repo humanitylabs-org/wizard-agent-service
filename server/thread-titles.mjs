@@ -126,7 +126,7 @@ export function appTopicInText(text, catalog = []) {
   return best.name
 }
 
-// The topic title for a status line: its app_id's app, else an app the opener or ask names, else its subject.
+// The topic title for a status line: its app_id's app, else an app the opener names, else its subject.
 export function topicFor({ appId = '', catalog = [], texts = [], subject = '' } = {}) {
   const byId = appTopicName(appId, catalog)
   if (byId) return byId
