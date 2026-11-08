@@ -399,26 +399,30 @@ export function readActiveHumanSessionIds(sessionDbPath, currentTime = Date.now(
   const database = new DatabaseSync(sessionDbPath, { readOnly: true })
   try {
     const now = currentTime / 1000
+    // Two index-driven branches instead of one scan of every root session (that join took ~12 ms warm and
+    // far longer on a busy disk, on every queue tick): live turn leases first, then recently active rows
+    // through the COALESCE(last_activity_at, started_at) index. The exact old predicate still decides.
     const rows = database.prepare(`
-      SELECT DISTINCT sessions.id, sessions.source
-        FROM sessions
-        LEFT JOIN session_turn_leases
-          ON session_turn_leases.conversation_id = sessions.id
-         AND session_turn_leases.expires_at > ?
-       WHERE sessions.hidden = 0
+      SELECT sessions.id, sessions.source
+        FROM session_turn_leases
+        CROSS JOIN sessions ON sessions.id = session_turn_leases.conversation_id
+       WHERE session_turn_leases.expires_at > ?
+         AND sessions.hidden = 0
          AND sessions.parent_session_id IS NULL
          AND sessions.message_count > 0
-         AND (
-           session_turn_leases.conversation_id IS NOT NULL
-           OR (
-             COALESCE(sessions.last_activity_description, '') <> ''
-             -- A background helper heartbeats its parent's activity while the parent's own
-             -- turn is over. That parent is waiting, not working: it must not hold a slot.
-             AND COALESCE(sessions.last_activity_description, '') NOT LIKE 'delegate_task:%'
-             AND COALESCE(sessions.last_activity_at, 0) >= ?
-           )
-         )
-    `).all(now, now - 150)
+      UNION
+      SELECT sessions.id, sessions.source
+        FROM sessions
+       WHERE COALESCE(sessions.last_activity_at, sessions.started_at) >= ?
+         AND sessions.hidden = 0
+         AND +sessions.parent_session_id IS NULL
+         AND sessions.message_count > 0
+         AND COALESCE(sessions.last_activity_description, '') <> ''
+         -- A background helper heartbeats its parent's activity while the parent's own
+         -- turn is over. That parent is waiting, not working: it must not hold a slot.
+         AND COALESCE(sessions.last_activity_description, '') NOT LIKE 'delegate_task:%'
+         AND COALESCE(sessions.last_activity_at, 0) >= ?
+    `).all(now, now - 150, now - 150)
     return rows
       .filter((row) => {
         const id = String(row.id ?? '')
