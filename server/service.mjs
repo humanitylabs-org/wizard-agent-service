@@ -36,7 +36,6 @@ import { bootstrapPayload, readApps, readSettings, normalizeSettings, validTimeZ
 import { readUiPreferences, updateUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
-import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX } from './delegation-follow-through.mjs'
@@ -64,10 +63,9 @@ import { AgentError, MAIN_AGENT_ID, agentModelSeesImages, agentVisionHelper, cre
 import { acquireServiceLeases } from './store-migration.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
 import { onboardingTools } from './onboarding.mjs'
-import { followUpThreadNote, followUpTool } from './follow-ups.mjs'
-import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, projectFollowUps, scheduledRunEvents } from './scheduler.mjs'
+import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
-import { loadAgentSessionRows, projectProfileSessions, decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { loadAgentSessionRows, decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { placeAgentFiles } from './agent-files.mjs'
 import { AgentChatInputs } from './agent-chat-inputs.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
@@ -2506,7 +2504,6 @@ function buildWizardServer(options, lifetime) {
   // kernel in its system prompt (settings agent.adapter = 'hermes-plugin'), only the apps that changed since the
   // thread started.
   const bridgeOsHome = options.wizardOsHome ? resolve(String(options.wizardOsHome)) : (appsJsonPath ? dirname(appsJsonPath) : '')
-  let workspaceStore = null
   // The agent registry (below) decides which apps each agent may use on the gateway (#58).
   let gatewayAgents = null
   // agentBridge 'gateway': serve /wizard/mcp and the agent kernel to container agents (their own gateway token)
@@ -2515,13 +2512,12 @@ function buildWizardServer(options, lifetime) {
   const containerAgent = (request) => { const id = bridge?.agentFor(request) || ''; return id && id !== GATEWAY_MAIN_AGENT ? id : '' }
   // wizard_remind / wizard_tips on the gateway (server/onboarding.mjs); bound once the scheduler exists below.
   let onboarding = null
-  let followUps = null
   let spacesTools = null
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
       builtins: {
-        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(spacesTools?.list(agentId) || [])],
-        call: async (name, args, agentId) => (await followUps?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
+        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(spacesTools?.list(agentId) || [])],
+        call: async (name, args, agentId) => await spacesTools?.call(name, args, agentId) || onboarding?.call(name, args, agentId),
       },
       agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
@@ -2650,8 +2646,6 @@ function buildWizardServer(options, lifetime) {
     },
     forgetAgentInput: (agent, sessionId) => agentChatInputs.forget(agent.id, sessionId),
     registry: agents, bindings: appBindings, sendJson, readBoundedBody, fetchImpl, isAllowedProxyRequest, secretGuard, projectStatusMarkers, projectWizardMessageHistory,
-    projectFollowUps: (result, agentId) => projectFollowUps(result, scheduler, { agent: agentId }),
-    followUpNote: (sessionId) => (scheduler?.running() && bridge ? followUpThreadNote(sessionId) : ''),
     scheduleRunEventFilter: (agentId, runId) => scheduler?.hasRun(agentId, runId) ? scheduledRunEvents() : null,
     projectAgentHistory: async (result, agent, sessionId = '') => {
       // Restore from this exact pair's accepted input receipts, not main history.
@@ -2714,16 +2708,10 @@ function buildWizardServer(options, lifetime) {
       const agent = agents.read(id)
       const key = id === MAIN_AGENT_ID ? hermesKey : agents.apiKey(id)
       const registry = id !== MAIN_AGENT_ID ? agents : { ...agents, fetchAgent: (_agent, path, init) => fetchImpl(`${upstreamOrigin}${path}`, init) }
-      const headers = key ? { Authorization: `Bearer ${key}` } : {}
-      const secrets = [key].filter(Boolean)
-      const rows = await loadAgentSessionRows({ registry, isThreadVisible: agentCtx.isThreadVisible, agentStatePath: agentCtx.agentStatePath, ...(id === MAIN_AGENT_ID ? { archivePath: hermesStatePath || '' } : {}) }, agent, {
-        headers, secrets,
+      return loadAgentSessionRows({ registry, isThreadVisible: agentCtx.isThreadVisible, agentStatePath: agentCtx.agentStatePath, ...(id === MAIN_AGENT_ID ? { archivePath: hermesStatePath || '' } : {}) }, agent, {
+        headers: key ? { Authorization: `Bearer ${key}` } : {}, secrets: [key].filter(Boolean),
         signal: AbortSignal.timeout(15000), archiveLimit: 100000, requireComplete: true,
       })
-      // Subjects come from status projection, not the raw upstream census. Use
-      // the session-list projection with the same scoped transport; omit title/
-      // filing hooks here so metadata search itself remains read-only.
-      return projectProfileSessions({ registry }, agent, rows, headers, secrets)
     },
   })
   const settingsOptions = { canStartAgent: id => agents ? agents.canStartAgent(id) : id === MAIN_AGENT_ID }
@@ -3343,9 +3331,9 @@ function buildWizardServer(options, lifetime) {
   let backgroundResults = null
   let runQueueReady = Promise.resolve()
   if (runQueueStatePath) {
-    // Every owner-authored turn (typed or voice reply, share, follow-through) brings an archived
-    // thread back: it shows in Working and its result lands in Ready. Quiet scheduler watchers are the exception;
-    // they retain archive state until a terminal visible outcome.
+    // Every admitted turn (typed or voice reply, share, follow-through) brings an archived
+    // thread back: it shows in Working and its result lands in Ready, never silently in Archive.
+    // Best effort: a failed un-archive must never fail the run itself.
     const unarchiveForNewTurn = async (sessionId) => {
       try {
         if (!sessionId) return
@@ -3372,19 +3360,6 @@ function buildWizardServer(options, lifetime) {
           clearTimeout(timer)
         }
       } catch { /* the run proceeds; Restore stays available */ }
-    }
-    const preserveWatcherArchive = async (sessionId) => {
-      if (!sessionId) return
-      const result = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, {
-        method: 'PATCH',
-        headers: { Authorization: ['Bearer', hermesKey].join(' '), 'Content-Type': 'application/json' },
-        body: JSON.stringify({ archived: true }),
-        signal: AbortSignal.timeout(5_000),
-        redirect: 'manual',
-      })
-      await result.body?.cancel().catch(() => undefined)
-      if (!result.ok) throw Object.assign(new Error('watcher archive preservation failed'), { status: result.status })
-      canonicalSessionCache.expiresAt = 0
     }
     const queueHermesAdmission = async (record) => {
       if ((record.agent_id ?? MAIN_AGENT_ID) !== MAIN_AGENT_ID) throw Object.assign(new Error('Agent-qualified job belongs to a different executor'), { status: 410 })
@@ -3426,7 +3401,7 @@ function buildWizardServer(options, lifetime) {
         if (record.continuation?.kind === HEAVY_KIND) {
           if (!heavyWork) throw Object.assign(new Error('heavy continuation unavailable'), { status: 503 })
           await heavyWork.validate(record)
-        } else if (!manualRecovery && record.continuation?.kind !== 'watch' && (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey))) {
+        } else if (!manualRecovery && (record.continuation || /^(wizard-helper-receipt-|wizard-follow-through-)/u.test(record.idempotencyKey))) {
           await requireHelperContinuation(record.continuation)
         }
       }
@@ -3450,11 +3425,7 @@ function buildWizardServer(options, lifetime) {
         operatorWorkers.set(upstreamRunId, { ...pendingWorker, ackRunId: upstreamRunId })
         persistOperatorWorkers()
       }
-      if (record.continuation?.kind === 'watch') {
-        // Hermes materializes a run by reopening its thread. A queued watcher may dispatch long after the scheduler
-        // first accepted it, so preserve Done at the durable launch boundary rather than only beside enqueue.
-        if (record.continuation.preserve_archived === true) await preserveWatcherArchive(record.sessionId)
-      } else await unarchiveForNewTurn(record.sessionId)
+      await unarchiveForNewTurn(record.sessionId)
       chatPhotos?.kick('accepted_user') // accepted user message; never upload completion
       return {
         upstreamRunId,
@@ -3925,7 +3896,6 @@ function buildWizardServer(options, lifetime) {
   }
   const decorateSessionList = (result, operator) => {
           result = decorateSessionTitles(result, operator)
-          if (!operator) result = projectFollowUps(result, scheduler, { agent: 'main' })
           if (agents && !operator) {
             const ids = []
             result = decorateThreadAgent(result, row => { ids.push(row.id); return agents.threadAgent(MAIN_AGENT_ID) })
@@ -4308,24 +4278,15 @@ function buildWizardServer(options, lifetime) {
     }
     return options.uploadTargets?.(key) ?? shareRouting?.uploadTarget(key) ?? null
   }
-  const deliveryCall = async (path, body, idempotencyKey = '', method = 'POST', extraHeaders = {}) => {
+  const deliveryCall = async (path, body, idempotencyKey = '', method = 'POST') => {
     if (!selfOrigin) throw Object.assign(new Error('service not listening'), { status: 503 })
     const result = await fetchImpl(`${selfOrigin}${path}`, {
       method,
-      headers: { 'Content-Type': 'application/json', 'X-Wizard-Internal-Token': internalToken, ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}), ...extraHeaders },
+      headers: { 'Content-Type': 'application/json', 'X-Wizard-Internal-Token': internalToken, ...(idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : {}) },
       body: JSON.stringify(body), redirect: 'manual', signal: AbortSignal.timeout(60_000),
     })
     const raw = await result.text()
     let payload = {}
-    try { payload = raw ? JSON.parse(raw) : {} } catch { payload = {} }
-    return { status: result.status, ok: result.ok, payload }
-  }
-  const deliverySession = async (path, method = 'GET', body = null, extraHeaders = {}) => {
-    if (!selfOrigin) throw Object.assign(new Error('service not listening'), { status: 503 })
-    const result = await fetchImpl(`${selfOrigin}${path}`, { method,
-      headers: { 'X-Wizard-Internal-Token': internalToken, ...(body ? { 'Content-Type': 'application/json' } : {}), ...extraHeaders },
-      ...(body ? { body: JSON.stringify(body) } : {}), redirect: 'manual', signal: AbortSignal.timeout(10_000) })
-    const raw = await result.text(); let payload = {}
     try { payload = raw ? JSON.parse(raw) : {} } catch { payload = {} }
     return { status: result.status, ok: result.ok, payload }
   }
@@ -4390,14 +4351,6 @@ function buildWizardServer(options, lifetime) {
       if (!result.ok) { await result.body?.cancel(); return null }
       return result.json()
     },
-    onWatchResult: async job => {
-      // A visible watcher result is a real new turn: bring the same thread back from either Defer or Done.
-      const agent = job.agent === 'main' ? MAIN_AGENT_ID : job.agent
-      threadDispositionStore.clearSession(job.thread.startsWith(OPERATOR_SESSION_PREFIX) ? 'operator' : 'direct', job.thread, agent)
-      const query = agents ? `?agent=${encodeURIComponent(agent)}` : ''
-      const restored = await deliverySession(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(job.thread)}${query}`, 'PATCH', { archived: false })
-      if (!restored.ok) throw Object.assign(new Error('watcher thread restoration failed'), { status: restored.status })
-    },
     deliver: async occurrence => {
       // 'main' is the portable schedule spelling; Hermes is the registry's main id.
       const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
@@ -4411,13 +4364,6 @@ function buildWizardServer(options, lifetime) {
       if (!agents && agent !== MAIN_AGENT_ID) throw Object.assign(new Error('agent unavailable'), { status: 404 })
       if (agents && (!agents.read(agent) || agents.read(agent)?.role === 'recovery')) throw Object.assign(new Error('agent unavailable'), { status: 409 })
       if (agent === MAIN_AGENT_ID && !runQueue) throw Object.assign(new Error('durable run queue required'), { status: 503 })
-      let wasArchived = false
-      if (occurrence.kind === 'watch') {
-        const state = await deliverySession(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(occurrence.thread)}${query}`)
-        if (!state.ok) throw Object.assign(new Error('watcher thread lookup failed'), { status: state.status })
-        const session = state.payload?.session ?? state.payload?.data ?? state.payload
-        wasArchived = session?.archived === true
-      }
       if (occurrence.createThread) {
         const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${query}`, { id: occurrence.thread, title: occurrence.title, ...(occurrence.body.model ? { model: occurrence.body.model } : {}) })
         if (!created.ok && created.status !== 409) throw Object.assign(new Error('schedule thread creation failed'), { status: created.status })
@@ -4429,19 +4375,15 @@ function buildWizardServer(options, lifetime) {
         const marked = await deliveryCall(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(occurrence.thread)}${query}`, { hidden }, '', 'PATCH')
         if (!marked.ok) throw Object.assign(new Error('schedule thread visibility failed'), { status: marked.status })
       }
-      const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${query}`, occurrence.body, occurrence.key, 'POST', { 'X-Wizard-Schedule-Kind': occurrence.kind,
-        ...(occurrence.kind === 'watch' ? { 'X-Wizard-Watcher-Preserve': wasArchived ? '1' : '0' } : {}) })
+      const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${query}`, occurrence.body, occurrence.key)
       if (!run.ok) throw Object.assign(new Error('schedule admission failed'), { status: run.status })
-      return { run_id: run.payload.run_id || run.payload.id, ...(occurrence.kind === 'watch' ? { was_archived: wasArchived } : {}) }
+      return { run_id: run.payload.run_id || run.payload.id }
     },
   }) : null
   if (scheduler) lifetime.own(() => scheduler.close(), () => scheduler.quiesce())
   onboarding = scheduler ? onboardingTools({ scheduler, running: () => Boolean(scheduler.timer) && !scheduler.stopped,
     timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
     now: options.schedulerNow ?? Date.now, mainAgent: GATEWAY_MAIN_AGENT }) : null
-  followUps = scheduler ? followUpTool({ scheduler, running: () => scheduler.running(), mainAgent: GATEWAY_MAIN_AGENT,
-    // A routed agent watches only a thread it has accepted (its pin). Main keeps its own unpinned history.
-    ownsThread: (agentId, sessionId) => agentId === GATEWAY_MAIN_AGENT || Boolean(agents?.pinnedAgents(sessionId)?.includes(agentId)) }) : null
   const uploadStatePath = options.uploadStatePath ? resolve(String(options.uploadStatePath)) : ''
   // Uploads with a destination (the Files app) land in the owner's user-files root (user-files.mjs).
   let userFiles = null
@@ -4860,32 +4802,6 @@ function buildWizardServer(options, lifetime) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const run = scheduler?.returnRun(decodeURIComponent(url.pathname.slice(`${PROXY_PREFIX}/v1/runs/`.length)))
         sendJson(response, run ? 200 : 404, run ?? { error: 'not_found' }, { 'Cache-Control': 'no-store' })
-        return
-      }
-      if (url.pathname === '/wizard/v1/workspaces' || url.pathname === '/wizard/v1/workspaces/closed/forget') {
-        // Workspace sync (server/workspaces.mjs, docs/workspaces.md): the same desks on every device of the owner.
-        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        // Owner-only like My skin: agent credentials and, with an owner proof configured, anonymous local callers are refused.
-        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
-        const forget = url.pathname.endsWith('/forget'), allowed = forget ? ['POST'] : ['GET', 'PUT']
-        if (!allowed.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: allowed.join(', ') }); return }
-        workspaceStore ||= createWorkspaceStore(resolve(bridgeOsHome || wizardOsHome(), 'workspaces.json'))
-        if (request.method === 'GET') {
-          const since = Number(url.searchParams.get('since') ?? -1), wait = Number(url.searchParams.get('wait') ?? 0)
-          if (!Number.isFinite(since) || !Number.isFinite(wait)) { sendJson(response, 400, { error: 'invalid_query' }); return }
-          const gone = new AbortController(); response.on('close', () => gone.abort())
-          const snap = await workspaceStore.wait(since, Math.max(0, Math.min(25, wait)), gone.signal)
-          if (!response.writableEnded && !response.destroyed) sendJson(response, 200, snap)
-          return
-        }
-        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_site_write' }); return }
-        if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
-        let body
-        try { body = JSON.parse((await readBoundedBody(request, 512 * 1024)).toString('utf8')) } catch (error) { sendJson(response, error?.status === 413 ? 413 : 400, { error: error?.status === 413 ? 'too_large' : 'invalid_workspaces' }); return }
-        try {
-          if (forget) { sendJson(response, 200, workspaceStore.forget(body?.desk)); return }
-          const r = workspaceStore.put(body || {}); sendJson(response, r.status, r.body)
-        } catch (error) { const st = [400, 413].includes(error?.status) ? error.status : 503; sendJson(response, st, { error: st === 400 ? 'invalid_workspaces' : st === 413 ? 'too_large' : 'workspaces_unavailable' }) }
         return
       }
       if (url.pathname === '/wizard/v1/ui-preferences') {
@@ -5521,28 +5437,6 @@ function buildWizardServer(options, lifetime) {
         return
       }
 
-      if (url.pathname === '/wizard/follow-ups/stop' && request.method === 'POST') {
-        if (!scheduler) { sendJson(response, 503, { error: 'follow-ups unavailable' }); return }
-        if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
-        if (url.search || !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 400, { error: 'invalid_request' }); return }
-        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
-        if (request.headers.origin) {
-          let originHost
-          try { originHost = new URL(request.headers.origin).host } catch { sendJson(response, 403, { error: 'cross_origin_request' }); return }
-          const publicHost = request.headers['x-forwarded-host'] || request.headers.host
-          if (originHost !== publicHost) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
-        }
-        const body = parseJsonBody(await readBoundedBody(request, 2048))
-        const sessionId = typeof body?.session_id === 'string' && /^[A-Za-z0-9._:-]{1,160}$/u.test(body.session_id) ? body.session_id : ''
-        if (!sessionId || hiddenSession(request, sessionId)) { sendJson(response, sessionId ? 404 : 400, { error: sessionId ? 'not_found' : 'invalid_request' }); return }
-        const agentId = typeof body.agent_id === 'string' && /^[a-z][a-z0-9-]{0,30}$/u.test(body.agent_id) ? body.agent_id : ''
-        const agent = !agentId || agentId === MAIN_AGENT_ID ? 'main' : agentId
-        try { sendJson(response, 200, { ok: true, ...scheduler.stopFollowUps(sessionId, { watcherId: String(body.watcher_id || ''), agent }) }) }
-        catch (error) { sendJson(response, error?.status || 500, { error: error?.status ? error.message : 'follow-up stop failed' }) }
-        return
-      }
-
       if (url.pathname === '/wizard/thread-dispositions' && ['GET', 'PUT'].includes(request.method ?? '')) {
         if (url.search) { sendJson(response, 400, { error: 'invalid_request' }); return }
         const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
@@ -5698,7 +5592,7 @@ function buildWizardServer(options, lifetime) {
             }
             await proxyToAgent(agentCtx, {
               agent: agents.read(agentResolution.agentId), method: request.method ?? 'GET', upstreamPath, searchParams: url.searchParams,
-              request, response, body: agentResolution.body, bodyRead: agentResolution.bodyRead, rawRunRead: scheduleRawRead(request),
+              request, response, body: agentResolution.body, bodyRead: agentResolution.bodyRead,
             })
             return
           }
@@ -5778,14 +5672,11 @@ function buildWizardServer(options, lifetime) {
           return
         }
         let queuedAdmission = null
-        let quietWatcherAdmission = false
         let directAdmissionSessionId = ''
         let admissionContract
         if (body && request.method === 'POST' && upstreamPath === '/v1/runs') {
           admissionContract = await assertJoinedDelegationCapability()
           const requested = parseJsonBody(body)
-          quietWatcherAdmission = principal.kind === 'service'
-            && request.headers['x-wizard-schedule-kind'] === 'watch'
           if (Object.hasOwn(requested, BACKGROUND_RECOVERY_MARKER)) throw Object.assign(new Error('reserved recovery marker'), { status: 400 })
           if (!operator && typeof requested.session_id === 'string') directAdmissionSessionId = requested.session_id
           const runtime = operator ? 'operator' : 'direct'
@@ -5801,8 +5692,7 @@ function buildWizardServer(options, lifetime) {
               sendQueuedRun(response, 202, replay, { 'Idempotency-Replayed': 'true' })
               return
             }
-            queuedAdmission = { runtime, sessionId, idempotencyKey, requestHash, recoveryAuthorized: agents?.read(MAIN_AGENT_ID)?.role === 'recovery' && principal.kind === 'owner',
-              ...(quietWatcherAdmission ? { continuation: { kind: 'watch', preserve_archived: request.headers['x-wizard-watcher-preserve'] === '1' } } : {}) }
+            queuedAdmission = { runtime, sessionId, idempotencyKey, requestHash, recoveryAuthorized: agents?.read(MAIN_AGENT_ID)?.role === 'recovery' && principal.kind === 'owner' }
           }
         }
         let pendingWorker = null
@@ -5831,7 +5721,7 @@ function buildWizardServer(options, lifetime) {
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
           // A durable queue receipt is not proof that Hermes has materialized this session.
           if (await agents?.catalogContains(MAIN_AGENT_ID, queuedAdmission.sessionId) === true) agents.pin(queuedAdmission.sessionId, MAIN_AGENT_ID, 'runtime_verified')
-          if (!quietWatcherAdmission) threadDispositionStore.clearSession(queuedAdmission.runtime, queuedAdmission.sessionId)
+          threadDispositionStore.clearSession(queuedAdmission.runtime, queuedAdmission.sessionId)
           sendQueuedRun(response, 202, admitted.record, { 'Idempotency-Replayed': String(admitted.replayed) })
           return
         }
@@ -6000,8 +5890,7 @@ function buildWizardServer(options, lifetime) {
         if (upstream.ok && body) {
           // Both Close and explicit Restore supersede parking; Restore must also
           // repair a stale client that observes archived + deferred together.
-          if (request.method === 'PATCH' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath) && typeof parseJsonBody(body).archived === 'boolean'
-            && !(principal.kind === 'service' && request.headers['x-wizard-watcher-preserve'] === '1')) {
+          if (request.method === 'PATCH' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath) && typeof parseJsonBody(body).archived === 'boolean') {
             threadDispositionStore.clearSession(operator ? 'operator' : 'direct', decodeURIComponent(upstreamPath.split('/')[3]))
           } else if (request.method === 'POST' && upstreamPath === '/v1/runs') {
             threadDispositionStore.clearSession(operator ? 'operator' : 'direct', parseJsonBody(body).session_id)
@@ -6228,12 +6117,6 @@ function buildWizardServer(options, lifetime) {
     // Start existing sockets before index.mjs accepts owner traffic; new agents await ensure before Docker.
     server.agentSocketsReady = Promise.all(agents.list().filter(agent => agents.agentRestricted(agent.id)).map(agent => agentSockets.ensure(agent.id)))
     void server.agentSocketsReady.catch(() => undefined)
-    // Wait until the gateway is accepting connections before reapplying old
-    // managed harnesses. No owner update or conversation is needed on upgrade.
-    server.once('listening', () => {
-      server.agentHarnessesReady = server.agentSocketsReady.then(() => agents.migrateManagedHarnesses())
-      void server.agentHarnessesReady.catch(() => undefined)
-    })
     lifetime.own(() => agentSockets.close(), () => agentSockets.close())
   } else server.agentSocketsReady = Promise.resolve()
   if (canonicalSessionReader && listCache.mode() !== 'off') {
