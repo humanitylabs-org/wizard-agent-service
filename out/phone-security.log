@@ -1,0 +1,47 @@
+
+[1m[30m[46m RUN [49m[39m[22m [36mv5.0.3 [39m[90m/Volumes/ThalesMedia/qa/phone-setup/service-ef878276507d-land[39m
+
+(node:69262) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:69265) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:69263) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:69264) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+ [32m✓[39m tests/tailnet-access.test.ts [2m([22m[2m17 tests[22m[2m)[22m[32m 20[2mms[22m[39m
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+ [32m✓[39m tests/phone-setup.test.ts [2m([22m[2m31 tests[22m[2m)[22m[33m 1000[2mms[22m[39m
+ [32m✓[39m tests/agents-sealed-apps.test.ts [2m([22m[2m8 tests[22m[2m)[22m[33m 1087[2mms[22m[39m
+[uploads] share sh_c2ce050a320b2d066815ed783622b376: 1 file(s) to private
+ [32m✓[39m tests/agent-principals.test.ts [2m([22m[2m21 tests[22m[2m)[22m[33m 5780[2mms[22m[39m
+   [32m✓[39m owner vs agent authentication [2m(7)[22m
+     [33m[2m✓[22m[39m test 2: spoofed identity headers, wrong proofs, query flags and loopback get nothing from the private agent[33m 953[2mms[22m[39m
+     [33m[2m✓[22m[39m test 4: an agent credential lists and runs only its own threads[33m 303[2mms[22m[39m
+     [33m[2m✓[22m[39m test 5: non-private routes keep working for local automations, and a bound app still delivers into the private agent[33m 344[2mms[22m[39m
+   [32m✓[39m review regressions [2m(11)[22m
+     [33m[2m✓[22m[39m app membership for standard agents still works for local callers while a private agent exists[33m 416[2mms[22m[39m
+     [33m[2m✓[22m[39m third review: the number of visible seen marks a caller can store does not depend on hidden ones[33m 581[2mms[22m[39m
+     [33m[2m✓[22m[39m second review: a non-owner cannot push out or reset the owner's private seen marks[33m 375[2mms[22m[39m
+
+[2m Test Files [22m [1m[32m4 passed[39m[22m[90m (4)[39m
+[2m      Tests [22m [1m[32m77 passed[39m[22m[90m (77)[39m
+[2m   Start at [22m 15:21:56
+[2m   Duration [22m 6.20s[2m (tests 86%, transform 10%, import 4%)[22m
+
