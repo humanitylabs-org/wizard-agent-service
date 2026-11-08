@@ -1,0 +1,29 @@
+test_unit_missing_reports_missing_and_refuses_start (test_wizard_private_access.DaemonMissing.test_unit_missing_reports_missing_and_refuses_start) ... ok
+test_start_enables_daemon_and_returns_sign_in_link_quickly (test_wizard_private_access.DaemonStopped.test_start_enables_daemon_and_returns_sign_in_link_quickly) ... ok
+test_serve_before_sign_in_is_refused (test_wizard_private_access.HttpsNotEnabled.test_serve_before_sign_in_is_refused) ... ok
+test_waiting_cli_yields_enable_link_then_serve_turns_on (test_wizard_private_access.HttpsNotEnabled.test_waiting_cli_yields_enable_link_then_serve_turns_on) ... ok
+test_serve_before_sign_in_is_refused (test_wizard_private_access.HttpsNotEnabledNoWait.test_serve_before_sign_in_is_refused) ... ok
+test_waiting_cli_yields_enable_link_then_serve_turns_on (test_wizard_private_access.HttpsNotEnabledNoWait.test_waiting_cli_yields_enable_link_then_serve_turns_on) ... ok
+test_image_root_install_is_idempotent_and_never_touches_tailscale (test_wizard_private_access.Install.test_image_root_install_is_idempotent_and_never_touches_tailscale) ... ok
+test_rerun_over_commented_config_keeps_extra_keys (test_wizard_private_access.Install.test_rerun_over_commented_config_keeps_extra_keys) ... ok
+test_unit_runs_helper_as_root_with_socket_directory (test_wizard_private_access.Install.test_unit_runs_helper_as_root_with_socket_directory) ... ok
+test_needs_machine_auth_is_reported (test_wizard_private_access.MachineAuth.test_needs_machine_auth_is_reported) ... ok
+test_serve_requires_configured_upstream (test_wizard_private_access.NoServeUpstream.test_serve_requires_configured_upstream) ... ok
+test_status_and_start_without_tailscale (test_wizard_private_access.NotInstalled.test_status_and_start_without_tailscale) ... ok
+test_only_control_links_count_as_enable_links (test_wizard_private_access.NoticeInServeOutput.test_only_control_links_count_as_enable_links) ... ok
+test_failed_logout_is_an_error_not_success (test_wizard_private_access.ResetFailure.test_failed_logout_is_an_error_not_success) ... ok
+test_stopped_daemon_is_started_so_reset_really_signs_out (test_wizard_private_access.ResetWhileStopped.test_stopped_daemon_is_started_so_reset_really_signs_out) ... ok
+test_reset_kills_pending_login (test_wizard_private_access.ServingAndPeers.test_reset_kills_pending_login) ... ok
+test_reset_unpairs_and_keeps_tailscaled (test_wizard_private_access.ServingAndPeers.test_reset_unpairs_and_keeps_tailscaled) ... ok
+test_running_serving_with_owner_peers (test_wizard_private_access.ServingAndPeers.test_running_serving_with_owner_peers) ... ok
+test_needs_login_then_running (test_wizard_private_access.SignInFlow.test_needs_login_then_running) ... ok
+test_rejects_bad_hostnames_and_bodies (test_wizard_private_access.SignInFlow.test_rejects_bad_hostnames_and_bodies) ... ok
+test_status_keys_match_contract (test_wizard_private_access.StatusShape.test_status_keys_match_contract) ... ok
+test_only_four_endpoints (test_wizard_private_access.Surface.test_only_four_endpoints) ... ok
+test_requests_are_serialized (test_wizard_private_access.Surface.test_requests_are_serialized) ... ok
+test_socket_permissions (test_wizard_private_access.Surface.test_socket_permissions) ... ok
+
+----------------------------------------------------------------------
+Ran 24 tests in 10.037s
+
+OK
