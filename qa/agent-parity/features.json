@@ -80,6 +80,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "routed-owner-turns",
+      "description": "The owner's own messages stay visible in chat history when Hermes 0.22.7 stamps the admitted user row internal_notification: each kind restores the turn from its own run queue (routed kinds behind WIZARD_ROUTED_OWNER_TURNS=1, off by default), once, while machine wakes with the same kind stay hidden.",
+      "layer": "server",
+      "fixture": "routed-owner-turns",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile /p/<profile>, container TCP, restricted Unix ingress) with routedOwnerTurns on: admit a list-shaped synthetic owner turn, stamp its upstream row internal_notification, add a [Wizard follow-through] wake with the same kind, then read ?view=wizard history. Require the owner row exactly once as a normal user row, the wake still internal, upstream rows and raw history unchanged. tests/routed-owner-turns.test.ts proves routed kinds are unchanged with the switch off. Synthetic HTTP fixture evidence, not live/provider/browser proof.",
+      "source_refs": [
+        "server/routed-run-queue.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/routed-owner-turns.test.ts",
+        "tests/owner-turns-submission.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "policy_exemptions": []
+    },
+    {
       "id": "reply-summary-preferences",
       "description": "Reopening the shell short-answer view accepts and persists its existing box-wide choice while main, host-profile, container and restricted chats retain their own unchanged transcripts and admit no reply.",
       "layer": "server",

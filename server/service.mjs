@@ -911,7 +911,19 @@ const sameTurnText = (left, right) => left === right || (left.length >= 60 && ri
 // Unambiguous machine-tagged inputs the Service itself queues (follow-through, heavy, scheduler, reporter, relays).
 const MACHINE_INPUT = /^\[(?:Wizard\b|reporter\]|Relayed by\b|ASYNC\b|System\b)/i
 const PYTHON_REPR_PARTS = /^\s*\[\{'(?:text|type)':/
-export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null) {
+// The owner's words in a Hermes row without its appended "[System: ...]" part, also from the multipart list's Python
+// repr. Used only when the row's ids cannot be read (a restricted agent's sandboxed state.db), behind `ownerText`.
+const REPR_TEXT = /['"]text['"]:\s*(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")/g
+const unrepr = (value) => value.replace(/\\(n|t|'|"|\\)/g, (_, c) => ({ n: '\n', t: '\t' })[c] ?? c)
+function ownerRowText(content) {
+  const owner = (text) => typeof text === 'string' && !text.startsWith('[System:')
+  if (Array.isArray(content)) return visibleInputText(content.filter((part) => !(typeof part?.text === 'string' && !owner(part.text))))
+  if (typeof content === 'string' && PYTHON_REPR_PARTS.test(content)) {
+    return [...content.matchAll(REPR_TEXT)].map((m) => unrepr(m[1] ?? m[2] ?? '')).filter(owner).join('\n')
+  }
+  return visibleInputText(content)
+}
+export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, { ownerText = false } = {}) {
   if (!runQueue || typeof sessionId !== 'string' || !sessionId) return result
   let records
   try { records = runQueue.admittedForSession('direct', sessionId) } catch { return result }
@@ -968,7 +980,7 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null) {
     // A row Hermes tied to a submission we know only as a superseded retry stays hidden rather than guessing by text.
     const submission = metaById.get(row.id)?.submission_id
     if (submission && pending.some((p) => p.run === submission)) return null
-    const text = visibleInputText(row.content).trim()
+    const text = (ownerText ? ownerRowText(row.content) : visibleInputText(row.content)).trim()
     const at = Number(row.timestamp ?? row.created_at)
     if (!text || !Number.isFinite(at)) return null
     // Closest admission at or before the row.
@@ -2719,11 +2731,12 @@ function buildWizardServer(options, lifetime) {
   const hermesStatePath = options.hermesStatePath ? resolve(String(options.hermesStatePath)) : ''
   // Hermes' history API omits display_metadata/platform_message_id; read them by primary key (read-only) so an owner
   // row can be tied to its queued run by Hermes' submission id.
-  const ownerTurnRowMeta = !hermesStatePath ? null : (sessionId, ids) => {
+  // Routed agents (WIZARD_ROUTED_OWNER_TURNS, off by default) use the same reader on their own state.db.
+  const ownerTurnRowMetaAt = (statePath) => !statePath ? null : (sessionId, ids) => {
     const found = new Map()
     const keys = [...new Set((Array.isArray(ids) ? ids : []).filter(Number.isInteger))].slice(0, 500)
-    if (!keys.length || !existsSync(hermesStatePath)) return found
-    const db = new DatabaseSync(hermesStatePath, { readOnly: true })
+    if (!keys.length || !existsSync(statePath)) return found
+    const db = new DatabaseSync(statePath, { readOnly: true })
     try {
       const rows = db.prepare(`SELECT id, display_metadata, platform_message_id FROM messages WHERE id IN (${keys.map(() => '?').join(',')}) AND session_id = ?`).all(...keys, String(sessionId))
       for (const row of rows) {
@@ -2737,6 +2750,7 @@ function buildWizardServer(options, lifetime) {
     } catch { /* older state.db without these columns: text matching still applies */ } finally { db.close() }
     return found
   }
+  const ownerTurnRowMeta = ownerTurnRowMetaAt(hermesStatePath)
   const helmDbPath = options.helmDbPath ? resolve(String(options.helmDbPath)) : ''
   const hermesKey = options.hermesKey ?? ''
   const baseRequireAccess = options.requireAccess ?? true
@@ -2965,7 +2979,15 @@ function buildWizardServer(options, lifetime) {
   const providerRecoveryOptions = { providerSignInReady, providerFailureDismissed,
     providerAccessRecovery: options.providerAccessRecovery ?? process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
     providerAccessWindowSeconds: options.providerAccessWindowSeconds }
-  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, queuedHistory: queuedOwnerHistory, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
+  // Routed owner turns (issue 379): off unless WIZARD_ROUTED_OWNER_TURNS=1. Each agent's own queue and state.db, never main's.
+  const routedOwnerTurns = options.routedOwnerTurns === true
+    ? (raw, queue, sessionId, agent) => {
+        const home = routedAgentMedia(agent)?.home
+        // A restricted agent's home is unreadable here, so its rows also match on the owner's words alone.
+        return restoreOwnerTurns(raw, queue, sessionId, ownerTurnRowMetaAt(home ? join(home, 'state.db') : ''), { ownerText: true })
+      }
+    : null
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, queuedHistory: queuedOwnerHistory, restoreOwnerTurns: routedOwnerTurns, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
     ...(options.runQueueLaunchWaitMs !== undefined ? { launchWaitMs: Number(options.runQueueLaunchWaitMs) } : {}),
     decorateDispatch: (agentId, sessionId, body) => {
       const note = heavyNotices(agentId, sessionId)

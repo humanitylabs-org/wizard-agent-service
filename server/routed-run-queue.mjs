@@ -8,7 +8,7 @@ import { readSteerResentHttp } from './hermes-http-readers.mjs'
 import { normalizeProviderPreflightFailure, projectProviderSignInHistory, projectProviderSignInEvent } from './run-provider-failure.mjs'
 const terminal = new Set(['completed','failed','cancelled','interrupted'])
 const json = (status, payload) => new Response(JSON.stringify(payload),{status,headers:{'Content-Type':'application/json'}})
-export function createRoutedQueues({ registry, queuedHistory, own, pollIntervalMs = 1500, maxActive = 8, onStatus, onDispatch, decorateDispatch, providerAccessRecovery = false, providerAccessWindowSeconds, providerFailureDismissed, providerSignInReady = null, launchWaitMs }) {
+export function createRoutedQueues({ registry, queuedHistory, restoreOwnerTurns = null, own, pollIntervalMs = 1500, maxActive = 8, onStatus, onDispatch, decorateDispatch, providerAccessRecovery = false, providerAccessWindowSeconds, providerFailureDismissed, providerSignInReady = null, launchWaitMs }) {
   const entries = new Map()
   const get = async agent => {
     if (!entries.has(agent.id)) {
@@ -74,7 +74,12 @@ export function createRoutedQueues({ registry, queuedHistory, own, pollIntervalM
         const record = queue.latestForSession(decodeURIComponent(parsed.pathname.split('/')[3]))
         const raw = Buffer.from(await upstream.arrayBuffer())
         let result = raw
-        if (parsed.pathname.endsWith('/messages') && parsed.searchParams.get('view') === 'wizard') result = projectProviderSignInHistory(raw, record, parsed.searchParams)
+        // The proxy strips ?view before this read and says so with init.wizardHistory. Same order as main: the owner's
+        // own turns (Hermes 0.22.7 internal_notification) are restored first, from this agent's queue only.
+        const wizardHistory = parsed.pathname.endsWith('/messages') && (init.wizardHistory === true || parsed.searchParams.get('view') === 'wizard')
+        let restored = raw
+        if (wizardHistory && typeof restoreOwnerTurns === 'function') restored = result = restoreOwnerTurns(raw, queue, decodeURIComponent(parsed.pathname.split('/')[3]), agent)
+        if (parsed.pathname.endsWith('/messages') && parsed.searchParams.get('view') === 'wizard') result = projectProviderSignInHistory(restored, record, parsed.searchParams)
         else if (!parsed.pathname.endsWith('/messages')) {
           const payload = JSON.parse(raw.toString('utf8')), row = payload.session || payload
           const saved = detail ? queue.savedRetry(decodeURIComponent(detail[1])) : null

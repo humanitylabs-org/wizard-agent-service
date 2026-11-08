@@ -49,6 +49,37 @@ const finishedRunLeavesWorking = async (s, fresh = true) => {
 const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].flatMap(match => JSON.parse(match[1]).items || [])
 
 export const serverChecks = {
+  // Issue 379: Hermes 0.22.7 stamps every /v1/runs admission's user row internal_notification, the owner's own
+  // messages included. Every kind restores the owner's turn from its own queue (routed kinds behind
+  // WIZARD_ROUTED_OWNER_TURNS); a machine wake with the same kind stays hidden; raw upstream rows are untouched.
+  'routed-owner-turns': async s => {
+    // Short on purpose: no opening-words match, so the appended [System:] part must be ignored (no state.db ids here).
+    const words = 'Synthetic short owner turn.'
+    await admit(s, { input: [{ role: 'user', content: [{ type: 'text', text: words }] }] })
+    for (let i = 0; i < 40 && !s.sessions.get('wizard_parity').messages.length; i++) await new Promise(r => setTimeout(r, 25))
+    const row = s.sessions.get('wizard_parity')
+    const owner = row.messages.findLast(m => m.role === 'user')
+    assert.ok(owner, 'the queued owner turn reached this kind\'s runtime')
+    owner.display_kind = 'internal_notification'
+    // Routed kinds match by words (a restricted home is unreadable); main matches this shape by Hermes' submission
+    // id from its readable state.db (tests/owner-turns-submission.test.ts), which this fixture's state.db lacks.
+    if (s.kind !== 'main') owner.content = [{ type: 'text', text: words }, { type: 'text', text: '[System: synthetic Hermes notice]' }]
+    const at = Number(owner.timestamp)
+    for (const run of s.runs.values()) Object.assign(run, { status: 'completed', output: 'Synthetic reply' })
+    row.messages.push({ id: 'synthetic-reply', role: 'assistant', content: 'Synthetic reply', timestamp: at + 1 },
+      { id: 'synthetic-wake', role: 'user', display_kind: 'internal_notification', content: '[Wizard follow-through] Synthetic machine wake', timestamp: at + 2 })
+    const before = JSON.stringify(row.messages)
+    const output = await history(s)
+    const mine = output.filter(m => m.role === 'user' && JSON.stringify(m.content).includes(words))
+    assert.equal(mine.length, 1, `${s.kind}: the owner's own message shows exactly once`)
+    assert.notEqual(mine[0].display_kind, 'internal_notification', `${s.kind}: the owner's own message is a normal user row`)
+    assert.ok(!JSON.stringify(mine[0].content).includes('[System:'), 'Hermes\' own notice is not shown as the owner\'s words')
+    const wake = output.find(m => JSON.stringify(m.content ?? '').includes('Synthetic machine wake'))
+    assert.ok(!wake || wake.display_kind === 'internal_notification', 'a machine wake is never turned into an owner turn')
+    assert.equal(JSON.stringify(row.messages), before, 'upstream rows are unchanged')
+    const raw = await (await s.request('/api/sessions/wizard_parity/messages?order=oldest')).json()
+    assert.equal(raw.data.find(m => JSON.stringify(m.content).includes(words)).display_kind, 'internal_notification', 'raw (non-wizard) history is not projected')
+  },
   'in-flight-notice': async outer => {
     const path = join(outer.root, 'in-flight-heavy.db')
     const s = await scene(outer.kind, { heavyStatePath: path, heavyToken: 'synthetic-in-flight-notice-token', heavyPollIntervalMs: 3_600_000,
