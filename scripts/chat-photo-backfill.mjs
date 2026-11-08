@@ -9,12 +9,12 @@ import { createCanonicalFileResolver, createCanonicalHelmPhotoResolver } from '.
 import { createCanonicalChatPhotoResolver, photoAuthorityId, createPhotoRuntimeVerifier } from '../server/chat-photo-authority.mjs'
 import { createPhotoProjection, createChatPhotoReconciler } from '../server/chat-photo-projection.mjs'
 const e = process.env, home = e.HERMES_HOME || resolve(homedir(), '.hermes'), osHome = e.WIZARD_OS_HOME || resolve(homedir(), '.wizard-os')
-const database = e.WIZARD_HERMES_STATE_PATH, ownerId = e.WIZARD_CHAT_PHOTOS_OWNER_ID
+const database = e.WIZARD_HERMES_STATE_PATH, ownerId = e.WIZARD_CHAT_PHOTOS_OWNER_ID, appChats = e.WIZARD_CHAT_PHOTOS_APP_CHATS === '1'
 const registry = createAgentRegistry({ agentsDir: e.WIZARD_AGENTS_DIR || resolve(osHome, 'agents') })
 const upstreamOrigin = e.HERMES_ORIGIN || 'http://127.0.0.1:8642'
 const authorityId = photoAuthorityId({ database, runtimeHome: osHome, ownerId, hermesKey: e.WIZARD_HERMES_API_KEY,
   registryPath: registry.agentsDir, upstreamOrigin, singleOwner: e.WIZARD_CHAT_PHOTOS_SINGLE_OWNER === '1' })
-const verifyAuthority = createPhotoRuntimeVerifier({ database, registry, ownerId, upstreamOrigin, hermesKey: e.WIZARD_HERMES_API_KEY })
+const verifyAuthority = createPhotoRuntimeVerifier({ database, registry, ownerId, upstreamOrigin, hermesKey: e.WIZARD_HERMES_API_KEY, appChats })
 await verifyAuthority()
 const roots = (e.WIZARD_AGENT_ARTIFACT_ROOTS || '').split(':').filter(Boolean)
 const mediaFiles = !e.WIZARD_INBOX_INTERNAL_TOKEN && e.WIZARD_MEDIA_ROOT ? createMediaFiles({ mediaRoot: e.WIZARD_MEDIA_ROOT, agentRoot: e.WIZARD_MEDIA_AGENT_ROOT || e.WIZARD_MEDIA_ROOT, indexPath: e.WIZARD_MEDIA_INDEX_PATH || resolve(home, 'state/wizard-mobile/media-files.json') }) : null
@@ -23,7 +23,7 @@ const inboxJson = async path => {
   if (!response.ok) throw Object.assign(new Error('inbox_request_failed'), { status: response.status, upstreamStatus: response.status })
   const raw = await response.text(); if (raw.length > 2 * 1024 * 1024) throw new Error('inbox_response_limit'); return JSON.parse(raw)
 }
-const resolver = createCanonicalChatPhotoResolver({ database, ownerId, authorityId, registry, artifactRoots: roots,
+const resolver = createCanonicalChatPhotoResolver({ database, ownerId, authorityId, registry, appChats, artifactRoots: roots,
   aliases: mediaFiles && mediaFiles.agentRoot !== mediaFiles.root ? [[mediaFiles.agentRoot, mediaFiles.root]] : [],
   resolveFiles: createCanonicalFileResolver({ mediaFiles, inboxJson, inboxTrustedRoots: (e.WIZARD_INBOX_TRUSTED_ROOT || '').split(':').filter(Boolean).map(p => `${resolve(p)}${sep}`) }),
   resolveHelm: createCanonicalHelmPhotoResolver({ artifactDir: e.WIZARD_AGENT_ARTIFACT_DIR || resolve(home, 'data/apps/wizard-mobile/agent-artifacts'), helmOrigin: e.WIZARD_HELM_ORIGIN || 'http://127.0.0.1:8836', legacyRoot: e.WIZARD_HELM_ATTACHMENTS_ROOT }) })
@@ -54,7 +54,7 @@ if (process.argv[2] === '--survey') {
 } else if (process.argv[2] === '--backfill') {
   if (e.WIZARD_CHAT_PHOTOS_ENABLED !== '1') throw new Error('explicit activation required')
   const projection = createPhotoProjection({ root: e.WIZARD_USER_FILES_ROOT, ownerId, authorityId, ownerLabel: e.WIZARD_CHAT_PHOTOS_OWNER_LABEL, agentLabel: e.WIZARD_CHAT_PHOTOS_AGENT_LABEL, maxBytes: Number(e.WIZARD_CHAT_PHOTOS_MAX_BYTES) })
-  const reconciler = createChatPhotoReconciler({ database, registryPath: registry.agentsDir, ownerId, authorityId, verifyAuthority, statePath: e.WIZARD_CHAT_PHOTOS_STATE_PATH, projection, resolveMessage: resolver })
+  const reconciler = createChatPhotoReconciler({ database, registryPath: registry.agentsDir, ownerId, authorityId, appChats, verifyAuthority, statePath: e.WIZARD_CHAT_PHOTOS_STATE_PATH, projection, resolveMessage: resolver })
   for (let i = 0; i < 2000; i++) {
     const result = await reconciler.step(); console.log(JSON.stringify(result))
     if (result?.done) break

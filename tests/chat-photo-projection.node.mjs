@@ -89,6 +89,17 @@ test('canonical main message resolves; pin, owner, hidden and synthetic reject',
   assert.equal((await createCanonicalChatPhotoResolver(opts)(candidate)).photos.length, 0)
   for (const change of [{ hidden: 1 }, { parent_session_id: 'helper' }, { created_source: 'cron' }, { transport_profile: 'synthetic' }, { origin_json: '{"visibility":"private"}' }]) assert.equal(eligiblePhotoSession({ ...session, ...change }, '123', ''), false)
 })
+test('app chat recorded as user_id api copies only behind the appChats switch (issue 400)', async t => {
+  const { db, candidate, opts, session } = fixture(t)
+  db.prepare('UPDATE sessions SET user_id=?').run('api')
+  assert.equal((await createCanonicalChatPhotoResolver(opts)(candidate)).photos.length, 0)
+  assert.equal((await createCanonicalChatPhotoResolver({ ...opts, appChats: true })(candidate)).photos.length, 1)
+  assert.equal((await createCanonicalChatPhotoResolver({ ...opts, appChats: true, registry: { pinnedAgent: () => 'private' } })(candidate)).photos.length, 0)
+  const app = { ...session, user_id: 'api' }
+  assert.equal(eligiblePhotoSession(app, '123', ''), false)
+  assert.equal(eligiblePhotoSession(app, '123', '', { appChats: true }), true)
+  for (const change of [{ user_id: 'other' }, { source: 'webui' }, { source: 'telegram' }, { id: 'api_session_1' }, { hidden: 1 }, { parent_session_id: 'helper' }, { profile_name: 'private' }, { created_source: 'cron' }, { origin_json: '{"visibility":"private"}' }, { title: 'QA canary' }]) assert.equal(eligiblePhotoSession({ ...app, ...change }, '123', '', { appChats: true }), false, JSON.stringify(change))
+})
 test('canonical inline and older incoming history; no prose/fenced/private file reads', async t => {
   const { root, db, candidate, opts } = fixture(t)
   const set = (role, content) => db.prepare('UPDATE messages SET role=?,content=?').run(role, content)

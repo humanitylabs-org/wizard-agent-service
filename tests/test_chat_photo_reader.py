@@ -14,6 +14,25 @@ class Photos(unittest.TestCase):
   self.assertEqual(m.session_reason(tg,'123'),'')
   self.assertTrue(m.session_reason({**tg,'chat_type':'group'},'123'))
   self.assertTrue(m.session_reason({**tg,'chat_id':'other'},'123'))
+ def test_app_chat_api_user_behind_switch(self):
+  # issue 400: Wizard app chats are stored by the Hermes API server with user_id 'api'.
+  app=dict(id='wizard_123_abcdef',source='api_server',user_id='api',chat_id=None,chat_type=None,profile_name='default',hidden=0,archived=0,parent_session_id=None,title='A normal human chat',model_config='{}')
+  self.assertEqual(m.session_reason(app,'123'),'not_owner')
+  self.assertEqual(m.session_reason(app,'123',True),'')
+  for change in [dict(user_id='other'),dict(source='webui'),dict(source='telegram'),dict(id='api_session_1'),dict(hidden=1),dict(parent_session_id='p'),dict(profile_name='private'),dict(created_source='cron'),dict(origin_json='{"visibility":"private"}'),dict(title='QA canary')]:
+   self.assertTrue(m.session_reason({**app,**change},'123',True),change)
+ def test_app_chat_scan_switch(self):
+  import sqlite3, tempfile
+  with tempfile.TemporaryDirectory() as root:
+   path=str(pathlib.Path(root)/'history.db')
+   c=sqlite3.connect(path)
+   c.executescript('CREATE TABLE sessions(id TEXT,source TEXT,user_id TEXT,chat_id TEXT,chat_type TEXT,profile_name TEXT,hidden INTEGER,archived INTEGER,parent_session_id TEXT,title TEXT,model_config TEXT,origin_json TEXT,created_source TEXT,transport_profile TEXT); CREATE TABLE messages(id INTEGER,session_id TEXT,role TEXT,timestamp REAL,display_kind TEXT,_compressed_summary INTEGER,tool_calls TEXT,platform_message_id TEXT,content TEXT);')
+   for i,(sid,uid) in enumerate([('wizard_1_aa','api'),('wizard_2_bb','other')],1):
+    c.execute('INSERT INTO sessions VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',(sid,'api_server',uid,None,None,'default',0,0,None,'Owner chat','{}',None,'unknown',None))
+    c.execute('INSERT INTO messages VALUES(?,?,?,?,?,?,?,?,?)',(i,sid,'assistant',10,None,0,None,None,'MEDIA:/image.png'))
+   c.commit();c.close()
+   self.assertEqual(m.scan(path,0,0,'123',250,'')['evidence'],[])
+   self.assertEqual([e['thread_id'] for e in m.scan(path,0,0,'123',250,'',True)['evidence']],['wizard_1_aa'])
  def test_attachment_syntax_not_prose_or_fences(self):
   self.assertEqual(m.photo_refs('look at /a/image.jpg','user'),[])
   self.assertEqual(m.photo_refs('```\nMEDIA:/a/image.jpg\n```','assistant'),[])
