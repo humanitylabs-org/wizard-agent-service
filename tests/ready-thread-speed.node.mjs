@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -121,4 +121,42 @@ test('concurrent self-check failure is shared and next check can retry (includin
   await assert.rejects(check(), e => e === failure); assert.equal(calls, 2)
   const retry = check(); const observed = assert.rejects(retry, e => e === failure)
   await Promise.resolve(); assert.equal(calls, 3); reject(failure); await observed
+})
+
+// Exercise the exact service closure and real guard without starting a service or
+// inventing a substitute wrapper. No database, owner rows, timers or worker calls.
+const serviceHeavyStatus = async () => {
+  const source = readFileSync(new URL('../server/service.mjs', import.meta.url), 'utf8')
+  const start = source.indexOf('  const heavyStatus = '), end = source.indexOf('\n  const heavyNotices = ', start)
+  assert.ok(start >= 0 && end > start, 'service heavy-status closure must be found')
+  const expression = source.slice(start + '  const heavyStatus = '.length, end).trim()
+  const { guardHeavyStatus } = await import('../server/thread-status.mjs')
+  let reads = 0
+  const read = () => { reads++; return new Set(['synthetic']) }
+  const wrap = new Function('guardHeavyStatus', 'heavyWork', 'readNonHoldingFollowUps', 'hermesStatePath', 'runQueue', 'agents', `return (${expression})`)
+  const runQueue = { get: id => id === 'delivered' ? { upstreamRunId: 'synthetic-delivery' } : null }
+  const agents = { runThread: (_agent, id) => id === 'delivered' ? { session_id: 'synthetic', heavy_origin: 'synthetic-origin' } : null }
+  return { run: wrap(guardHeavyStatus, undefined, read, 'synthetic-only-unused', runQueue, agents), reads: () => reads, guardHeavyStatus }
+}
+
+test('heavy status decoration never reads discarded follow-up evidence for done rows', async () => {
+  const { run, reads } = await serviceHeavyStatus()
+  const status = { state: 'done', ask: 'Finished', title: 'Synthetic', subject: 'Tests', app_id: 'wizard-quest' }
+  const jobs = [{ sessionId: 'synthetic', state: 'completed', resume: 'delivered' },
+    { session_id: 'synthetic', state: 'running', resume: '' }]
+  for (let row = 0; row < 100; row++) assert.equal(run('hermes', 'synthetic', status, jobs), status)
+  assert.equal(reads(), 0, 'cached done rows must not synchronously read evidence the guard discards')
+})
+
+test('heavy status decoration preserves pending and delivered status semantics without evidence reads', async () => {
+  const { run, reads, guardHeavyStatus } = await serviceHeavyStatus()
+  for (const agentId of ['hermes', 'synthetic-agent']) for (const state of ['done', 'check', 'needs_you', 'fyi']) {
+    const status = { state, ask: 'Synthetic', subject: 'Tests' }
+    for (const delivery of ['', 'delivered']) {
+      const jobs = [{ agent_id: agentId, sessionId: 'synthetic', state: 'completed', origin: 'synthetic-origin', resume: delivery }]
+      const expected = guardHeavyStatus(status, { agentId, sessionId: 'synthetic', jobs, isDelivered: () => delivery === 'delivered' })
+      assert.deepEqual(run(agentId, 'synthetic', status, jobs), expected)
+    }
+  }
+  assert.equal(reads(), 0)
 })
