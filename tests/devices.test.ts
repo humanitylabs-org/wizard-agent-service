@@ -79,9 +79,9 @@ it('tolerates corrupt files and sanitizes loaded metadata instead of replaying a
 it('exposes the same no-argument builtin to every agent and formats relative last seen', () => {
   const d = registry(); const tool = devicesTool({ devices: d, now: () => clock })
   expect(tool.call('unrelated')).toBeUndefined()
-  expect(tool.call('wizard_devices').content[0].text).toBe('No phones have checked in yet. The Wizard OS phone app reports itself while it is open.')
+  expect(tool.call('wizard_devices').content[0].text).toBe('No phones have checked in yet. The WizardOS phone app reports itself while it is open.')
   for (const agent of ['hermes', 'host-profile', 'container', 'restricted']) expect(tool.list(agent).map(x => x.name)).toEqual(['wizard_devices'])
   expect(tool.call('wizard_devices', { session_id: 'nope' }).isError).toBe(true)
   d.record(session); clock += 180000
-  expect(tool.call('wizard_devices').content[0].text).toBe('- Google Pixel 10 Pro XL (Android SDK 37): Wizard OS 0.10.18 (code 82), WebView app.vanadium.webview 156.0.8078.47.0, last seen 3 min ago')
+  expect(tool.call('wizard_devices').content[0].text).toBe('- Google Pixel 10 Pro XL (Android SDK 37): WizardOS 0.10.18 (code 82), WebView app.vanadium.webview 156.0.8078.47.0, last seen 3 min ago')
 })

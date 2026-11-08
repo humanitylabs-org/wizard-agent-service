@@ -1,4 +1,4 @@
-// Wizard OS agent bridge (spec/AGENT_BRIDGE.md in humanitylabs-org/wizard-os).
+// WizardOS agent bridge (spec/AGENT_BRIDGE.md in humanitylabs-org/wizard-os).
 //
 // One source, apps.json, turned into what every agent on the box needs:
 //   1. tools:       one MCP gateway (/wizard/mcp) that proxies every running app's tools as <app>__<tool>,
@@ -111,8 +111,8 @@ export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAUL
   const name = hermes ? `mcp__${MCP_SERVER_NAME}__<app>__<tool>` : '<app>__<tool>'
   const idNote = ' (<app> = app id, - as _)'
   const text = [
-    'Wizard OS: you are the owner\'s agent on this box. Its apps do jobs for them.',
-    ...(hermes ? ['To build, port, redesign or modify an app for Wizard OS, first load `wizard-builder` with skill_view; follow its coding and wam workflow.',
+    'WizardOS: you are the owner\'s agent on this box. Its apps do jobs for them.',
+    ...(hermes ? ['To build, port, redesign or modify an app for WizardOS, first load `wizard-builder` with skill_view; follow its coding and wam workflow.',
       'Help, reminders, tips: load `wizard-guide`.'] : []),
     `Files root: ${filesRoot}; app tool paths are relative to it.`,
     pointers
@@ -147,7 +147,7 @@ export function renderDelta(apps, { harness = 'hermes' } = {}) {
     const job = app.jobs.find((j) => /^[a-z0-9][a-z0-9-]{0,39}$/u.test(j))
     const state = app.status === 'running' ? 'new app' : `app ${app.status}`
     const how = job && harness === 'hermes' ? `load \`${jobSkillName(job)}\`` : `tools \`${agentToolName(app.prefix, '*', harness)}\``
-    return `Wizard OS, ${state}: ${app.name} for ${job ? jobWords(job) : 'other jobs'}; ${how}.`
+    return `WizardOS, ${state}: ${app.name} for ${job ? jobWords(job) : 'other jobs'}; ${how}.`
   }).join('\n')
 }
 
@@ -195,7 +195,7 @@ export function pointerSkills(apps, { harness = 'hermes', tools = {} } = {}) {
       '',
       `Tools are on the \`${MCP_SERVER_NAME}\` MCP server.${harness === 'hermes' ? ' If one is not in your tool list, run it with tool_call and that exact name.' : ''} Paths are relative to the owner's Files root.`,
       '',
-      'Written by Wizard OS from apps.json and rebuilt when apps change. Do not edit.',
+      'Written by WizardOS from apps.json and rebuilt when apps change. Do not edit.',
       '',
     ].join('\n')
   }
@@ -506,7 +506,7 @@ export function createAgentBridge({
   function metaTool() {
     return {
       name: META_TOOL,
-      description: '[Wizard OS] List the apps installed on this box: what job each does, whether it is running, and its tool names. Use for "what apps do I have?" or "what can you do here?".',
+      description: '[WizardOS] List the apps installed on this box: what job each does, whether it is running, and its tool names. Use for "what apps do I have?" or "what can you do here?".',
       inputSchema: { type: 'object', properties: {} },
     }
   }
@@ -842,7 +842,7 @@ export function sharedAgentTools(registry, log = () => {}) {
     ['notes_read', 'Read a safe text note in an agent\'s declared notes folder.', { agent: { type: 'string' }, path: { type: 'string' } }],
   ]
   return {
-    list: () => specs.map(([name, description, properties]) => ({ name: `wizard_agents__${name}`, description: `[Wizard OS] ${description}`, inputSchema: { type: 'object', properties, required: Object.keys(properties), additionalProperties: false } })),
+    list: () => specs.map(([name, description, properties]) => ({ name: `wizard_agents__${name}`, description: `[WizardOS] ${description}`, inputSchema: { type: 'object', properties, required: Object.keys(properties), additionalProperties: false } })),
     call(name, args, reader) {
       if (!SHARED_AGENT_TOOLS.includes(name)) return null
       const kind = name.slice('wizard_agents__'.length)

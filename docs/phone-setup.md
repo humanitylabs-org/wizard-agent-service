@@ -3,7 +3,7 @@
 The owner opens **Setup → Use Wizard on your phone** on the computer. Wizard signs this box in to the owner's
 own Tailscale account, turns on Tailscale Serve, and the phone opens `https://<machine>.<tailnet>.ts.net/`
 signed in as the owner. Nothing about a particular owner, tailnet or machine is in this repository: every
-address is discovered from the box's own Tailscale status and stored in Wizard OS settings.
+address is discovered from the box's own Tailscale status and stored in WizardOS settings.
 
 ## Pieces
 

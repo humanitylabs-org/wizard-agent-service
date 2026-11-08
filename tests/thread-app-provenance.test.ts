@@ -27,7 +27,7 @@ describe('explicit reply app provenance', () => {
   })
   it.each(['', 'a', 'a'.repeat(42), ' topics', 'topics ', 'TOPICS', 'topics\n', 'topics\r\n', '../topics', 'https://x.test', 'topics/icon', 'topics_id', '<img src=x onerror=alert(1)>', 'javascript:alert(1)', '\u0000topics', 42, {}, ['topics']])('rejects malformed/XSS ID %j without harming attention', id => {
     expect(normalizeAppId(id)).toBeNull()
-    expect(normalizeStatus({ state: 'qa', ask: 'Judge the layout', subject: 'Wizard OS', title: 'Wizard OS · App', app_id: id })).toEqual({ state: 'check', ask: 'Judge the layout', subject: 'Wizard OS', title: 'Wizard OS · App' })
+    expect(normalizeStatus({ state: 'qa', ask: 'Judge the layout', subject: 'WizardOS', title: 'WizardOS · App', app_id: id })).toEqual({ state: 'check', ask: 'Judge the layout', subject: 'WizardOS', title: 'WizardOS · App' })
   })
   it('parses app-only markers independently of the status state/ask contract', () => {
     const text = `Published.\n${tag({ app_id: 'topics' })}`

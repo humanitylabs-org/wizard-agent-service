@@ -21,11 +21,11 @@ const tag = (value: object) => `Reply.\n\n[WIZARD_STATUS_V1]${JSON.stringify(val
 
 describe('title format', () => {
   it('compacts proposals into a short project label', () => {
-    expect(normalizeTitle('Wizard OS - Desktop')).toBe('Wizard OS · Desktop')
-    expect(normalizeTitle('Wizard OS: Phone app.')).toBe('Wizard OS · Phone app')
-    expect(normalizeTitle('"Wizard OS — Voice"')).toBe('Wizard OS · Voice')
+    expect(normalizeTitle('WizardOS - Desktop')).toBe('WizardOS · Desktop')
+    expect(normalizeTitle('WizardOS: Phone app.')).toBe('WizardOS · Phone app')
+    expect(normalizeTitle('"WizardOS — Voice"')).toBe('WizardOS · Voice')
     expect(normalizeTitle('  ')).toBe('')
-    const long = normalizeTitle('Wizard OS · An extremely long project name that keeps going and going')
+    const long = normalizeTitle('WizardOS · An extremely long project name that keeps going and going')
     expect(long.length).toBeLessThanOrEqual(32)
     expect(long.endsWith(' ')).toBe(false)
   })
@@ -33,16 +33,16 @@ describe('title format', () => {
   it('knows a sentence title from a label', () => {
     expect(looksLikeSentence('Review 0xMovez post on X')).toBe(true)
     expect(looksLikeSentence('Send voice note with text and images together')).toBe(true)
-    expect(looksLikeSentence('Wizard OS · Desktop')).toBe(false)
+    expect(looksLikeSentence('WizardOS · Desktop')).toBe(false)
     expect(looksLikeSentence('Wizard Topics')).toBe(false)
   })
 
   it('asks the agent for a title in the status line and to keep it unless the project changed', () => {
-    expect(STATUS_INSTRUCTIONS).toContain('"title":"Wizard OS · Desktop"')
+    expect(STATUS_INSTRUCTIONS).toContain('"title":"WizardOS · Desktop"')
     expect(STATUS_INSTRUCTIONS).toContain('Return the thread\'s current title exactly')
     expect(WIZARD_RUN_INSTRUCTIONS).toContain('project-level label')
     expect(WIZARD_RUN_INSTRUCTIONS).toContain("hand that tab over with the Browser app's handoff tool")
-    expect(parseStatus(tag({ state: 'done', ask: 'Shipped', subject: 'DeFleur', title: 'Wizard OS - Desktop' }))).toEqual({ state: 'done', ask: 'Shipped', subject: 'DeFleur', title: 'Wizard OS · Desktop' })
+    expect(parseStatus(tag({ state: 'done', ask: 'Shipped', subject: 'DeFleur', title: 'WizardOS - Desktop' }))).toEqual({ state: 'done', ask: 'Shipped', subject: 'DeFleur', title: 'WizardOS · Desktop' })
     expect(parseStatus(tag({ state: 'done', ask: 'Shipped' }))).toEqual({ state: 'done', ask: 'Shipped' })
   })
 
@@ -60,15 +60,15 @@ describe('title format', () => {
     expect(decide('Messenger · Composer paste', 'Messenger')).toBe('Messenger')
     expect(decide('Messenger · Composer paste', 'Messenger', true)).toBe('')
     expect(decide('Messenger', 'Video Editor')).toBe('Video Editor')
-    expect(decide('Wizard OS · Desktop', 'Wizard OS · Phone app')).toBe('Wizard OS · Phone app')
+    expect(decide('WizardOS · Desktop', 'WizardOS · Phone app')).toBe('WizardOS · Phone app')
   })
 })
 
 describe('when a title changes', () => {
   it('renames only on a different project, once per reply, never over a lock', () => {
-    expect((titleToApply as any)({ currentTitle: 'Wizard OS · Desktop', proposed: 'Wizard OS · Desktop', record: null, assistantAt: 1 })).toBe('')
-    expect((titleToApply as any)({ currentTitle: 'Wizard OS · Desktop', proposed: 'wizard os · desktop', record: null, assistantAt: 1 })).toBe('')
-    expect((titleToApply as any)({ currentTitle: 'Wizard OS · Desktop #2', proposed: 'Wizard OS · Desktop', record: null, assistantAt: 1 })).toBe('')
+    expect((titleToApply as any)({ currentTitle: 'WizardOS · Desktop', proposed: 'WizardOS · Desktop', record: null, assistantAt: 1 })).toBe('')
+    expect((titleToApply as any)({ currentTitle: 'WizardOS · Desktop', proposed: 'WizardOS · desktop', record: null, assistantAt: 1 })).toBe('')
+    expect((titleToApply as any)({ currentTitle: 'WizardOS · Desktop #2', proposed: 'WizardOS · Desktop', record: null, assistantAt: 1 })).toBe('')
     expect((titleToApply as any)({ currentTitle: 'Review 0xMovez post on X', proposed: 'DeFleur', record: null, assistantAt: 1 })).toBe('DeFleur')
     expect((titleToApply as any)({ currentTitle: 'A', proposed: 'B project', record: { locked: true }, assistantAt: 1 })).toBe('')
     expect((titleToApply as any)({ currentTitle: 'A', proposed: 'B project', record: { appliedFor: 7 }, assistantAt: 7 })).toBe('')
@@ -79,21 +79,21 @@ describe('when a title changes', () => {
     const path = join(await tempDir(), 'titles.json')
     const store: any = new ThreadTitleStore(path, { now: () => now })
     // The opener's sentence title, replaced minutes after the thread started: nothing to mark.
-    store.recordRename('s1', { from: 'Send voice note with text', to: 'Wizard OS · Voice notes', by: 'agent', assistantAt: 1, since: now - 120 })
+    store.recordRename('s1', { from: 'Send voice note with text', to: 'WizardOS · Voice notes', by: 'agent', assistantAt: 1, since: now - 120 })
     expect(store.visibleHistory('s1')).toEqual([])
     // Days later the work moves: the thread marks where.
     now += 2 * 86400
-    store.recordRename('s1', { from: 'Wizard OS · Voice notes', to: 'Wizard OS · Desktop', by: 'agent', assistantAt: 2 })
-    expect(store.visibleHistory('s1').map((r: any) => r.from)).toEqual(['Wizard OS · Voice notes'])
-    expect(new ThreadTitleStore(path).get('s1')?.title).toBe('Wizard OS · Desktop')
+    store.recordRename('s1', { from: 'WizardOS · Voice notes', to: 'WizardOS · Desktop', by: 'agent', assistantAt: 2 })
+    expect(store.visibleHistory('s1').map((r: any) => r.from)).toEqual(['WizardOS · Voice notes'])
+    expect(new ThreadTitleStore(path).get('s1')?.title).toBe('WizardOS · Desktop')
     // James renames: locked.
-    store.recordRename('s1', { from: 'Wizard OS · Desktop', to: 'Captions', by: 'you' })
+    store.recordRename('s1', { from: 'WizardOS · Desktop', to: 'Captions', by: 'you' })
     expect(store.get('s1')?.locked).toBe(true)
     expect(ANCHOR_SECONDS).toBe(1800)
   })
 
   it('tells each run what the thread is called', () => {
-    expect(titleContextLine('Wizard OS · Desktop', {})).toContain('“Wizard OS · Desktop”')
+    expect(titleContextLine('WizardOS · Desktop', {})).toContain('“WizardOS · Desktop”')
     const locked = titleContextLine('Captions', { locked: true })
     expect(locked).toContain('“Captions”, and that title is fixed')
     expect(locked).not.toMatch(/James|himself|herself/u)
@@ -110,7 +110,7 @@ describe('topic titles: the app or area, never the opener words', () => {
     expect(topicFor({ appId: 'wizard-music', catalog, texts: ['Notes app'], subject: 'Infrastructure' })).toBe('Music')
     expect(topicFor({ catalog, texts: ['Notes app having dumb popups'] })).toBe('Notes')
     expect(topicFor({ catalog, texts: ['Build ai lookup from wisdom'] })).toBe('Wisdom')
-    expect(topicFor({ catalog, texts: ['Wizard OS general thread'] })).toBe('Wizard OS')
+    expect(topicFor({ catalog, texts: ['WizardOS general thread'] })).toBe('WizardOS')
     expect(topicFor({ catalog, texts: ['I spent money on lunch'] })).toBe('') // a generic app word needs "app" after it
     expect(topicFor({ catalog, texts: ['Open the Money app'] })).toBe('Money')
     expect(topicFor({ catalog, texts: ['With Novaire right now, could'], subject: 'Infrastructure' })).toBe('Infrastructure')
@@ -119,7 +119,7 @@ describe('topic titles: the app or area, never the opener words', () => {
 
   it('knows opener fragments from labels', () => {
     for (const opener of ['Bro on music, I am', 'My messenger isn\'t loading', 'With Novaire right now, could', 'Actually just realized I don\'t', 'Troubleshoot chat that won\'t', 'Mythological terms for lesser false gods']) expect(looksLikeOpener(opener), opener).toBe(true)
-    for (const label of ['Music', 'Messenger', 'Notes', 'Wizard OS · Voice', 'Wizard OS · Phone app', 'TSR podcast', 'Tokyo trip', 'Rabbit R1 setup', 'VPS performance', 'GitHub sync']) expect(looksLikeOpener(label), label).toBe(false)
+    for (const label of ['Music', 'Messenger', 'Notes', 'WizardOS · Voice', 'WizardOS · Phone app', 'TSR podcast', 'Tokyo trip', 'Rabbit R1 setup', 'VPS performance', 'GitHub sync']) expect(looksLikeOpener(label), label).toBe(false)
   })
 
   it('replaces an echoed placeholder or an opener-word proposal with the topic, and only then', () => {
@@ -139,13 +139,13 @@ describe('topic titles: the app or area, never the opener words', () => {
     expect((titleToApply as any)({ currentTitle: 'Bro on music, I am', proposed: 'Bro on music, I am', record: { ...placeholder, appliedFor: 3 }, assistantAt: 3, topic: 'Music' })).toBe('')
     // Without a topic option (routed agents such as Philosopher) behaviour is exactly as before.
     expect(decide('Review 0xMovez post on X', 'Bro on music, I am', null)).toBe('Bro on music, I am')
-    expect(decide('Wizard OS · Chats', 'Messenger', null, 'Notes')).toBe('Messenger')
+    expect(decide('WizardOS · Chats', 'Messenger', null, 'Notes')).toBe('Messenger')
   })
 
   it('puts a clash-free spelling on a title another thread holds: dated, never numbered', () => {
     const at = new Date(Date.UTC(2026, 10, 8, 13, 5))
     expect(clashCandidates('Messenger', at)).toEqual(['Messenger', 'Messenger (8 Nov)', 'Messenger (8 Nov 13:05)'])
-    for (const c of clashCandidates('Wizard OS · Phone app experience', at)) expect(c.length).toBeLessThanOrEqual(32)
+    for (const c of clashCandidates('WizardOS · Phone app experience', at)) expect(c.length).toBeLessThanOrEqual(32)
     expect(clashCandidates('Messenger', at, 'wizard_ab12')).toEqual(['Messenger', 'Messenger (8 Nov)', 'Messenger (8 Nov 13:05)', 'Messenger (8 Nov 13:05 ab12)'])
     expect(titleKey('Messenger (8 Nov 13:05 ab12)')).toBe('messenger')
     expect(titleContextLine('Music, I am', { provisional: true })).toMatch(/only a placeholder/)
@@ -171,7 +171,7 @@ describe('topic titles: the app or area, never the opener words', () => {
 })
 
 describe('the Agent Service applies titles through Hermes', () => {
-  async function fixture({ titleSource = 'llm', startedAgo = 5 * 86400, title = 'Review 0xMovez post on X' as string | null, queued = false, apps = null as null | Array<{ id: string, name: string }> } = {}) {
+  async function fixture({ titleSource = 'llm', startedAgo = 5 * 86400, title = 'Review 0xMovez post on X' as string | null, queued = false, apps = null as null | Array<{ id: string, name: string }>, extra = {} as Record<string, unknown> } = {}) {
     const directory = await tempDir()
     const now = Date.now() / 1000
     const statePath = join(directory, 'state.db')
@@ -236,13 +236,51 @@ describe('the Agent Service applies titles through Hermes', () => {
       threadTitleStatePath: join(directory, 'titles.json'),
       ...(apps ? { appsJsonPath: join(directory, 'apps.json') } : {}),
       ...(queued ? { runQueueStatePath: join(directory, 'queue.sqlite3'), dispatchHealthReader: () => true, activeSessionReader: () => [] } : {}),
+      ...extra,
     })
     servers.push(app)
     const origin = `http://127.0.0.1:${(await listen(app) as any).port}`
     const list = async () => (await (await fetch(`${origin}/wizard/hermes/api/sessions?limit=20`)).json()).data[0]
-    return { origin, list, patches, runs, reply, statePath, clock }
+    return { origin, list, patches, runs, reply, statePath, clock, directory }
   }
   const settle = () => new Promise((resolve) => setTimeout(resolve, 150))
+
+  // WizardOS is one word (James, 8 Nov 2026): stored titles are respelled once, keeping who owns them.
+  const TWO = `Wizard${' '}OS`
+  const receipt = async (directory: string) => {
+    for (let i = 0; i < 40; i += 1) {
+      try { return JSON.parse(await (await import('node:fs/promises')).readFile(join(directory, 'titles.json.wizardos-respell.json'), 'utf8')) } catch { await settle() }
+    }
+    throw new Error('no respell receipt')
+  }
+  it('respells a stored agent title once and the agent may still rename it', async () => {
+    const { list, patches, reply, directory } = await fixture({ title: `${TWO} · Desktop`, extra: { respellDelayMs: 5 } })
+    reply.title = 'WizardOS · Desktop'
+    const done = await receipt(directory)
+    expect(done.renamed).toEqual([expect.objectContaining({ id: 'wizard_t1', from: `${TWO} · Desktop`, to: 'WizardOS · Desktop', locked: false })])
+    expect(done.titles_before).toEqual([expect.objectContaining({ id: 'wizard_t1', title: `${TWO} · Desktop` })])
+    expect(patches).toEqual([{ id: 'wizard_t1', body: { title: 'WizardOS · Desktop' } }])
+    expect((await list()).title).toBe('WizardOS · Desktop'); await settle()
+    const stored = JSON.parse(await (await import('node:fs/promises')).readFile(join(directory, 'titles.json'), 'utf8')).threads.wizard_t1
+    expect(stored).toMatchObject({ title: 'WizardOS · Desktop', locked: false })
+    expect(stored.history.at(-1)).toMatchObject({ by: 'agent', quiet: true, to: 'WizardOS · Desktop' })
+    expect(patches).toHaveLength(1)
+  })
+  it("respells the owner's own title and keeps it locked", async () => {
+    const { list, patches, directory } = await fixture({ title: `My ${TWO} notes`, titleSource: 'user', extra: { respellDelayMs: 5 } })
+    const done = await receipt(directory)
+    expect(done.renamed).toEqual([expect.objectContaining({ to: 'My WizardOS notes', locked: true })])
+    expect((await list()).title).toBe('My WizardOS notes'); await settle()
+    expect(patches).toEqual([{ id: 'wizard_t1', body: { title: 'My WizardOS notes' } }])
+  })
+  it('shows WizardOS before the stored title is fixed, and spells an owner rename in one word', async () => {
+    const { origin, list, patches } = await fixture({ title: `${TWO} plans`, titleSource: 'user', extra: { respellStoredTitles: false } })
+    expect((await list()).title).toBe('WizardOS plans'); await settle()
+    expect(patches).toEqual([{ id: 'wizard_t1', body: { title: 'WizardOS plans' } }])
+    const renamed = await fetch(`${origin}/wizard/hermes/api/sessions/wizard_t1`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title: `${TWO.toLowerCase()} roadmap` }) })
+    expect(renamed.ok).toBe(true)
+    expect(patches.at(-1)).toEqual({ id: 'wizard_t1', body: { title: 'WizardOS roadmap' } })
+  })
 
   it('renames a sentence-titled thread from the status line once, then marks it in the thread only', async () => {
     const { list, patches } = await fixture()

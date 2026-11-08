@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Wizard OS agent runtime: the host half of spec/AGENTS.md section 2.
+"""WizardOS agent runtime: the host half of spec/AGENTS.md section 2.
 
 The Agent Service owns agents/<id>/agent.json, home/config.yaml and home/.env (no provider keys). This helper
 is the only piece that touches the container runtime. It runs on the host (loopback, bearer token) because the
@@ -273,10 +273,10 @@ def config_doc(agent: dict, *, version: str) -> str:
         "id": agent["runtime"]["app_id"],
         "available": True,
         "short_desc": f"Agent: {agent['label']} on Hermes.",
-        "author": "Wizard OS",
+        "author": "WizardOS",
         "port": agent["runtime"]["port"],
         "categories": ["ai"],
-        "description": "A Wizard OS agent instance: stock Hermes in its own container with its own home, chats and memory. Managed from the Agents app.",
+        "description": "A WizardOS agent instance: stock Hermes in its own container with its own home, chats and memory. Managed from the Agents app.",
         "tipi_version": 1,
         "version": version,
         "source": "https://github.com/humanitylabs-org/wizard-agent-service",
@@ -300,13 +300,13 @@ def wizard_md(agent: dict) -> str:
         f"name: {json.dumps(agent['label'] + ' (agent)')}\n"
         "type: agent\n"
         "category: agent\n"
-        f"summary: {json.dumps('Wizard OS agent instance ' + agent['id'] + ' (Agents app).')}\n"
+        f"summary: {json.dumps('WizardOS agent instance ' + agent['id'] + ' (Agents app).')}\n"
         "runtime:\n"
         "  config: runtipi/config.json\n"
         "  compose: runtipi/docker-compose.yml\n"
         "---\n"
         f"# {agent['label']} (agent)\n\n"
-        "Stock Hermes in its own container, managed by the Wizard OS Agents app (spec/AGENTS.md). Its chats, memory "
+        "Stock Hermes in its own container, managed by the WizardOS Agents app (spec/AGENTS.md). Its chats, memory "
         "and skills stay in its own folder. Not an app: it has no window and no launcher tile.\n"
     )
 
@@ -653,7 +653,7 @@ class RuntipiDriver:
         (pkg / "runtipi" / "config.json").write_text(config_doc(agent, version=agent.get("runtime", {}).get("version") or "0.1.0"))
         (pkg / "runtipi" / "docker-compose.yml").write_text(
             compose_doc(agent, image=self.image, proxy_image=self.proxy_image, home_source=stock_home, uid=1000, gid=1000, ports=False))
-        git = ["git", "-C", str(pkg), "-c", "user.name=Wizard OS", "-c", "user.email=agents@wizard.local"]
+        git = ["git", "-C", str(pkg), "-c", "user.name=WizardOS", "-c", "user.email=agents@wizard.local"]
         if not (pkg / ".git").exists():
             subprocess.run(["git", "init", "-q", str(pkg)], check=True)
         subprocess.run([*git, "add", "-A"], check=True)

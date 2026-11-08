@@ -21,7 +21,7 @@ export const reachOutNote = () => `You can open a new Wizard chat thread with th
 const TOOLS = [
   {
     name: START_THREAD_TOOL,
-    description: '[Wizard OS] Open a new chat thread with the owner right now and write its first message. Use when the owner asks you to split a topic into its own thread, or when something deserves its own conversation. The thread appears in the owner\'s Chats under your name; their reply there comes back to you.',
+    description: '[WizardOS] Open a new chat thread with the owner right now and write its first message. Use when the owner asks you to split a topic into its own thread, or when something deserves its own conversation. The thread appears in the owner\'s Chats under your name; their reply there comes back to you.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -34,7 +34,7 @@ const TOOLS = [
   },
   {
     name: SCHEDULE_TOOL,
-    description: '[Wizard OS] Message the owner later: once, or on a repeating schedule such as every morning at 08:30 (owner time). Delivers into this thread (pass session_id) or into your own new thread (pass title). Also lists and cancels your own schedules.',
+    description: '[WizardOS] Message the owner later: once, or on a repeating schedule such as every morning at 08:30 (owner time). Delivers into this thread (pass session_id) or into your own new thread (pass title). Also lists and cancels your own schedules.',
     inputSchema: {
       type: 'object',
       properties: {

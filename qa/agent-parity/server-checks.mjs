@@ -360,7 +360,7 @@ export const serverChecks = {
     const fresh = sent(s).instructions
     assert.ok(fresh.includes(STATUS_PROTOCOL_INSTRUCTIONS) && fresh.includes('SOUL.md in your home'))
     for (const rule of [FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS]) assert.ok(!fresh.includes(rule), `${s.kind}: fresh install has no imposed style`)
-    // One style source: whatever an older shell saved, every runtime gets Wizard OS facts + status protocol only.
+    // One style source: whatever an older shell saved, every runtime gets WizardOS facts + status protocol only.
     for (const style of ['summary', 'concise', 'own']) {
       const put = await s.raw('/wizard/v1/settings', { ...post({ response_style: style }), method: 'PUT' })
       assert.equal(put.status, 200)
@@ -688,7 +688,7 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     await s.restart()
     const binding = await (await s.raw('/wizard/v1/apps/parity-qa/binding')).json()
     assert.equal(binding.binding.agent,s.id)
-    const r = await s.raw(`/wizard/hermes/v1/runs?agent=${binding.binding.agent}`,post({session_id:'wizard_parity',input:'Synthetic owner question about bound app',instructions:'[Wizard OS context] Window in front: Synthetic Parity App. Visible on screen: Bound synthetic context '+ 'X'.repeat(12000)}))
+    const r = await s.raw(`/wizard/hermes/v1/runs?agent=${binding.binding.agent}`,post({session_id:'wizard_parity',input:'Synthetic owner question about bound app',instructions:'[WizardOS context] Window in front: Synthetic Parity App. Visible on screen: Bound synthetic context '+ 'X'.repeat(12000)}))
     assert.equal(r.status,202);assert.equal((await r.json()).agent_id,s.id)
     const body=sent(s)
     assert.ok(body.instructions.includes('Synthetic Parity App'));assert.ok(body.instructions.includes('Background only:'))
@@ -826,7 +826,7 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.ok(sent(s).instructions.includes(TITLE_INSTRUCTIONS), `${s.kind}: actual upstream run gets the shared project rule`)
     assert.ok(sent(s).instructions.includes('This thread is currently titled “Messenger”.'))
     assert.ok(!sent(s).instructions.includes('or to a different feature'))
-    assert.ok(sent(s).instructions.includes('no "Wizard OS ·" prefix, no number'), `${s.kind}: app-name title rule reaches every runtime`)
+    assert.ok(sent(s).instructions.includes('no "WizardOS ·" prefix, no number'), `${s.kind}: app-name title rule reaches every runtime`)
     assert.ok(sent(s).instructions.includes('Never use the owner\'s own opening words'), `${s.kind}: opener words are not a title`)
     await project('Video Editor', 'Video Editor') // genuine project move
     const rename = await s.request('/api/sessions/wizard_parity', { ...post({ title: 'Owner chosen' }), method: 'PATCH' }); assert.equal(rename.status, 200)

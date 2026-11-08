@@ -12,8 +12,8 @@ afterEach(async () => { await Promise.all(dirs.splice(0).map((d) => rm(d, { recu
 
 describe('thread status tag', () => {
   it('parses the last valid tag and normalises aliases', () => {
-    const text = `Shipped.\n\n${tag({ state: 'fyi', ask: 'old' })}\n${tag({ state: 'needs you', ask: 'Decide whether to ship desks', subject: 'Wizard OS' })}`
-    expect(parseStatus(text)).toEqual({ state: 'needs_you', ask: 'Decide whether to ship desks', subject: 'Wizard OS' })
+    const text = `Shipped.\n\n${tag({ state: 'fyi', ask: 'old' })}\n${tag({ state: 'needs you', ask: 'Decide whether to ship desks', subject: 'WizardOS' })}`
+    expect(parseStatus(text)).toEqual({ state: 'needs_you', ask: 'Decide whether to ship desks', subject: 'WizardOS' })
     expect(parseStatus(tag({ state: 'qa', ask: 'Try the orb' }))?.state).toBe('check')
     expect(parseStatus(tag({ state: 'bogus', ask: 'x' }))).toBeNull()
     expect(parseStatus(tag({ state: 'done' }))).toBeNull()
@@ -92,7 +92,7 @@ describe('finish-report prompt', () => {
     expect(FINISH_REPORT_INSTRUCTIONS).toBe(SUMMARY_REPLY_INSTRUCTIONS)
     expect(SUMMARY_REPLY_INSTRUCTIONS).toContain('Briefly restate what we are doing')
     expect(SUMMARY_REPLY_INSTRUCTIONS).toContain('a reply that fits in three sentences never uses this format')
-    // Summary/Concise are retired from the run contract: every saved style gets Wizard OS facts only.
+    // Summary/Concise are retired from the run contract: every saved style gets WizardOS facts only.
     for (const response_style of [undefined, 'summary', 'concise', 'own'] as const) {
       const sent = runInstructions({ join: true, response_style })
       expect(sent).not.toContain(SUMMARY_REPLY_INSTRUCTIONS)
@@ -122,10 +122,10 @@ describe('session list status projection', () => {
   it('serves the latest assistant tag and a clean preview', () => {
     const rows = { data: [
       { role: 'user', content: 'Build it', timestamp: 100 },
-      { role: 'assistant', content: `It is live.\n\n${tag({ state: 'check', ask: 'Try the new pill', subject: 'Wizard OS' })}`, timestamp: 200 },
+      { role: 'assistant', content: `It is live.\n\n${tag({ state: 'check', ask: 'Try the new pill', subject: 'WizardOS' })}`, timestamp: 200 },
     ] }
     const m = latestVisibleSessionMessages(rows)
-    expect(m.status).toEqual({ state: 'check', ask: 'Try the new pill', subject: 'Wizard OS' })
+    expect(m.status).toEqual({ state: 'check', ask: 'Try the new pill', subject: 'WizardOS' })
     expect(m.latest.content).toBe('It is live.')
     expect(m.latest).not.toHaveProperty('status')
     expect(m.latestAssistantAt).toBe(200)
@@ -148,9 +148,9 @@ describe('status backfill', () => {
   it('applies only to the exact reply it classified', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'status-backfill-')); dirs.push(dir)
     const path = join(dir, 'backfill.json')
-    await writeFile(path, JSON.stringify({ threads: { t1: { state: 'needs_you', ask: 'Reply yes to build it', subject: 'Wizard OS', assistant_at: 1000.4 } } }))
+    await writeFile(path, JSON.stringify({ threads: { t1: { state: 'needs_you', ask: 'Reply yes to build it', subject: 'WizardOS', assistant_at: 1000.4 } } }))
     const store = new StatusBackfill(path)
-    expect(store.lookup('t1', 1000)).toEqual({ state: 'needs_you', ask: 'Reply yes to build it', subject: 'Wizard OS' })
+    expect(store.lookup('t1', 1000)).toEqual({ state: 'needs_you', ask: 'Reply yes to build it', subject: 'WizardOS' })
     expect(store.lookup('t1', 1500)).toBeNull()
     expect(store.lookup('t2', 1000)).toBeNull()
     expect(new StatusBackfill('').lookup('t1', 1000)).toBeNull()

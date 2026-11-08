@@ -95,6 +95,6 @@ def register(ctx):
     for short, description, properties, required in specs:
         name = 'wizard_agents_' + short
         ctx.register_tool(name=name, toolset='wizard-agents', handler=tool(short, list(properties)),
-            schema={'name': name, 'description': '[Wizard OS] ' + description,
+            schema={'name': name, 'description': '[WizardOS] ' + description,
                     'parameters': {'type': 'object', 'properties': properties,
                                    'required': required, 'additionalProperties': False}})

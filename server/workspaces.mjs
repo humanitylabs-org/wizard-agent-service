@@ -65,7 +65,7 @@ function parseDb(text) {
 }
 const sleepSync = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
 
-// The file on disk is the single authority, so two service processes sharing one Wizard OS home agree on `rev`:
+// The file on disk is the single authority, so two service processes sharing one WizardOS home agree on `rev`:
 // every mutation takes a short exclusive lock, re-reads the file, compares, writes, then publishes. Nothing is
 // visible to readers until the write has succeeded.
 export function createWorkspaceStore(path) {

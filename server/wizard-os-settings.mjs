@@ -1,7 +1,7 @@
-// Wizard OS settings, the bootstrap payload and the app list for Wizard front ends.
+// WizardOS settings, the bootstrap payload and the app list for Wizard front ends.
 //
 // One small file, $WIZARD_OS_HOME/settings.json (default ~/.wizard-os/settings.json), holds the
-// few facts every Wizard OS piece needs and no agent stores for us: who the user is, what they
+// few facts every WizardOS piece needs and no agent stores for us: who the user is, what they
 // call their agent, their clock. The Agent Service owns the format; front ends read it through
 // GET /wizard/v1/bootstrap and never hardcode any of it.
 import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs'
@@ -92,7 +92,7 @@ export function normalizeSettings(raw, { canStartAgent = (id) => id === 'hermes'
     },
     agent: {
       name: cleanText(agent.name, 40) || DEFAULT_AGENT_NAME,
-      // 'hermes-plugin': the wizard-os Hermes plugin puts the Wizard OS kernel in the agent's system prompt, so
+      // 'hermes-plugin': the wizard-os Hermes plugin puts the WizardOS kernel in the agent's system prompt, so
       // runs carry only app changes. '' (any other harness): every run carries the full kernel.
       adapter: agent.adapter === 'hermes-plugin' ? 'hermes-plugin' : '',
     },
@@ -107,7 +107,7 @@ export function normalizeSettings(raw, { canStartAgent = (id) => id === 'hermes'
     },
     // The fast model that sorts orb utterances into phone commands vs agent requests. It is not the
     // agent: these calls never go through Hermes. `account` names which connected account pays for
-    // it (claude, chatgpt, tinfoil, ...); until Wizard OS has a shared accounts service, `endpoint`
+    // it (claude, chatgpt, tinfoil, ...); until WizardOS has a shared accounts service, `endpoint`
     // + `key_env` say how to reach it. The key itself never lives in this file.
     fast_router: {
       account: cleanText(fastRouter.account, 40),
@@ -170,7 +170,7 @@ export function readSettings(path, options = {}) {
 
 /**
  * Change settings.json: `mutate(raw)` edits the parsed file in place. Fields this service does not
- * know survive (other Wizard OS pieces write their own keys); the result must still normalise. Writes
+ * know survive (other WizardOS pieces write their own keys); the result must still normalise. Writes
  * are atomic (temp file + rename). A file that exists but is not valid JSON is never overwritten.
  * Returns the normalised settings.
  */
@@ -192,7 +192,7 @@ export function updateSettings(path, mutate) {
   return normalizeSettings(raw)
 }
 
-// Own: Wizard sends only Wizard OS facts and protocol, no reply-style rules.
+// Own: Wizard sends only WizardOS facts and protocol, no reply-style rules.
 export const RESPONSE_STYLES = ['summary', 'concise', 'own']
 
 // Bounded, local-only experiment counters. No timestamps, identifiers, content or network sink.
@@ -313,8 +313,8 @@ export function readApps({ appsJsonPath, launcherPath }) {
 }
 
 /**
- * The Wizard OS block every agent run gets (WORK_OUTSTANDING: "instruction injection"): the agent
- * is inside Wizard OS, and these apps are installed, with the MCP endpoint and skill file to use.
+ * The WizardOS block every agent run gets (WORK_OUTSTANDING: "instruction injection"): the agent
+ * is inside WizardOS, and these apps are installed, with the MCP endpoint and skill file to use.
  * Built from apps.json on each run, so an install or uninstall takes effect on the next message.
  * Returns '' when no app is installed, so a box without the App Manager gets a plain run.
  */
@@ -346,7 +346,7 @@ export function wizardOsInstructions({ appsJsonPath, mcpAddress = 'url', skillsI
     lines.push(parts.join(' '))
   }
   if (!lines.length) return ''
-  return `\n\nYou are an agent inside Wizard OS. These apps are installed on this box. When a request matches an app's job, use that app through its MCP endpoint and follow its skill, even if the user does not name MCP. If you save a skill for such a job, make it a short pointer to the app and its skill file, never a copy of the app's workflow.\n${lines.join('\n')}`
+  return `\n\nYou are an agent inside WizardOS. These apps are installed on this box. When a request matches an app's job, use that app through its MCP endpoint and follow its skill, even if the user does not name MCP. If you save a skill for such a job, make it a short pointer to the app and its skill file, never a copy of the app's workflow.\n${lines.join('\n')}`
 }
 
 export function bootstrapPayload({ settings, settingsSource, capabilities }) {

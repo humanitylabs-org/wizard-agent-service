@@ -1,7 +1,7 @@
 {
   "name": "wizard-os",
-  "label": "Wizard OS",
-  "description": "Wizard OS API for connection apps (ChatGPT usage) and the Importer app (bring-data). No dashboard tab.",
+  "label": "WizardOS",
+  "description": "WizardOS API for connection apps (ChatGPT usage) and the Importer app (bring-data). No dashboard tab.",
   "icon": "Puzzle",
   "version": "0.4.0",
   "tab": { "path": "/wizard-os", "hidden": true },

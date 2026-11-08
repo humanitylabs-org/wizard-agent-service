@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""wizard-private-access: the only piece of Wizard OS that may drive Tailscale on the box.
+"""wizard-private-access: the only piece of WizardOS that may drive Tailscale on the box.
 
 Runs as root (systemd unit wizard-private-access.service) and answers HTTP/JSON on a unix socket
 (default /run/wizard-private-access/sock, directory 0750 and socket 0660, group `wizard`). The Agent

@@ -87,7 +87,7 @@ async function startLocal(options: Record<string, unknown>) {
   return { server, port: (await listen(server)).port }
 }
 
-describe('Wizard OS settings for phone setup', () => {
+describe('WizardOS settings for phone setup', () => {
   it('normalises access.tailscale and setup progress', () => {
     const empty = normalizeSettings({})
     expect(empty.access).toEqual({ tailscale: { origin: '', owner_logins: [] } })

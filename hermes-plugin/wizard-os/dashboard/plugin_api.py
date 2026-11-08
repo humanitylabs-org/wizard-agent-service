@@ -1,4 +1,4 @@
-"""Wizard OS dashboard API, mounted by stock Hermes at /api/plugins/wizard-os/ (dashboard login required).
+"""WizardOS dashboard API, mounted by stock Hermes at /api/plugins/wizard-os/ (dashboard login required).
 
 GET /ai-usage/chatgpt -> this agent's own ChatGPT (openai-codex) usage in the wizard.ai-connection/1 `usage`
 shape, so the ChatGPT connection app can report usage without ever holding a token. Read-only: Hermes' own
@@ -46,7 +46,7 @@ router.include_router(_bring.router)
 # Add / reconnect / remove ship switched OFF. The read-only listing works on every box regardless of
 # auth.adopt_external_logins (Hermes keeps importing an existing Claude Code login). Turning account changes on needs a
 # path that provably keeps that login; until then set WIZARD_ACCOUNT_CHANGES=1 only on a box that has been checked.
-# A comma list of providers (e.g. `chatgpt`) turns changes on for those only: a fresh Wizard OS box adds ChatGPT
+# A comma list of providers (e.g. `chatgpt`) turns changes on for those only: a fresh WizardOS box adds ChatGPT
 # sign-ins here while its Claude sign-in stays with the Claude app's own Claude Code page (the login the agent's
 # Claude subscription provider uses).
 def _changes_on(provider: str) -> bool:

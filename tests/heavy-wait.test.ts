@@ -10,7 +10,7 @@ const sid = 'wizard_heavy_fixture'
 const now = Date.now()
 const job = (over: Record<string, unknown> = {}) => ({ job_id: 'heavy_one', sessionId: sid, agent_id: 'hermes', state: 'queued', resume: '',
   cancel_requested: false, continuation_invalidated: false, created_at: now - 60_000, ...over })
-const status = (state: string) => ` [WIZARD_STATUS_V1]{"state":"${state}","ask":"x","subject":"Wizard OS","title":"T · X"}[/WIZARD_STATUS_V1]`
+const status = (state: string) => ` [WIZARD_STATUS_V1]{"state":"${state}","ask":"x","subject":"WizardOS","title":"T · X"}[/WIZARD_STATUS_V1]`
 
 function stateDb(fn: (db: DatabaseSync, path: string) => unknown) {
   const dir = mkdtempSync(join(tmpdir(), 'heavy-wait-')), path = join(dir, 'state.db'), db = new DatabaseSync(path)

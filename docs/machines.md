@@ -1,6 +1,6 @@
 # Machines
 
-The owner gives an agent a computer. v1 builds the one level Archimedes needs to run on Wizard OS: **agent-owned**.
+The owner gives an agent a computer. v1 builds the one level Archimedes needs to run on WizardOS: **agent-owned**.
 
 ## Levels
 

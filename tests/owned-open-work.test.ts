@@ -387,7 +387,7 @@ describe('owned-work service wiring', () => {
     expect(before.status).toBe('running'); expect(before.wizard_attention?.state).not.toBe('done')
     await vi.waitFor(() => expect(f.sent).toHaveLength(1))
     expect(f.sent[0].input).toContain(OWNED_WORK_PREFIX)
-    // Summary is retired: continuations carry the Wizard OS contract only, never the owned-work style rule.
+    // Summary is retired: continuations carry the WizardOS contract only, never the owned-work style rule.
     expect(f.sent[0].instructions).not.toContain(OWNED_OPEN_WORK_INSTRUCTIONS)
     expect(f.sent[0].instructions).toContain('Wizard renders Markdown')
     const history = await fetch(`http://127.0.0.1:${f.server.address().port}/wizard/hermes/api/sessions/wizard_owned/messages?view=wizard`).then(r => r.json())
@@ -627,7 +627,7 @@ describe('owned open work scan stays cheap on large transcripts', () => {
     const now = Date.now()
     const add = (session, role, content) => db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)').run(session, role, content, now / 1000)
     add('wizard_a', 'user', 'go')
-    add('wizard_a', 'assistant', '**Done.**\n\n**Still open:**\n- Mine: run the soak\n[WIZARD_STATUS_V1]{"state":"done","ask":"x","subject":"Wizard OS","title":"A · B"}[/WIZARD_STATUS_V1]')
+    add('wizard_a', 'assistant', '**Done.**\n\n**Still open:**\n- Mine: run the soak\n[WIZARD_STATUS_V1]{"state":"done","ask":"x","subject":"WizardOS","title":"A · B"}[/WIZARD_STATUS_V1]')
     const first = scanOwnedOpenWork(path, { now })
     expect(first.evidence.map(e => e.sessionId)).toEqual(['wizard_a'])
     const second = scanOwnedOpenWork(path, { now, afterId: first.lastId })
@@ -656,7 +656,7 @@ describe('owned open work restated from an earlier turn', () => {
       }
       add('assistant', 'Scheduled.')
       add('user', 'anything else?')
-      add('assistant', '**Nothing else.**\n\n**Still open:**\n- The rebase runs tonight around 03:40. That is mine, and it is already scheduled.\n[WIZARD_STATUS_V1]{"state":"fyi","ask":"x","subject":"Wizard OS","title":"A · B"}[/WIZARD_STATUS_V1]')
+      add('assistant', '**Nothing else.**\n\n**Still open:**\n- The rebase runs tonight around 03:40. That is mine, and it is already scheduled.\n[WIZARD_STATUS_V1]{"state":"fyi","ask":"x","subject":"WizardOS","title":"A · B"}[/WIZARD_STATUS_V1]')
       db.close()
       return readOwnedOpenWork(path, 'wizard_p')!
     }
@@ -680,7 +680,7 @@ describe('owned open work waits for a busy thread', () => {
     db.exec(`CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, tool_calls TEXT, tool_call_id TEXT, timestamp REAL, active INTEGER DEFAULT 1, display_kind TEXT, message_uid TEXT)`)
     const add = (role: string, content: string) => db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)').run('wizard_busy', role, content, Date.now() / 1000)
     add('user', 'fix it')
-    add('assistant', '**Fixed.**\n\n**Still open:**\n- Mine: run the soak tonight\n[WIZARD_STATUS_V1]{"state":"done","ask":"x","subject":"Wizard OS","title":"A · B"}[/WIZARD_STATUS_V1]')
+    add('assistant', '**Fixed.**\n\n**Still open:**\n- Mine: run the soak tonight\n[WIZARD_STATUS_V1]{"state":"done","ask":"x","subject":"WizardOS","title":"A · B"}[/WIZARD_STATUS_V1]')
     let busy = true
     const inputs: string[] = []
     const worker = createOwnedWorkFollowThrough({ sessionDbPath: path, statePath: join(root, 'claims.db'), busy: async () => busy,

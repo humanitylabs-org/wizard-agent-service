@@ -7,7 +7,7 @@ it never fetches GitHub, installs a phone app, or changes a box update setting.
 - Container: `/wizard-os/phone/`, inherited from the existing
   `${ROOT_FOLDER_HOST}/app-data/wizard-os:/wizard-os:ro` mount in `runtipi/docker-compose.yml`.
 - `WIZARD_PHONE_FEED_DIR` overrides the directory. Without it, `server/index.mjs` derives `phone/` beside
-  `WIZARD_APPS_JSON_PATH` (or the normal Wizard OS home). Old pinned compose definitions already have the
+  `WIZARD_APPS_JSON_PATH` (or the normal WizardOS home). Old pinned compose definitions already have the
   apps.json mount and therefore need no new mount for a new Service image to read the mirror.
 - `GET` and `HEAD` only: `/reports/wizard-os/latest.json` and
   `/reports/wizard-os/wizard-os-<semver>.apk`. Other methods return 405 with `Allow: GET, HEAD`.

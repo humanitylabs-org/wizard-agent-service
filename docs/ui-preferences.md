@@ -92,7 +92,7 @@ This is not a cross-process filesystem lock: run one Agent Service writer per ow
 as before. Shells must not write a migration-complete marker in browser storage. Old
 services may lack this route; clients keep compatibility defaults without making a PUT.
 
-The service saves `ui-preferences.json` under its Wizard OS home, using a restricted
+The service saves `ui-preferences.json` under its WizardOS home, using a restricted
 mode and atomic rename. It never rewrites operator-owned `settings.json`, app config,
 Hermes configuration or user data. Writes within one service process merge
 synchronously so simultaneous partial updates do not lose other fields.

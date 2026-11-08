@@ -38,9 +38,9 @@ describe('status backfill across the whole session list', () => {
     // Replies past the preview window that carry the agent's own status line.
     const tag = (status: object) => `Answer\n\n[WIZARD_STATUS_V1]${JSON.stringify(status)}[/WIZARD_STATUS_V1]`
     const tagged: Record<string, string> = {
-      wizard_bf_50: tag({ state: 'done', ask: 'Troubleshooter opens as an app window', subject: 'Wizard OS', title: 'Wizard OS · Troubleshooter' }),
-      wizard_bf_54: tag({ state: 'needs_you', ask: 'Approve the code', subject: 'Wizard OS' }),
-      wizard_bf_56: tag({ state: 'done', ask: 'Superseded by a follow-up', subject: 'Wizard OS' }),
+      wizard_bf_50: tag({ state: 'done', ask: 'Troubleshooter opens as an app window', subject: 'WizardOS', title: 'WizardOS · Troubleshooter' }),
+      wizard_bf_54: tag({ state: 'needs_you', ask: 'Approve the code', subject: 'WizardOS' }),
+      wizard_bf_56: tag({ state: 'done', ask: 'Superseded by a follow-up', subject: 'WizardOS' }),
     }
     ids.forEach((id, i) => {
       addSession.run(id, base - i)
@@ -54,12 +54,12 @@ describe('status backfill across the whole session list', () => {
 
     const backfillPath = join(directory, 'backfill.json')
     await writeFile(backfillPath, JSON.stringify({ threads: {
-      wizard_bf_55: { state: 'check', ask: 'Try the new list', subject: 'Wizard OS', assistant_at: replyAt(55) },
-      wizard_bf_58: { state: 'needs_you', ask: 'Pick a layout', subject: 'Wizard OS', assistant_at: replyAt(58) },
+      wizard_bf_55: { state: 'check', ask: 'Try the new list', subject: 'WizardOS', assistant_at: replyAt(55) },
+      wizard_bf_58: { state: 'needs_you', ask: 'Pick a layout', subject: 'WizardOS', assistant_at: replyAt(58) },
       wizard_bf_59: { state: 'fyi', ask: 'Answered the licence question', subject: 'Research', assistant_at: replyAt(59) },
-      wizard_bf_57: { state: 'done', ask: 'Old reply', subject: 'Wizard OS', assistant_at: replyAt(57) - 500 },
+      wizard_bf_57: { state: 'done', ask: 'Old reply', subject: 'WizardOS', assistant_at: replyAt(57) - 500 },
       // The reply's own status line wins over a backfill record for the same reply.
-      wizard_bf_54: { state: 'fyi', ask: 'Backfill guess', subject: 'Wizard OS', assistant_at: replyAt(54) },
+      wizard_bf_54: { state: 'fyi', ask: 'Backfill guess', subject: 'WizardOS', assistant_at: replyAt(54) },
     } }))
 
     const upstream = createServer((req, res) => {
@@ -108,19 +108,19 @@ describe('status backfill across the whole session list', () => {
 
     // One page of 60: 55 and 59 sit past the preview window.
     const whole = await list(0, 100)
-    expect(whole.wizard_bf_55).toEqual({ state: 'check', ask: 'Try the new list', subject: 'Wizard OS' })
+    expect(whole.wizard_bf_55).toEqual({ state: 'check', ask: 'Try the new list', subject: 'WizardOS' })
     expect(whole.wizard_bf_59).toEqual({ state: 'fyi', ask: 'Answered the licence question', subject: 'Research' })
     expect(whole.wizard_bf_58).toBeNull() // James replied after it
     expect(whole.wizard_bf_57).toBeNull() // classified a different (older) reply
     expect(whole.wizard_bf_10).toBeNull() // never backfilled
     // The agent's own status line reaches threads past the preview window.
-    expect(whole.wizard_bf_50).toEqual({ state: 'done', ask: 'Troubleshooter opens as an app window', subject: 'Wizard OS', title: 'Wizard OS · Troubleshooter' })
-    expect(whole.wizard_bf_54).toEqual({ state: 'needs_you', ask: 'Approve the code', subject: 'Wizard OS' })
+    expect(whole.wizard_bf_50).toEqual({ state: 'done', ask: 'Troubleshooter opens as an app window', subject: 'WizardOS', title: 'WizardOS · Troubleshooter' })
+    expect(whole.wizard_bf_54).toEqual({ state: 'needs_you', ask: 'Approve the code', subject: 'WizardOS' })
     expect(whole.wizard_bf_56).toBeNull() // James replied after the tagged answer
 
     // Second page of a paged walk gets the same statuses.
     const second = await list(50, 50)
-    expect(second.wizard_bf_55).toEqual({ state: 'check', ask: 'Try the new list', subject: 'Wizard OS' })
+    expect(second.wizard_bf_55).toEqual({ state: 'check', ask: 'Try the new list', subject: 'WizardOS' })
     expect(second.wizard_bf_59).toEqual({ state: 'fyi', ask: 'Answered the licence question', subject: 'Research' })
     expect(second.wizard_bf_58).toBeNull()
     expect(second.wizard_bf_50).toEqual(whole.wizard_bf_50)

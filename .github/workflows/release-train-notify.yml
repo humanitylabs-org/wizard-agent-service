@@ -1,4 +1,4 @@
-# Tells the Wizard OS release train (humanitylabs-org/wizard-os .github/workflows/release-cut.yml) that main has a
+# Tells the WizardOS release train (humanitylabs-org/wizard-os .github/workflows/release-cut.yml) that main has a
 # new publishable commit, so it reaches For testers (latest) within minutes (at most one cut per 30 min there).
 # Runs after a green "Publish public image" (image published, attested, anonymously pullable) on main; never checks out or runs this repo's code. Uses the org secret
 # RELEASE_TRAIN_TOKEN (the release train's one token; wizard-os docs/RELEASE_AUTOMATION.md "Owner setup"). Without

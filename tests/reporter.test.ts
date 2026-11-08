@@ -125,10 +125,10 @@ describe('scheduled corrective run is durable and bounded', () => {
   it('keeps the original attention state, subject and title when asking for a rewrite (check stays on Ready)', async () => {
     const f=fixture(); f.s.create({name:'Check',when:{once:'2026-10-25T12:00:00Z'},prompt:'Check it'})
     await f.s.tick()
-    const original='**0.10.16 is on your phone.**\n\n**Does it work:** yes.\n\n[WIZARD_STATUS_V1]{"state":"check","ask":"Translate bar update is on your phone. Say if it feels right","subject":"Wizard OS","title":"Wizard OS · Translate bar"}[/WIZARD_STATUS_V1]'
+    const original='**0.10.16 is on your phone.**\n\n**Does it work:** yes.\n\n[WIZARD_STATUS_V1]{"state":"check","ask":"Translate bar update is on your phone. Say if it feels right","subject":"WizardOS","title":"WizardOS · Translate bar"}[/WIZARD_STATUS_V1]'
     f.results.set(f.calls[0].key,{status:'completed',output:original}); await f.s.refreshRuns()
     expect(f.calls).toHaveLength(2)
-    expect(f.calls[1].body.input).toContain('Keep the status line\'s state "check", subject "Wizard OS" and title "Wizard OS · Translate bar" exactly')
+    expect(f.calls[1].body.input).toContain('Keep the status line\'s state "check", subject "WizardOS" and title "WizardOS · Translate bar" exactly')
   })
 })
 

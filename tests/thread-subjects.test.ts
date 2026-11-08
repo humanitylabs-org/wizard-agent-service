@@ -18,13 +18,13 @@ const tag = (value: object) => `Reply.\n\n[WIZARD_STATUS_V1]${JSON.stringify(val
 
 const SUBJECTS = {
   subjects: [
-    { name: 'Wizard OS', about: 'the shell: chats, Ready, orb' },
+    { name: 'WizardOS', about: 'the shell: chats, Ready, orb' },
     { name: 'Wizard Apps', about: 'apps inside Wizard' },
     { name: 'AI Wizards', about: 'the business' },
     'Music',
   ],
-  aliases: { 'Wizard App': 'wizard os', 'Wizard Movement': 'AI Wizards', 'McKenna Track': 'Music', 'Wizard Signal': 'Wizard Apps', 'Music': 'Music' },
-  threads: { wizard_grab: { from: 'Wizard OS', subject: 'Wizard Apps' }, '../bad': { subject: 'Music' } },
+  aliases: { 'Wizard App': 'WizardOS', 'Wizard Movement': 'AI Wizards', 'McKenna Track': 'Music', 'Wizard Signal': 'Wizard Apps', 'Music': 'Music' },
+  threads: { wizard_grab: { from: 'WizardOS', subject: 'Wizard Apps' }, '../bad': { subject: 'Music' } },
 }
 
 describe('subject list', () => {
@@ -36,8 +36,8 @@ describe('subject list', () => {
 
   it('normalises the file: canonical names, aliases onto them, safe thread ids only', () => {
     const data = normalizeSubjects(SUBJECTS)
-    expect(data.subjects.map((s) => s.name)).toEqual(['Wizard OS', 'Wizard Apps', 'AI Wizards', 'Music'])
-    expect(data.aliases.get('wizard app')).toBe('Wizard OS') // target spelled the canonical way
+    expect(data.subjects.map((s) => s.name)).toEqual(['WizardOS', 'Wizard Apps', 'AI Wizards', 'Music'])
+    expect(data.aliases.get('wizard app')).toBe('WizardOS') // target spelled the canonical way
     expect(data.aliases.has('music')).toBe(false) // a self-alias is dropped
     expect([...data.threads.keys()]).toEqual(['wizard_grab'])
     expect(normalizeSubjects(null).subjects).toEqual([])
@@ -51,13 +51,13 @@ describe('subject list', () => {
     expect(catalog.resolve('t1', 'wizard movement')).toBe('AI Wizards')
     expect(catalog.resolve('t1', 'wizard apps')).toBe('Wizard Apps')
     expect(catalog.resolve('t1', 'Gardening')).toBe('Gardening') // unknown subjects pass through
-    expect(catalog.resolve('wizard_grab', 'Wizard OS')).toBe('Wizard Apps')
+    expect(catalog.resolve('wizard_grab', 'WizardOS')).toBe('Wizard Apps')
     expect(catalog.resolve('wizard_grab', 'Music')).toBe('Music') // the agent moved on: correction no longer applies
-    expect(catalog.apply('t1', { state: 'check', ask: 'Try it', subject: 'Wizard App' })).toEqual({ state: 'check', ask: 'Try it', subject: 'Wizard OS' })
+    expect(catalog.apply('t1', { state: 'check', ask: 'Try it', subject: 'Wizard App' })).toEqual({ state: 'check', ask: 'Try it', subject: 'WizardOS' })
     const same = { state: 'fyi', ask: 'Done', subject: 'Music' }
     expect(catalog.apply('t1', same)).toBe(same)
     const note = catalog.runNote('Wizard Apps')
-    expect(note).toContain('Wizard OS (the shell: chats, Ready, orb); Wizard Apps (apps inside Wizard); AI Wizards (the business); Music.')
+    expect(note).toContain('WizardOS (the shell: chats, Ready, orb); Wizard Apps (apps inside Wizard); AI Wizards (the business); Music.')
     expect(note).toContain('This thread\'s subject is “Wizard Apps”')
     // Edits apply without a restart; a broken file means no list rather than a crash.
     await writeFile(path, '{nope')
@@ -73,7 +73,7 @@ describe('subject list', () => {
     await writeFile(subjectsPath, JSON.stringify(SUBJECTS))
     const now = 1_790_000_000
     const runs: any[] = []
-    const threads: Record<string, string> = { wizard_grab: 'Wizard OS', wizard_track: 'McKenna Track', wizard_shell: 'Wizard OS' }
+    const threads: Record<string, string> = { wizard_grab: 'WizardOS', wizard_track: 'McKenna Track', wizard_shell: 'WizardOS' }
     const upstream = createServer(async (req, res) => {
       const url = new URL(req.url ?? '/', 'http://x')
       const chunks: Buffer[] = []
@@ -110,12 +110,12 @@ describe('subject list', () => {
     const origin = `http://127.0.0.1:${(await listen(app) as any).port}`
     const body = await (await fetch(`${origin}/wizard/hermes/api/sessions?limit=20`)).json() as { data: Array<{ id: string, wizard_attention?: { subject?: string } }> }
     const subjects = Object.fromEntries(body.data.map((s) => [s.id, s.wizard_attention?.subject]))
-    expect(subjects).toEqual({ wizard_grab: 'Wizard Apps', wizard_track: 'Music', wizard_shell: 'Wizard OS' })
+    expect(subjects).toEqual({ wizard_grab: 'Wizard Apps', wizard_track: 'Music', wizard_shell: 'WizardOS' })
 
     const sent = await fetch(`${origin}/wizard/hermes/v1/runs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: 'wizard_grab', input: 'hi' }) })
     expect(sent.ok).toBe(true)
     const instructions = String(runs[0].instructions)
-    expect(instructions).toContain('Subjects for the status line: Wizard OS (the shell: chats, Ready, orb); Wizard Apps')
+    expect(instructions).toContain('Subjects for the status line: WizardOS (the shell: chats, Ready, orb); Wizard Apps')
     expect(instructions).toContain('This thread\'s subject is “Wizard Apps”')
   })
 })

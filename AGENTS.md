@@ -25,10 +25,10 @@ Historical evidence/receipt paths are explicitly exempt, not executable examples
 - **Publishing:** merging to `main` triggers the **publish-image** workflow, which publishes the public image. Confirm the run succeeded. Live boxes run `main`.
 - **Real conversation content** never goes into fixtures, tests or PR text. Use synthetic threads.
 
-<!-- wizard-os-team-rules v4 (24 Oct 2026). Same text in every Wizard OS repo; the canonical copy is humanitylabs-org/wizard-os AGENTS.md. Change it there first, then copy the block to every repo in one round of PRs. -->
-## Wizard OS team rules (identical in every repo)
+<!-- wizard-os-team-rules v4 (24 Oct 2026). Same text in every WizardOS repo; the canonical copy is humanitylabs-org/wizard-os AGENTS.md. Change it there first, then copy the block to every repo in one round of PRs. -->
+## WizardOS team rules (identical in every repo)
 
-Wizard OS is built by James, Jan and Miguel together with their agents. Archimedes commits as `defleur-agents` and Oscar as `oscarhenrycollins`. Every repo belongs to Wizard OS as a whole, and no repo belongs to one person. Make the change that is best for the whole system, and build on each other's work.
+WizardOS is built by James, Jan and Miguel together with their agents. Archimedes commits as `defleur-agents` and Oscar as `oscarhenrycollins`. Every repo belongs to WizardOS as a whole, and no repo belongs to one person. Make the change that is best for the whole system, and build on each other's work.
 
 ### Branches
 
@@ -86,7 +86,7 @@ Every change reaches `main` one of two ways: **propose a fix** (`tier: recommend
 
 ### Tracking
 
-**The [Wizard OS · PR pipeline](https://github.com/orgs/humanitylabs-org/projects/1) board is the source of truth for where every PR is**, across all repos: Draft → In review → Merged → On Latest → On Stable, or Dropped. wizard-os `tools/pr_board.py` syncs it every 15 minutes from the PRs and the release pointers, so nobody moves cards by hand; keep the tier label right and the board stays right. Check it before asking someone where a change is, and link it in status updates instead of listing PRs.
+**The [WizardOS · PR pipeline](https://github.com/orgs/humanitylabs-org/projects/1) board is the source of truth for where every PR is**, across all repos: Draft → In review → Merged → On Latest → On Stable, or Dropped. wizard-os `tools/pr_board.py` syncs it every 15 minutes from the PRs and the release pointers, so nobody moves cards by hand; keep the tier label right and the board stays right. Check it before asking someone where a change is, and link it in status updates instead of listing PRs.
 
 ### Merging
 

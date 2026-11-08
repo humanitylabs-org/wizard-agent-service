@@ -1,4 +1,4 @@
-// Wizard Files on a Wizard OS box: attachments are ordinary user files.
+// Wizard Files on a WizardOS box: attachments are ordinary user files.
 //
 // On a box running the Wizard App Manager, the user-files root is Runtipi's shared `media/` folder
 // (wizard-os docs/SYSTEM_APPS.md, "one files root"). The Files app shows it and every app that works

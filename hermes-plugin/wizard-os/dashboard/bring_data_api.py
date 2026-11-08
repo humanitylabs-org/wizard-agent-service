@@ -4,7 +4,7 @@ Mounted by plugin_api.py under /api/plugins/wizard-os/bring-data/ (stock dashboa
 engine is the same module the ``wizard_bring_data`` agent tool uses; nothing here parses an export.
 
 GET  sources   agent folders on this box (Claude Code, other Hermes homes) + exports in Files Inbox/Downloads,
-               and ``into``: other Wizard OS agents an import can go into (then this agent is a source too)
+               and ``into``: other WizardOS agents an import can go into (then this agent is a source too)
 GET  imports?dest=<agent>   earlier imports (for per-import Undo)
 POST scan      {path} or {paths: [...]}, dest?, scan_id?    -> counts, draft facts, skills, personality, fact store
 GET  progress?scan_id=<id>   where that scan is: step, done/total, idle seconds, seconds_left

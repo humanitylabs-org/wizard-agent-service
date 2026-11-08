@@ -95,7 +95,7 @@ describe('agent bridge: kernel', () => {
   it('routes app development to the OS builder before ordinary job routing, including an empty box', () => {
     for (const apps of [[], bridgeApps({ apps: [app('hello-wizard', 1)] })]) {
       const text = renderKernel(apps)
-      expect(text).toContain('To build, port, redesign or modify an app for Wizard OS, first load `wizard-builder` with skill_view')
+      expect(text).toContain('To build, port, redesign or modify an app for WizardOS, first load `wizard-builder` with skill_view')
       expect(text.indexOf('wizard-builder')).toBeLessThan(text.indexOf('wizard-job-<job>'))
       expect(text).toContain('follow its coding and wam workflow')
       expect(text).toContain('For ordinary app use: Never search the disk')
@@ -172,7 +172,7 @@ describe('agent bridge: kernel', () => {
       '',
       'Tools are on the `wizard` MCP server. If one is not in your tool list, run it with tool_call and that exact name. Paths are relative to the owner\'s Files root.',
       '',
-      'Written by Wizard OS from apps.json and rebuilt when apps change. Do not edit.',
+      'Written by WizardOS from apps.json and rebuilt when apps change. Do not edit.',
       '',
     ].join('\n'))
     expect(read('wizard-job-video-editing')).toContain('The installed DeFleur Video app does it')
@@ -253,7 +253,7 @@ describe('agent bridge: kernel', () => {
     const before = { 'hello-wizard': 'running' }
     const apps = bridgeApps({ apps: [app('hello-wizard', 1), app('transcriber', 2, { provides: ['transcription'] })] })
     expect(appsDelta(apps, before).map((a) => a.id)).toEqual(['transcriber'])
-    expect(renderDelta(appsDelta(apps, before))).toBe('Wizard OS, new app: Transcriber for transcription; load `wizard-job-transcription`.')
+    expect(renderDelta(appsDelta(apps, before))).toBe('WizardOS, new app: Transcriber for transcription; load `wizard-job-transcription`.')
     expect(renderDelta([])).toBe('')
     const snaps = new ThreadAppSnapshots('')
     expect(snaps.take('s1', before)).toEqual(before)
@@ -418,7 +418,7 @@ describe('agent bridge: kernel route and per-run instructions', () => {
     const dir = box([app('hello-wizard', 9)])
     const base = await start(dir)
     const text = await (await fetch(`${base}/wizard/v1/agent-context`)).text()
-    expect(text).toContain('Wizard OS: you are the owner\'s agent')
+    expect(text).toContain('WizardOS: you are the owner\'s agent')
     expect(text).not.toContain('Hello Wizard')
     const json = await (await fetch(`${base}/wizard/v1/agent-context?format=json`)).json()
     expect(json.apps[0]).toMatchObject({ id: 'hello-wizard', status: 'running', jobs: ['diagnostics'] })
@@ -443,17 +443,17 @@ describe('agent bridge: kernel route and per-run instructions', () => {
     const post = (b, sid) => fetch(`${b}/wizard/hermes/v1/runs`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: sid, input: 'hi' }) })
     const first = await post(base, 's-generic')
     expect([first.status, await first.text()]).toEqual([202, expect.any(String)])
-    expect(seen.at(-1)).toContain('Wizard OS: you are the owner\'s agent')
+    expect(seen.at(-1)).toContain('WizardOS: you are the owner\'s agent')
     expect(seen.at(-1)).toContain('- diagnostics -> Hello Wizard (`mcp__wizard__hello_wizard__*`)')
     writeFileSync(join(dir, 'settings.json'), JSON.stringify({ agent: { adapter: 'hermes-plugin' } }))
     base = await start(dir, { options: { ...opts, threadAppsStatePath: join(dir, 'thread-apps.json') } })
     await post(base, 's-plugin')
-    expect(seen.at(-1)).not.toContain('Wizard OS: you are')
-    expect(seen.at(-1)).not.toContain('Wizard OS, new app')
+    expect(seen.at(-1)).not.toContain('WizardOS: you are')
+    expect(seen.at(-1)).not.toContain('WizardOS, new app')
     writeFileSync(join(dir, 'apps.json'), JSON.stringify({ apps: [app('hello-wizard', 9), app('transcriber', 9, { provides: ['transcription'] })] }))
     utimesSync(join(dir, 'apps.json'), new Date(), new Date(Date.now() + 5000))
     await post(base, 's-plugin')
-    expect(seen.at(-1)).toContain('Wizard OS, new app: Transcriber for transcription; load `wizard-job-transcription`.')
+    expect(seen.at(-1)).toContain('WizardOS, new app: Transcriber for transcription; load `wizard-job-transcription`.')
     expect(seen.at(-1)).toContain('Transcriber')
     // The delta names only the new app. The separate app-provenance catalogue (live 41de73a, every run) lists
     // every installed app id/name as data, so the delta rule is checked on the text before that catalogue.

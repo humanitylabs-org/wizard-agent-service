@@ -184,7 +184,7 @@ export const checks = {
     assert.equal((await (await s.request('/api/sessions/wizard_parity')).json()).session.title, 'Synthetic renamed thread')
   },
   'screen-context': async s => {
-    const r = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'About this view', instructions: '[Wizard OS context] Window in front: Fixture. Visible on screen: synthetic label' })); assert.equal(r.status, 202)
+    const r = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'About this view', instructions: '[WizardOS context] Window in front: Fixture. Visible on screen: synthetic label' })); assert.equal(r.status, 202)
     const sent = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
     assert.ok(sent.instructions.includes('Background only:'))
     assert.ok(sent.instructions.includes('Visible on screen: synthetic label'))

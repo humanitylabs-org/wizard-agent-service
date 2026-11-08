@@ -19,7 +19,7 @@ export const TIPS = [
   { topic: 'change your skin', text: 'Make Wizard look the way you like. Pick a skin in Settings → Appearance, then ask me "change my skin so the background is dark green" (or anything else). I edit your own My skin file in Files, Skins/My skin/skin.css, which stays on top of the skin you picked and survives updates. If a change goes wrong, open Wizard with ?myskin=off and ask me to undo it.' },
   { topic: 'set reminders', text: 'Ask me to remind you of things: "remind me tomorrow morning to call the bank" or "remind me at 6pm to stretch". The reminder arrives here in Chats at that time. Say "what reminders do I have?" to see them, or "cancel the bank reminder".' },
   { topic: 'the Store and connectors', text: 'The Store adds apps and connectors. Say what you want rather than hunting for it: "make me a website" brings in the Cloudflare connector (you tap Get once and sign in), and from then on I can publish your site and look after its domain. Open the Store from Home to browse everything else.' },
-  { topic: 'report a change request', text: 'Want something to work differently? Say "change request:" and describe it. For your own apps and your skin I make the change straight away. For Wizard itself I write it up as a short request and, with your OK, send it to the Wizard OS team.' },
+  { topic: 'report a change request', text: 'Want something to work differently? Say "change request:" and describe it. For your own apps and your skin I make the change straight away. For Wizard itself I write it up as a short request and, with your OK, send it to the WizardOS team.' },
 ]
 
 const tipPrompt = (index) => `Wizard tip ${index + 1} of ${TIPS.length} (${TIPS[index].topic}). Share this with the owner in two or three friendly sentences and suggest one thing to try now:\n${TIPS[index].text}\nEnd with: "Say stop tips to turn these off."`
@@ -64,7 +64,7 @@ export function stopTips(scheduler, { agent = 'main' } = {}) {
 const TOOLS = [
   {
     name: 'wizard_remind',
-    description: '[Wizard OS] Set, list or cancel a reminder for the owner. It arrives in Wizard Chats at the time, in its own "Reminder · …" thread. Use for "remind me…", "what reminders do I have?", "cancel the … reminder".',
+    description: '[WizardOS] Set, list or cancel a reminder for the owner. It arrives in Wizard Chats at the time, in its own "Reminder · …" thread. Use for "remind me…", "what reminders do I have?", "cancel the … reminder".',
     inputSchema: {
       type: 'object',
       properties: {
@@ -78,7 +78,7 @@ const TOOLS = [
   },
   {
     name: 'wizard_tips',
-    description: '[Wizard OS] Opt the owner in to one Wizard feature tip a day for five days (build an app by voice, My skin, reminders, Store and connectors, change requests), or stop them. Only start when the owner says yes.',
+    description: '[WizardOS] Opt the owner in to one Wizard feature tip a day for five days (build an app by voice, My skin, reminders, Store and connectors, change requests), or stop them. Only start when the owner says yes.',
     inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['start', 'stop', 'status'], description: 'start, stop or status' } }, required: ['action'] },
   },
 ]

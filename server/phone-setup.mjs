@@ -1,4 +1,4 @@
-// "Connect your phone": the Agent Service half of Wizard OS phone setup (Tailscale).
+// "Connect your phone": the Agent Service half of WizardOS phone setup (Tailscale).
 //
 // The box's root helper `wizard-private-access` (ops/private-access/) owns Tailscale; this module talks to
 // it over its unix socket and turns its status into the Setup app's steps:
@@ -12,7 +12,7 @@
 //                A phone that is merely online on the tailnet is not connected: it may not have the Wizard app or
 //                address yet, so it is only listed in `phones`.
 //
-// Once serving, it records the address and owner in Wizard OS settings (network.base_url, network.aliases,
+// Once serving, it records the address and owner in WizardOS settings (network.base_url, network.aliases,
 // access.tailscale) through updateSettings, so tailnet-access.mjs authorizes the owner's phone without a
 // restart. Reset clears them. Nothing here is specific to one owner, tailnet or machine.
 
