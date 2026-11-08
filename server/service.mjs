@@ -2719,11 +2719,12 @@ function buildWizardServer(options, lifetime) {
   const hermesStatePath = options.hermesStatePath ? resolve(String(options.hermesStatePath)) : ''
   // Hermes' history API omits display_metadata/platform_message_id; read them by primary key (read-only) so an owner
   // row can be tied to its queued run by Hermes' submission id.
-  const ownerTurnRowMeta = !hermesStatePath ? null : (sessionId, ids) => {
+  // Routed agents (WIZARD_ROUTED_OWNER_TURNS, off by default) use the same reader on their own state.db.
+  const ownerTurnRowMetaAt = (statePath) => !statePath ? null : (sessionId, ids) => {
     const found = new Map()
     const keys = [...new Set((Array.isArray(ids) ? ids : []).filter(Number.isInteger))].slice(0, 500)
-    if (!keys.length || !existsSync(hermesStatePath)) return found
-    const db = new DatabaseSync(hermesStatePath, { readOnly: true })
+    if (!keys.length || !existsSync(statePath)) return found
+    const db = new DatabaseSync(statePath, { readOnly: true })
     try {
       const rows = db.prepare(`SELECT id, display_metadata, platform_message_id FROM messages WHERE id IN (${keys.map(() => '?').join(',')}) AND session_id = ?`).all(...keys, String(sessionId))
       for (const row of rows) {
@@ -2737,6 +2738,7 @@ function buildWizardServer(options, lifetime) {
     } catch { /* older state.db without these columns: text matching still applies */ } finally { db.close() }
     return found
   }
+  const ownerTurnRowMeta = ownerTurnRowMetaAt(hermesStatePath)
   const helmDbPath = options.helmDbPath ? resolve(String(options.helmDbPath)) : ''
   const hermesKey = options.hermesKey ?? ''
   const baseRequireAccess = options.requireAccess ?? true
@@ -2965,7 +2967,14 @@ function buildWizardServer(options, lifetime) {
   const providerRecoveryOptions = { providerSignInReady, providerFailureDismissed,
     providerAccessRecovery: options.providerAccessRecovery ?? process.env.WIZARD_PROVIDER_ACCESS_RECOVERY === '1',
     providerAccessWindowSeconds: options.providerAccessWindowSeconds }
-  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, queuedHistory: queuedOwnerHistory, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
+  // Routed owner turns (#379): off unless WIZARD_ROUTED_OWNER_TURNS=1. Each agent's own queue and state.db, never main's.
+  const routedOwnerTurns = options.routedOwnerTurns === true
+    ? (raw, queue, sessionId, agent) => {
+        const home = routedAgentMedia(agent)?.home
+        return restoreOwnerTurns(raw, queue, sessionId, ownerTurnRowMetaAt(home ? join(home, 'state.db') : ''))
+      }
+    : null
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, queuedHistory: queuedOwnerHistory, restoreOwnerTurns: routedOwnerTurns, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
     ...(options.runQueueLaunchWaitMs !== undefined ? { launchWaitMs: Number(options.runQueueLaunchWaitMs) } : {}),
     decorateDispatch: (agentId, sessionId, body) => {
       const note = heavyNotices(agentId, sessionId)

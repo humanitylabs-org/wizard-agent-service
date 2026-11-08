@@ -8,6 +8,7 @@ import { notificationScene, checkBoundNotification } from './scheduler-notify.mj
 
 const featureScenes = {
   'thread-tracker': kind => scene(kind, { threadTracker: true }),
+  'routed-owner-turns': kind => scene(kind, { routedOwnerTurns: true }),
   'slow-admission': kind => scene(kind, { runQueueLaunchWaitMs: 100 }),
   'locked-selector-boundary': kind => scene(kind, { fixtureSelectorLock: true, fixtureHoldEvents: true }), 'scheduler-notifications': kind => notificationScene(kind, true),
   'head-row-owner-write-parity': kind => scene(kind, { canonicalSessionListing: true, listCacheMode: 'on', listCacheStaleMs: 0, canonicalSessionCacheMs: 0 }),
