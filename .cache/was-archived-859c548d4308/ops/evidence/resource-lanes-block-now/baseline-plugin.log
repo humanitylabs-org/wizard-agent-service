@@ -1,0 +1,79 @@
+actual secret_scope source: /Volumes/ThalesMedia/Development/resource-lanes-20261015/evidence/hermes-scope-source/agent/secret_scope.py sha256: 5f2584dc93be49ef7e4de23f9f92a4abd05aa42aab8fc2fac40f54f9f8b9c664
+test_concurrent_profile_scopes_do_not_cross_credentials (__main__.ScopedPluginTests.test_concurrent_profile_scopes_do_not_cross_credentials) ... ERROR
+test_fresh_turn_scopes_resolve_both_origin_and_token_without_restart (__main__.ScopedPluginTests.test_fresh_turn_scopes_resolve_both_origin_and_token_without_restart) ... ERROR
+test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools (__main__.ScopedPluginTests.test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools) ...
+  test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools (__main__.ScopedPluginTests.test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools) (values={}) ... FAIL
+  test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools (__main__.ScopedPluginTests.test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools) (values={'WIZARD_HEAVY_ORIGIN': 'http://127.0.0.1:61342'}) ... FAIL
+  test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools (__main__.ScopedPluginTests.test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools) (values={'WIZARD_HEAVY_TOKEN': 'fixture-token'}) ... FAIL
+  test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools (__main__.ScopedPluginTests.test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools) (values=None) ... FAIL
+test_single_profile_process_env_remains_supported (__main__.ScopedPluginTests.test_single_profile_process_env_remains_supported) ... ok
+
+======================================================================
+ERROR: test_concurrent_profile_scopes_do_not_cross_credentials (__main__.ScopedPluginTests.test_concurrent_profile_scopes_do_not_cross_credentials)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Volumes/ThalesMedia/Development/resource-lanes-20261015/evidence/baseline-2d5174e/tests/heavy-plugin.remote.py", line 114, in test_concurrent_profile_scopes_do_not_cross_credentials
+    self.assertTrue(all(r['state'] == 'queued' for r in results))
+                    ^^^
+  File "/Volumes/ThalesMedia/Development/resource-lanes-20261015/evidence/baseline-2d5174e/tests/heavy-plugin.remote.py", line 114, in <genexpr>
+    self.assertTrue(all(r['state'] == 'queued' for r in results))
+                        ~^^^^^^^^^
+KeyError: 'state'
+
+======================================================================
+ERROR: test_fresh_turn_scopes_resolve_both_origin_and_token_without_restart (__main__.ScopedPluginTests.test_fresh_turn_scopes_resolve_both_origin_and_token_without_restart)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Volumes/ThalesMedia/Development/resource-lanes-20261015/evidence/baseline-2d5174e/tests/heavy-plugin.remote.py", line 91, in test_fresh_turn_scopes_resolve_both_origin_and_token_without_restart
+    self.assertEqual(result['state'], 'queued')
+                     ~~~~~~^^^^^^^^^
+KeyError: 'state'
+
+======================================================================
+FAIL: test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools (__main__.ScopedPluginTests.test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools) (values={})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Volumes/ThalesMedia/Development/resource-lanes-20261015/evidence/baseline-2d5174e/tests/heavy-plugin.remote.py", line 99, in test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools
+    self.assertEqual(self.ctx.prompt(None), '')
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'For authorized sustained builds/tests, st[483 chars]ion.' != ''
+- For authorized sustained builds/tests, stage source on Thales and use wizard_heavy_submit. Do not hold a terminal or model turn open waiting for the shared worker. For Android, use android-build-thales --prepare-only, then submit its returned argv/cwd. A durable receipt is an authorized turn boundary: acknowledge the job and finish this turn, even though the overall task is unfinished. The service resumes this same thread on completion. Never start duplicate work or poll in a loop. Use wizard_heavy_cancel for cancellation.
+
+
+======================================================================
+FAIL: test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools (__main__.ScopedPluginTests.test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools) (values={'WIZARD_HEAVY_ORIGIN': 'http://127.0.0.1:61342'})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Volumes/ThalesMedia/Development/resource-lanes-20261015/evidence/baseline-2d5174e/tests/heavy-plugin.remote.py", line 99, in test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools
+    self.assertEqual(self.ctx.prompt(None), '')
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'For authorized sustained builds/tests, st[483 chars]ion.' != ''
+- For authorized sustained builds/tests, stage source on Thales and use wizard_heavy_submit. Do not hold a terminal or model turn open waiting for the shared worker. For Android, use android-build-thales --prepare-only, then submit its returned argv/cwd. A durable receipt is an authorized turn boundary: acknowledge the job and finish this turn, even though the overall task is unfinished. The service resumes this same thread on completion. Never start duplicate work or poll in a loop. Use wizard_heavy_cancel for cancellation.
+
+
+======================================================================
+FAIL: test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools (__main__.ScopedPluginTests.test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools) (values={'WIZARD_HEAVY_TOKEN': 'fixture-token'})
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Volumes/ThalesMedia/Development/resource-lanes-20261015/evidence/baseline-2d5174e/tests/heavy-plugin.remote.py", line 99, in test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools
+    self.assertEqual(self.ctx.prompt(None), '')
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'For authorized sustained builds/tests, st[483 chars]ion.' != ''
+- For authorized sustained builds/tests, stage source on Thales and use wizard_heavy_submit. Do not hold a terminal or model turn open waiting for the shared worker. For Android, use android-build-thales --prepare-only, then submit its returned argv/cwd. A durable receipt is an authorized turn boundary: acknowledge the job and finish this turn, even though the overall task is unfinished. The service resumes this same thread on completion. Never start duplicate work or poll in a loop. Use wizard_heavy_cancel for cancellation.
+
+
+======================================================================
+FAIL: test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools (__main__.ScopedPluginTests.test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools) (values=None)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/Volumes/ThalesMedia/Development/resource-lanes-20261015/evidence/baseline-2d5174e/tests/heavy-plugin.remote.py", line 99, in test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools
+    self.assertEqual(self.ctx.prompt(None), '')
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: 'For authorized sustained builds/tests, st[483 chars]ion.' != ''
+- For authorized sustained builds/tests, stage source on Thales and use wizard_heavy_submit. Do not hold a terminal or model turn open waiting for the shared worker. For Android, use android-build-thales --prepare-only, then submit its returned argv/cwd. A durable receipt is an authorized turn boundary: acknowledge the job and finish this turn, even though the overall task is unfinished. The service resumes this same thread on completion. Never start duplicate work or poll in a loop. Use wizard_heavy_cancel for cancellation.
+
+
+----------------------------------------------------------------------
+Ran 4 tests in 2.026s
+
+FAILED (failures=4, errors=2)

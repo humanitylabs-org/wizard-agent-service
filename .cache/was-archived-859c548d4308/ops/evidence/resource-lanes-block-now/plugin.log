@@ -1,0 +1,10 @@
+actual secret_scope source: /Volumes/ThalesMedia/Development/resource-lanes-20261015/evidence/hermes-scope-source/agent/secret_scope.py sha256: 5f2584dc93be49ef7e4de23f9f92a4abd05aa42aab8fc2fac40f54f9f8b9c664
+test_concurrent_profile_scopes_do_not_cross_credentials (__main__.ScopedPluginTests.test_concurrent_profile_scopes_do_not_cross_credentials) ... ok
+test_fresh_turn_scopes_resolve_both_origin_and_token_without_restart (__main__.ScopedPluginTests.test_fresh_turn_scopes_resolve_both_origin_and_token_without_restart) ... ok
+test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools (__main__.ScopedPluginTests.test_scoped_misses_and_unscoped_calls_fail_closed_for_prompt_and_all_tools) ... ok
+test_single_profile_process_env_remains_supported (__main__.ScopedPluginTests.test_single_profile_process_env_remains_supported) ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in 2.059s
+
+OK

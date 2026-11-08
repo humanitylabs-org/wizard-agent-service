@@ -1,0 +1,10 @@
+{
+  "name": "wizard-os",
+  "label": "Wizard OS",
+  "description": "Wizard OS read-only API for connection apps (ChatGPT usage). No dashboard tab.",
+  "icon": "Puzzle",
+  "version": "0.3.0",
+  "tab": { "path": "/wizard-os", "hidden": true },
+  "entry": "dist/index.js",
+  "api": "plugin_api.py"
+}

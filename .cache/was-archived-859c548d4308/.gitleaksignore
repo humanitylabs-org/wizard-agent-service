@@ -1,0 +1,11 @@
+# Test fixture keys in history (not secrets): the fake main Hermes key in the agents tests.
+# Reviewed false positives: SHA-256 source-file digests in immutable test evidence.
+# Exact historical finding fingerprints only; future keys/other lines remain scanned.
+568e3ec48093c875a22eac7b65e68c87d89277df:ops/evidence/resource-lanes-block-now/receipt.json:generic-api-key:50
+568e3ec48093c875a22eac7b65e68c87d89277df:ops/evidence/resource-lanes-block-now/plugin.log:generic-api-key:1
+568e3ec48093c875a22eac7b65e68c87d89277df:ops/evidence/resource-lanes-block-now/baseline-plugin.log:generic-api-key:1
+568e3ec48093c875a22eac7b65e68c87d89277df:ops/evidence/resource-lanes-block-now/source-manifest.json:generic-api-key:53
+568e3ec48093c875a22eac7b65e68c87d89277df:ops/evidence/resource-lanes-block-now/source-manifest.json:generic-api-key:72
+568e3ec48093c875a22eac7b65e68c87d89277df:ops/evidence/resource-lanes-block-now/source-manifest.json:generic-api-key:106
+f09e86f477efd5b2908b1fdfb1ba886db75e4213:tests/agents.test.ts:generic-api-key:73
+78067c8c3a7b922d3558878c4d76278760170623:tests/app-bindings.test.ts:generic-api-key:50

@@ -1,0 +1,159 @@
+
+> wizard-agent-service@0.2.0 test
+> vitest run --maxWorkers=2 --reporter=json --outputFile=/Volumes/ThalesMedia/Development/resource-lanes-20261015/evidence/block-now-996b3f7/vitest.json
+
+(node:65638) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:65639) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[follow-through] follow-through started for wizard_merge_fixture (deleg_merge)
+[follow-through] follow-through started for wizard_shared (row 7)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[follow-through] follow-through started for wizard_merge_fixture (row 7)
+(node:65771) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[follow-through] follow-through failed for wizard_merge_fixture: Agent already active
+(node:65834) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[follow-through] follow-through failed for wizard_merge_fixture: Agent already active
+(node:65856) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[uploads] complete up_fee3d0a0c68e036523c4438b9062beda (3145745 bytes)
+[uploads] complete up_773b2789c8b726d3fc0a98e152851746 (73400320 bytes)
+[uploads] complete up_9a69e0d52dedb24be421dbb401feca1f (6291456 bytes)
+[uploads] share sh_bb79acd29976bdf44ff6de1e6c79035b: 2 file(s) to hermes
+[uploads] complete up_4dcb4ec19973cc73ed07bed36303ff85 (7000 bytes, share sh_bb79acd29976bdf44ff6de1e6c79035b)
+[uploads] complete up_863a94825179c3fad933c59f849c0567 (5000 bytes, share sh_bb79acd29976bdf44ff6de1e6c79035b)
+[uploads] share sh_bb79acd29976bdf44ff6de1e6c79035b delivered
+[uploads] share sh_672400eadc697b7573c06a0742189f07: 1 file(s) to hermes
+[uploads] complete up_447c748b684204abafd2117f32ebd5e3 (3 bytes, share sh_672400eadc697b7573c06a0742189f07)
+[uploads] share sh_672400eadc697b7573c06a0742189f07 delivered
+[uploads] share sh_917b66cf169d9bc4d98345b042da914c: 1 file(s) to hermes
+[uploads] complete up_06555ff5a32078bf21b4b7370211d666 (10 bytes, share sh_917b66cf169d9bc4d98345b042da914c)
+[uploads] share sh_917b66cf169d9bc4d98345b042da914c delivered
+[uploads] share sh_f76a7a03e84abfb7013b088a2d205550: 1 file(s) to hermes
+[uploads] share sh_faece9bb8e5bb3c1f97a126c736d27c2: 1 file(s) to hermes
+[uploads] share sh_faece9bb8e5bb3c1f97a126c736d27c2 failed: sha256_mismatch
+[uploads] share sh_a481b4d46e5b75048ffb70b3cba487c7: 1 file(s) to hermes
+[uploads] complete up_57eb9ebf356915a681f465eb30894108 (9437189 bytes)
+[uploads] complete up_e8896d5b764a89b692155c9ea383a843 (5242880 bytes)
+(node:65902) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[follow-through] follow-through failed for wizard_merge_fixture: Agent already active
+(node:65932) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:65942) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+(node:65952) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66069) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66070) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66071) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[agent-bridge] pointer skills: 0 job(s)
+[agent-bridge] pointer skills: 0 job(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] pointer skills: 0 job(s)
+(node:66072) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66073) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66074) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[uploads] complete up_67cf9473065c42c811de9f5421a7ecb2 (2097157 bytes)
+[uploads] complete up_23c81074a6cc6f7b489a1c54da4f1ca9 (1000 bytes)
+[uploads] complete up_3923d5b8e020d6f17b666a400efe79c9 (4096 bytes)
+[uploads] complete up_3ffcdef73ee0766c6bbb6dc60242d6d3 (4096 bytes)
+[uploads] complete up_1a4918b064a315efe6bb960dec524a70 (1000 bytes)
+(node:66075) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[uploads] share sh_febd497d63eb1af706c2d10260de19cb: 2 file(s) to private
+[uploads] complete up_8c060d95af9252a1af5bfcb4959ea2ce (4096 bytes, share sh_febd497d63eb1af706c2d10260de19cb)
+[uploads] complete up_cea394f3ce4c796d3d9d231e1c626e28 (100 bytes, share sh_febd497d63eb1af706c2d10260de19cb)
+[uploads] share sh_febd497d63eb1af706c2d10260de19cb delivered
+[uploads] share sh_1d6fdc78027ffcfa07dff2c643795274: 1 file(s) to hermes
+[uploads] complete up_a0581a889ae6488c29f4fbdc19ab7898 (10 bytes, share sh_1d6fdc78027ffcfa07dff2c643795274)
+[uploads] share sh_1d6fdc78027ffcfa07dff2c643795274 delivered
+[uploads] share sh_d422127fd69010722658ab0d5502a211: 1 file(s) to private
+[uploads] complete up_5724761cae02b8686f175177f3b308a8 (25 bytes, share sh_d422127fd69010722658ab0d5502a211)
+[uploads] share sh_d422127fd69010722658ab0d5502a211 delivered
+(node:66076) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[uploads] share sh_91e4d59d1ee165e105e6ec10ee192b83: 1 file(s) to hermes
+(node:66085) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66086) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66092) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66093) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66107) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66108) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+[agent-bridge] pointer skills: 0 job(s)
+[agent-bridge] pointer skills: 0 job(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] pointer skills: 2 job(s)
+[agent-bridge] pointer skills: 2 job(s)
+[agent-bridge] apps.json changed: tools/list_changed sent on 0 stream(s)
+[agent-bridge] tools/list defleur-video failed: fetch failed
+[agent-bridge] tools/list defleur-video failed: fetch failed
+[agent-bridge] pointer skills: 0 job(s)
+(node:66118) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66119) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66123) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66122) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66126) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66127) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66128) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66129) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66131) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66134) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66137) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66138) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66140) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66141) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66143) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66142) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66145) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66144) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66146) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66155) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66156) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66157) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:66164) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+JSON report written to /Volumes/ThalesMedia/Development/resource-lanes-20261015/evidence/block-now-996b3f7/vitest.json
+npm notice
+npm notice New major version of npm available! 10.9.8 -> 12.2.0
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v12.2.0
+npm notice To update run: npm install -g npm@12.2.0
+npm notice
