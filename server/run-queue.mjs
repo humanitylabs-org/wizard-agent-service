@@ -163,6 +163,12 @@ export class DurableRunQueue {
     launchWaitMs = 3_000,
     summaryWaitMs = 500,
     slowLaunchSeconds = 20,
+    // 8 Nov 2026: new chats waited 13-20 min because every slot was held by runs Hermes had accepted but
+    // whose turn nothing held (a stalled gateway, a dead agent). A run Hermes confirms has no turn held
+    // for ghostGraceSeconds still fences its own thread but no longer occupies a global slot; people's
+    // sends may use interactiveOverflow slots beyond maxActive (Hermes admits more than Wizard's 8).
+    ghostGraceSeconds = 90,
+    interactiveOverflow = 0,
   }) {
     if (!statePath) throw new Error('Wizard run queue state path is required')
     if (!Number.isSafeInteger(maxActive) || maxActive < 1 || maxActive > 64) throw new Error('Wizard run queue capacity is invalid')
@@ -194,6 +200,9 @@ export class DurableRunQueue {
     this.providerAccessWindowSeconds = Math.max(1, Math.min(6 * 3600, Number(providerAccessWindowSeconds) || 6 * 3600))
     this.onPendingSteerReplay = onPendingSteerReplay
     this.leaselessSince = new Map()
+    this.ghostGraceSeconds = Math.max(15, Number(ghostGraceSeconds) || 90)
+    this.interactiveOverflow = Math.max(0, Math.min(8, Number.isSafeInteger(interactiveOverflow) ? interactiveOverflow : 0))
+    this.ghostSessions = new Set()
     this.refreshedAt = new Map()  // run id -> last lookup time; the 0.7 s throttle no longer relies on updated_at
     this.refreshing = new Map() // status polls share only this run's lookup, never the global tick
     this.launches = new Map() // run id -> { promise, startedAt }: one in-flight Hermes admission per run
@@ -810,7 +819,8 @@ export class DurableRunQueue {
     catch { dispatchHealthy = false }
     return {
       max_active: this.maxActive,
-      active: activeSessions.size,
+      active: [...activeSessions].filter((id) => !this.ghostSessions.has(id)).length,
+      ghost_slots_released: this.ghostSessions.size,
       queued: this._rows("status = 'queued' AND waiting_reason <> 'provider_access'").length,
       dispatch_paused: !dispatchHealthy,
       liveness_available: livenessAvailable,
@@ -1253,6 +1263,30 @@ export class DurableRunQueue {
     }
   }
 
+  // Sessions whose only queue runs are accepted by Hermes but hold no turn (confirmed false, not unknown),
+  // and that no other Hermes surface is working on. They keep their thread fenced but free their slot.
+  async _findGhostSessions(external) {
+    const ghosts = new Set()
+    if (!this.turnHeld) return ghosts
+    const now = nowSeconds()
+    const bySession = new Map()
+    for (const record of this._rows("status IN ('launching','running','waiting_for_approval','stopping')")) {
+      const list = bySession.get(record.sessionId) ?? []
+      list.push(record)
+      bySession.set(record.sessionId, list)
+    }
+    const outside = new Set(external)
+    for (const [sessionId, records] of bySession) {
+      if (outside.has(sessionId)) continue
+      const verdicts = await Promise.all(records.map(async (record) => {
+        if (record.status !== 'running' || !record.upstreamRunId || record.workerRunId || now - record.createdAt < this.ghostGraceSeconds) return false
+        try { return (await this.turnHeld(record)) === false } catch { return false }
+      }))
+      if (verdicts.every(Boolean)) ghosts.add(sessionId)
+    }
+    return ghosts
+  }
+
   async _tick(force) {
     // The status is stored after the request body, so a plain scan follows every saved body's
     // overflow pages each 1.5 s. Select the identities through the (status, …) index instead.
@@ -1283,6 +1317,8 @@ export class DurableRunQueue {
     for (const record of activeRows) activeSessions.add(record.sessionId)
     const fenced = new Set(this._rows("status = 'unknown'").map(record => record.sessionId))
     for (const id of fenced) activeSessions.delete(id)
+    this.ghostSessions = await this._findGhostSessions(external.filter((value) => typeof value === 'string' && value))
+    const slotsUsed = () => { let used = 0; for (const id of activeSessions) if (!this.ghostSessions.has(id)) used += 1; return used }
 
     let dispatchHealthy = false
     try { dispatchHealthy = Boolean(await this.canDispatch()) }
@@ -1299,11 +1335,12 @@ export class DurableRunQueue {
     for (const record of pending) {
       const recoveryProvider = record.retrySourceId ? parseJson(record.body, {})?.provider || 'configured' : ''
       if (record.retrySourceId && blockedRecoveryProviders.has(recoveryProvider)) continue
-      if (activeSessions.size >= this.maxActive) break
+      const people = !isBackgroundContinuation(record)
+      if (slotsUsed() >= this.maxActive + (people ? this.interactiveOverflow : 0)) { if (people || !this.interactiveOverflow) break; continue }
       // Background turns may consume only the nonreserved total occupancy.
       // Existing turns are never preempted; two slots stay reachable by people.
       if (this.reservedInteractive && isBackgroundContinuation(record)
-          && activeSessions.size >= this.maxActive - this.reservedInteractive) {
+          && slotsUsed() >= this.maxActive - this.reservedInteractive) {
         this._update(record.publicRunId, { waitingReason: 'interactive_reserve' })
         if (record.retrySourceId) blockedRecoveryProviders.add(recoveryProvider)
         continue
