@@ -396,12 +396,13 @@ export class DurableRunQueue {
 
   get(publicRunId) {
     if (!PUBLIC_ID.test(String(publicRunId ?? ''))) return null
-    return this._lazyRecord(this._statement(`SELECT ${this._lightColumns()} FROM wizard_run_queue WHERE public_run_id = ?`).get(publicRunId))
+    return this._record(this._statement('SELECT * FROM wizard_run_queue WHERE public_run_id = ?').get(publicRunId))
   }
 
   // Saved request bodies carry attachments (up to MB each; 3.3k rows ~128 MB on 8 Nov 2026). Status scans run every
   // 1.5 s tick and used to read every matching body into memory several times per tick (~0.3 core). Rows read for
-  // status work leave the body columns behind; record.body (and the dispatch bodies) load on first access.
+  // status work (_rows, latestForSession) leave the body columns behind; record.body (and the dispatch bodies) load
+  // on first access, while the queue is open. get() still returns a complete record for callers outside the queue.
   _lightColumns() {
     return this.lightColumns ??= this.database.prepare('PRAGMA table_info(wizard_run_queue)').all()
       .map((column) => column.name).filter((name) => !HEAVY_COLUMNS.has(name)).join(', ')
