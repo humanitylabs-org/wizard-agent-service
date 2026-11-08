@@ -1578,6 +1578,22 @@
             "tests/thread-items.test.ts"
         ],
         "policy_exemptions": []
+    },
+    {
+      "id": "ai-lookup",
+      "description": "Look up in the Chats selection menu explains selected words with a fast stateless model (claude-haiku-4-5, no tools, no history) in the context of their own message only, identically for main, host-profile, container and restricted agents; private agents, private threads and Incognito never reach a cloud model, decided from the session's pinned agent on the server, not the caller's agent field.",
+      "layer": "ux",
+      "fixture": null,
+      "how_to_test": "Server: tests/lookup.node.mjs (contract, stream shape, 400/413/415, 800-char bound, model identity, no persistence) and tests/lookup-privacy.test.ts (private agent's pinned session refused with agent omitted, spoofed as main/hermes or explicit, zero broker calls; a standard thread explained). UX (wizard-ux PR #1181): tests/lookup-scope-parity.test.mjs runs the real lookupScope for main, host-profile, container and restricted windows plus private agent/thread/Incognito/private default/vanished window; tests/lookup-pop.browser.cjs covers popover behaviour in real Chromium on a synthetic thread. Synthetic fixture evidence, not a real Android long-press or real routed-agent live run.",
+      "source_refs": [
+        "server/lookup.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/lookup.node.mjs",
+        "tests/lookup-privacy.test.ts"
+      ],
+      "policy_exemptions": []
     }
   ]
 }

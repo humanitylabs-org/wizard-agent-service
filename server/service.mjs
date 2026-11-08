@@ -5438,6 +5438,14 @@ function buildWizardServer(options, lifetime) {
     if (qualified) return isPrivateAgent(agents, qualified[1]) && (agents.read(qualified[1])?.role === 'recovery' ? principalOf(request).kind !== 'owner' : !mayOpenAgent(request, qualified[1]))
     return ids.some((id) => { const pins = agents.pinnedAgents(id); return pins.length > 0 && pins.every(pinned => isPrivateAgent(agents, pinned) && !mayOpenAgent(request, pinned)) })
   }
+  // AI Look up privacy comes from the session itself, never from the caller's optional agent field: any private (or recovery)
+  // agent pinned to the session, or an agent-qualified key of one, keeps its text away from a cloud model, owner or not.
+  const sessionPinnedPrivate = (key) => {
+    if (!agents || typeof key !== 'string') return false
+    const qualified = /^agent\/([a-z][a-z0-9-]{0,30})\//u.exec(key)
+    if (qualified && isPrivateAgent(agents, qualified[1])) return true
+    return [key, key.split(':').slice(1).join(':')].filter(Boolean).some((id) => agents.pinnedAgents(id).some((pinned) => isPrivateAgent(agents, pinned)))
+  }
   const withoutHiddenSessions = (request, records) => {
     if (!records || typeof records !== 'object' || Array.isArray(records) || principalOf(request).kind === 'owner') return records
     return Object.fromEntries(Object.entries(records).filter(([key, record]) => {
@@ -6233,7 +6241,7 @@ function buildWizardServer(options, lifetime) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         await aiLookup.handle(request, response, { sendJson, readBody: readBoundedBody,
-          isPrivate: id => Boolean(agents) && isPrivateAgent(agents, id), isHiddenSession: key => hiddenSession(request, key) })
+          isPrivate: id => Boolean(agents) && isPrivateAgent(agents, id), isHiddenSession: key => hiddenSession(request, key) || sessionPinnedPrivate(key) })
         return
       }
       if ((url.pathname === '/wizard/v1/route' || (uxApi && url.pathname === `${uxPrefix}api/route`)) && request.method === 'POST') {
