@@ -74,6 +74,14 @@ export function projectOpenAskSession(session, { replies, lastUserAt, background
   if (decision.section === 'Working' && background) {
     row.status = 'running'
     if (background) row.wizard_waiting_on = heavyPending && replies?.at(-1)?.status?.state === 'check' ? 'heavy' : 'helper'
+    // A turn that handed off to a durable background job (queued heavy job or a detached deploy) is
+    // waiting on it. Helpers that returned earlier are not "stuck, no agent running" while the job
+    // runs, and Continue would start a second agent next to it: say what it waits on, offer no resume.
+    if (live === 'heavy' || heavyPending) {
+      row.wizard_background = 'heavy'
+      const h = row.wizard_helper_status
+      if (h && typeof h === 'object' && ['stalled', 'waiting'].includes(h.phase)) row.wizard_helper_status = { ...h, phase: 'background', resumeEligible: false }
+    }
   } else if (decision.background) {
     row.status = 'completed'
     delete row.wizard_waiting_on

@@ -60,6 +60,7 @@ import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, g
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { heavyJobsForSession, pendingHeavyJobs } from './heavy-wait.mjs'
+import { createDetachedJobReader, createLedger } from './detached-job-wait.mjs'
 import { readSupervisorBuildWaits, readSupervisorWaitRevision } from './supervisor-wait.mjs'
 import { resumeHelper } from './helper-resume.mjs'
 import { requireCurrentContinuation, helperContinueRequestAllowed } from './helper-continuation.mjs'
@@ -3041,7 +3042,10 @@ function buildWizardServer(options, lifetime) {
   // that from re-reading each owning thread's transcript on the HTTP loop when nothing changed.
   const ownedWorkEvidence = createOwnedOpenWorkReader(hermesStatePath)
   lifetime.own(() => ownedWorkEvidence.close())
-  const heavyStatus = createHeavyStatusGuard({ rows: () => heavyWork?.queue.rows(),
+  // The heavy ledger plus detached background jobs (deploys) a turn handed off to: both own a thread's result.
+  const detachedJobs = createDetachedJobReader(options.detachedJobDir ?? (hermesStatePath ? join(dirname(hermesStatePath), 'state', 'wizard-restart-report') : ''))
+  const ledgerRows = createLedger(() => heavyWork?.queue.rows(), () => detachedJobs.rows())
+  const heavyStatus = createHeavyStatusGuard({ rows: ledgerRows,
     nonHolding: (_agentId, sessionId) => ownedWorkEvidence.nonHolding(sessionId),
     isDelivered: (agentId, sessionId, job) => {
       if (agentId === 'hermes') return Boolean(runQueue?.get(job.resume)?.upstreamRunId)
@@ -3094,7 +3098,7 @@ function buildWizardServer(options, lifetime) {
       for (const id of readSupervisorBuildWaits(options.supervisorStatePath, path, batch, now, { includeOwnerGates: true }).keys()) if (evidence.has(id)) evidence.get(id).supervisorPending = true
     }
     // One heavy-ledger snapshot for the whole list as well.
-    evidence.heavyJobs = heavyWork?.queue.rows()
+    evidence.heavyJobs = ledgerRows()
     return evidence
   }
   const agentCtx = agents ? {
@@ -3881,7 +3885,7 @@ function buildWizardServer(options, lifetime) {
   let runQueue = null
   let heavyWork = null
   // The queue owns the data-version snapshot; every projection sees writes immediately.
-  const heavyJobRows = () => heavyWork?.queue.rows() ?? []
+  const heavyJobRows = () => ledgerRows() ?? []
   let backgroundResults = null
   let runQueueReady = Promise.resolve()
   if (runQueueStatePath) {
@@ -4496,7 +4500,7 @@ function buildWizardServer(options, lifetime) {
     if (operator) return result
     try {
       const payload = JSON.parse(result.toString('utf8'))
-      const heavyJobs = heavyWork?.queue.rows()
+      const heavyJobs = ledgerRows()
       for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => {
         if (!session || typeof session.id !== 'string') return session
         const guarded = heavyStatus('hermes', session.id, session.wizard_attention, heavyJobs)
@@ -4635,7 +4639,7 @@ function buildWizardServer(options, lifetime) {
           // SQLite transcript/helper/supervisor reads belong to the presentation
           // lane, not the HTTP loop. Queue/direct/external runs remain controller-
           // owned immutable snapshots; only their active ids cross the boundary.
-          const heavyJobs = heavyWork?.queue.rows() ?? []
+          const heavyJobs = ledgerRows() ?? []
           const queueProjections = runQueue?.latestProjections(listedSessionIds) ?? []
           const wanted = new Set(listedSessionIds)
           recordProjectionSlice(sliceStarted)
