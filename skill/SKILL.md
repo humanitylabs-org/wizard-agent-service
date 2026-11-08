@@ -1,6 +1,6 @@
 ---
 name: wizard-agent-service
-description: How the agent reaches the apps installed on this Wizard OS box through the one Wizard gateway.
+description: How the agent reaches the apps installed on this WizardOS box through the one Wizard gateway.
 ---
 
 # Wizard Agent Service
@@ -42,7 +42,7 @@ Skins/My skin/
 ```
 
 The legacy `Skins/My skin.css` still works when the folder's `skin.css` is absent; do not force a migration. Wizard
-loads it last, on top of whichever skin the owner picked, on phone and desktop. Wizard OS and skin
+loads it last, on top of whichever skin the owner picked, on phone and desktop. WizardOS and skin
 updates never touch it; an empty file (comments only) means the picked skin exactly as its author made it.
 
 - When the owner asks to change how Wizard looks ("change my skin", "bigger text", "less purple"), edit

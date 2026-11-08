@@ -375,7 +375,7 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   const disabled = OUTSIDE_TOOLS.map((tool) => tool.id).filter((id) => !granted.has(id))
   if (agent.permissions.files === 'none') disabled.push(...FILE_TOOLSETS)
   const lines = [
-    '# Managed by the Wizard OS Agent Service from agents/<id>/agent.json. Change the agent in the Agents app;',
+    '# Managed by the WizardOS Agent Service from agents/<id>/agent.json. Change the agent in the Agents app;',
     '# edits here are overwritten.',
     `# Supervisor assets: ${SUPERVISOR_ASSET_HASH}`,
     'model:',
@@ -431,7 +431,7 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
 
 export function agentEnvFile({ apiKey, gatewayKey = '' }) {
   return [
-    '# Managed by the Wizard OS Agent Service. Secrets for this agent only; the runtime adds provider keys below.',
+    '# Managed by the WizardOS Agent Service. Secrets for this agent only; the runtime adds provider keys below.',
     `API_SERVER_KEY=${apiKey}`,
     'API_SERVER_HOST=0.0.0.0',
     'API_SERVER_PORT=8642',

@@ -16,11 +16,11 @@ One agent tool, ``wizard_bring_data``, reads an export the owner dropped in File
 * ``status``   list earlier scans.
 * ``undo``     remove only what one import wrote (files no other import also wrote, its skills).
 
-The Importer app can also bring data into another agent on this box (``dest``: a Wizard OS agent from the
+The Importer app can also bring data into another agent on this box (``dest``: a WizardOS agent from the
 Agents registry whose Hermes home this process can write: a host profile agent or a standard container
 agent). Every write then lands in that agent's home, and this agent's own home becomes a valid source:
-that is how "Move this agent into Wizard OS" copies an alongside Hermes (memories, fact store, skills,
-personality, chats) into an agent running inside Wizard OS. Credentials never move: the whole-agent move
+that is how "Move this agent into WizardOS" copies an alongside Hermes (memories, fact store, skills,
+personality, chats) into an agent running inside WizardOS. Credentials never move: the whole-agent move
 with credentials stays ``ops/agent-runtime/hermes_import.py`` (owner CLI).
 
 The model never sees a credential: Hermes ``.env``/``auth.json``/``config.yaml`` are not read, and
@@ -1926,7 +1926,7 @@ def _claude_manifest(path: Path) -> list[dict]:
 
 
 def _agents_dirs() -> list[Path]:
-    """Where this box keeps its Wizard OS Agents registry (``<dir>/<id>/agent.json``), first found wins."""
+    """Where this box keeps its WizardOS Agents registry (``<dir>/<id>/agent.json``), first found wins."""
     dirs = [Path(p).expanduser() for p in os.environ.get("WIZARD_AGENTS_DIR", "").split(os.pathsep) if p.strip()]
     if os.environ.get("WIZARD_OS_HOME", "").strip():
         dirs.append(Path(os.environ["WIZARD_OS_HOME"]).expanduser() / "agents")
@@ -1964,7 +1964,7 @@ def _home_label(home: Path) -> str:
 
 
 def destinations() -> list[dict]:
-    """Other Wizard OS agents an import can go into: registered agents whose Hermes home this process can
+    """Other WizardOS agents an import can go into: registered agents whose Hermes home this process can
     write. A host profile agent (``runtime.kind: profile``) and a standard container agent (its home is
     ``<agents dir>/<id>/home``). A restricted agent's sealed home belongs to its container user, so it is not
     offered; neither is an agent still being imported, a private one, or this agent itself."""
@@ -2004,7 +2004,7 @@ def destinations() -> list[dict]:
             seen.add(agent_id)
             label = _clip(str(agent.get("label") or agent.get("name") or agent_id), 40)
             out.append({"id": agent_id, "label": label, "kind": kind, "home": home,
-                        "where": "Inside Wizard OS" if kind == "container" else "A Hermes profile on this box"})
+                        "where": "Inside WizardOS" if kind == "container" else "A Hermes profile on this box"})
     return out
 
 
@@ -2029,7 +2029,7 @@ def _estimated(row: dict, path: Path | None = None) -> dict:
 
 def sources(_args: dict) -> dict:
     """What the Importer can offer: agent folders on this box (one tap, no export) and exports in Files.
-    This agent itself is offered only as "Move into Wizard OS", when another agent can take it."""
+    This agent itself is offered only as "Move into WizardOS", when another agent can take it."""
     local = []
     own = own_home().resolve()
     into = [{"id": d["id"], "label": d["label"], "kind": d["kind"], "where": d["where"]} for d in destinations()]

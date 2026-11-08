@@ -1,17 +1,17 @@
-// Private access through Tailscale Serve (the Wizard OS default; spec/PRIVATE_ACCESS.md).
+// Private access through Tailscale Serve (the WizardOS default; spec/PRIVATE_ACCESS.md).
 //
 // Tailscale Serve terminates HTTPS on the owner's tailnet address and forwards each request to this service
 // with the signed-in tailnet user in `Tailscale-User-Login`. That header can be trusted only when the request
 // really came from Serve, so this verifier accepts a request only when ALL of these hold:
 //   - it arrived from a trusted proxy peer: loopback on a bare box, or the container network's gateway when
-//     the service runs in a Wizard OS container whose port is published on the box's 127.0.0.1 only;
+//     the service runs in a WizardOS container whose port is published on the box's 127.0.0.1 only;
 //   - its Host is exactly the configured tailnet origin;
 //   - the asserted user is the box owner (one login, or a short comma list);
 //   - writes are same-origin, and cross-site requests are refused except opening the app itself.
 // Never put Funnel or another header-forwarding proxy in front of this service.
 //
 // The origin and owner login(s) come from the environment (WIZARD_TAILNET_ORIGIN + WIZARD_TAILNET_LOGIN) or,
-// when neither is set, from Wizard OS settings access.tailscale, read on every request: "Connect your phone"
+// when neither is set, from WizardOS settings access.tailscale, read on every request: "Connect your phone"
 // (phone-setup.mjs) writes them when the box starts serving, so phone access turns on without a restart.
 // Until both are known every request through this verifier is refused.
 
@@ -79,9 +79,9 @@ export function createTailnetAccessVerifier({ origin = '', logins = '', proxyPee
 }
 
 /**
- * A Tailscale Serve verifier for Wizard OS. When the environment names the tailnet (WIZARD_TAILNET_ORIGIN and
+ * A Tailscale Serve verifier for WizardOS. When the environment names the tailnet (WIZARD_TAILNET_ORIGIN and
  * WIZARD_TAILNET_LOGIN), it is exactly the PR15 verifier and a partial or invalid pair fails startup. With
- * neither set, origin and owner login(s) come from `settings()` (Wizard OS settings access.tailscale =
+ * neither set, origin and owner login(s) come from `settings()` (WizardOS settings access.tailscale =
  * { origin, owner_logins }), read on every request; until both are present every request is refused.
  * `onVerified(request, claims)` runs after an accepted request (phone-seen detection); it never affects access.
  * @param {{ origin?: string, logins?: string, settings?: () => ({ origin?: string, owner_logins?: string[] } | null | undefined),

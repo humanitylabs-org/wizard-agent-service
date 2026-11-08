@@ -191,7 +191,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertEqual(j['accounts'][0]['actions'],{'reconnect':False,'remove':False}); self.assertEqual(j['accounts'][0]['id'],'aa11bb')
 
     def test_changes_can_be_on_for_chatgpt_only(self):
-        """Fresh Wizard OS: WIZARD_ACCOUNT_CHANGES=chatgpt lets the ChatGPT app add sign-ins while Claude stays
+        """Fresh WizardOS: WIZARD_ACCOUNT_CHANGES=chatgpt lets the ChatGPT app add sign-ins while Claude stays
         read-only (its sign-in is the Claude Code page the agent's subscription provider uses)."""
         from fastapi import FastAPI
         from fastapi.testclient import TestClient

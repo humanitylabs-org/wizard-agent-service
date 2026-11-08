@@ -16,7 +16,7 @@ it('ignores attachment blocks, links, screen context and empty text', () => {
   expect(provisionalTitleFrom('[WIZARD_FILES_V1][{"id":"a"}][/WIZARD_FILES_V1]')).toBe('')
   expect(provisionalTitleFrom('https://example.com/a/b')).toBe('')
   expect(provisionalTitleFrom('hey')).toBe('')
-  expect(provisionalTitleFrom('Summarise this paper\n[Wizard OS context] Window in front: Browser')).toBe('Summarise this paper')
+  expect(provisionalTitleFrom('Summarise this paper\n[WizardOS context] Window in front: Browser')).toBe('Summarise this paper')
 })
 it('sets a placeholder once and never over an existing title, a lock or an agent title', async () => {
   const s = await store()
@@ -24,16 +24,16 @@ it('sets a placeholder once and never over an existing title, a lock or an agent
   expect(s.setProvisional('t1', 'Another words')).toBeNull() // title already there
   s.recordRename('t2', { from: 'Old', to: 'Owner name', by: 'you' })
   expect(s.setProvisional('t2', 'Placeholder')).toBeNull()
-  s.recordRename('t3', { from: '', to: 'Wizard OS · Phone app', by: 'agent' })
+  s.recordRename('t3', { from: '', to: 'WizardOS · Phone app', by: 'agent' })
   expect(s.setProvisional('t3', 'Placeholder')).toBeNull()
 })
 it('the agent title replaces the placeholder (even a longer project label) and the placeholder is gone after', async () => {
   const s = await store()
-  s.setProvisional('t1', 'Wizard OS')
+  s.setProvisional('t1', 'WizardOS')
   const record = s.get('t1')!
-  expect(titleToApply({ currentTitle: 'Wizard OS', proposed: 'Wizard OS · Phone app', record, assistantAt: 5 })).toBe('Wizard OS · Phone app')
-  expect(titleToApply({ currentTitle: 'Wizard OS', proposed: 'Wizard OS · Phone app', record: { ...record, provisional: false }, assistantAt: 5 })).toBe('')
-  s.recordRename('t1', { from: 'Wizard OS', to: 'Wizard OS · Phone app', by: 'agent', assistantAt: 5 })
+  expect(titleToApply({ currentTitle: 'WizardOS', proposed: 'WizardOS · Phone app', record, assistantAt: 5 })).toBe('WizardOS · Phone app')
+  expect(titleToApply({ currentTitle: 'WizardOS', proposed: 'WizardOS · Phone app', record: { ...record, provisional: false }, assistantAt: 5 })).toBe('')
+  s.recordRename('t1', { from: 'WizardOS', to: 'WizardOS · Phone app', by: 'agent', assistantAt: 5 })
   expect(s.get('t1')?.provisional).toBeUndefined()
   expect(titleContextLine('Fix calendar sync', record)).toMatch(/placeholder/)
 })

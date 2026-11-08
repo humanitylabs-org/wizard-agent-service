@@ -35,6 +35,6 @@ Body `{ desk }`: removes one entry from `closed`.
 
 ## Storage
 
-`workspaces.json` under the Wizard OS home, mode 0600, written by atomic rename. An unreadable file is served as
+`workspaces.json` under the WizardOS home, mode 0600, written by atomic rename. An unreadable file is served as
 empty and left untouched until the next valid save replaces it. A box whose service predates this API answers 404,
 and the shell stays a single-device shell.

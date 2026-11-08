@@ -28,6 +28,9 @@ export function slugFromName(name) {
   return slug || 'my-skin'
 }
 
+// Listings published before 8 Nov 2026 carry the two-word product name in their alt text; both are valid.
+const SKIN_ALTS = (name) => [`WizardOS skin: ${name}`, `Wizard${' '}OS skin: ${name}`]
+
 export function validateListing(event, { allowPrivate = false } = {}) {
   if (!verifyEvent(event) || event.kind !== 30117 || Buffer.byteLength(JSON.stringify(event)) > 32768) fail('invalid_skin_event')
   let content
@@ -35,7 +38,7 @@ export function validateListing(event, { allowPrivate = false } = {}) {
   if (!content || content.schema !== 1) fail('invalid_schema')
   const slug = one(event, 'd'), name = one(event, 'name'), summary = one(event, 'summary', false) || ''
   const published = one(event, 'published_at'), version = one(event, 'version'), base = one(event, 'base'), ux = one(event, 'ux')
-  if (!SLUG.test(slug) || !shortText(name, 48, true) || !shortText(summary, 140) || one(event, 'alt') !== `Wizard OS skin: ${name}`) fail('invalid_skin_tags')
+  if (!SLUG.test(slug) || !shortText(name, 48, true) || !shortText(summary, 140) || !SKIN_ALTS(name).includes(one(event, 'alt'))) fail('invalid_skin_tags')
   if (!tagsOf(event, 't').some(t => t.length === 2 && t[1] === 'wizard-skin')) fail('missing_skin_tag')
   if (!integer(published) || Number(published) > event.created_at || !integer(version) || Number(version) < 1 || base !== 'nebula' || ux !== '1') fail('unsupported_skin')
   const files = tagsOf(event, 'file').map(t => {
@@ -305,7 +308,7 @@ export function createSkins({ root = '', stateDir = '', relays = DEFAULT_SKINS_R
       if (!ADDRESS.test(parent.a) || parent.author !== parent.a.split(':')[1]) fail('invalid_fork')
       tags.push(['a', parent.a, relays[0], 'fork'], ['p', parent.author])
     }
-    tags.push(['alt', `Wizard OS skin: ${name}`])
+    tags.push(['alt', `WizardOS skin: ${name}`])
     const unsigned = { kind: 30117, created_at: created, tags, content: '{"schema":1}' }
     storage()
     atomicWrite(join(packsRoot, sha256(id) + '.json'), JSON.stringify({ unsigned, css: files[0][2], previous: meta.published?.event_id || null }))

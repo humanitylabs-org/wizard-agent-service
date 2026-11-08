@@ -6,7 +6,7 @@
 //
 // Records live in one SQLite file. A target says where a finished file goes:
 //   kind 'local'  staged as <stagingDir>/<upload_id>.part on the store's own filesystem, then handed to
-//                 target.finalize(path, meta) (Wizard Files on a Wizard OS box, an agent's home inbox)
+//                 target.finalize(path, meta) (Wizard Files on a WizardOS box, an agent's home inbox)
 //   kind 'drop'   James's box: the Wizard Inbox drop service owns the bytes. With a sha256 declared up
 //                 front, chunks stream straight through to the drop upload; without one they stage
 //                 locally and are pushed to the drop service from disk at completion (it needs the hash

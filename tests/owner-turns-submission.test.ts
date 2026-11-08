@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { restoreOwnerTurns } from '../server/service.mjs'
 
-// Shapes copied from the real Wizard OS · Chats #2 thread after Hermes 0.22.7: the API drops
+// Shapes copied from the real WizardOS · Chats #2 thread after Hermes 0.22.7: the API drops
 // platform_message_id/display_metadata, the user row lands 10-25 minutes after the queue admitted
 // the run, one row carries Python repr of the multipart list, and compaction re-emits copies.
 const SID = 'wizard_1794036340706_7a4a6d366ae1'

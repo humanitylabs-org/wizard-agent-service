@@ -1,4 +1,4 @@
-"""Wizard OS kernel + pointer skills (Python twin of server/agent-bridge.mjs).
+"""WizardOS kernel + pointer skills (Python twin of server/agent-bridge.mjs).
 
 The kernel is fixed text (no app list); discovery is the wizard-job-* pointer skills, which this
 module can also write from ~/.wizard-os/apps.json when the Agent Service is down. Keep this file and agent-bridge.mjs in lockstep: tests/agent-bridge.test.ts renders both
@@ -114,8 +114,8 @@ def render_kernel(apps: list[dict] | None = None, harness: str = "hermes",
     name = f"mcp__{MCP_SERVER_NAME}__<app>__<tool>" if hermes else "<app>__<tool>"
     id_note = " (<app> = app id, - as _)"
     text = [
-        "Wizard OS: you are the owner's agent on this box. Its apps do jobs for them.",
-        *(["To build, port, redesign or modify an app for Wizard OS, first load `wizard-builder` with skill_view; follow its coding and wam workflow.",
+        "WizardOS: you are the owner's agent on this box. Its apps do jobs for them.",
+        *(["To build, port, redesign or modify an app for WizardOS, first load `wizard-builder` with skill_view; follow its coding and wam workflow.",
            "Help, reminders, tips: load `wizard-guide`."] if hermes else []),
         f"Files root: {files_root}; app tool paths are relative to it.",
         "When a request matches a wizard-job-<job> skill in your skills:" if pointers else "When a request matches a job below:",
@@ -184,7 +184,7 @@ def pointer_skills(apps: list[dict], harness: str = "hermes", tools: dict | None
             "",
             f"Tools are on the `{MCP_SERVER_NAME}` MCP server.{tail} Paths are relative to the owner's Files root.",
             "",
-            "Written by Wizard OS from apps.json and rebuilt when apps change. Do not edit.",
+            "Written by WizardOS from apps.json and rebuilt when apps change. Do not edit.",
             "",
         ])
     return out

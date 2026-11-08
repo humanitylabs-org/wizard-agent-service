@@ -86,7 +86,7 @@ describe('box-wide UI preferences HTTP contract', () => {
   })
   it('validates owner-created spaces, persists membership and preserves other fields', async () => {
     const u = await start(home())
-    const space = { id: 'launch', name: 'Wizard OS launch', threads: ['wizard_1', 'wizardop_2'], createdAt: '2026-10-24T12:00:00.000Z' }
+    const space = { id: 'launch', name: 'WizardOS launch', threads: ['wizard_1', 'wizardop_2'], createdAt: '2026-10-24T12:00:00.000Z' }
     expect((await put(u, { spaces: [space], compact: true })).status).toBe(200)
     expect((await (await fetch(u)).json()).spaces).toEqual([space])
     const invalid = [null, {}, 'x', Array(51).fill(space), [space, space],

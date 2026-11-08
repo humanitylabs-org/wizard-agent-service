@@ -7,7 +7,7 @@ import { readApps, wizardOsInstructions } from '../server/wizard-os-settings.mjs
 
 const fixed = () => new Date('2026-10-10T12:00:00Z')
 
-describe('media files (Wizard OS user-files root)', () => {
+describe('media files (WizardOS user-files root)', () => {
   it('saves uploads under Inbox/<date>/<name>, lists them and resolves the agent path', () => {
     const dir = mkdtempSync(join(tmpdir(), 'wmf-'))
     const files = createMediaFiles({ mediaRoot: join(dir, 'media'), agentRoot: '/files', indexPath: join(dir, 'idx.json'), now: fixed })
@@ -50,7 +50,7 @@ describe('media files (Wizard OS user-files root)', () => {
   })
 })
 
-describe('Wizard OS instructions inside a container', () => {
+describe('WizardOS instructions inside a container', () => {
   const box = () => {
     const dir = mkdtempSync(join(tmpdir(), 'wos-'))
     mkdirSync(join(dir, 'skills/defleur-video'), { recursive: true })
@@ -78,7 +78,7 @@ describe('Wizard OS instructions inside a container', () => {
   })
 })
 
-describe('launcher on a Wizard OS box', () => {
+describe('launcher on a WizardOS box', () => {
   it('never shows the shell itself as a tile', () => {
     const dir = mkdtempSync(join(tmpdir(), 'wla-'))
     const appsJsonPath = join(dir, 'apps.json')

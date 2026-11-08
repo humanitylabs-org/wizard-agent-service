@@ -3,7 +3,7 @@
 // Without a registry only the main agent exists and service.mjs routes every share there. With one:
 //   - `agent` omitted → the default agent (the main agent, `hermes`); any other id must exist and be
 //     running (or starting) at share time, else 409 agent_unavailable. Never a fallback to another agent.
-//   - The main agent's files go to Wizard Files (media/Inbox on a Wizard OS box) as before.
+//   - The main agent's files go to Wizard Files (media/Inbox on a WizardOS box) as before.
 //   - Every other agent's files go to that agent's own home, `<agentsDir>/<id>/home/inbox/<date>/<name>`,
 //     staged beside its home (outside the container's view) on the same filesystem. They are never
 //     written to `media/` or the main Wizard Files index, and are named in the run as paths inside the

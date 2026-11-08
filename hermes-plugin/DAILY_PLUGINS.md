@@ -12,6 +12,9 @@ These are supported Hermes plugins, alongside `wizard-heavy` and
   personal Wizard turn, including resumed chats. It uses `pre_llm_call`, not a
   cached-system-prompt edit, and makes no model calls. It does not inject into
   non-Wizard or child sessions.
+- **wizardos-speech** reads the written product name WizardOS aloud as "Wizard O S".
+  A `pre_tool_call` hook rewrites only the `text_to_speech` tool's spoken text; displayed
+  text keeps WizardOS. No paths, secrets, network or model calls.
 
 ## Configuration and installation
 

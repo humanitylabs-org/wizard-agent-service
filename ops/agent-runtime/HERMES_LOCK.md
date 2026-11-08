@@ -2,7 +2,7 @@
 
 This directory vendors wizard-os `tools/hermes_lock.py` and
 `releases/hermes-lock.json` unchanged. The authority and approval workflow are
-[Wizard OS #215](https://github.com/humanitylabs-org/wizard-os/pull/215).
+[WizardOS #215](https://github.com/humanitylabs-org/wizard-os/pull/215).
 Keep those copies byte-identical when promoting; never advance a runtime default
 by changing a tag or an environment variable alone.
 

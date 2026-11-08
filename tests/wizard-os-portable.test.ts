@@ -83,7 +83,7 @@ describe('stock Hermes compatibility', () => {
   })
 })
 
-describe('Wizard OS settings, bootstrap and apps', () => {
+describe('WizardOS settings, bootstrap and apps', () => {
   function osHome() {
     const dir = mkdtempSync(join(tmpdir(), 'wizard-os-'))
     writeFileSync(join(dir, 'settings.json'), JSON.stringify({
@@ -161,7 +161,7 @@ describe('Wizard OS settings, bootstrap and apps', () => {
     ])
   })
 
-  it('every run is told it is inside Wizard OS and which jobs the apps do, re-read per run', async () => {
+  it('every run is told it is inside WizardOS and which jobs the apps do, re-read per run', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wizard-os-'))
     const appsJson = join(dir, 'apps.json')
     writeFileSync(appsJson, JSON.stringify({ schema: 1, apps: [
@@ -175,7 +175,7 @@ describe('Wizard OS settings, bootstrap and apps', () => {
     expect((await postRun(wizard)).status).toBe(202)
     const first = String(hermes.bodies[0].instructions)
     // The agent-bridge kernel replaced the URL- and path-heavy block (spec/AGENT_BRIDGE.md).
-    expect(first).toContain("Wizard OS: you are the owner's agent on this box.")
+    expect(first).toContain("WizardOS: you are the owner's agent on this box.")
     // No plugin (generic harness): the fixed kernel plus the job -> app map, one line per job.
     expect(first).toContain('- short-form video -> DeFleur Video (`mcp__wizard__defleur_video__*`)')
     expect(first).toContain('- video editing -> DeFleur Video (`mcp__wizard__defleur_video__*`)')

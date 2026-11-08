@@ -70,7 +70,7 @@ test('message search: word index path matches word starts, skips tool rows and u
       CREATE VIRTUAL TABLE messages_fts USING fts5(content, content='messages_fts_src', content_rowid='id');`)
     const add = db.prepare('INSERT INTO messages (session_id, role, content, timestamp, finish_reason) VALUES (?,?,?,?,?)')
     add.run('a', 'user', 'How does Nostr help with identity?', 1, null)
-    add.run('b', 'assistant', 'Wizard-OS keys are #nostr-style', 2, 'stop')
+    add.run('b', 'assistant', 'WizardOS keys are #nostr-style', 2, 'stop')
     add.run('private', 'user', 'nostr secret plan', 3, null)
     for (let i = 0; i < 900; i++) add.run('c', 'tool', 'nostr relay log line', 10 + i, null)  // tool output floods the word index
     add.run('d', 'user', 'unrelated', 2000, null)

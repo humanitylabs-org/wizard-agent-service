@@ -1,10 +1,10 @@
 // Optional orb command router: classifies one spoken utterance as a phone/UI command, a reply to
 // the window in front, or a request for the agent. It calls any OpenAI-compatible chat endpoint
 // the owner configures (WIZARD_ROUTER_URL / _MODEL / _KEY). With no router configured, front ends
-// send everything to the agent. Place and time zone come from Wizard OS settings, never the code.
+// send everything to the agent. Place and time zone come from WizardOS settings, never the code.
 import { validTimeZone } from './wizard-os-settings.mjs'
 
-const ROUTER_SYSTEM = `You are the command router inside Wizard OS, a voice-first shell.
+const ROUTER_SYSTEM = `You are the command router inside WizardOS, a voice-first shell.
 Classify ONE spoken utterance and reply with ONLY one compact JSON object, no prose.
 
 If it is a direct phone/UI command, reply {"route":"command","action":ACTION,...args}. Actions:

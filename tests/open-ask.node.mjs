@@ -189,7 +189,7 @@ test('owner-stopped, cancelled and expired runs keep their terminal status while
   }
 })
 
-// James, 7 Nov 2026 ('Wizard OS · Chats #2'): a false interrupted run left the thread in
+// James, 7 Nov 2026 ('WizardOS · Chats #2'): a false interrupted run left the thread in
 // Errors/Needs you while two helpers it had dispatched were still running. A running worker
 // keeps any thread in Working, including after an errored run; the error status stays.
 test('errored last run with a running helper or heavy job stays Working and keeps its status', () => {
@@ -231,7 +231,7 @@ for (const [name, status, helper, expected] of [
   add('assistant', 'Both fixes are running now in two helpers.\n[WIZARD_STATUS_V1]{"state":"fyi","ask":"Two fixes are being built"}[/WIZARD_STATUS_V1]', now - 2800)
   if (helper === 'running') db.prepare('INSERT INTO async_delegations VALUES(?,?,?,?,?,?,?,?,?,?)').run('deleg_two', sid, null, '', 'running', now - 2810, null, '{"goals":["Fix A","Fix B"]}', 'pending', '{}')
   if (helper === 'stalled') db.prepare('INSERT INTO async_delegations VALUES(?,?,?,?,?,?,?,?,?,?)').run('deleg_two', sid, null, '', 'completed', now - 2810, now - 1200, '{"goals":["Fix A"]}', 'pending', '{}')
-  const server = createWizardServer({ requireAccess: false, hermesKey: 'synthetic-only', hermesStatePath: path, sessionDbPath: path, followThrough: false, archivedSessionReader: () => [], fetchImpl: async url => new Response(JSON.stringify(String(url).includes('/api/sessions?') ? { data: [{ id: sid, title: 'Wizard OS · Chats', source: 'wizard-mobile', status }] } : { data: [] }), { headers: { 'content-type': 'application/json' } }) })
+  const server = createWizardServer({ requireAccess: false, hermesKey: 'synthetic-only', hermesStatePath: path, sessionDbPath: path, followThrough: false, archivedSessionReader: () => [], fetchImpl: async url => new Response(JSON.stringify(String(url).includes('/api/sessions?') ? { data: [{ id: sid, title: 'WizardOS · Chats', source: 'wizard-mobile', status }] } : { data: [] }), { headers: { 'content-type': 'application/json' } }) })
   try {
     await listen(server)
     const response = await fetch(`http://127.0.0.1:${server.address().port}/wizard/hermes/api/sessions?limit=10`)

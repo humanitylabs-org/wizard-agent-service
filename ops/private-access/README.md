@@ -1,8 +1,8 @@
 # wizard-private-access
 
-The box's only Tailscale driver for Wizard OS "Connect your phone". A root helper (Python 3 standard library,
+The box's only Tailscale driver for WizardOS "Connect your phone". A root helper (Python 3 standard library,
 no dependencies) that the Agent Service calls over a unix socket, so no app or container gets Tailscale
-privileges. Contract: Wizard OS phone setup, section "Host helper".
+privileges. Contract: WizardOS phone setup, section "Host helper".
 
 | File | What |
 | --- | --- |

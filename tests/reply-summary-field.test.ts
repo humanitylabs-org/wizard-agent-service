@@ -11,7 +11,7 @@ import { writeFileSync } from 'node:fs'
 
 // A long reply's own hidden status line already holds a plain-words ask written for someone reading cold.
 // The Wizard history view keeps it on the row (wizard_ask / wizard_state) so a shell can show it first.
-const marker = '[WIZARD_STATUS_V1]{"state":"check","ask":"New chat groups are live. Say if the 11 groups feel right","subject":"Wizard OS"}[/WIZARD_STATUS_V1]'
+const marker = '[WIZARD_STATUS_V1]{"state":"check","ask":"New chat groups are live. Say if the 11 groups feel right","subject":"WizardOS"}[/WIZARD_STATUS_V1]'
 const reply = { id: 9, session_id: 'wizard_fixture', role: 'assistant', timestamp: 200, finish_reason: 'stop', content: `Long technical body.\n\n${marker}` }
 const viewOf = (rows: unknown[]) => {
   const source = Buffer.from(JSON.stringify({ data: rows }))
@@ -35,9 +35,9 @@ describe('reply summary on Wizard history rows', () => {
   })
 
   it('keeps a long ask whole on the row (the 140-char clip is only for the chat list)', () => {
-    const ask = "Short-answer-plus-Details is a Wizard OS feature, on only for you for now. Asked James's team on GitHub to merge it and consider it for everyone"
+    const ask = "Short-answer-plus-Details is a WizardOS feature, on only for you for now. Asked James's team on GitHub to merge it and consider it for everyone"
     expect(ask.length).toBeGreaterThan(140)
-    const long = { ...reply, content: `Long technical body.\n\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'fyi', ask, subject: 'Wizard OS' })}[/WIZARD_STATUS_V1]` }
+    const long = { ...reply, content: `Long technical body.\n\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'fyi', ask, subject: 'WizardOS' })}[/WIZARD_STATUS_V1]` }
     const [row] = viewOf([long])
     expect(row.wizard_ask).toBe(ask)
     expect(row.wizard_ask).not.toContain('…')

@@ -113,7 +113,7 @@ it('lists and calls wizard_devices through the main gateway without adding it to
   expect((await rpc('tools/list')).tools.map((t: any) => t.name)).toContain('wizard_devices')
   expect((await rpc('tools/call', { name: 'wizard_devices' })).content[0].text).toContain('No phones have checked in yet.')
   await fetch(`${s.base}/wizard-os-home/api/diagnostics/scroll-capture`, post(JSON.stringify({ session })))
-  expect((await rpc('tools/call', { name: 'wizard_devices', arguments: {} })).content[0].text).toContain('Google Pixel 10 Pro XL (Android SDK 37): Wizard OS 0.10.18 (code 82), WebView app.vanadium.webview 156.0.8078.47.0')
+  expect((await rpc('tools/call', { name: 'wizard_devices', arguments: {} })).content[0].text).toContain('Google Pixel 10 Pro XL (Android SDK 37): WizardOS 0.10.18 (code 82), WebView app.vanadium.webview 156.0.8078.47.0')
 })
 
 it('a box diagnostics receiver gets the report instead of the shell, with its Origin', async () => {

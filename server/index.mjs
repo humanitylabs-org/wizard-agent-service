@@ -22,17 +22,17 @@ if (!key) {
   process.exit(1)
 }
 
-// Inside a Wizard OS container (WIZARD_CONTAINER=1) the service listens on the container's own interface;
+// Inside a WizardOS container (WIZARD_CONTAINER=1) the service listens on the container's own interface;
 // the compose file publishes that port on the box's 127.0.0.1 only. Everywhere else it stays loopback.
 const container = process.env.WIZARD_CONTAINER === '1'
 const host = process.env.WIZARD_HOST || (container ? '0.0.0.0' : '127.0.0.1')
 if (!['127.0.0.1', '::1', 'localhost'].includes(host) && !(container && host === '0.0.0.0')) {
-  process.stderr.write('WIZARD_HOST must be a loopback address (0.0.0.0 only inside a Wizard OS container).\n')
+  process.stderr.write('WIZARD_HOST must be a loopback address (0.0.0.0 only inside a WizardOS container).\n')
   process.exit(1)
 }
 
 const port = Number(process.env.WIZARD_PORT || 8787)
-// Who may use the service: 'tailscale' (Tailscale Serve identity, the Wizard OS default), 'cloudflare'
+// Who may use the service: 'tailscale' (Tailscale Serve identity, the WizardOS default), 'cloudflare'
 // (Cloudflare Access JWTs) or 'none' (box-only, e.g. behind a gateway that checks identity itself).
 // Unset keeps the earlier behaviour: tailscale when WIZARD_TAILNET_ORIGIN is set, else WIZARD_REQUIRE_CF_ACCESS.
 const authMode = process.env.WIZARD_AUTH_MODE
@@ -172,7 +172,7 @@ server = createWizardServer({
   uxPrefix: process.env.WIZARD_UX_PREFIX || 'wizard-os-home',
   ...(process.env.WIZARD_STT_ENABLED === '0' ? { sttConfigured: false } : {}),
   router,
-  // Wizard OS box: attachments go into the shared user-files folder; the agent sees it at WIZARD_MEDIA_AGENT_ROOT.
+  // WizardOS box: attachments go into the shared user-files folder; the agent sees it at WIZARD_MEDIA_AGENT_ROOT.
   mediaRoot: process.env.WIZARD_MEDIA_ROOT || '',
   mediaAgentRoot: process.env.WIZARD_MEDIA_AGENT_ROOT || process.env.WIZARD_MEDIA_ROOT || '',
   mediaIndexPath: process.env.WIZARD_MEDIA_INDEX_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'media-files.json'),
@@ -190,7 +190,7 @@ server = createWizardServer({
   // phone step seen (issue 146). Off by default.
   hostPhoneSeen: process.env.WIZARD_HOST_PHONE_SEEN === '1',
   filesRoot: process.env.WIZARD_FILES_ROOT || '',
-  // The owner's user-files root on this host (Runtipi's media/ folder on a Wizard OS box). When set, an
+  // The owner's user-files root on this host (Runtipi's media/ folder on a WizardOS box). When set, an
   // upload created with a destination is placed there, and the Files app can list it. Separate from
   // WIZARD_MEDIA_ROOT, which moves chat attachments, and from WIZARD_FILES_ROOT, the agent's view of it.
   userFilesRoot: process.env.WIZARD_USER_FILES_ROOT || '',

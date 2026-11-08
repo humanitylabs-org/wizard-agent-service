@@ -3,7 +3,7 @@
 # Stopping or restarting the unit never takes the rules down (no ExecStop); `restart`/`reload` refresh them in
 # place without a gap. Removing them is deliberate: `wizard-agent-firewall remove`.
 [Unit]
-Description=Wizard OS restricted-agent host firewall
+Description=WizardOS restricted-agent host firewall
 # Up before networking and Docker, so restricted containers (restart: unless-stopped) never start unguarded at boot.
 DefaultDependencies=no
 After=local-fs.target

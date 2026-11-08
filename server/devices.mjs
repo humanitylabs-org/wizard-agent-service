@@ -81,7 +81,7 @@ export function createDevices({ statePath = '', now = Date.now } = {}) {
 
 const TOOL = {
   name: 'wizard_devices',
-  description: "[Wizard OS] The owner's phones running the Wizard OS app: model, Android, app version, WebView version and when each last checked in. Check this first when the owner reports a phone or app problem or asks what version they have; never ask them.",
+  description: "[WizardOS] The owner's phones running the WizardOS app: model, Android, app version, WebView version and when each last checked in. Check this first when the owner reports a phone or app problem or asks what version they have; never ask them.",
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
 }
 const ago = (at, now) => {
@@ -97,8 +97,8 @@ export function devicesTool({ devices, now = Date.now }) {
     call(name, args = {}) {
       if (name !== TOOL.name) return undefined
       if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).length) return { isError: true, content: [{ type: 'text', text: 'wizard_devices takes no arguments.' }] }
-      const text = devices.list().map(d => `- ${d.manufacturer} ${d.model} (Android SDK ${d.sdk}): Wizard OS ${d.appVersion} (code ${d.versionCode}), WebView ${d.webviewPackage} ${d.webviewVersion}, last seen ${ago(d.last_seen, now())}`).join('\n')
-        || 'No phones have checked in yet. The Wizard OS phone app reports itself while it is open.'
+      const text = devices.list().map(d => `- ${d.manufacturer} ${d.model} (Android SDK ${d.sdk}): WizardOS ${d.appVersion} (code ${d.versionCode}), WebView ${d.webviewPackage} ${d.webviewVersion}, last seen ${ago(d.last_seen, now())}`).join('\n')
+        || 'No phones have checked in yet. The WizardOS phone app reports itself while it is open.'
       return { content: [{ type: 'text', text }] }
     },
   }

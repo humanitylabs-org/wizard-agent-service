@@ -5,9 +5,9 @@
 // keeps its own short list in $WIZARD_OS_HOME/subjects.json (default ~/.wizard-os/subjects.json):
 //
 //   {
-//     "subjects": [{ "name": "Wizard OS", "about": "the shell itself: chats, Ready, orb, settings" }, ...],
-//     "aliases":  { "Wizard App": "Wizard OS", "McKenna Track": "Music" },
-//     "threads":  { "<session id>": { "from": "Wizard OS", "subject": "Wizard Apps" } }
+//     "subjects": [{ "name": "WizardOS", "about": "the shell itself: chats, Ready, orb, settings" }, ...],
+//     "aliases":  { "Wizard App": "WizardOS", "McKenna Track": "Music" },
+//     "threads":  { "<session id>": { "from": "WizardOS", "subject": "Wizard Apps" } }
 //   }
 //
 // - subjects: the canonical areas, in the owner's order. Every run is told this list.
@@ -20,6 +20,7 @@
 
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import { migrateOptionalJson, qualifyRawThreadRecords, sideKey } from './thread-reference.mjs'
+import { spellProductName } from './product-name.mjs'
 
 const SUBJECT_MAX = 40
 const ABOUT_MAX = 120
@@ -28,7 +29,7 @@ const MAP_MAX = 2000
 const ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/u
 
 const clean = (value, max) => {
-  const text = String(value ?? '').replace(/[\u0000-\u001f\u007f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/gu, ' ').replace(/\s+/gu, ' ').trim()
+  const text = spellProductName(String(value ?? '')).replace(/[\u0000-\u001f\u007f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/gu, ' ').replace(/\s+/gu, ' ').trim()
   return text.length > max ? text.slice(0, max).trimEnd() : text
 }
 export const subjectKey = (value) => clean(value, SUBJECT_MAX).toLocaleLowerCase()

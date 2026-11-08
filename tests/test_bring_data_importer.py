@@ -347,7 +347,7 @@ class ImporterTests(unittest.TestCase):
         result = call('sources')
         self.assertEqual(result['local'], [{'kind': 'hermes', 'self': True, 'label': 'This box’s main agent (Oscar)',
                                             'path': str(own)}])
-        self.assertEqual(result['into'], [{'id': 'studio', 'label': 'Studio', 'kind': 'container', 'where': 'Inside Wizard OS'}])
+        self.assertEqual(result['into'], [{'id': 'studio', 'label': 'Studio', 'kind': 'container', 'where': 'Inside WizardOS'}])
         self.assertFalse(call('scan', path=str(own))['success'])  # not into itself
 
     def registry(self):
@@ -372,7 +372,7 @@ class ImporterTests(unittest.TestCase):
         os.environ['HERMES_HOME'] = str(own)
         (own / 'memories').mkdir(parents=True)
         (own / 'memories/USER.md').write_text('Ana lives in Lisbon.\n§\nPrefers short answers.\n', 'utf-8')
-        (own / 'memories/MEMORY.md').write_text('Box runs Wizard OS alongside.\n', 'utf-8')
+        (own / 'memories/MEMORY.md').write_text('Box runs WizardOS alongside.\n', 'utf-8')
         (own / 'SOUL.md').write_text('You are Oscar, direct and kind.\n', 'utf-8')
         (own / '.env').write_text(f'ANTHROPIC_API_KEY={CANARY}\n', 'utf-8')
         (own / 'auth.json').write_text(json.dumps({'token': CANARY}), 'utf-8')
@@ -385,7 +385,7 @@ class ImporterTests(unittest.TestCase):
         con.executescript("CREATE TABLE sessions (id TEXT, title TEXT, source TEXT, started_at REAL, parent_session_id TEXT);"
                           "CREATE TABLE messages (id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, timestamp REAL);")
         con.execute("INSERT INTO sessions VALUES ('s1', 'Plan the move', 'cli', 1790000000, NULL)")
-        con.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s1', 'user', 'Move me into Wizard OS', 1790000001)")
+        con.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s1', 'user', 'Move me into WizardOS', 1790000001)")
         con.execute("INSERT INTO messages (session_id, role, content, timestamp) VALUES ('s1', 'assistant', 'On it.', 1790000002)")
         con.commit(); con.close()
         fact_store(own / 'memory_store.db', [('Ana’s box is called garden-box.', 'general', 0.9),
@@ -399,13 +399,13 @@ class ImporterTests(unittest.TestCase):
     def test_move_this_agent_into_an_agent_inside_wizard_os(self):
         own = self.alongside_hermes()
         registry = self.registry()
-        dest = self.container_agent(registry, 'oscar-os', 'Oscar in Wizard OS')
+        dest = self.container_agent(registry, 'oscar-os', 'Oscar in WizardOS')
         before = self.tree(own)
         listed = call('sources')
         self.assertTrue(listed['local'][0]['self'])
         scan = call('scan', path=str(own), dest='oscar-os')
         self.assertTrue(scan['success'], scan)
-        self.assertEqual(scan['into'], 'Oscar in Wizard OS')
+        self.assertEqual(scan['into'], 'Oscar in WizardOS')
         self.assertEqual(scan['counts']['facts'], 2)  # the key-looking fact stays behind
         self.assertEqual(scan['fact_store'], {'found': 2, 'here': None})
         self.assertEqual(scan['personality'], {'found': True, 'here': 'none'})

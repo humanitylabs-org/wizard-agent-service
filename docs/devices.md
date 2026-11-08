@@ -1,6 +1,6 @@
 # Owner phones
 
-The existing Wizard OS Android app POSTs its diagnostics report while open. The Service
+The existing WizardOS Android app POSTs its diagnostics report while open. The Service
 intercepts `POST /wizard-os-home/api/diagnostics/scroll-capture`, `/wizard-ux/api/diagnostics/scroll-capture`
 and the configured `WIZARD_UX_PREFIX` equivalent **after owner authentication**, saves only
 allowlisted session metadata, then forwards the original body to `WIZARD_TAILNET_SHELL_ORIGIN`.

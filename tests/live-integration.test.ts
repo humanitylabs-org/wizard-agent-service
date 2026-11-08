@@ -95,11 +95,11 @@ it('inherits live selector locks, keeps OS/view instructions, and recovers a dro
     hermesStatePath: state, joinedDelegation: 'require', appsJsonPath, mcpToken: 'fixture-mcp',
     bridgeWriteSkills: false, bridgeWatchMs: 0,
   }))
-  const response = await send(base, { instructions: '[Wizard OS context] Current view: Fixture Notes' })
+  const response = await send(base, { instructions: '[WizardOS context] Current view: Fixture Notes' })
   expect(response.status).toBe(202)
   expect((await response.json()).runtime).toMatchObject({ ...route, model_lock: 'accepted' })
   expect(upstream.admissions[0].body.instructions).toContain('Fixture Notes')
-  expect(upstream.admissions[0].body.instructions).toContain('[Wizard OS context]')
+  expect(upstream.admissions[0].body.instructions).toContain('[WizardOS context]')
   expect(upstream.admissions[0].body.instructions).toContain('wizard')
   const db = new DatabaseSync(state)
   db.prepare('INSERT INTO async_delegations VALUES(?,?,?,?,?,?)').run('deleg_merge', sessionId, 'completed', 'dropped',

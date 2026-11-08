@@ -59,12 +59,12 @@ thinking, sub-agent runs or command echoes); `skills/**/SKILL.md`, `commands/*.m
 Not yet: ChatGPT/Claude conversations as Hermes sessions for `session_search`, Hermes holographic
 fact-store rows, and streaming very large exports (a conversations file is read whole).
 
-## Into another agent, and "Move this agent into Wizard OS"
+## Into another agent, and "Move this agent into WizardOS"
 
-Alongside mode (Hermes on the host) is a bridge; the goal is an agent that is just another app inside Wizard OS.
+Alongside mode (Hermes on the host) is a bridge; the goal is an agent that is just another app inside WizardOS.
 The Importer reaches that with the same engine, no second migration system:
 
-- `sources` returns `into`: other Wizard OS agents from the Agents registry (`<agents dir>/<id>/agent.json`) whose
+- `sources` returns `into`: other WizardOS agents from the Agents registry (`<agents dir>/<id>/agent.json`) whose
   Hermes home this process can write: a standard container agent (`<agents dir>/<id>/home`) or a host profile
   agent (`runtime.kind: profile`). Restricted agents (sealed home owned by the container user), agents still being
   imported, private and recovery agents are never offered.
@@ -72,7 +72,7 @@ The Importer reaches that with the same engine, no second migration system:
   agent's home through Hermes' own context-local home override: skills, `SOUL.md`, the stock memory tool (with that
   agent's config limits), the fact store and the import registry all land there. Chats stay in `Files/Imported`.
 - With a destination chosen, this agent's own home becomes a valid source, so `sources` lists it (`self: true`)
-  only when `into` is not empty. The app shows it as "Move into Wizard OS".
+  only when `into` is not empty. The app shows it as "Move into WizardOS".
 - Another named profile inside this agent's home (`<home>/profiles/<name>`) is a separate agent and a valid source;
   scanning the home itself never walks `profiles/`.
 - Fact store: `memory_store.db` (stock holographic plugin). An agent without one gets an exact SQLite backup copy

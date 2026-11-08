@@ -13,7 +13,7 @@ const SESSION = /^[A-Za-z0-9._:-]{1,160}$/u
 
 const TOOL = {
   name: FOLLOW_UP_TOOL,
-  description: '[Wizard OS] Create, list or explicitly stop a quiet one-shot follow-up for this Wizard chat thread. Use create when you owe the owner a future result: checks stay silent while pending, and the first finished result, real blocker or required decision comes back in this same thread. Pass this thread\'s id (from your run instructions) as session_id.',
+  description: '[WizardOS] Create, list or explicitly stop a quiet one-shot follow-up for this Wizard chat thread. Use create when you owe the owner a future result: checks stay silent while pending, and the first finished result, real blocker or required decision comes back in this same thread. Pass this thread\'s id (from your run instructions) as session_id.',
   inputSchema: {
     type: 'object',
     properties: {

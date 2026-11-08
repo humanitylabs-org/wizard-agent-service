@@ -1,11 +1,11 @@
 // Uploads placed in the owner's Files root (wizard-os spec/AGENT_SERVICE_API.md, "Upload destination").
 //
 // The Files app uploads through /wizard/v1/uploads like every other client, but asks for the finished
-// file to land in a folder of the user-files root (Runtipi's shared media/ folder on a Wizard OS box)
+// file to land in a folder of the user-files root (Runtipi's shared media/ folder on a WizardOS box)
 // rather than in the chat-attachment store. An upload with a destination folder is placed in that folder
 // under its own name; one without a folder goes to Inbox/<YYYY-MM-DD> in the owner's time zone.
 //
-//   root        the user-files root (WIZARD_USER_FILES_ROOT; on a Wizard OS box, the media root)
+//   root        the user-files root (WIZARD_USER_FILES_ROOT; on a WizardOS box, the media root)
 //   indexPath   small JSON index of placed uploads (makes a retried completion return the same file)
 //
 // Rules: folders are relative to the root and confined to it (no absolute paths, no '..', no hidden

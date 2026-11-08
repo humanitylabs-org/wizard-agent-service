@@ -18,7 +18,7 @@ spec=importlib.util.spec_from_file_location('wizard_os_plugin', root + '/__init_
 mod=importlib.util.module_from_spec(spec); sys.modules[spec.name]=mod; spec.loader.exec_module(mod)
 `
 
-test('Wizard OS plugin registers a session-bound follow-up tool', () => {
+test('WizardOS plugin registers a session-bound follow-up tool', () => {
   const result = python(load + `
 class C:
   def __init__(self): self.tools=[]

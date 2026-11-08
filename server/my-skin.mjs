@@ -1,6 +1,6 @@
 // My skin: the owner's one personal stylesheet, layered by the shell on top of whichever skin they picked.
 //
-// It lives OUTSIDE the shell image, in the owner's Files root (Runtipi's media/ folder on a Wizard OS box):
+// It lives OUTSIDE the shell image, in the owner's Files root (Runtipi's media/ folder on a WizardOS box):
 //
 //     <files root>/Skins/My skin/skin.css (legacy Skins/My skin.css still works)
 //     <files root>/Skins/My skin/skin.js  (read-only here; device-local owner approval in the shell)
@@ -30,7 +30,7 @@ export const validSkinId = id => typeof id === 'string' && [...id].length >= 1 &
 export const MY_SKIN_TEMPLATE = `/* My skin
  *
  * Your own look, on top of whichever skin you picked in Settings > Look.
- * Wizard OS and skin updates never change this file. Leave it empty to see
+ * WizardOS and skin updates never change this file. Leave it empty to see
  * the skin exactly as its author made it.
  *
  * Write plain CSS, or ask your agent: "change my skin so ...".

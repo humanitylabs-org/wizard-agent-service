@@ -1,6 +1,6 @@
 // Large-file acceptance for resumable uploads, run on Thales (never on Telos):
 //   node scripts/upload-large-acceptance.mjs <work dir under WIZARD_WORK_ROOT> [bytes]
-// Starts a fixture Hermes and the Agent Service (Wizard OS box mode, media root inside <work dir>) in a
+// Starts a fixture Hermes and the Agent Service (WizardOS box mode, media root inside <work dir>) in a
 // child process, then:
 //   1. streams a <bytes> file (default 2 GiB) in 8 MiB PATCH chunks from disk, killing the connection
 //      mid-chunk at ~40% and resuming from GET offset / the 409 offset, sampling the server's RSS;

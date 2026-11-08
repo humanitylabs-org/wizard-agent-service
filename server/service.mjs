@@ -32,7 +32,8 @@ import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, fullStatusAsk, askMaxFor, withAskMax, createHeavyStatusGuard, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
-import { ThreadTitleStore, clashCandidates, provisionalTitleFrom, readSessionTitle, titleContextLine, titleKey, titleToApply, topicFor } from './thread-titles.mjs'
+import { ThreadTitleStore, clashCandidates, provisionalTitleFrom, readMisspelledTitles, readSessionTitle, titleContextLine, titleKey, titleToApply, topicFor } from './thread-titles.mjs'
+import { PRODUCT_NAME, misspellsProductName, spellProductName } from './product-name.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
 import { createRoutedQueues } from './routed-run-queue.mjs'
 import { Supervisor } from './supervisor.mjs'
@@ -184,7 +185,7 @@ ${FINISH_REPORT_INSTRUCTIONS}
 
 ${STATUS_INSTRUCTIONS}`
 
-// Own reply style: Wizard OS facts and protocol only.
+// Own reply style: WizardOS facts and protocol only.
 export const OWN_STYLE_RUN_INSTRUCTIONS = `${WIZARD_CLIENT_INTRO} ${WIZARD_CLIENT_FACTS}
 
 ${OWN_STYLE_SOURCE}
@@ -313,15 +314,17 @@ const DETACHED_DELEGATION_FACT = 'Background helpers you start finish after this
 const DETACHED_DELEGATION = 'When you hand work to background helpers, say in one short line what is running and end the turn. Wizard returns their results to you as a follow-up turn; then inspect them, finish integration or release work, verify the real target, and give one final answer.'
 /** @param {{ join: boolean, response_style?: 'summary' | 'concise' | 'own' }} [contract] */
 export function runInstructions(contract = { join: true }) {
-  // One style source: the agent's own persona. Wizard sends Wizard OS facts and protocol only, whatever
+  // One style source: the agent's own persona. Wizard sends WizardOS facts and protocol only, whatever
   // response_style an older shell saved (Summary/Concise are retired; see docs/response-style.md).
   return contract.join ? OWN_STYLE_RUN_INSTRUCTIONS : OWN_STYLE_RUN_INSTRUCTIONS.replace(`\n\n${SUPERVISOR_SPELL}`, `\n\n${DETACHED_DELEGATION_FACT}\n\n${SUPERVISOR_SPELL}`)
 }
 
 // The server owns the run contract: arbitrary client instructions are dropped. The one exception is the
-// shell's own screen note ("[Wizard OS context] … Window in front: … Visible on screen: …"), which tells the
+// shell's own screen note ("[WizardOS context] … Window in front: … Visible on screen: …"), which tells the
 // agent what the user was looking at when they spoke. It rides after the contract, bounded, as background only.
-const VIEW_CONTEXT_PREFIX = '[Wizard OS context]'
+const VIEW_CONTEXT_PREFIX = '[WizardOS context]'
+// Shells and phone apps from before 8 Nov 2026 write the product name as two words; the note is re-spelled on the way in.
+const LEGACY_VIEW_CONTEXT_PREFIX = /^\[Wizard ?OS context\]/u
 const VIEW_CONTEXT_MAX = 2400
 // The note is framed by the server and flattened to one line, so screen text (a web page, a message) can never
 // pose as another instruction section; only a string or the first array element is read.
@@ -330,8 +333,9 @@ export function clientViewContext(value) {
   const raw = Array.isArray(value) ? value[0] : value
   if (typeof raw !== 'string') return ''
   // eslint-disable-next-line no-control-regex
-  const note = raw.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim()
-  if (!note.startsWith(VIEW_CONTEXT_PREFIX)) return ''
+  const flat = raw.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!LEGACY_VIEW_CONTEXT_PREFIX.test(flat)) return ''
+  const note = spellProductName(flat.replace(LEGACY_VIEW_CONTEXT_PREFIX, VIEW_CONTEXT_PREFIX))
   return `${VIEW_CONTEXT_FRAME}\n${note.length > VIEW_CONTEXT_MAX ? `${note.slice(0, VIEW_CONTEXT_MAX - 1)}…` : note}`
 }
 
@@ -2669,7 +2673,7 @@ export function createCloudflareAccessVerifier({ teamDomain, audience, jwksUrl, 
   }
 }
 
-// Inside a Wizard OS container the agent and the other apps are reached by their service names on the
+// Inside a WizardOS container the agent and the other apps are reached by their service names on the
 // box's private container network (e.g. http://hermes-agent-engine:8642), never on loopback.
 const PRIVATE_UPSTREAM_HOST = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/
 function upstreamHostAllowed(hostname) {
@@ -2882,12 +2886,12 @@ function buildWizardServer(options, lifetime) {
   lifetime.own(() => Promise.allSettled([...lockedBridge.streams]))
   const fetchImpl = (url, init) => lockedBridge.fetch(url, init)
 
-  // Wizard OS settings and launcher (see wizard-os-settings.mjs) and the optional Wizard UX build.
+  // WizardOS settings and launcher (see wizard-os-settings.mjs) and the optional Wizard UX build.
   const settingsPath = options.settingsPath ? resolve(String(options.settingsPath)) : ''
   migrateJson(options.voiceRecoveryManifestPath, value => value.version === 1 && Array.isArray(value.entries) ? { ...value, entries: value.entries.map(entry => qualifyContinuation(entry)) } : value)
   const appsJsonPath = options.appsJsonPath ? resolve(String(options.appsJsonPath)) : ''
   const launcherPath = options.launcherPath ? resolve(String(options.launcherPath)) : ''
-  // Wizard OS agent bridge (spec/AGENT_BRIDGE.md): the `wizard` MCP gateway, the kernel and the pointer skills,
+  // WizardOS agent bridge (spec/AGENT_BRIDGE.md): the `wizard` MCP gateway, the kernel and the pointer skills,
   // all from apps.json. Per run the agent gets the kernel, or, when the wizard-os Hermes plugin already puts the
   // kernel in its system prompt (settings agent.adapter = 'hermes-plugin'), only the apps that changed since the
   // thread started.
@@ -3367,7 +3371,7 @@ function buildWizardServer(options, lifetime) {
   const inboxToken = options.inboxToken ?? ''
   const inboxTrustedRoots = confinedTrustedRoots(options.inboxTrustedRoots ?? options.inboxTrustedRoot)
   const inboxDbPath = options.inboxDbPath ? resolve(String(options.inboxDbPath)) : ''
-  // Wizard OS box: attachments are saved into the shared user-files folder (media-files.mjs) unless a
+  // WizardOS box: attachments are saved into the shared user-files folder (media-files.mjs) unless a
   // Wizard Inbox service is configured.
   let chatPhotos = null
   const mediaFiles = !inboxToken && options.mediaRoot
@@ -4359,9 +4363,9 @@ function buildWizardServer(options, lifetime) {
     if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote, trackerNote('hermes', '')].filter(Boolean).join('\n')
     return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId)].filter(Boolean).join('\n')
   }
-  const patchHermesTitle = async (sessionId, title) => {
-    // A title another thread holds is dated, never numbered (James, 8 Nov: no #N).
-    for (const candidate of clashCandidates(title, new Date(), sessionId)) {
+  const patchHermesTitle = async (sessionId, title, { exact = false } = {}) => {
+    // A title another thread holds is dated, never numbered (James, 8 Nov: no #N). An exact patch never is.
+    for (const candidate of exact ? [title] : clashCandidates(title, new Date(), sessionId)) {
       const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'application/json' })
       if (hermesKey) headers.set('Authorization', ['Bearer', hermesKey].join(' '))
       const reply = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(sessionId)}`, {
@@ -4394,6 +4398,70 @@ function buildWizardServer(options, lifetime) {
       if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
     } catch { /* the next final reply proposes again */ }
     finally { titleInFlight.delete(sessionId) }
+  }
+  // WizardOS is one word (James, 8 Nov 2026). A stored title that spells it as two is fixed in Hermes through the same
+  // session PATCH as any rename, keeping its owner: an owner's title stays locked, an agent's stays the agent's.
+  const respellInFlight = new Set()
+  const respelledAt = new Map()
+  const respellTitle = async (sessionId) => {
+    if (respellInFlight.has(sessionId)) return null
+    respellInFlight.add(sessionId)
+    try {
+      const current = readSessionTitle(titleDbPath(), sessionId)
+      if (!current?.title || !misspellsProductName(current.title)) return null
+      const record = threadTitleStore.get(sessionId)
+      const locked = titleLocked(current, record)
+      // An owner's title changes in spelling only; an agent title that clashes is dated like any agent title.
+      const applied = await patchHermesTitle(sessionId, spellProductName(current.title), { exact: locked })
+      if (!applied) return null
+      threadTitleStore.respell(sessionId, { from: current.title, to: applied, locked })
+      canonicalSessionCache.expiresAt = 0
+      return { id: sessionId, from: current.title, to: applied, locked }
+    } finally { respellInFlight.delete(sessionId) }
+  }
+  const queueRespell = (sessionId) => {
+    if (Date.now() - (respelledAt.get(sessionId) ?? 0) < 60_000) return
+    respelledAt.set(sessionId, Date.now())
+    if (respelledAt.size > 500) respelledAt.delete(respelledAt.keys().next().value)
+    void lifetime.track(respellTitle(sessionId).catch(() => null))
+  }
+  // Once per install: every stored title, archived and hidden ones included, with a receipt that doubles as the backup.
+  // Titles Hermes refused stay in the receipt's `failed` list and are tried again on the next starts (at most 5 passes).
+  const respellStoredTitles = async () => {
+    const statePath = threadTitleStore.statePath
+    if (!statePath || !titleDbPath()) return
+    const receiptPath = `${statePath}.wizardos-respell.json`
+    let receipt = null
+    if (existsSync(receiptPath)) {
+      try { receipt = JSON.parse(readFileSync(receiptPath, 'utf8')) } catch { return }
+      if (!Array.isArray(receipt?.failed) || !receipt.failed.length || (receipt.passes ?? 1) >= 5) return
+    }
+    const found = receipt
+      ? readMisspelledTitles(titleDbPath()).filter((row) => receipt.failed.includes(row.id))
+      : readMisspelledTitles(titleDbPath())
+    if (!receipt) {
+      receipt = { schema: 1, name: PRODUCT_NAME, started_at: new Date().toISOString(), titles_before: found, title_store_before: threadTitleStore.load(), renamed: [], failed: [], passes: 0 }
+      writeFileSync(`${receiptPath}.partial`, JSON.stringify(receipt), { mode: 0o600 })
+    }
+    const failed = []
+    for (const row of found) {
+      try {
+        const done = await respellTitle(row.id)
+        if (done) receipt.renamed.push(done); else failed.push(row.id)
+      } catch { failed.push(row.id) }
+      await new Promise((resolveGap) => setTimeout(resolveGap, 15))
+    }
+    receipt.failed = failed
+    receipt.passes = (receipt.passes ?? 1) + 1
+    receipt.finished_at = new Date().toISOString()
+    writeFileSync(receiptPath, JSON.stringify(receipt), { mode: 0o600 })
+    try { rmSync(`${receiptPath}.partial`, { force: true }) } catch { /* the full receipt is written */ }
+    if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
+  }
+  if (options.respellStoredTitles !== false && hermesStatePath && options.threadTitleStatePath) {
+    const timer = setTimeout(() => { void lifetime.track(respellStoredTitles().catch(() => console.error('[titles] WizardOS respell pending'))) }, options.respellDelayMs ?? 20_000)
+    timer.unref?.()
+    lifetime.own(async () => clearTimeout(timer))
   }
   // A placeholder title from the owner's first message, set the moment it is queued (not when the first reply ends).
   // It shows on every list/detail read at once, is copied into Hermes's own title as soon as that session exists, and
@@ -4435,6 +4503,10 @@ function buildWizardServer(options, lifetime) {
         if (guarded !== session.wizard_attention) session = { ...session, wizard_attention: guarded, status: 'running', wizard_waiting_on: 'heavy' }
         session = projectOwnedOpenWork(session, ownedOpenWork?.evidenceFor(session.id))
         const renames = threadTitleStore.visibleHistory(session.id)
+        if (misspellsProductName(session.title)) {
+          queueRespell(session.id)
+          session = { ...session, title: spellProductName(session.title) }
+        }
         if (!session.title) {
           const placeholder = threadTitleStore.get(session.id)
           if (placeholder?.provisional && !placeholder.locked && placeholder.title) {
@@ -6362,7 +6434,7 @@ function buildWizardServer(options, lifetime) {
       if (url.pathname === '/wizard/voice/transcribe' && request.method === 'POST') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const contentType = String(request.headers['content-type'] ?? '').toLowerCase()
-        // The native Wizard OS orb records AAC ADTS (crash-safe on disk) and labels it audio/aac.
+        // The native WizardOS orb records AAC ADTS (crash-safe on disk) and labels it audio/aac.
         const audioType = /^audio\/(webm|ogg|mp4|wav|x-m4a|aac|x-aac|mpeg)(?:;|$)/.exec(contentType)
         if (!audioType) { sendJson(response, 415, { error: 'audio_required' }); return }
         const data = await readBoundedBody(request, WIZARD_VOICE_UPLOAD_LIMIT)
@@ -6377,11 +6449,11 @@ function buildWizardServer(options, lifetime) {
         if (sttInfo.id) form.append('model', sttInfo.id)
         if (sttInfo.segments) form.append('response_format', 'verbose_json')
         {
-          // Language and spelling hints come from Wizard OS settings: the agent's name, the user's
+          // Language and spelling hints come from WizardOS settings: the agent's name, the user's
           // own vocabulary. Nothing about any particular user is built in.
           const { settings } = readSettings(settingsPath)
           form.append('language', settings.voice.language || 'en')
-          const hints = [settings.agent.name, settings.owner.name, ...settings.voice.vocabulary].filter(Boolean)
+          const hints = [PRODUCT_NAME, settings.agent.name, settings.owner.name, ...settings.voice.vocabulary].filter(Boolean)
           if (hints.length) form.append('prompt', `Names: ${[...new Set(hints)].join(', ')}.`.slice(0, 800))
         }
         const controller = new AbortController()
@@ -6394,7 +6466,7 @@ function buildWizardServer(options, lifetime) {
           // verbose_json carries per-segment tokens, several times the plain reply; long takes need room.
           if (!upstream.ok || raw.length > (sttInfo.segments ? 4 * 1024 * 1024 : 256 * 1024)) throw new Error('voice transcription failed')
           const value = JSON.parse(raw.toString('utf8'))
-          const text = speechText(value).trim().slice(0, 64_000)
+          const text = spellProductName(speechText(value)).trim().slice(0, 64_000)
           // A blank reading is "no speech" too: clients drop the take with a note (never a 4xx/5xx they retry).
           if (!text) { sendJson(response, 200, { text: '', no_speech: true, provider: '', model: '' }); return }
           sendJson(response, 200, {
@@ -7045,6 +7117,7 @@ function buildWizardServer(options, lifetime) {
           try {
             const requested = JSON.parse(body.toString('utf8'))
             if (typeof requested?.title === 'string' && requested.title.trim()) {
+              if (misspellsProductName(requested.title)) body = Buffer.from(JSON.stringify({ ...requested, title: spellProductName(requested.title) }))
               const sessionId = decodeURIComponent(titlePatchId)
               titlePatch = { sessionId, from: readSessionTitle(titleDbPath(), sessionId)?.title ?? '', to: requested.title }
             }

@@ -1,6 +1,6 @@
-"""Wizard OS plugin for stock Hermes.
+"""WizardOS plugin for stock Hermes.
 
-Registers one system-prompt section, ``wizard-os.kernel``: a FIXED Wizard OS orientation (under
+Registers one system-prompt section, ``wizard-os.kernel``: a FIXED WizardOS orientation (under
 1300 characters, the same on every box, no per-app list). Apps are discovered through the
 ``wizard-job-<job>`` pointer skills in ``~/.wizard-os/skills`` (``skills.external_dirs``); this
 plugin rewrites them from ``apps.json`` when the Agent Service has not. Mid-thread installs arrive
@@ -149,7 +149,7 @@ def _section(_session_info) -> str:
         logger.debug("wizard-os: pointer skill refresh failed", exc_info=True)
     registry = _kernel.read_registry()
     if registry is None:
-        return ""  # no Wizard OS on this box (yet): add nothing
+        return ""  # no WizardOS on this box (yet): add nothing
     return _kernel.kernel_for_session()
 
 

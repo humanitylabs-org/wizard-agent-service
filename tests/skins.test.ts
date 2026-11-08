@@ -21,7 +21,7 @@ function listing(server = 'https://example.com/blossom', overrides: any = {}, ke
   return sign({ kind: 30117, created_at: 1700000000, tags: [
     ['d', 'golden'], ['t', 'wizard-skin'], ['name', 'Golden'], ['summary', 'Synthetic skin'],
     ['published_at', '1699999900'], ['version', '1'], ['base', 'nebula'], ['ux', '1'],
-    ['file', 'skin.css', sha256(CSS), 'text/css', String(CSS.length)], ['server', server], ['alt', 'Wizard OS skin: Golden'],
+    ['file', 'skin.css', sha256(CSS), 'text/css', String(CSS.length)], ['server', server], ['alt', `Wizard${' '}OS skin: Golden`], // the fixed vectors predate the one-word WizardOS
   ], content: '{"schema":1}', ...overrides }, key)
 }
 function mutate(event: any, key: string, transform: (e: any) => void) { const draft = structuredClone(event); transform(draft); return sign(draft, key) }

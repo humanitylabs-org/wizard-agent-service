@@ -12,6 +12,7 @@ import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { migrateOptionalJson, atomicStoreWrite, qualifyRawThreadRecords } from './thread-reference.mjs'
+import { misspellsProductName, spellProductName } from './product-name.mjs'
 
 export const TITLE_MAX = 32
 // A title that was on screen for less than this before being replaced was never a recognition anchor
@@ -21,13 +22,13 @@ const HISTORY_MAX = 8
 const ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/
 const LEADING_VERB = /^(?:review|reviewing|fix|fixing|build|building|send|sending|make|making|add|adding|create|creating|update|updating|check|checking|find|finding|help|helping|investigate|investigating|explore|exploring|discuss|discussing|plan|planning|set up|setting up|setup|write|writing|troubleshoot|troubleshooting|debug|debugging|diagnose|test|testing|ship|shipping|deploy|deploying|rename|renaming|retitle|look into|looking into|get|getting)\s+/iu
 
-export const TITLE_INSTRUCTIONS = "title names the thread on the chat list: a broad project-level label for the home where the owner can keep all related work, in one to four words and at most 32 characters. Name one app (\"Messenger\", \"Video Editor\", \"DeFleur\"), one long-lived surface of a bigger product (\"Wizard OS · Desktop\", \"Wizard OS · Phone app\", \"Wizard OS · Voice\"), or one sustained project or life area (\"TSR podcast\", \"Tokyo trip\"). Use \" · \" only for a long-lived surface or area of a bigger product, never for a feature, fix, bug, ask or task: not \"Messenger · Settings buttons\" or \"Wizard OS · Pane fix\". It is a label, never a sentence: no leading verb such as Review, Fix, Build or Send, no trailing period, no emoji. Return the thread's current title exactly as long as the work still belongs to that project, however many sub-asks, features or fixes pass through. Give a new title only when the project itself changes. Exception: a title naming a single feature, fix or sub-task is outdated; replace it once with its project as a one-time broadening, not with another feature. Also replace a sentence title with its project label. When the reply reports work in an installed app (app_id), the title is that app's plain name (\"Messenger\", \"Music\", \"Notes\"): no \"Wizard OS ·\" prefix, no number. Never use the owner's own opening words or any sentence fragment. Owner-set titles stay fixed."
+export const TITLE_INSTRUCTIONS = "title names the thread on the chat list: a broad project-level label for the home where the owner can keep all related work, in one to four words and at most 32 characters. Name one app (\"Messenger\", \"Video Editor\", \"DeFleur\"), one long-lived surface of a bigger product (\"WizardOS · Desktop\", \"WizardOS · Phone app\", \"WizardOS · Voice\"), or one sustained project or life area (\"TSR podcast\", \"Tokyo trip\"). Use \" · \" only for a long-lived surface or area of a bigger product, never for a feature, fix, bug, ask or task: not \"Messenger · Settings buttons\" or \"WizardOS · Pane fix\". It is a label, never a sentence: no leading verb such as Review, Fix, Build or Send, no trailing period, no emoji. Return the thread's current title exactly as long as the work still belongs to that project, however many sub-asks, features or fixes pass through. Give a new title only when the project itself changes. Exception: a title naming a single feature, fix or sub-task is outdated; replace it once with its project as a one-time broadening, not with another feature. Also replace a sentence title with its project label. When the reply reports work in an installed app (app_id), the title is that app's plain name (\"Messenger\", \"Music\", \"Notes\"): no \"WizardOS ·\" prefix, no number. Never use the owner's own opening words or any sentence fragment. The product name is one word, WizardOS, in every title. Owner-set titles stay fixed."
 
 const squash = (value) => String(value ?? '').replace(/[\u0000-\u001f\u007f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/gu, '').replace(/\s+/gu, ' ').trim()
 
 // A proposed title, made safe and compact, or '' when it is unusable.
 export function normalizeTitle(value) {
-  let title = squash(value).replace(/^["'“”‘’`]+|["'“”‘’`]+$/gu, '').replace(/[.!?。]+$/u, '').trim()
+  let title = spellProductName(squash(value)).replace(/^["'“”‘’`]+|["'“”‘’`]+$/gu, '').replace(/[.!?。]+$/u, '').trim()
   if (!title) return ''
   // Normalize legacy separators; their meaning is governed by the project-level instructions.
   title = title.replace(/\s+(?:[-–—|:]|·|•)\s+/gu, ' · ').replace(/^([^·:]{2,24}):\s+/u, '$1 · ')
@@ -45,11 +46,11 @@ const FIRST_FILLER = /^(?:(?:hey|hi|hello|ok(?:ay)?|so|well|um+|uh+|right|yeah|y
 const LAST_FILLER = /[\s,.;:!?-]+(?:and|or|but|the|a|an|to|of|for|in|on|at|with|so|that|is|it|i|my|me)$/iu
 export function provisionalTitleFrom(text, catalog = null) {
   // An app the opener names is the topic; otherwise the opener's own first words hold the place until the agent's label arrives.
-  const named = catalog ? appTopicInText(String(text ?? '').replace(/\[(WIZARD_[A-Z0-9_]+)\][\s\S]*?\[\/\1\]/gu, ' ').replace(/\[Wizard OS context\][\s\S]*$/u, ' '), catalog) : ''
+  const named = catalog ? appTopicInText(String(text ?? '').replace(/\[(WIZARD_[A-Z0-9_]+)\][\s\S]*?\[\/\1\]/gu, ' ').replace(/\[Wizard ?OS context\][\s\S]*$/u, ' '), catalog) : ''
   if (named) return named
   let line = String(text ?? '')
     .replace(/\[(WIZARD_[A-Z0-9_]+)\][\s\S]*?\[\/\1\]/gu, ' ')
-    .replace(/\[Wizard OS context\][\s\S]*$/u, ' ')
+    .replace(/\[Wizard ?OS context\][\s\S]*$/u, ' ')
     .replace(/```[\s\S]*?```/gu, ' ')
     .replace(/https?:\/\/\S+/gu, ' ')
     .replace(/[*_#>`~]+/gu, ' ')
@@ -107,7 +108,7 @@ export function appTopicName(appId, catalog = []) {
   return words.length ? normalizeTitle(words.map(titleCase).join(' ')) : ''
 }
 
-// An app (or Wizard OS) the free text names, earliest mention first. Generic app words need the word "app" after them.
+// An app (or WizardOS) the free text names, earliest mention first. Generic app words need the word "app" after them.
 export function appTopicInText(text, catalog = []) {
   const haystack = ` ${squash(text)} `
   if (haystack.trim().length < 3) return ''
@@ -116,7 +117,7 @@ export function appTopicInText(text, catalog = []) {
     const at = haystack.search(pattern)
     if (at >= 0 && at < best.at) best = { at, name }
   }
-  consider('Wizard OS', /\bwizard ?os\b/iu)
+  consider('WizardOS', /\bwizard ?os\b/iu)
   for (const app of Array.isArray(catalog) ? catalog : []) {
     const name = appTopicName(app?.id, catalog)
     if (name.length < 4 || name.includes(' · ')) continue
@@ -170,12 +171,29 @@ export function readSessionTitle(sessionDbPath, sessionId) {
   }
 }
 
+// Every stored title that spells the product as two words (WizardOS is one word), oldest first. Read-only.
+export function readMisspelledTitles(sessionDbPath, limit = 5000) {
+  if (!sessionDbPath || !existsSync(sessionDbPath)) return []
+  let database
+  try {
+    database = new DatabaseSync(sessionDbPath, { readOnly: true })
+    const columns = new Set(database.prepare('PRAGMA table_info(sessions)').all().map((column) => column.name))
+    const rows = database.prepare(`SELECT id, title${columns.has('title_source') ? ', title_source' : ''} FROM sessions WHERE title IS NOT NULL AND lower(title) LIKE '%wizard%os%' ORDER BY started_at LIMIT ?`).all(limit)
+    return rows.filter((row) => typeof row.id === 'string' && ID.test(row.id) && misspellsProductName(row.title))
+      .map((row) => ({ id: row.id, title: row.title, source: columns.has('title_source') ? (row.title_source ?? null) : 'llm' }))
+  } catch {
+    return []
+  } finally {
+    try { database?.close() } catch { /* already closed */ }
+  }
+}
+
 // The per-run reminder: what the thread is called now, so the agent can keep it exactly.
 export function titleContextLine(current, record) {
   const title = squash(current)
   // No person's name here: this line reaches every owner's agent, and a fixed title may come from code (onboarding).
   if (record?.locked) return `This thread is titled “${title}”, and that title is fixed: put exactly that in the status line's title.`
-  if (record?.provisional && title) return `This thread's title “${title}” is only a placeholder cut from the first message, not a label: never repeat it. Put the plain name of the app or area this thread works on (for example Messenger, Music, Notes, Wizard OS) in the status line's title.`
+  if (record?.provisional && title) return `This thread's title “${title}” is only a placeholder cut from the first message, not a label: never repeat it. Put the plain name of the app or area this thread works on (for example Messenger, Music, Notes, WizardOS) in the status line's title.`
   if (!title) return 'This thread has no title yet: give its broad project label in the status line.'
   return `This thread is currently titled “${title}”. Keep it exactly for all work in this project; rename only for a different project, or broaden a legacy feature/sentence title once to its project.`
 }
@@ -282,9 +300,22 @@ export class ThreadTitleStore {
     })
   }
 
+  // A spelling fix (WizardOS is one word) that reached Hermes: not a rename. An owner-locked title stays the owner's;
+  // an agent or auto title stays the agent's (a quiet entry), so the agent may still rename it later.
+  respell(sessionId, { from, to, locked = false }) {
+    const current = this.get(sessionId)
+    const history = (current?.history ?? []).map((entry) => ({ ...entry, from: spellProductName(entry.from), to: spellProductName(entry.to) }))
+    if (locked || current?.locked || current?.provisional) {
+      if (!current) return null
+      return this._put(sessionId, { ...current, title: squash(to), history })
+    }
+    const entry = { from: squash(from), to: squash(to), at: this.now(), by: 'agent', quiet: true }
+    return this._put(sessionId, { title: entry.to, locked: false, appliedFor: current?.appliedFor ?? null, history: [...history, entry].slice(-HISTORY_MAX) })
+  }
+
   // Renames the thread view can mark in place ("Renamed from …"), oldest first.
   visibleHistory(sessionId) {
-    return (this.load()[sessionId]?.history ?? []).filter((entry) => !entry.quiet).map(({ from, to, at, by }) => ({ from, to, at, by }))
+    return (this.load()[sessionId]?.history ?? []).filter((entry) => !entry.quiet).map(({ from, to, at, by }) => ({ from: spellProductName(from), to: spellProductName(to), at, by }))
   }
 }
 

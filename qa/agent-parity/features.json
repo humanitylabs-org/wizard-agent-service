@@ -293,7 +293,7 @@
     },
     {
       "id": "finish-report-instructions",
-      "description": "All agent kinds receive only Wizard OS facts, the persona pointer and the status protocol, never a reply-style rule, whatever response_style an older shell saved. The Markdown fact overrides only the API-server plain-text line, so the runtime's own keep-replies-brief default survives.",
+      "description": "All agent kinds receive only WizardOS facts, the persona pointer and the status protocol, never a reply-style rule, whatever response_style an older shell saved. The Markdown fact overrides only the API-server plain-text line, so the runtime's own keep-replies-brief default survives.",
       "layer": "server",
       "how_to_test": "Admit fresh-install and legacy summary/concise/own turns through main, host-profile, container and restricted HTTP routes; assert settings read Own and actual upstream instructions contain Wizard facts, the persona pointer and STATUS_PROTOCOL_INSTRUCTIONS without reply-style rules, and with the scoped Markdown override that keeps the runtime's brevity default. Fixture proof covers prompt delivery, not model compliance.",
       "source_refs": [
@@ -1528,7 +1528,7 @@
     },
     {
       "id": "bring-my-data",
-      "description": "An owner's ChatGPT/Claude/Hermes export dropped in Files is archived as searchable chats in the owner's Files, and picked Hermes skills install only into the importing agent's own home, or, from the Importer app, into another Wizard OS agent the owner picks (dest: a standard container or host profile agent; restricted agents are never offered).",
+      "description": "An owner's ChatGPT/Claude/Hermes export dropped in Files is archived as searchable chats in the owner's Files, and picked Hermes skills install only into the importing agent's own home, or, from the Importer app, into another WizardOS agent the owner picks (dest: a standard container or host profile agent; restricted agents are never offered).",
       "layer": "server",
       "how_to_test": "For every runtime kind, upload a synthetic ChatGPT export and a synthetic Hermes backup through the Service's Files upload, run the wizard-os bring_data tool with that kind's own HERMES_HOME and the owner Files root, then assert scan counts, the archived chat under Files/Imported/ChatGPT, the scan record and the installed skill under that agent's home only, and that no credential from the export appears in tool output. Synthetic fixture evidence, not live/browser evidence.",
       "source_refs": [
