@@ -171,7 +171,7 @@ describe('topic titles: the app or area, never the opener words', () => {
 })
 
 describe('the Agent Service applies titles through Hermes', () => {
-  async function fixture({ titleSource = 'llm', startedAgo = 5 * 86400, title = 'Review 0xMovez post on X' as string | null, queued = false, apps = null as null | Array<{ id: string, name: string }>, extra = {} as Record<string, unknown> } = {}) {
+  async function fixture({ titleSource = 'llm', startedAgo = 5 * 86400, title = 'Review 0xMovez post on X' as string | null, queued = false, apps = null as null | Array<{ id: string, name: string }>, others = [] as Array<[string, string]>, extra = {} as Record<string, unknown> } = {}) {
     const directory = await tempDir()
     const now = Date.now() / 1000
     const statePath = join(directory, 'state.db')
@@ -182,6 +182,7 @@ describe('the Agent Service applies titles through Hermes', () => {
       CREATE TABLE session_turn_leases (conversation_id TEXT, expires_at REAL);
     `)
     state.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?)').run('wizard_t1', now - startedAgo, title, title === null ? null : titleSource)
+    for (const [id, held] of others) state.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?)').run(id, now - 86400, held, 'user')
     state.close()
     if (apps) await writeFile(join(directory, 'apps.json'), JSON.stringify({ schema: 1, apps }))
     const reply: Record<string, string> = { title: 'DeFleur' }
@@ -283,6 +284,22 @@ describe('the Agent Service applies titles through Hermes', () => {
     expect(done).toMatchObject({ passes: 2, failed: [] })
     expect(done.renamed).toEqual([expect.objectContaining({ id: 'wizard_t1', to: 'WizardOS · Desktop' })])
     expect(patches).toEqual([{ id: 'wizard_t1', body: { title: 'WizardOS · Desktop' } }])
+  })
+  it("dates an owner's respelled title when another thread already holds the one-word spelling", async () => {
+    const startedAgo = 5 * 86400
+    const { directory } = await fixture({ title: `${TWO} · Voice routing`, titleSource: 'user', startedAgo, others: [['wizard_old', 'WizardOS · Voice routing']], extra: { respellDelayMs: 5 } })
+    const done = await receipt(directory)
+    const day = new Date(Date.now() - startedAgo * 1000)
+    const dated = `WizardOS · Voice routing (${day.getUTCDate()} ${day.toLocaleString('en-GB', { month: 'short', timeZone: 'UTC' })})`
+    expect(done).toMatchObject({ failed: [] })
+    expect(done.renamed).toEqual([expect.objectContaining({ id: 'wizard_t1', to: dated, locked: true })])
+  })
+  it('a respell already running for the thread is awaited, not recorded as failed', async () => {
+    const { list, directory } = await fixture({ title: `${TWO} · Desktop`, extra: { respellDelayMs: 0 } })
+    await list()
+    const done = await receipt(directory)
+    expect(done.failed).toEqual([])
+    expect(done.renamed.map((entry: any) => entry.id)).toEqual(['wizard_t1'])
   })
   it('shows WizardOS before the stored title is fixed, and spells an owner rename in one word', async () => {
     const { origin, list, patches } = await fixture({ title: `${TWO} plans`, titleSource: 'user', extra: { respellStoredTitles: false } })
