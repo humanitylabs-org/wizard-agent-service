@@ -19,9 +19,9 @@ export const TITLE_MAX = 32
 export const ANCHOR_SECONDS = 30 * 60
 const HISTORY_MAX = 8
 const ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/
-const LEADING_VERB = /^(?:review|reviewing|fix|fixing|build|building|send|sending|make|making|add|adding|create|creating|update|updating|check|checking|find|finding|help|helping|investigate|investigating|explore|exploring|discuss|discussing|plan|planning|set up|setting up|setup|write|writing)\s+/iu
+const LEADING_VERB = /^(?:review|reviewing|fix|fixing|build|building|send|sending|make|making|add|adding|create|creating|update|updating|check|checking|find|finding|help|helping|investigate|investigating|explore|exploring|discuss|discussing|plan|planning|set up|setting up|setup|write|writing|troubleshoot|troubleshooting|debug|debugging|diagnose|test|testing|ship|shipping|deploy|deploying|rename|renaming|retitle|look into|looking into|get|getting)\s+/iu
 
-export const TITLE_INSTRUCTIONS = "title names the thread on the chat list: a broad project-level label for the home where the owner can keep all related work, in one to four words and at most 32 characters. Name one app (\"Messenger\", \"Video Editor\", \"DeFleur\"), one long-lived surface of a bigger product (\"Wizard OS · Desktop\", \"Wizard OS · Phone app\", \"Wizard OS · Voice\"), or one sustained project or life area (\"TSR podcast\", \"Tokyo trip\"). Use \" · \" only for a long-lived surface or area of a bigger product, never for a feature, fix, bug, ask or task: not \"Messenger · Settings buttons\" or \"Wizard OS · Pane fix\". It is a label, never a sentence: no leading verb such as Review, Fix, Build or Send, no trailing period, no emoji. Return the thread's current title exactly as long as the work still belongs to that project, however many sub-asks, features or fixes pass through. Give a new title only when the project itself changes. Exception: a title naming a single feature, fix or sub-task is outdated; replace it once with its project as a one-time broadening, not with another feature. Also replace a sentence title with its project label. Owner-set titles stay fixed."
+export const TITLE_INSTRUCTIONS = "title names the thread on the chat list: a broad project-level label for the home where the owner can keep all related work, in one to four words and at most 32 characters. Name one app (\"Messenger\", \"Video Editor\", \"DeFleur\"), one long-lived surface of a bigger product (\"Wizard OS · Desktop\", \"Wizard OS · Phone app\", \"Wizard OS · Voice\"), or one sustained project or life area (\"TSR podcast\", \"Tokyo trip\"). Use \" · \" only for a long-lived surface or area of a bigger product, never for a feature, fix, bug, ask or task: not \"Messenger · Settings buttons\" or \"Wizard OS · Pane fix\". It is a label, never a sentence: no leading verb such as Review, Fix, Build or Send, no trailing period, no emoji. Return the thread's current title exactly as long as the work still belongs to that project, however many sub-asks, features or fixes pass through. Give a new title only when the project itself changes. Exception: a title naming a single feature, fix or sub-task is outdated; replace it once with its project as a one-time broadening, not with another feature. Also replace a sentence title with its project label. When the reply reports work in an installed app (app_id), the title is that app's plain name (\"Messenger\", \"Music\", \"Notes\"): no \"Wizard OS ·\" prefix, no number. Never use the owner's own opening words or any sentence fragment. Owner-set titles stay fixed."
 
 const squash = (value) => String(value ?? '').replace(/[\u0000-\u001f\u007f\u200b-\u200f\u2028-\u202e\u2060-\u206f\ufeff]/gu, '').replace(/\s+/gu, ' ').trim()
 
@@ -43,7 +43,10 @@ export function normalizeTitle(value) {
 // first reply is still being written. Deterministic and instant; the agent's own status-line title replaces it.
 const FIRST_FILLER = /^(?:(?:hey|hi|hello|ok(?:ay)?|so|well|um+|uh+|right|yeah|yes|no|what\??|please|pls|can you|could you|would you|will you|i(?:'d| would)? (?:like|want|need) (?:you )?to|i want|i need|i(?:'m| am) (?:trying|going) to|let's|lets|just|also|and|then|the|a|an)\b[\s,.!?:;-]*)+/iu
 const LAST_FILLER = /[\s,.;:!?-]+(?:and|or|but|the|a|an|to|of|for|in|on|at|with|so|that|is|it|i|my|me)$/iu
-export function provisionalTitleFrom(text) {
+export function provisionalTitleFrom(text, catalog = null) {
+  // An app the opener names is the topic; otherwise the opener's own first words hold the place until the agent's label arrives.
+  const named = catalog ? appTopicInText(String(text ?? '').replace(/\[(WIZARD_[A-Z0-9_]+)\][\s\S]*?\[\/\1\]/gu, ' ').replace(/\[Wizard OS context\][\s\S]*$/u, ' '), catalog) : ''
+  if (named) return named
   let line = String(text ?? '')
     .replace(/\[(WIZARD_[A-Z0-9_]+)\][\s\S]*?\[\/\1\]/gu, ' ')
     .replace(/\[Wizard OS context\][\s\S]*$/u, ' ')
@@ -68,14 +71,83 @@ export function provisionalTitleFrom(text) {
   return title.charAt(0).toLocaleUpperCase() + title.slice(1)
 }
 
-export const titleKey = (value) => squash(value).toLocaleLowerCase().replace(/\s*(?:#\d+)$/u, '')
+// Stripped when comparing, so a numbered or dated clash suffix never reads as a different project.
+const CLASH_SUFFIX = /\s*(?:#\d+|\(\d{1,2} [A-Za-z]{3}(?: \d{2}:\d{2}(?: [a-z0-9]{1,4})?)?\))$/u
+export const titleKey = (value) => squash(value).toLocaleLowerCase().replace(CLASH_SUFFIX, '')
 
 // Sentence-like titles (the opener's auto title) that should give way to a project label.
 export function looksLikeSentence(title) {
   const text = squash(title)
   if (!text) return true
   if (LEADING_VERB.test(text)) return true
-  return text.replace(/\s*#\d+$/u, '').split(/\s+/u).filter(word => word !== '·').length > 4
+  return text.replace(CLASH_SUFFIX, '').split(/\s+/u).filter(word => word !== '·').length > 4
+}
+
+// Opener words, not a topic: a sentence, a first-person or conversational fragment, a comma clause.
+const CHATTER = /(?:^|\s)(?:i|i'm|i'd|i've|my|me|we|you|your|our|isn't|aren't|don't|doesn't|won't|can't|couldn't|could|would|should|actually|just|bro|hey|please)(?=[\s,.]|$)|[,;?!]/iu
+export function looksLikeOpener(title) {
+  const text = squash(title)
+  return !text || looksLikeSentence(text) || CHATTER.test(text)
+}
+
+// ---- Topic: the app or area a thread works on, from facts the Service already holds. ----
+// James (8 Nov): a thread's title is a very brief general topic - the app or thing being worked on - never the
+// opener's words. The agent proposes it; this is the fallback when the agent echoes the opener placeholder.
+const GENERIC_APP_WORDS = new Set(['money', 'morning', 'reference', 'search', 'stories', 'outline', 'profiles', 'browser', 'tasks', 'contacts', 'notifications', 'food', 'mail', 'google', 'claude', 'calendar'])
+const GENERIC_SUBJECTS = new Set(['wizard apps', 'general', 'other', 'misc', 'miscellaneous', 'none'])
+const titleCase = (word) => word.charAt(0).toLocaleUpperCase() + word.slice(1)
+
+// The plain name of an installed app (catalog [{id, name}]); a not-installed id reads as its words without the wizard- prefix.
+export function appTopicName(appId, catalog = []) {
+  if (typeof appId !== 'string' || !appId) return ''
+  const entry = (Array.isArray(catalog) ? catalog : []).find(app => app?.id === appId)
+  const named = squash(entry?.name).replace(/\s*\((?:test|agent|beta|preview)\)\s*$/iu, '').trim()
+  if (named) return normalizeTitle(named)
+  const words = appId.replace(/^(?:wizard|agent)-/u, '').split('-').filter(Boolean)
+  return words.length ? normalizeTitle(words.map(titleCase).join(' ')) : ''
+}
+
+// An app (or Wizard OS) the free text names, earliest mention first. Generic app words need the word "app" after them.
+export function appTopicInText(text, catalog = []) {
+  const haystack = ` ${squash(text)} `
+  if (haystack.trim().length < 3) return ''
+  let best = { at: Infinity, name: '' }
+  const consider = (name, pattern) => {
+    const at = haystack.search(pattern)
+    if (at >= 0 && at < best.at) best = { at, name }
+  }
+  consider('Wizard OS', /\bwizard ?os\b/iu)
+  for (const app of Array.isArray(catalog) ? catalog : []) {
+    const name = appTopicName(app?.id, catalog)
+    if (name.length < 4 || name.includes(' · ')) continue
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+    consider(name, new RegExp(`\\b${escaped}${GENERIC_APP_WORDS.has(name.toLocaleLowerCase()) ? '\\s+app\\b' : '\\b'}`, 'iu'))
+  }
+  return best.name
+}
+
+// The topic title for a status line: its app_id's app, else an app the opener names, else its subject.
+export function topicFor({ appId = '', catalog = [], texts = [], subject = '' } = {}) {
+  const byId = appTopicName(appId, catalog)
+  if (byId) return byId
+  for (const text of texts) {
+    const named = appTopicInText(text, catalog)
+    if (named) return named
+  }
+  const area = normalizeTitle(subject)
+  return area && area.length >= 3 && !GENERIC_SUBJECTS.has(area.toLocaleLowerCase()) && !looksLikeOpener(area) ? area : ''
+}
+
+// A clash-free spelling of a title another thread already holds: dated, never numbered.
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+export function clashCandidates(title, now = new Date(), salt = '') {
+  const base = squash(title).replace(CLASH_SUFFIX, '')
+  const day = `${now.getUTCDate()} ${MONTHS[now.getUTCMonth()]}`
+  const time = `${String(now.getUTCHours()).padStart(2, '0')}:${String(now.getUTCMinutes()).padStart(2, '0')}`
+  const fit = (suffix) => `${base.slice(0, Math.max(3, TITLE_MAX - suffix.length - 1)).trimEnd()} ${suffix}`
+  // The last candidate carries a per-thread tail, so two same-topic threads in one minute never share it.
+  const tail = String(salt ?? '').replace(/[^a-z0-9]/giu, '').slice(-4).toLowerCase()
+  return [...new Set([base, fit(`(${day})`), fit(`(${day} ${time})`), ...(tail ? [fit(`(${day} ${time} ${tail})`)] : [])])]
 }
 
 export function readSessionTitle(sessionDbPath, sessionId) {
@@ -103,7 +175,7 @@ export function titleContextLine(current, record) {
   const title = squash(current)
   // No person's name here: this line reaches every owner's agent, and a fixed title may come from code (onboarding).
   if (record?.locked) return `This thread is titled “${title}”, and that title is fixed: put exactly that in the status line's title.`
-  if (record?.provisional && title) return `This thread's title “${title}” is only a placeholder cut from the first message: give its broad project label in the status line's title.`
+  if (record?.provisional && title) return `This thread's title “${title}” is only a placeholder cut from the first message, not a label: never repeat it. Put the plain name of the app or area this thread works on (for example Messenger, Music, Notes, Wizard OS) in the status line's title.`
   if (!title) return 'This thread has no title yet: give its broad project label in the status line.'
   return `This thread is currently titled “${title}”. Keep it exactly for all work in this project; rename only for a different project, or broaden a legacy feature/sentence title once to its project.`
 }
@@ -217,11 +289,20 @@ export class ThreadTitleStore {
 }
 
 // Decide whether an agent proposal renames the thread. Returns the title to apply, or ''.
-export function titleToApply({ currentTitle, proposed, record, assistantAt }) {
+// `topic` (main chats only; undefined leaves routed agents untouched) is the app or area the Service worked out: an
+// agent that echoes the opener placeholder, or proposes opener words, gets that topic instead - or no rename.
+export function titleToApply({ currentTitle, proposed, record, assistantAt, topic }) {
   if (!proposed || record?.locked) return ''
   if (assistantAt !== null && assistantAt !== undefined && record?.appliedFor === assistantAt) return ''
-  const next = normalizeTitle(proposed)
+  let next = normalizeTitle(proposed)
   if (!next || next.length < 3) return ''
+  if (topic !== undefined) {
+    const echoedPlaceholder = record?.provisional === true && titleKey(next) === titleKey(record.title || currentTitle)
+    if (echoedPlaceholder || looksLikeOpener(next)) {
+      next = normalizeTitle(topic)
+      if (!next || next.length < 3 || looksLikeOpener(next)) return ''
+    }
+  }
   const currentKey = titleKey(currentTitle)
   const nextKey = titleKey(next)
   if (nextKey === currentKey) return ''

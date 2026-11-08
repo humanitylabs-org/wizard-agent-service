@@ -826,6 +826,8 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.ok(sent(s).instructions.includes(TITLE_INSTRUCTIONS), `${s.kind}: actual upstream run gets the shared project rule`)
     assert.ok(sent(s).instructions.includes('This thread is currently titled “Messenger”.'))
     assert.ok(!sent(s).instructions.includes('or to a different feature'))
+    assert.ok(sent(s).instructions.includes('no "Wizard OS ·" prefix, no number'), `${s.kind}: app-name title rule reaches every runtime`)
+    assert.ok(sent(s).instructions.includes('Never use the owner\'s own opening words'), `${s.kind}: opener words are not a title`)
     await project('Video Editor', 'Video Editor') // genuine project move
     const rename = await s.request('/api/sessions/wizard_parity', { ...post({ title: 'Owner chosen' }), method: 'PATCH' }); assert.equal(rename.status, 200)
     await project('Must Not Replace', 'Owner chosen')

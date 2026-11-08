@@ -1,11 +1,11 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { STATUS_INSTRUCTIONS, parseStatus } from '../server/thread-status.mjs'
-import { ANCHOR_SECONDS, TITLE_INSTRUCTIONS, ThreadTitleStore, looksLikeSentence, normalizeTitle, titleContextLine, titleToApply } from '../server/thread-titles.mjs'
+import { ANCHOR_SECONDS, TITLE_INSTRUCTIONS, ThreadTitleStore, appTopicName, clashCandidates, looksLikeOpener, looksLikeSentence, normalizeTitle, provisionalTitleFrom, titleContextLine, titleKey, titleToApply, topicFor } from '../server/thread-titles.mjs'
 import { kinds, scene } from '../qa/agent-parity/fixture.mjs'
 import { serverChecks } from '../qa/agent-parity/server-checks.mjs'
 import { WIZARD_RUN_INSTRUCTIONS, createWizardServer, listen } from '../server/service.mjs'
@@ -100,8 +100,78 @@ describe('when a title changes', () => {
   })
 })
 
+describe('topic titles: the app or area, never the opener words', () => {
+  const catalog = [{ id: 'messenger', name: 'Messenger' }, { id: 'notes', name: 'Notes' }, { id: 'wisdom', name: 'Wisdom' }, { id: 'money', name: 'Money' }, { id: 'meditate-next', name: 'Meditate (test)' }]
+
+  it('names the topic from the status line app, then an app the text names, then the subject', () => {
+    expect(appTopicName('messenger', catalog)).toBe('Messenger')
+    expect(appTopicName('meditate-next', catalog)).toBe('Meditate')
+    expect(appTopicName('wizard-music', catalog)).toBe('Music') // not in the catalogue: its id without the wizard- prefix
+    expect(topicFor({ appId: 'wizard-music', catalog, texts: ['Notes app'], subject: 'Infrastructure' })).toBe('Music')
+    expect(topicFor({ catalog, texts: ['Notes app having dumb popups'] })).toBe('Notes')
+    expect(topicFor({ catalog, texts: ['Build ai lookup from wisdom'] })).toBe('Wisdom')
+    expect(topicFor({ catalog, texts: ['Wizard OS general thread'] })).toBe('Wizard OS')
+    expect(topicFor({ catalog, texts: ['I spent money on lunch'] })).toBe('') // a generic app word needs "app" after it
+    expect(topicFor({ catalog, texts: ['Open the Money app'] })).toBe('Money')
+    expect(topicFor({ catalog, texts: ['With Novaire right now, could'], subject: 'Infrastructure' })).toBe('Infrastructure')
+    expect(topicFor({ catalog, texts: ['x'], subject: 'Wizard Apps' })).toBe('')
+  })
+
+  it('knows opener fragments from labels', () => {
+    for (const opener of ['Bro on music, I am', 'My messenger isn\'t loading', 'With Novaire right now, could', 'Actually just realized I don\'t', 'Troubleshoot chat that won\'t', 'Mythological terms for lesser false gods']) expect(looksLikeOpener(opener), opener).toBe(true)
+    for (const label of ['Music', 'Messenger', 'Notes', 'Wizard OS · Voice', 'Wizard OS · Phone app', 'TSR podcast', 'Tokyo trip', 'Rabbit R1 setup', 'VPS performance', 'GitHub sync']) expect(looksLikeOpener(label), label).toBe(false)
+  })
+
+  it('replaces an echoed placeholder or an opener-word proposal with the topic, and only then', () => {
+    const placeholder = { provisional: true, locked: false, appliedFor: null, title: 'Bro on music, I am', history: [] }
+    const decide = (currentTitle: string, proposed: string, record: any, topic?: string) => (titleToApply as any)({ currentTitle, proposed, record, assistantAt: 3, topic })
+    // The agent repeats the placeholder (the live failure): topic wins; without a topic the placeholder stays untouched.
+    expect(decide('Bro on music, I am', 'Bro on music, I am', placeholder, 'Music')).toBe('Music')
+    expect(decide('Bro on music, I am', 'Bro on music, I am', placeholder, '')).toBe('')
+    // The agent proposes opener words that differ from the placeholder.
+    expect(decide('Bro on music, I am', 'Bro on music, I am going to', placeholder, 'Music')).toBe('Music')
+    // A real label from the agent still wins over the Service's guess.
+    expect(decide('Bro on music, I am', 'Wizard Music', placeholder, 'Music')).toBe('Wizard Music')
+    // A sentence-titled agent thread gets the topic once the agent echoes it.
+    expect(decide('Troubleshoot chat that won\'t', 'Troubleshoot chat that won\'t', { locked: false, appliedFor: null, history: [{ by: 'agent' }] }, 'Chats')).toBe('Chats')
+    // Owner locks and per-reply once-only stay absolute.
+    expect(decide('Mine', 'Mine too', { ...placeholder, locked: true }, 'Music')).toBe('')
+    expect((titleToApply as any)({ currentTitle: 'Bro on music, I am', proposed: 'Bro on music, I am', record: { ...placeholder, appliedFor: 3 }, assistantAt: 3, topic: 'Music' })).toBe('')
+    // Without a topic option (routed agents such as Philosopher) behaviour is exactly as before.
+    expect(decide('Review 0xMovez post on X', 'Bro on music, I am', null)).toBe('Bro on music, I am')
+    expect(decide('Wizard OS · Chats', 'Messenger', null, 'Notes')).toBe('Messenger')
+  })
+
+  it('puts a clash-free spelling on a title another thread holds: dated, never numbered', () => {
+    const at = new Date(Date.UTC(2026, 10, 8, 13, 5))
+    expect(clashCandidates('Messenger', at)).toEqual(['Messenger', 'Messenger (8 Nov)', 'Messenger (8 Nov 13:05)'])
+    for (const c of clashCandidates('Wizard OS · Phone app experience', at)) expect(c.length).toBeLessThanOrEqual(32)
+    expect(clashCandidates('Messenger', at, 'wizard_ab12')).toEqual(['Messenger', 'Messenger (8 Nov)', 'Messenger (8 Nov 13:05)', 'Messenger (8 Nov 13:05 ab12)'])
+    expect(titleKey('Messenger (8 Nov 13:05 ab12)')).toBe('messenger')
+    expect(titleContextLine('Music, I am', { provisional: true })).toMatch(/only a placeholder/)
+    expect(titleKey('Messenger (8 Nov)')).toBe('messenger')
+    expect(titleKey('Messenger (8 Nov 13:05)')).toBe('messenger')
+    expect(titleToApply({ currentTitle: 'Messenger (8 Nov)', proposed: 'Messenger', record: null, assistantAt: 1 })).toBe('')
+  })
+
+  it('cuts the first-message placeholder at the app the opener names', () => {
+    expect(provisionalTitleFrom('The Notes app keeps showing dumb popups', catalog)).toBe('Notes')
+    expect(provisionalTitleFrom('Fix the calendar sync bug on the phone app please', catalog)).toBe('Fix the calendar sync bug')
+    expect(provisionalTitleFrom('Fix the calendar sync bug on the phone app please')).toBe('Fix the calendar sync bug')
+  })
+
+  it('tells the agent a placeholder is not a label and apps are named plainly', () => {
+    const line = titleContextLine('Bro on music, I am', { provisional: true })
+    expect(line).toContain('never repeat it')
+    expect(line).toContain('app or area')
+    expect(TITLE_INSTRUCTIONS).toContain('plain name')
+    expect(TITLE_INSTRUCTIONS).toContain('no number')
+    expect(TITLE_INSTRUCTIONS).toContain('opening words')
+  })
+})
+
 describe('the Agent Service applies titles through Hermes', () => {
-  async function fixture({ titleSource = 'llm', startedAgo = 5 * 86400, title = 'Review 0xMovez post on X' as string | null, queued = false } = {}) {
+  async function fixture({ titleSource = 'llm', startedAgo = 5 * 86400, title = 'Review 0xMovez post on X' as string | null, queued = false, apps = null as null | Array<{ id: string, name: string }> } = {}) {
     const directory = await tempDir()
     const now = Date.now() / 1000
     const statePath = join(directory, 'state.db')
@@ -113,7 +183,8 @@ describe('the Agent Service applies titles through Hermes', () => {
     `)
     state.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?)').run('wizard_t1', now - startedAgo, title, title === null ? null : titleSource)
     state.close()
-    const reply = { title: 'DeFleur' }
+    if (apps) await writeFile(join(directory, 'apps.json'), JSON.stringify({ schema: 1, apps }))
+    const reply: Record<string, string> = { title: 'DeFleur' }
     const clock = { bump: 0 }
     const patches: Array<{ id: string, body: any }> = []
     const runs: any[] = []
@@ -130,6 +201,8 @@ describe('the Agent Service applies titles through Hermes', () => {
         const body = JSON.parse(raw)
         patches.push({ id: patch[1], body })
         const db = new DatabaseSync(statePath)
+        // Hermes keeps session titles unique.
+        if (db.prepare('SELECT 1 FROM sessions WHERE title = ? AND id != ?').get(body.title, patch[1])) { db.close(); res.statusCode = 400; res.end(JSON.stringify({ error: 'Title already in use' })); return }
         db.prepare("UPDATE sessions SET title = ?, title_source = 'user' WHERE id = ?").run(body.title, patch[1])
         db.close()
         res.end(JSON.stringify({ session: { id: patch[1], title: body.title } }))
@@ -161,6 +234,7 @@ describe('the Agent Service applies titles through Hermes', () => {
       hermesStatePath: statePath,
       archivedSessionReader: () => [],
       threadTitleStatePath: join(directory, 'titles.json'),
+      ...(apps ? { appsJsonPath: join(directory, 'apps.json') } : {}),
       ...(queued ? { runQueueStatePath: join(directory, 'queue.sqlite3'), dispatchHealthReader: () => true, activeSessionReader: () => [] } : {}),
     })
     servers.push(app)
@@ -208,6 +282,36 @@ describe('the Agent Service applies titles through Hermes', () => {
     expect(after.title).toBe('Calendar')
     expect(after.wizard_title_provisional).toBeUndefined()
     expect(patches).toHaveLength(2)
+  })
+
+  const firstSend = (origin: string, key: string, text: string) => fetch(`${origin}/wizard/hermes/v1/runs`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify({ session_id: 'wizard_t1', input: [{ role: 'user', content: [{ type: 'text', text }] }] }) })
+
+  it('replaces an opener placeholder the agent repeats with the app name', async () => {
+    const { origin, list, patches, reply } = await fixture({ title: null, startedAgo: 5, queued: true, apps: [{ id: 'messenger', name: 'Messenger' }] })
+    reply.title = 'Fix my chat window thing' // the agent repeats the placeholder the Service cut from the opener
+    reply.app_id = 'messenger'
+    await firstSend(origin, 'first-send-3', 'Fix my chat window thing now please')
+    await settle()
+    expect(patches.map((patch) => patch.body.title)).toEqual(['Fix my chat window thing'])
+    await list(); await settle()
+    expect(patches.map((patch) => patch.body.title)).toEqual(['Fix my chat window thing', 'Messenger'])
+    const after = await list()
+    expect(after.title).toBe('Messenger')
+  })
+
+  it('dates a second thread on the same app instead of numbering it', async () => {
+    const { origin, list, patches, reply, statePath } = await fixture({ title: null, startedAgo: 5, queued: true, apps: [{ id: 'messenger', name: 'Messenger' }] })
+    const db = new DatabaseSync(statePath)
+    db.prepare("INSERT INTO sessions VALUES ('wizard_other', 1, 'Messenger', 'llm')").run(); db.close()
+    reply.title = 'Fix my chat window thing'
+    reply.app_id = 'messenger'
+    await firstSend(origin, 'first-send-4', 'Fix my chat window thing now please')
+    await settle(); await list(); await settle()
+    const titles = patches.map((patch) => patch.body.title)
+    expect(titles[0]).toBe('Fix my chat window thing')
+    expect(titles.slice(1)).toEqual(clashCandidates('Messenger').slice(0, 2))
+    expect(titles.join('|')).not.toMatch(/#\d/u)
+    expect((await list()).title).toBe(clashCandidates('Messenger')[1])
   })
 
   it('never puts a placeholder over a title that exists or one James set', async () => {
