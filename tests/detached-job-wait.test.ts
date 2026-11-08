@@ -86,3 +86,18 @@ test('only returned-helper phases turn into background; running, held, uncertain
   for (const phase of ['running', 'integrating', 'held', 'uncertain']) { const h = { phase, pending: 1 }; assert.equal(backgroundHelperStatus(h), h) }
   assert.equal(backgroundHelperStatus(undefined), undefined)
 })
+
+test('a receipt directory that vanishes or becomes unreadable never keeps a cached job past its bounds', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'detached-gone-'))
+  writeFileSync(join(dir, 'a.json'), JSON.stringify(job({ id: 'a', timeout: 60, verify_s: 0 })))
+  const reader = createDetachedJobReader(dir, { ttlMs: 0 })
+  assert.equal(reader.rows(now).length, 1)
+  rmSync(dir, { recursive: true, force: true })
+  assert.deepEqual(reader.rows(now), [], 'a removed directory means no live deploy')
+  // Unreadable (not missing): the last receipts are kept but aged out by their own bounds.
+  const file = mkdtempSync(join(tmpdir(), 'detached-file-'))
+  writeFileSync(join(file, 'a.json'), JSON.stringify(job({ id: 'a', timeout: 60, verify_s: 0 })))
+  const odd = createDetachedJobReader(join(file, 'a.json'), { ttlMs: 0 }) // a file, not a directory: ENOTDIR
+  assert.deepEqual(odd.rows(now), [])
+  rmSync(file, { recursive: true, force: true })
+})
