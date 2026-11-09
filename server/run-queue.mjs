@@ -28,6 +28,8 @@ export const isBackgroundContinuation = record => Boolean(record.continuation)
 export const NOT_STARTED_REQUEUE_PREFIX = 'wizard-not-started-requeue-'
 // A reply Hermes accepts but never starts is resent this many times, then fails visibly with Retry.
 export const NOT_STARTED_MAX_RESENDS = 3
+const RESTART_REFUSED_ERROR = 'runtime_draining'
+const RESTART_RESEND_WINDOW_SECONDS = 30 * 60 // a refusal older than this (Wizard itself was down) stays visible with Retry
 export const NOT_STARTED_SAFE_ERROR = 'Your agent took this message but never started on it, even after Wizard sent it again. Your message is saved. Tap Retry, or open Troubleshooter if it keeps happening.'
 export const INTERRUPT_RECOVERY_PREFIX = 'wizard-interrupt-recovery-'
 export const INTERRUPTED_SAFE_ERROR = 'Wizard restarted while this was running, so the reply was cut off.'
@@ -1356,6 +1358,53 @@ export class DurableRunQueue {
     }
   }
 
+  // A reply Hermes refused only because the gateway was restarting: accepted, never started, then failed with
+  // `runtime_draining` when the drain began (8 Nov 13:50, 9 Nov 08:03 and 09:04: "Reply not sent" on every
+  // queued thread, each needing Retry once Hermes came back).
+  _restartRefused(record) {
+    const error = record.payload?.error
+    return record.status === 'failed' && Boolean(record.upstreamRunId) && !record.workerRunId
+      && (error === RESTART_REFUSED_ERROR || error?.code === RESTART_REFUSED_ERROR)
+  }
+
+  // Send a restart-refused reply again by itself, in the not-started resend family (same key prefix, same cap,
+  // first send time kept for ordering and display). Its launch then waits out the restart on the normal 503
+  // admission retry instead of failing. Only a fresh failure is resent, and never past a later message in the
+  // same thread that is not itself waiting on this restart (the owner moved on, or already tapped Retry).
+  _resendRestartRefused() {
+    const now = nowSeconds()
+    const rows = this._rows(`public_run_id IN (SELECT public_run_id FROM wizard_run_queue INDEXED BY wizard_run_queue_terminal
+      WHERE terminal_at IS NOT NULL AND terminal_at > ?) AND status = 'failed' AND upstream_run_id <> '' AND worker_run_id = ''`, now - RESTART_RESEND_WINDOW_SECONDS)
+    for (const record of rows) {
+      if (!this._restartRefused(record) || this._ownerStopped(record)) continue
+      const generation = (record.idempotencyKey.match(/^wizard-not-started-requeue-(\d)-/)?.[1] ?? '0') | 0
+      if (generation >= NOT_STARTED_MAX_RESENDS) continue
+      const order = record.retryOrderAt || record.createdAt
+      const sourceId = record.retrySourceId || record.publicRunId
+      // Leave it to the owner when a resend or Retry of this message already exists, or a later message in the
+      // thread already went to Hermes (a later one still waiting to launch is fine: the resend keeps its earlier place).
+      const blocked = this._rows('session_id = ? AND runtime = ? AND public_run_id <> ?', record.sessionId, record.runtime, record.publicRunId)
+        .some((other) => other.status !== 'cancelled' && !this._restartRefused(other)
+          && ((other.retrySourceId || other.publicRunId) === sourceId
+            || ((other.retryOrderAt || other.createdAt) > order && !WAITING_TO_LAUNCH.has(other.status))))
+      if (blocked) continue
+      const key = `${NOT_STARTED_REQUEUE_PREFIX}${generation + 1}-${record.publicRunId}`
+      try {
+        this.database.exec('BEGIN IMMEDIATE')
+        let admitted
+        try {
+          admitted = this._admitRow({ runtime: record.runtime, sessionId: record.sessionId, idempotencyKey: key,
+            requestHash: queueRequestHash(record.runtime, record.body), body: record.body, trustedPaths: record.trustedPaths ?? [],
+            continuation: record.continuation, recoveryAuthorized: record.recoveryAuthorized, agent_id: record.agent_id }, true)
+          this._update(admitted.record.publicRunId, { retrySourceId: sourceId, retryOrderAt: order })
+          this._update(record.publicRunId, { status: 'cancelled', payload: { ...(record.payload ?? {}), status: 'cancelled', last_event: 'run.requeued', reconciled_reason: 'gateway_restart' }, waitingReason: '' })
+          this.database.exec('COMMIT')
+        } catch (error) { this.database.exec('ROLLBACK'); throw error }
+        try { this.onRequeued(record, admitted.record) } catch { /* logging only */ }
+      } catch { /* the next tick tries again */ }
+    }
+  }
+
   _hermesNotStarted(record) {
     return record.status === 'running' && Boolean(record.upstreamRunId) && !record.workerRunId && record.payload?.status === 'queued'
   }
@@ -1518,6 +1567,7 @@ export class DurableRunQueue {
     this._resumeProviderAccess()
     await this._reconcileStale()
     await this._requeueNotStarted()
+    this._resendRestartRefused()
     await this._recoverInterrupted()
     await this._replayPendingSteers()
 
