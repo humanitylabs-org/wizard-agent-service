@@ -54,15 +54,44 @@ function httpStatusOf(text) {
   return m ? Number(m[1]) : 0
 }
 
-// The provider's own words, short and without anything token-shaped. A provider may echo the key it
-// refused in any format (sk-…, AIza…, ghp_…, a JWT), so every long run of key characters that mixes
-// letters and digits is dropped, plus whatever follows "key provided:" / "Bearer".
+// Supported credential families do not need digits. Keep the mixed-character fallback too.
+// Allow an underscore before a recognized prefix; arbitrary joined words and unknown secrets remain unproven.
+const CREDENTIAL = /(?<![A-Za-z0-9])(?:(?:sk-|rk-|pk-|sess-)[A-Za-z0-9_+/.=*-]+|AIza[A-Za-z0-9_-]+|(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]+|eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/g
 const KEYISH = /[A-Za-z0-9][A-Za-z0-9_\-+/=.*]{15,}/g
+// Consume whole quoted values (including escaped quotes) before the message is shortened.
+const LABELED_SECRET = /(\b(?:(?:api|access|refresh|auth|client)[ _-]?)?(?:key|token|secret|password)(?:[ _-]provided)?["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)/gi
+const BEARER = /\bBearer\s+(?!\[redacted\])(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s"',;}\]]+)/gi
+// Always consume from an escaped opening quote through the end of this input.
+// JSON decoding bounds the input to one complete string; raw trailing prose is discarded.
+const ESCAPED_BEARER = /\bBearer\s+\\+["'][\s\S]*/gi
+const JSON_STRING = /"(?:\\.|[^"\\])*"/g
+
+function redactBearers(raw) {
+  const redact = (value) => value.replace(ESCAPED_BEARER, 'Bearer [redacted]').replace(BEARER, 'Bearer [redacted]')
+  // Decode complete JSON string literals first so serialized quotes cannot become
+  // token boundaries. Re-encoding preserves the surrounding JSON and explanation.
+  const serialized = raw.replace(JSON_STRING, (value) => {
+    try {
+      const decoded = JSON.parse(value)
+      const redacted = redact(decoded)
+      return redacted === decoded ? value : JSON.stringify(redacted)
+    } catch {
+      return value
+    }
+  })
+  return redact(serialized)
+}
+
 function messageOf(payload) {
   const said = [payload.output, payload.final_response].map((v) => /Provider said:\s*([^\n]+)/.exec(textOf(v))?.[1]).find(Boolean)
   const raw = said || textOf(payload.error) || ''
-  return raw.replace(/\b(key|token|secret|password)( provided)?:\s*\S+/gi, '$1$2: [redacted]')
-    .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+  // Redact Bearer values before a label can consume the word Bearer and leave its value.
+  return redactBearers(raw)
+    .replace(LABELED_SECRET, (_match, label, value) => {
+      const quote = value[0] === '"' || value[0] === "'" ? value[0] : ''
+      return `${label}${quote}[redacted]${quote}`
+    })
+    .replace(CREDENTIAL, '[redacted]')
     .replace(KEYISH, (m) => /[A-Za-z]/.test(m) && /\d/.test(m) ? '[redacted]' : m)
     .replace(/\s+/g, ' ').trim().slice(0, 200)
 }
@@ -79,8 +108,17 @@ export function classifyRunError(payload, body = null) {
   if (payload.error && typeof payload.error === 'object' && /^(?:provider_recovery_failed|provider_preflight_failed)$/.test(String(payload.error.type || ''))) return null
   // A failed run's output can hold a partial answer; only Hermes' failure copy ("… Provider said: …") counts.
   const copy = (v) => { const t = textOf(v); return /Provider said:/.test(t) ? t : '' }
-  const text = [textOf(payload.error), copy(payload.output), copy(payload.final_response)].join('\n').slice(0, 8000)
-  const signedOut = classifyProviderSignOut(payload, body)
+  const output = copy(payload.output)
+  const finalResponse = copy(payload.final_response)
+  const text = [textOf(payload.error), output, finalResponse].join('\n').slice(0, 8000)
+  // Apply the same evidence boundary to sign-out detection. The reconnect annotation may
+  // itself have been inferred from partial prose, so derive this field without it.
+  const signedOut = classifyProviderSignOut({
+    ...payload,
+    output,
+    final_response: finalResponse,
+    wizard_reconnect: undefined,
+  }, body)
   const provider = routeOf(payload, body) || signedOut?.provider || ''
   const field = (code) => ({ code, provider, message: messageOf(payload) })
   if (signedOut) return field('provider_auth')
