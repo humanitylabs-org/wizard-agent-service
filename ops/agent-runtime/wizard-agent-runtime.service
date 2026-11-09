@@ -1,0 +1,29 @@
+# Agent runtime helper (agent_runtime.py) as a systemd user unit, kept in git so a box never needs a
+# hand-written ExecStart. Install (as the box owner, not root):
+#   cp ops/agent-runtime/wizard-agent-runtime.service ~/.config/systemd/user/
+#   install -D -m 600 ops/agent-runtime/wizard-agent-runtime.env.example ~/.config/wizard-agent-runtime/runtime.env
+#   (fill in runtime.env, then) systemctl --user daemon-reload && systemctl --user enable --now wizard-agent-runtime
+# %h/.local/share/wizard-agent-runtime/current must point at a release copied from an origin/main commit of
+# ops/agent-runtime, and WIZARD_RUNTIME_WAM at a wizard-app-manager checkout of an origin/main commit.
+# Secrets and per-box values live only in runtime.env (mode 0600), never in this file or in a drop-in.
+# A box that still carries a drop-in replacing ExecStart keeps overriding this unit: remove the drop-in
+# (systemctl --user cat wizard-agent-runtime lists them) before relying on this file.
+[Unit]
+Description=WizardOS agent runtime helper (creates and runs agent containers for the Agent Service)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/wizard-agent-runtime/runtime.env
+WorkingDirectory=%h/.local/share/wizard-agent-runtime/current
+# ${VAR} is one argument; $WIZARD_RUNTIME_EXTRA_ARGS splits on spaces and may be empty.
+ExecStart=/usr/bin/python3 %h/.local/share/wizard-agent-runtime/current/agent_runtime.py --driver runtipi --wam ${WIZARD_RUNTIME_WAM} --agents-dir %h/.wizard-os/agents --token-file %h/.wizard-os/agent-runtime/token --port 7795 --home-mount alongside $WIZARD_RUNTIME_EXTRA_ARGS
+Restart=on-failure
+RestartSec=3
+UMask=0077
+# No NoNewPrivileges, seccomp or path sandboxing: a user unit has no docker group, so agent_runtime.py
+# reaches Docker through setgid `sg docker`, which those options block (ops/host-container/README.md).
+
+[Install]
+WantedBy=default.target
