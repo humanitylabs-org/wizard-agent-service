@@ -146,6 +146,23 @@ describe('WizardOS settings, bootstrap and apps', () => {
     expect(body.settings.network).toEqual({ base_url: 'https://wizard.tail1234.ts.net', aliases: ['private.example.com'] })
   })
 
+  // The shell's link switches (wizard-ux links.js): without this block settings.json `links` never reached it.
+  it('links: reader and panel are off by default and only an exact true turns one on', () => {
+    expect(normalizeSettings({}).links).toEqual({ reader: false, panel: false })
+    expect(normalizeSettings({ links: { reader: 'yes', panel: 1 } }).links).toEqual({ reader: false, panel: false })
+    expect(normalizeSettings({ links: [true] }).links).toEqual({ reader: false, panel: false })
+    expect(normalizeSettings({ links: { panel: true } }).links).toEqual({ reader: false, panel: true })
+  })
+
+  it('bootstrap carries the links switches to front ends', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wizard-os-'))
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ links: { panel: true } }))
+    const hermes = await startHermes(STOCK)
+    const wizard = await startWizard({ upstreamOrigin: hermes.origin, joinedDelegation: 'prefer', settingsPath: join(dir, 'settings.json') })
+    const body = await (await fetch(`${wizard}/wizard/v1/bootstrap`)).json()
+    expect(body.settings.links).toEqual({ reader: false, panel: true })
+  })
+
   it('rejects an invalid time zone instead of guessing one', () => {
     expect(normalizeSettings({ clock: { timezone: 'Mars/Olympus', day_starts_at: '25:00' } }).clock)
       .toEqual({ timezone: '', day_starts_at: '00:00' })
