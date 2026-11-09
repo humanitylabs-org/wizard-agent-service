@@ -6,6 +6,7 @@ import { withSqliteMigration, qualifyContinuation } from './thread-reference.mjs
 import { DatabaseSync } from 'node:sqlite'
 import { normalizeProviderPreflightFailure } from './run-provider-failure.mjs'
 import { annotateProviderSignOut } from './provider-reconnect.mjs'
+import { classifyRunError } from './run-error.mjs'
 import { admissionFailure, retryDelaySeconds } from './hermes-compat.mjs'
 
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
@@ -73,13 +74,17 @@ const failureProjection = (record) => {
   const payload = record.payload && typeof record.payload === 'object' ? record.payload : {}
   const safeError = typeof payload.safe_error === 'string' ? payload.safe_error : ''
   if (record.status !== 'failed') return { safeError }
-  if (record.providerRecoveryAttempted && annotateProviderSignOut({ ...payload, status: 'failed' }, parseJson(record.body, null)).wizard_reconnect) {
-    return { safeError: 'The automatic send could not finish because sign-in still needs attention. Your message is saved. Sign in again, then tap Retry.' }
+  const body = parseJson(record.body, null)
+  // Why it failed (run-error.mjs): wizard_last_run_error on the thread row.
+  const runError = classifyRunError({ ...payload, status: 'failed' }, body)
+  const withReason = (value) => runError ? { ...value, runError } : value
+  if (record.providerRecoveryAttempted && annotateProviderSignOut({ ...payload, status: 'failed' }, body).wizard_reconnect) {
+    return withReason({ safeError: 'The automatic send could not finish because sign-in still needs attention. Your message is saved. Sign in again, then tap Retry.' })
   }
-  const annotated = annotateProviderSignOut({ ...payload, status: 'failed' }, parseJson(record.body, null))
-  return annotated.wizard_reconnect
+  const annotated = annotateProviderSignOut({ ...payload, status: 'failed' }, body)
+  return withReason(annotated.wizard_reconnect
     ? { safeError: '', reconnect: { ...annotated.wizard_reconnect, run_id: record.publicRunId } }
-    : { safeError }
+    : { safeError })
 }
 
 const queuedInputPreview = (body) => {
@@ -682,6 +687,7 @@ export class DurableRunQueue {
           'wizard_reconnect', current.payload_json -> '$.wizard_reconnect',
           'error', current.payload_json -> '$.error',
           'output', substr(json_extract(current.payload_json, '$.output'), 1, 4000),
+          'final_response', substr(json_extract(current.payload_json, '$.final_response'), 1, 4000),
           'runtime', current.payload_json -> '$.runtime',
           'usage', json_object('runtime', current.payload_json -> '$.usage.runtime')) AS payload_json,
         current.created_at, current.updated_at

@@ -40,6 +40,13 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
     return { provider: v.provider, appId: app[0], name: app[1], runId: String(v.run_id || ''), installed: v.installed !== false,
       appStatus: ['connected', 'signed_out', 'expired'].includes(v.app_status) ? v.app_status : 'unknown' };
   }
+  // Why the last run failed (Agent Service run-error.mjs; wizard-ux live.js runErrorOf reads `runError`).
+  const RUN_ERROR_CODES = new Set(['provider_auth', 'provider_billing', 'provider_quota', 'network', 'unknown']);
+  function runErrorRow(v) {
+    if (!v || typeof v !== 'object' || !RUN_ERROR_CODES.has(v.code)) return null;
+    const one = (x, n) => (typeof x === 'string' ? x : '').replace(/\s+/g, ' ').trim().slice(0, n);
+    return { code: v.code, provider: one(v.provider, 60), message: one(v.message, 200) };
+  }
   const ATTN = new Set(['needs_you', 'check', 'done', 'fyi']);
   function attentionOf(v) {
     if (!v || typeof v !== 'object' || !ATTN.has(v.state)) return null;
@@ -75,6 +82,7 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
       safeError: typeof item.wizard_safe_error === 'string' ? item.wizard_safe_error : '',
       // Provider sign-in expired: the connection app that fixes it (provider-reconnect.mjs).
       reconnect: reconnectRow(item.wizard_reconnect),
+      runError: runErrorRow(item.wizard_last_run_error),
       archived: !!item.archived, hidden: !!item.hidden,
       messageCount: Number.isSafeInteger(item.message_count) ? item.message_count : undefined,
       lastUserAt, lastAssistantAt,
@@ -113,7 +121,7 @@ export function listRow(item, q = '') {
   const s = normalizeFull(item);
   if (!s) return null;
   const { request, renames, source, runtime, ...row } = s;
-  for (const key of ['safeError','reconnect','critical','waitingOn','helperStatus','background','attention','followUp']) if (!row[key]) delete row[key];
+  for (const key of ['safeError','reconnect','runError','critical','waitingOn','helperStatus','background','attention','followUp']) if (!row[key]) delete row[key];
   const needle = String(q || '').toLowerCase().trim().split(/\s+/)[0];
   const body = [s.preview, s.request, clean(item.wizard_search_text), s.title].find(t => needle && t.toLowerCase().includes(needle));
   const at = body ? Math.max(0, body.toLowerCase().indexOf(needle)-40) : 0;
