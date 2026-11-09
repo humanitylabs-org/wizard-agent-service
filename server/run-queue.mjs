@@ -687,6 +687,7 @@ export class DurableRunQueue {
           'wizard_reconnect', current.payload_json -> '$.wizard_reconnect',
           'error', current.payload_json -> '$.error',
           'output', substr(json_extract(current.payload_json, '$.output'), 1, 4000),
+          'final_response', substr(json_extract(current.payload_json, '$.final_response'), 1, 4000),
           'runtime', current.payload_json -> '$.runtime',
           'usage', json_object('runtime', current.payload_json -> '$.usage.runtime')) AS payload_json,
         current.created_at, current.updated_at

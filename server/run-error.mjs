@@ -54,13 +54,16 @@ function httpStatusOf(text) {
   return m ? Number(m[1]) : 0
 }
 
-// The provider's own words, short and without anything token-shaped.
+// The provider's own words, short and without anything token-shaped. A provider may echo the key it
+// refused in any format (sk-…, AIza…, ghp_…, a JWT), so every long run of key characters that mixes
+// letters and digits is dropped, plus whatever follows "key provided:" / "Bearer".
+const KEYISH = /[A-Za-z0-9][A-Za-z0-9_\-+/=.*]{15,}/g
 function messageOf(payload) {
-  const said = /Provider said:\s*([^\n]+)/.exec(textOf(payload.output))?.[1]
+  const said = [payload.output, payload.final_response].map((v) => /Provider said:\s*([^\n]+)/.exec(textOf(v))?.[1]).find(Boolean)
   const raw = said || textOf(payload.error) || ''
-  return raw.replace(/\b(?:sk|rk|pk|sess)-[A-Za-z0-9_*-]{8,}/g, '[redacted]')
-    .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]{8,}/gi, 'Bearer [redacted]')
-    .replace(/\beyJ[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]+){0,2}/g, '[redacted]')
+  return raw.replace(/\b(key|token|secret|password)( provided)?:\s*\S+/gi, '$1$2: [redacted]')
+    .replace(/\bBearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(KEYISH, (m) => /[A-Za-z]/.test(m) && /\d/.test(m) ? '[redacted]' : m)
     .replace(/\s+/g, ' ').trim().slice(0, 200)
 }
 

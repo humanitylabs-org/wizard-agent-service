@@ -61,6 +61,15 @@ describe('classifyRunError', () => {
     const value = classifyRunError(run)!
     expect(value.message.length).toBeLessThanOrEqual(200)
     expect(value.message).not.toMatch(/abcdefghijklmnop/)
+    // Keys without a known prefix, as other providers echo them. Built at runtime so the secret scan never
+    // reads a fake key as a real one.
+    const fake = (prefix: string, n: number) => prefix + Array.from({ length: n }, (_, i) => 'a1B2c3D4e5'[i % 10]).join('')
+    for (const key of [fake('AI' + 'za', 35), fake('gh' + 'p_', 36), [fake('ey' + 'J', 20), fake('ey' + 'J', 20), fake('', 16)].join('.')]) {
+      const msg = classifyRunError(failed({ error: `HTTP 401: Incorrect API key ${key} was refused` }))!.message
+      expect(msg).not.toContain(key.slice(0, 12))
+      expect(msg).toMatch(/^HTTP 401: Incorrect API key/)
+    }
+    expect(classifyRunError(failed({ error: 'HTTP 401: Incorrect API key provided: abc_def_ghi_jkl_mno.' }))!.message).toBe('HTTP 401: Incorrect API key provided: [redacted]')
   })
   it('runErrorOf drops unknown codes and clips fields', () => {
     expect(runErrorOf({ code: 'evil', provider: 'x' })).toBeNull()
@@ -89,6 +98,10 @@ describe('run queue projection and compact rows', () => {
   it('the request route names the provider when Hermes omits runtime', async () => {
     const q = await failedQueue({ status: 'failed', error: NETWORK })
     expect(q.latestProjections(['wizard_s'])[0].runError).toMatchObject({ code: 'network', provider: 'openai-codex' })
+  })
+  it('Hermes copy only in final_response still names the reason (same as routed runs)', async () => {
+    const q = await failedQueue({ status: 'failed', output: '', final_response: said('ChatGPT hit its limit.', "HTTP 429: You've hit your usage limit.") })
+    expect(q.latestProjections(['wizard_s'])[0].runError).toMatchObject({ code: 'provider_quota', message: "HTTP 429: You've hit your usage limit." })
   })
   it('an ordinary failure projects no runError', async () => {
     const q = await failedQueue({ status: 'failed', error: 'agent run failed', safe_error: 'Try again later.' })
