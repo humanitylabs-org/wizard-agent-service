@@ -11,7 +11,7 @@
 // Machine feeds are not reports and never pass through here. `/reports/wizard-os/` (the phone app's updater
 // feed, phone-feed.mjs) is answered earlier in the request path; the bare `/reports/wizard-os` is left alone
 // here too, so every byte the updater and the release mirror see stays exactly as it was.
-import { readFileSync, realpathSync, statSync } from 'node:fs'
+import { closeSync, constants, fstatSync, openSync, readFileSync, readSync, realpathSync, statSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { join, resolve, sep } from 'node:path'
 import { pageSlugValid } from './pages.mjs'
@@ -24,12 +24,26 @@ export const REPORTS_MOVED_FILE = '.reports-moved.json'
 
 const escapeHtml = (text) => String(text).replace(/[&<>"']/gu, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c])
 
-function renamedSlug(pagesRoot, slug) {
+const MOVED_MAP_MAX_BYTES = 64 * 1024
+
+// The Pages folder is agent-writable: never block on a FIFO, follow a symlink or read an unbounded file.
+function readMovedMap(pagesRoot) {
+  let fd
   try {
-    const map = JSON.parse(readFileSync(join(pagesRoot, REPORTS_MOVED_FILE), 'utf8'))
-    const target = map && typeof map === 'object' && !Array.isArray(map) && Object.hasOwn(map, slug) ? map[slug] : null
-    return typeof target === 'string' && pageSlugValid(target) ? target : slug
-  } catch { return slug }
+    fd = openSync(join(pagesRoot, REPORTS_MOVED_FILE), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    const info = fstatSync(fd)
+    if (!info.isFile() || info.size > MOVED_MAP_MAX_BYTES) return null
+    const buffer = Buffer.alloc(info.size)
+    let offset = 0
+    while (offset < buffer.length) { const n = readSync(fd, buffer, offset, buffer.length - offset, offset); if (!n) break; offset += n }
+    return JSON.parse(buffer.subarray(0, offset).toString('utf8'))
+  } catch { return null } finally { if (fd !== undefined) try { closeSync(fd) } catch {} }
+}
+
+function renamedSlug(pagesRoot, slug) {
+  const map = readMovedMap(pagesRoot)
+  const target = map && typeof map === 'object' && !Array.isArray(map) && Object.hasOwn(map, slug) ? map[slug] : null
+  return typeof target === 'string' && pageSlugValid(target) ? target : slug
 }
 
 function pageExists(pagesRoot, slug) {

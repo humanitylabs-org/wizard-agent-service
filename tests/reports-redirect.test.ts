@@ -3,7 +3,8 @@
 // updater feed under /reports/wizard-os/ keeps answering byte for byte.
 import { afterAll, afterEach, describe, expect, it } from 'vitest'
 import { createServer, request as httpRequest } from 'node:http'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../server/service.mjs'
@@ -127,6 +128,21 @@ describe('old /reports/<slug>/ links', () => {
     expect((await b.raw('/reports/gone/')).status).toBe(404)
     // The mapping file itself is never served.
     expect((await b.raw('/pages/.reports-moved.json')).status).toBe(404)
+  })
+})
+
+describe('the rename map is agent-writable and never trusted blindly', () => {
+  it('a FIFO, a symlink or an oversized file in its place is ignored without blocking the service', async () => {
+    for (const make of [
+      (file: string) => execFileSync('mkfifo', [file]),
+      (file: string) => { writeFileSync(`${file}.target`, JSON.stringify({ old: 'q3-report' })); symlinkSync(`${file}.target`, file) },
+      (file: string) => writeFileSync(file, JSON.stringify({ old: 'q3-report', pad: 'x'.repeat(70 * 1024) })),
+    ]) {
+      const b = await box((files) => { seedPage(files, 'q3-report'); make(join(files, 'Pages', '.reports-moved.json')) })
+      const r = await Promise.race([b.raw('/reports/old/'), new Promise<never>((_, no) => setTimeout(() => no(new Error('service blocked')), 4000))])
+      expect(r.status).toBe(404)
+      expect((await b.raw('/reports/q3-report/')).status).toBe(308)
+    }
   })
 })
 
