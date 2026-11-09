@@ -1156,7 +1156,16 @@ export function projectInFlightOwnerTurns(result, runQueue, sessionId) {
   if (!payload || typeof payload !== 'object' || !Array.isArray(payload.data)) return result
   const page = payload.pagination && typeof payload.pagination === 'object' ? payload.pagination : null
   const newestIncluded = !page || (page.order === 'oldest' ? Number(page.returned) < Number(page.limit) : Number(page.offset || 0) === 0)
-  if (!newestIncluded) return result
+  // An older page carries only the failed sends whose own time falls inside it (a failed send older than the newest
+  // page used to appear on no page at all); in-flight turns belong to the newest page alone.
+  const pageStamps = payload.data.map((row) => Number(row?.timestamp ?? row?.created_at)).filter(Number.isFinite)
+  if (!newestIncluded) {
+    if (!pageStamps.length) return result
+    const first = Math.min(...pageStamps), last = Math.max(...pageStamps)
+    const inside = turns.filter((turn) => turn.unsent && turn.at >= first && turn.at <= last)
+    if (!inside.length) return result
+    turns.splice(0, turns.length, ...inside)
+  }
   const shown = payload.data
     .filter((row) => row && typeof row === 'object' && (row.role ?? row.author) === 'user' && row.display_kind !== 'hidden')
     .map((row) => ({ text: visibleInputText(row.content).trim(), at: Number(row.timestamp ?? row.created_at), visible: !row.display_kind || row.display_kind === 'final' }))

@@ -139,3 +139,24 @@ it('the Not sent marker reaches the client through the history projection (it us
   expect(out.wizard_queue).toEqual({ status: 'failed', reason: 'not_sent', public_run_id: 'wizardq_f' })
   expect(out.secret).toBeUndefined()
 })
+
+describe('an old failed send appears on the page it belongs to', () => {
+  it('shows once, on the older page whose times contain it, and on no other page', async () => {
+    const s = await setup()
+    await s.q.admit(request())
+    await s.q.tick(true)
+    const sentAt = s.q.queuedForSession('direct', SID)[0].createdAt
+    for (let i = 0; i < 4; i++) await s.advance()
+    // 90 turns older than the failed send's time... then 30 newer: three pages of 40, newest first.
+    const rows = Array.from({ length: 120 }, (_, i) => ({ id: i + 1, session_id: SID, role: i % 2 ? 'assistant' : 'user', content: `row ${i}`, timestamp: sentAt - 6000 + i * 100 }))
+    const page = (offset: number) => {
+      const data = rows.slice().reverse().slice(offset, offset + 40).reverse()
+      let out = Buffer.from(JSON.stringify({ object: 'list', data, pagination: { order: 'latest', offset, limit: 40, returned: data.length } }))
+      out = projectInFlightOwnerTurns(out, s.q, SID)
+      return JSON.parse(out.toString()).data.filter((row: any) => row.wizard_queue?.status === 'failed')
+    }
+    const hits = [0, 40, 80].map((offset) => page(offset).length)
+    expect(hits.reduce((a, b) => a + b, 0)).toBe(1)
+    expect(hits[0]).toBe(0) // the newest page does not claim a send older than its first row
+  })
+})
