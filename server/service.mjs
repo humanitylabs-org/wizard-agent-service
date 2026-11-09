@@ -56,6 +56,7 @@ import { createOwnedOpenWorkReader, createOwnedWorkFollowThrough, ownedWorkState
 import { createFollowThroughFinder, requireHttpContinuation, hermesRunHasAgent, hermesRunTurnHeld, abandonedRunVerdict, readAbandonedRunOutcomeHttp, readInterruptedRunOutcomeHttp, readSteerResentHttp, readCanonicalSessionsHttp } from './hermes-http-readers.mjs'
 import { createMediaFiles } from './media-files.mjs'
 import { PAGES_FOLDER, PagesError, createPages, servePage } from './pages.mjs'
+import { serveOldReport } from './reports-redirect.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
@@ -6083,6 +6084,13 @@ function buildWizardServer(options, lifetime) {
       if (url.pathname.startsWith('/wizard/v1/chats-views/')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (serveChatsView(request, response, url, { appsJsonPath, apps: readApps({ appsJsonPath, launcherPath }).apps })) return
+      }
+      // Old report links (/reports/<slug>/...) go to the same page under /pages/, or to a plain "this page moved"
+      // page. The phone updater feed (/reports/wizard-os/) was answered above, before any gate.
+      if (url.pathname === '/reports' || url.pathname.startsWith('/reports/')) {
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (serveOldReport(request, response, url, { pagesRoot: pages?.root || '', uxPrefix })) return
       }
       if (url.pathname === '/pages' || url.pathname.startsWith('/pages/')) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }, { 'Content-Security-Policy': 'sandbox' }); return }
