@@ -16,7 +16,6 @@ import { createReadStream, existsSync, linkSync, mkdirSync, readFileSync, rename
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 
 const ID = /^wf_[0-9a-f]{32}$/
-const MAX_INDEX = 5000
 
 function cleanName(value) {
   const name = basename(String(value || 'file')).replace(/[\u0000-\u001f\u007f/\\]/gu, '_').replace(/^\.+/u, '_').trim()
@@ -29,18 +28,40 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
   if (root === sep || agent === sep) throw new Error('media root must be narrower than /')
   const index = resolve(String(indexPath))
 
-  const load = () => {
+  // The index keeps every record the store ever accepted: no count limit drops a file (issue 422).
+  // It is parsed once and kept in memory with an id map; the file's identity (inode, size, mtime) is
+  // checked on each call so another writer's records are still seen. Reads never rewrite it.
+  let cache = { stamp: '', files: [], byId: new Map() }
+  const stampOf = () => {
+    try { const info = statSync(index, { bigint: true }); return `${info.ino}-${info.size}-${info.mtimeNs}` } catch { return 'missing' }
+  }
+  const remember = (files, stamp) => {
+    const byId = new Map()
+    for (const record of files) if (record && typeof record.id === 'string') byId.set(record.id, record)
+    cache = { stamp, files, byId }
+    return cache
+  }
+  const current = () => {
+    const stamp = stampOf()
+    if (stamp === cache.stamp) return cache
+    let files = []
     try {
       const value = JSON.parse(readFileSync(index, 'utf8'))
-      return Array.isArray(value?.files) ? value.files : []
-    } catch { return [] }
+      files = Array.isArray(value?.files) ? value.files : []
+    } catch { files = [] }
+    return remember(files, stamp)
   }
+  const load = () => current().files
+  const find = (id) => current().byId.get(id) ?? null
   const save = (files) => {
     mkdirSync(dirname(index), { recursive: true })
     const tmp = `${index}.${process.pid}.tmp`
-    writeFileSync(tmp, JSON.stringify({ schema: 1, files: files.slice(-MAX_INDEX) }))
+    writeFileSync(tmp, JSON.stringify({ schema: 1, files }))
     renameSync(tmp, index)
+    remember(files, stampOf())
   }
+  // Oldest record with these bytes whose file is still on disk.
+  const firstCopy = (files, sha256) => files.find((item) => item.sha256 === sha256 && existsSync(resolve(root, relOf(item))))
   const relOf = (record) => String(record.rel || '')
   const hostPath = (record) => {
     const path = resolve(root, relOf(record))
@@ -65,13 +86,14 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
     },
     get(id, trusted = false) {
       if (!ID.test(String(id))) return null
-      const record = load().find((item) => item.id === id)
+      const record = find(id)
       if (!record) return null
       try { if (!statSync(hostPath(record)).isFile()) return null } catch { return null }
       return publicRecord(record, trusted)
     },
     open(id, range = null) {
-      const record = load().find((item) => item.id === id)
+      if (!ID.test(String(id))) return null
+      const record = find(id)
       if (!record) return null
       const path = hostPath(record)
       const info = statSync(path, { bigint: true })
@@ -90,7 +112,7 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
     save(data, { filename, mime }) {
       const sha256 = createHash('sha256').update(data).digest('hex')
       const files = load()
-      const same = files.find((item) => item.sha256 === sha256 && existsSync(resolve(root, relOf(item))))
+      const same = firstCopy(files, sha256)
       const day = now().toISOString().slice(0, 10)
       const name = cleanName(filename)
       const dir = join('Inbox', day)
@@ -106,8 +128,7 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
         id: `wf_${randomUUID().replaceAll('-', '')}`, rel, filename: name, mime: String(mime || 'application/octet-stream').slice(0, 160),
         bytes: data.length, sha256, created_at: now().toISOString(), duplicate_of: same ? same.id : null,
       }
-      files.push(record)
-      save(files)
+      save([...files, record])
       return publicRecord(record)
     },
     // Resumable uploads (server/uploads.mjs) stage on this filesystem and hand the finished file over
@@ -125,7 +146,7 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
         try { unlinkSync(sourcePath) } catch { /* already moved */ }
         return publicRecord(existing)
       }
-      const same = files.find((item) => item.sha256 === sha256 && existsSync(resolve(root, relOf(item))))
+      const same = firstCopy(files, sha256)
       const day = now().toISOString().slice(0, 10)
       const name = cleanName(filename)
       const dir = join('Inbox', day)
@@ -150,8 +171,7 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
         id: `wf_${randomUUID().replaceAll('-', '')}`, rel, filename: name, mime: String(mime || 'application/octet-stream').slice(0, 160),
         bytes, sha256, created_at: now().toISOString(), duplicate_of: same ? same.id : null, ...(key ? { upload_key: key } : {}),
       }
-      files.push(record)
-      save(files)
+      save([...files, record])
       if (!moved) unlinkSync(sourcePath)
       return publicRecord(record)
     },
