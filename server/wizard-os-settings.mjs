@@ -75,6 +75,7 @@ export function normalizeSettings(raw, { canStartAgent = (id) => id === 'hermes'
   const access = value.access && typeof value.access === 'object' && !Array.isArray(value.access) ? value.access : {}
   const tailscale = access.tailscale && typeof access.tailscale === 'object' && !Array.isArray(access.tailscale) ? access.tailscale : {}
   const setup = value.setup && typeof value.setup === 'object' && !Array.isArray(value.setup) ? value.setup : {}
+  const links = value.links && typeof value.links === 'object' && !Array.isArray(value.links) ? value.links : {}
   const tailnetOrigin = validTailnetOrigin(tailscale.origin)
   const ownerLogins = tailnetOrigin && Array.isArray(tailscale.owner_logins)
     ? [...new Set(tailscale.owner_logins.map(validLogin).filter(Boolean))].slice(0, 1) : []
@@ -137,6 +138,13 @@ export function normalizeSettings(raw, { canStartAgent = (id) => id === 'hermes'
       seen_at: validStamp(setup.seen_at),
       phone_started_at: validStamp(setup.phone_started_at),
       phone_seen_at: validStamp(setup.phone_seen_at),
+    },
+    // How the shell opens links that leave Wizard. Both off by default, only an exact `true` turns one on:
+    // reader routes them into the installed Browser Reader; panel (a trial, 9 Nov 2026) opens them on the
+    // WizardOS Android app in a browser panel over Wizard (Brave when installed). Desktop ignores panel.
+    links: {
+      reader: links.reader === true,
+      panel: links.panel === true,
     },
   }
 }
