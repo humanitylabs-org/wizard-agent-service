@@ -836,6 +836,20 @@ export function createAgentRegistry(options = {}) {
       if (id === 'anthropic') models = [...new Set(models.map(claudeModelId))]
       if (models.length) out.push({ id, label: AI_ACCOUNTS.get(id), confidential: false, models: models.map((m) => ({ id: m, label: m })) })
     }
+    // Issue 409: the box's Claude sign-in is app-owned (the Claude app's login, which agents reach through
+    // CLAUDE_AGENT_PROVIDER), so the gateway's `anthropic` slug can read signed out while Claude works. When the
+    // switch hands us the connector reader, a connected Claude app contributes the row and its curated models.
+    if (typeof options.claudeConnectionModels === 'function' && !out.some((item) => item.id === 'anthropic')) {
+      let models = []
+      try { models = await options.claudeConnectionModels() } catch { models = [] }
+      const seen = new Set()
+      const rows = (Array.isArray(models) ? models : []).map((m) => ({ id: claudeModelId(String(m?.id ?? '')), label: String(m?.label || m?.id || '') }))
+        .filter((m) => m.id && m.id.length < 120 && !seen.has(m.id) && seen.add(m.id)).slice(0, 12)
+      if (rows.length) {
+        const at = out.findIndex((item) => item.id === 'openai-codex')
+        out.splice(at < 0 ? out.length : at, 0, { id: 'anthropic', label: AI_ACCOUNTS.get('anthropic'), confidential: false, models: rows })
+      }
+    }
     return out
   }
 

@@ -551,6 +551,37 @@ export function aiConnectionApps(registry, address = 'local') {
   return [...byProvider.values()]
 }
 
+const CONNECTION_MODEL_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/u
+
+/**
+ * The curated model list a connected wizard.ai-connection/2 app offers for
+ * `provider` (e.g. 'claude'), or [] when no such app runs, it is not connected,
+ * or it answers anything else. Read-only: the same `/api/connection` the usage
+ * reader uses, at the address apps.json pins; never a token.
+ */
+export async function connectedProviderModels(appsJsonPath, provider, { address = 'local', fetchImpl = fetch, timeoutMs = 2_000 } = {}) {
+  const path = trimmed(appsJsonPath)
+  if (!path) return []
+  const registry = readJsonFile(resolve(path))
+  const app = registry ? aiConnectionApps(registry, address === 'internal' ? 'internal' : 'local').find((entry) => entry.provider === provider) : null
+  if (!app) return []
+  let payload
+  try { payload = await getJson(fetchImpl, app.url, { Accept: 'application/json' }, timeoutMs, { authFailureExpired: false }) } catch { return [] }
+  if (!payload || payload.contract !== 'wizard.ai-connection/2' || payload.provider !== provider || payload.status !== 'connected') return []
+  const authCode = payload.error && typeof payload.error === 'object' ? payload.error.code : ''
+  if (authCode === SIGNED_OUT || authCode === EXPIRED) return []
+  const seen = new Set()
+  const models = []
+  for (const model of arrayOf(payload.models)) {
+    const id = typeof model?.id === 'string' ? model.id : ''
+    if (!CONNECTION_MODEL_ID.test(id) || seen.has(id)) continue
+    seen.add(id)
+    models.push({ id, label: text(model.label, 60) || id })
+    if (models.length >= 12) break
+  }
+  return models
+}
+
 function connectionLimits(usage) {
   const rows = []
   for (const [index, entry] of arrayOf(usage?.limits).entries()) {
