@@ -184,6 +184,9 @@ server = createWizardServer({
   ...(process.env.WIZARD_UPLOAD_RESERVE_BYTES ? { uploadReserveBytes: Number(process.env.WIZARD_UPLOAD_RESERVE_BYTES) } : {}),
   ...(process.env.WIZARD_UPLOAD_MAX_BYTES ? { uploadMaxBytes: Number(process.env.WIZARD_UPLOAD_MAX_BYTES) } : {}),
   kernelJobMap: process.env.WIZARD_KERNEL_JOB_MAP === '1',
+  // Agent builder offers Claude from a connected Claude app (wizard.ai-connection/2 models) when the gateway's
+  // anthropic slug reads signed out (issue 409). Off by default.
+  agentClaudeFromApp: process.env.WIZARD_AGENT_CLAUDE_FROM_APP === '1',
   // Routed agents' owner turns stamped internal_notification by Hermes 0.22.7 (issue 379). Off by default.
   routedOwnerTurns: process.env.WIZARD_ROUTED_OWNER_TURNS === '1',
   // Owner turns with an inline screenshot, which Hermes flattens to "[screenshot]" (issue 145). Off by default.

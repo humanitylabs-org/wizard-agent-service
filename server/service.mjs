@@ -38,7 +38,7 @@ import { createRoutedPresentation } from './routed-presentation.mjs'
 import { createRoutedQueues } from './routed-run-queue.mjs'
 import { Supervisor } from './supervisor.mjs'
 import { SubjectCatalog } from './thread-subjects.mjs'
-import { createAiUsageReader } from './ai-usage.mjs'
+import { connectedProviderModels, createAiUsageReader } from './ai-usage.mjs'
 import { confirmedClaudePoolExhaustion, CLAUDE_POOL_SAFE_ERROR } from './claude-cooldown-bridge.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
 import { projectProviderSignInHistory, providerSignInEvents } from './run-provider-failure.mjs'
@@ -2983,6 +2983,9 @@ function buildWizardServer(options, lifetime) {
       if (!result.ok) return []
       return (await result.json())?.providers ?? []
     },
+    // Switch WIZARD_AGENT_CLAUDE_FROM_APP (issue 409): the Claude row comes from the connected Claude app.
+    ...(options.agentClaudeFromApp === true ? { claudeConnectionModels: () => connectedProviderModels(appsJsonPath, 'claude', {
+      address: options.aiConnectionAddress || (options.appsMcpAddress === 'internal' ? 'internal' : 'local'), fetchImpl }) } : {}),
     mainStatus: async () => {
       try {
         const result = await fetchImpl(`${upstreamOrigin}/health`, { redirect: 'error', signal: AbortSignal.timeout(1500) })
