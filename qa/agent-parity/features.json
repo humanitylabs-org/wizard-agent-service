@@ -979,6 +979,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "file-store-retention",
+      "description": "The built-in file store keeps every upload findable by id: after more than 5,000 later uploads the first attachment still opens, still resolves for the agent and is still found as a duplicate; opening it never rewrites the index.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile, container TCP, restricted Unix ingress): upload a synthetic file, append 5,001 synthetic records to the fixture index, upload again, then open the first file's content (bytes and type), re-upload its bytes (duplicate_of the first id), check the index file's inode and mtime are unchanged by the open, and admit a run with its wizard_file_ids. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/media-files.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/media-files-retention.test.ts"
+      ],
+      "fixture": "file-store-retention",
+      "policy_exemptions": []
+    },
+    {
       "id": "read-receipts",
       "description": "Mark one thread seen or unread",
       "layer": "server",
