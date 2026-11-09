@@ -40,6 +40,32 @@ describe('point 5: service-written sends never match as owner turns', () => {
     expect(out.find((r: any) => r.id === 5).display_kind).toBe('internal_notification')
     expect(out.filter((r: any) => String(r.id).startsWith('queue-'))).toEqual([])
   })
+  // Codex review: a service send repeating the owner's words must not claim the owner's queued turn by text.
+  const same = 'Synthetic repeated words.'
+  const repeat = [
+    rec('wizardq_mine', 1000, listBody(same)),
+    rec('wizardq_svc', 2000, listBody(same), { continuation: { kind: 'heavy', job_id: 'j9' }, payload: { created_at: 2000, admission_id: 'adm_svc' } }),
+  ]
+  const ownerRow = { id: 1, session_id: SID, role: 'user', display_kind: 'internal_notification', timestamp: 1010, content: same }
+  const svcRow = { id: 2, session_id: SID, role: 'user', display_kind: 'internal_notification', timestamp: 2010, content: same }
+  const reply = { id: 3, session_id: SID, role: 'assistant', timestamp: 2020, content: 'Synthetic reply.' }
+  it('a later service send with the owner\'s words keeps its kind, even read newest first', () => {
+    const out = restore(page([reply, svcRow, ownerRow]), { admittedForSession: () => repeat }).data
+    expect(out.find((r: any) => r.id === 2).display_kind).toBe('internal_notification')
+    expect(out.find((r: any) => r.id === 1).display_kind).toBeUndefined()
+  })
+  it('when the owner\'s row is gone, the service row stays internal and the owner\'s turn is restored from the queue', () => {
+    const out = restore(page([{ ...svcRow, timestamp: 2010 }, reply]), { admittedForSession: () => repeat }).data
+    expect(out.find((r: any) => r.id === 2).display_kind).toBe('internal_notification')
+    expect(out.filter((r: any) => String(r.id).startsWith('queue-')).map((r: any) => r.id)).toEqual(['queue-wizardq_mine'])
+  })
+  it('a row Hermes tied to a service send\'s admission id is never claimed by text', () => {
+    const tied = { ...svcRow, timestamp: 1020, platform_message_id: 'adm_svc' }
+    // The service send was admitted before the owner's, so only its admission id tells the rows apart.
+    const out = restore(page([tied, ownerRow, reply]), { admittedForSession: () => [{ ...repeat[1], createdAt: 990, payload: { created_at: 990, admission_id: 'adm_svc' } }, repeat[0]] }).data
+    expect(out.find((r: any) => r.id === 2).display_kind).toBe('internal_notification')
+    expect(out.find((r: any) => r.id === 1).display_kind).toBeUndefined()
+  })
 })
 
 describe('point 2: Retry rebuilds the owner\'s turn', () => {

@@ -969,6 +969,8 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, {
   let records
   try { records = runQueue.admittedForSession('direct', sessionId) } catch { return result }
   const pending = []
+  // Service-written sends (issue 145, point 5): never owner turns, and their Hermes rows never claim one by its words.
+  const serviceSends = []
   for (const record of Array.isArray(records) ? records : []) {
     let body = null
     try { body = JSON.parse(String(record?.body ?? '{}')) } catch { /* unreadable body */ }
@@ -983,6 +985,7 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, {
     // (follow-through, heavy, scheduler, reporter) is a bracketed string and never an owner turn.
     const listShaped = Array.isArray(body?.input)
     const owner = !body?._wizard_background_recovery && !serviceWrittenSend(record) && Boolean(input || shot) && (listShaped || typeof body?.input === 'string') && !MACHINE_INPUT.test(input)
+    if (serviceWrittenSend(record) && Number.isFinite(at)) serviceSends.push({ input, shot, at, id, run })
     if ((input || shot || id) && owner && Number.isFinite(at)) pending.push({ input, shot, at, id, run, owner, listShaped, status: String(record?.status ?? ''), publicRunId: String(record?.publicRunId ?? ''), chain: String(record?.retrySourceId || record?.publicRunId || ''), sentAt: Number(record?.retryOrderAt) || at, used: false })
   }
   // An interrupted/failed attempt that a later queued run retried (the queue records the retry source) is the same
@@ -1026,8 +1029,12 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, {
   }
   const textClaim = (row) => {
     // A row Hermes tied to a submission we know only as a superseded retry stays hidden rather than guessing by text.
-    const submission = metaById.get(row.id)?.submission_id
+    const meta = metaById.get(row.id)
+    const submission = meta?.submission_id
     if (submission && pending.some((p) => p.run === submission)) return null
+    // A row Hermes tied to a service-written send is that send's, never the owner's.
+    const rowId = row.platform_message_id ?? row.message_id ?? meta?.platform_message_id
+    if ((submission && serviceSends.some((p) => p.run === submission)) || (rowId && serviceSends.some((p) => p.id === rowId))) return null
     const text = (ownerText ? ownerRowText(row.content) : visibleInputText(row.content)).trim()
     const at = Number(row.timestamp ?? row.created_at)
     // A machine-tagged row (a heavy-work continuation, a follow-through wake) is never claimed by its words.
@@ -1038,6 +1045,9 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, {
       if (p.used || p.superseded || !sameOwnerTurn(p, text) || at < p.at - 5 || at - p.at > OWNER_TURN_WINDOW_SECONDS) continue
       if (!best || p.at > best.at) best = p
     }
+    // When the closest send with these words is one the Service wrote, the row is that send's (an owner's earlier
+    // identical words keep their own row).
+    if (best && serviceSends.some((p) => sameOwnerTurn(p, text) && at >= p.at - 5 && at - p.at <= OWNER_TURN_WINDOW_SECONDS && p.at >= best.at)) return null
     return best
   }
   let changed = false
