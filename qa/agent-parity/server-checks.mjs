@@ -104,6 +104,80 @@ export const serverChecks = {
     assert.ok(!wake || wake.display_kind === 'internal_notification', 'a machine wake is never turned into an owner turn')
     assert.equal(JSON.stringify(row.messages), before, 'upstream rows are unchanged')
   },
+  // Issue 145, point 2: with WIZARD_OWNER_TURN_RETRY (and routed kinds' WIZARD_ROUTED_OWNER_TURNS), Retry's
+  // wizard_retry_input is the owner's own latest turn even though Hermes stamped it internal_notification.
+  'owner-turn-retry': async s => {
+    const words = 'Synthetic retry owner turn.'
+    await admit(s, { input: [{ role: 'user', content: [{ type: 'text', text: words }] }] })
+    for (let i = 0; i < 40 && !s.sessions.get('wizard_parity').messages.length; i++) await new Promise(r => setTimeout(r, 25))
+    const row = s.sessions.get('wizard_parity')
+    row.hidden = false
+    const owner = row.messages.findLast(m => m.role === 'user')
+    assert.ok(owner, 'the queued owner turn reached this kind\'s runtime')
+    owner.display_kind = 'internal_notification'
+    for (const run of s.runs.values()) Object.assign(run, { status: 'completed', output: 'Synthetic reply' })
+    row.messages.push({ id: 'synthetic-reply', role: 'assistant', content: 'Synthetic reply', timestamp: Number(owner.timestamp) + 1 })
+    const r = await s.request('/api/sessions/wizard_parity?view=detail')
+    assert.equal(r.status, 200)
+    const detail = await r.json()
+    assert.equal((detail.session || detail).wizard_retry_input, words, `${s.kind}: Retry rebuilds the owner's own turn`)
+  },
+  // Issue 145, point 3: with WIZARD_OWNER_TURN_LEDGER, a finished owner send that queue retention pruned still keeps
+  // its words, so the owner's internal_notification row is restored on every kind. The prune runs through the same
+  // DurableRunQueue class on this kind's own queue file (a second handle, retention forced).
+  'owner-turn-ledger': async s => {
+    const words = 'Synthetic pruned owner turn.'
+    await admit(s, { input: [{ role: 'user', content: [{ type: 'text', text: words }] }] })
+    for (let i = 0; i < 40 && !s.sessions.get('wizard_parity').messages.length; i++) await new Promise(r => setTimeout(r, 25))
+    const row = s.sessions.get('wizard_parity')
+    const owner = row.messages.findLast(m => m.role === 'user')
+    assert.ok(owner, 'the queued owner turn reached this kind\'s runtime')
+    owner.display_kind = 'internal_notification'
+    for (const run of s.runs.values()) Object.assign(run, { status: 'completed', output: 'Synthetic reply' })
+    row.messages.push({ id: 'synthetic-reply', role: 'assistant', content: 'Synthetic reply', timestamp: Number(owner.timestamp) + 1 })
+    const path = s.kind === 'main' ? join(s.root, 'queue.sqlite3') : join(s.root, 'os', 'agents', s.id, 'wizard-run-queue.sqlite3')
+    const { DurableRunQueue } = await import('../../server/run-queue.mjs')
+    const second = new DurableRunQueue({ statePath: path, agentId: s.id, keepOwnerTurns: true, launch: async () => ({}), lookup: async () => ({}), activeSessionIds: async () => [], canDispatch: async () => false })
+    try {
+      const old = Date.now() / 1000 - 30 * 86400
+      second.database.prepare("UPDATE wizard_run_queue SET status = 'completed', terminal_at = ? WHERE session_id = 'wizard_parity'").run(old)
+      const fill = second.database.prepare(`INSERT INTO wizard_run_queue (public_run_id, runtime, session_id, idempotency_key, request_hash, body,
+        trusted_paths_json, status, upstream_run_id, payload_json, created_at, updated_at, terminal_at, agent_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      for (let i = 0; i < 130; i++) fill.run(`wizardq_parityfill${i}`, 'direct', `wizard_parity_fill${i}`, `parity-fill-${i}`, 'h', '{}', '[]', 'completed', `run_fill${i}`, '{}', old + 10 + i, old + 10 + i, old + 10 + i, s.id)
+      second._pruneTerminal(true)
+      assert.equal(second.database.prepare("SELECT COUNT(*) AS n FROM wizard_run_queue WHERE session_id = 'wizard_parity'").get().n, 0, 'retention pruned the owner send')
+    } finally { await second.close() }
+    const output = await history(s)
+    const mine = output.filter(m => m.role === 'user' && JSON.stringify(m.content).includes(words))
+    assert.equal(mine.length, 1, `${s.kind}: the pruned owner message shows exactly once`)
+    assert.notEqual(mine[0].display_kind, 'internal_notification', `${s.kind}: the pruned owner message is a normal user row`)
+  },
+  // Issue 145, point 5: a send the Service wrote itself (heavy-work continuation key or continuation metadata) is never
+  // claimed as the owner's turn on any kind, even list-shaped with the same words as its Hermes row.
+  'owner-turn-service-sends': async s => {
+    const words = 'Synthetic service continuation words.'
+    await admit(s, { input: [{ role: 'user', content: [{ type: 'text', text: 'Synthetic owner opener.' }] }] })
+    for (let i = 0; i < 40 && !s.sessions.get('wizard_parity').messages.length; i++) await new Promise(r => setTimeout(r, 25))
+    const row = s.sessions.get('wizard_parity')
+    for (const run of s.runs.values()) Object.assign(run, { status: 'completed', output: 'Synthetic reply' })
+    const at = Number(row.messages.at(-1)?.timestamp ?? Date.now() / 1000)
+    const path = s.kind === 'main' ? join(s.root, 'queue.sqlite3') : join(s.root, 'os', 'agents', s.id, 'wizard-run-queue.sqlite3')
+    const db = new DatabaseSync(path)
+    try {
+      const body = JSON.stringify({ session_id: 'wizard_parity', input: [{ role: 'user', content: [{ type: 'text', text: words }] }] })
+      db.prepare(`INSERT INTO wizard_run_queue (public_run_id, runtime, session_id, idempotency_key, request_hash, body, trusted_paths_json,
+        status, upstream_run_id, payload_json, created_at, updated_at, terminal_at, agent_id, continuation_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run('wizardq_parityheavy', 'direct', 'wizard_parity', 'wizard-heavy-parity', 'h', body, '[]', 'completed', 'run_parity_heavy',
+          JSON.stringify({ created_at: at + 10 }), at + 10, at + 10, at + 10, s.id, JSON.stringify({ kind: 'heavy', job_id: 'parity', agent_id: s.id, session_id: 'wizard_parity' }))
+    } finally { db.close() }
+    row.messages.push({ id: 'synthetic-heavy', role: 'user', display_kind: 'internal_notification', content: words, timestamp: at + 11 },
+      { id: 'synthetic-heavy-reply', role: 'assistant', content: 'Synthetic heavy reply', timestamp: at + 12 })
+    const output = await history(s)
+    const theirs = output.filter(m => JSON.stringify(m.content ?? '').includes(words))
+    assert.ok(theirs.length <= 1, `${s.kind}: a service send is never added a second time`)
+    assert.ok(!theirs.length || theirs[0].display_kind === 'internal_notification', `${s.kind}: a service-written send is not shown as the owner's message`)
+    assert.ok(!output.some(m => String(m.id) === 'queue-wizardq_parityheavy'), `${s.kind}: no queue copy of a service send`)
+  },
   'in-flight-notice': async outer => {
     const path = join(outer.root, 'in-flight-heavy.db')
     const s = await scene(outer.kind, { heavyStatePath: path, heavyToken: 'synthetic-in-flight-notice-token', heavyPollIntervalMs: 3_600_000,

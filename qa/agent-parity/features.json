@@ -112,6 +112,55 @@
       "policy_exemptions": []
     },
     {
+      "id": "owner-turn-retry",
+      "description": "Retry rebuilds the owner's own latest message when Hermes 0.22.5+ stamped its row internal_notification: the detail view's wizard_retry_input reads history with the owner's turns restored from this kind's own queue (behind WIZARD_OWNER_TURN_RETRY=1, off by default; routed kinds also need WIZARD_ROUTED_OWNER_TURNS=1).",
+      "layer": "server",
+      "fixture": "owner-turn-retry",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile /p/<profile>, container TCP, restricted Unix ingress) with routedOwnerTurns and ownerTurnRetry on: admit a list-shaped synthetic owner turn, stamp its upstream row internal_notification, finish the run, then read GET /api/sessions/wizard_parity?view=detail. Require wizard_retry_input to equal the owner's words. tests/owner-turn-followups.test.ts shows the plain scan skipping the row and Hermes' [System:] notice being dropped. Synthetic HTTP fixture evidence, not live/provider/browser proof.",
+      "source_refs": [
+        "server/service.mjs",
+        "server/agents-http.mjs",
+        "server/session-detail.mjs"
+      ],
+      "reference_tests": [
+        "tests/owner-turn-followups.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "policy_exemptions": []
+    },
+    {
+      "id": "owner-turn-ledger",
+      "description": "A finished owner send keeps its words (never its image bytes) in a small per-queue ledger when retention prunes it after 7 days / 128 runs, so the owner's internal_notification row is still restored on every kind (behind WIZARD_OWNER_TURN_LEDGER=1, off by default; routed kinds also need WIZARD_ROUTED_OWNER_TURNS=1).",
+      "layer": "server",
+      "fixture": "owner-turn-ledger",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile /p/<profile>, container TCP, restricted Unix ingress) with routedOwnerTurns and ownerTurnLedger on: admit a list-shaped synthetic owner turn, stamp its upstream row internal_notification, age it past retention with 130 synthetic filler runs and force retention through a second DurableRunQueue handle on that kind's own queue file, then read ?view=wizard history. Require the owner row exactly once as a normal user row. tests/owner-turn-followups.test.ts covers image stripping, service sends never kept, restart and the switch off. Synthetic HTTP fixture evidence, not live/provider/browser proof.",
+      "source_refs": [
+        "server/run-queue.mjs",
+        "server/routed-run-queue.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/owner-turn-followups.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "policy_exemptions": []
+    },
+    {
+      "id": "owner-turn-service-sends",
+      "description": "A send the Service queued itself (heavy-work continuation, follow-through, helper receipt: continuation metadata or their idempotency keys, or a machine-tagged input) is never matched or restored as the owner's own message, whatever shape its input has. Plain fix, on for main; routed kinds follow WIZARD_ROUTED_OWNER_TURNS=1.",
+      "layer": "server",
+      "fixture": "owner-turn-service-sends",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile /p/<profile>, container TCP, restricted Unix ingress) with routedOwnerTurns on: queue a list-shaped synthetic send keyed wizard-heavy-* with heavy continuation metadata on that kind's own queue, store its Hermes row with the same words stamped internal_notification, then read ?view=wizard history. Require the row to stay internal and no queue copy to be added. tests/owner-turn-followups.test.ts covers continuation metadata, the heavy key and machine-tagged text. Synthetic HTTP fixture evidence, not live/provider/browser proof.",
+      "source_refs": [
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/owner-turn-followups.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "policy_exemptions": []
+    },
+    {
       "id": "reply-summary-preferences",
       "description": "Reopening the shell short-answer view accepts and persists its existing box-wide choice while main, host-profile, container and restricted chats retain their own unchanged transcripts and admit no reply.",
       "layer": "server",

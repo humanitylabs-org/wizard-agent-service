@@ -73,7 +73,7 @@ import { serveAppView } from './app-views.mjs'
 import { serveChatsView } from './chats-views.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { listPayload } from './session-list-view.mjs'
-import { fullRetryInput } from './session-detail.mjs'
+import { fullRetryInput, ownerRetryRows } from './session-detail.mjs'
 import { createListWindows } from './session-list-window.mjs'
 import { standardChatRpc } from './standard-chats.mjs'
 import { AgentError, MAIN_AGENT_ID, agentModelSeesImages, agentVisionHelper, createAgentRegistry, createRuntimeClient } from './agents.mjs'
@@ -930,6 +930,10 @@ const UNSENT_STATUSES = new Set(['failed', 'interrupted'])
 const sameTurnText = (left, right) => left === right || (left.length >= 60 && right.length >= 60 && left.slice(0, 60) === right.slice(0, 60))
 // Unambiguous machine-tagged inputs the Service itself queues (follow-through, heavy, scheduler, reporter, relays).
 const MACHINE_INPUT = /^\[(?:Wizard\b|reporter\]|Relayed by\b|ASYNC\b|System\b)/i
+// Sends the Service writes itself (issue 145, point 5): heavy-work continuations, follow-through and helper receipts
+// carry continuation metadata or one of these idempotency keys, whatever shape their input has.
+const SERVICE_SEND_KEY = /^(?:wizard-heavy-|wizard-follow-through-|wizard-helper-receipt-)/u
+const serviceWrittenSend = (record) => Boolean(record?.continuation) || SERVICE_SEND_KEY.test(String(record?.idempotencyKey ?? ''))
 const PYTHON_REPR_PARTS = /^\s*\[\{'(?:text|type)':/
 // The owner's words in a Hermes row without its appended "[System: ...]" part, also from the multipart list's Python
 // repr. Used only when the row's ids cannot be read (a restricted agent's sandboxed state.db), behind `ownerText`.
@@ -978,7 +982,7 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, {
     // The owner's app sends list-shaped input (or a plain sentence typed in older builds); every machine message
     // (follow-through, heavy, scheduler, reporter) is a bracketed string and never an owner turn.
     const listShaped = Array.isArray(body?.input)
-    const owner = !body?._wizard_background_recovery && Boolean(input || shot) && (listShaped || (typeof body?.input === 'string' && !MACHINE_INPUT.test(input)))
+    const owner = !body?._wizard_background_recovery && !serviceWrittenSend(record) && Boolean(input || shot) && (listShaped || typeof body?.input === 'string') && !MACHINE_INPUT.test(input)
     if ((input || shot || id) && owner && Number.isFinite(at)) pending.push({ input, shot, at, id, run, owner, listShaped, status: String(record?.status ?? ''), publicRunId: String(record?.publicRunId ?? ''), chain: String(record?.retrySourceId || record?.publicRunId || ''), sentAt: Number(record?.retryOrderAt) || at, used: false })
   }
   // An interrupted/failed attempt that a later queued run retried (the queue records the retry source) is the same
@@ -1026,7 +1030,8 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, {
     if (submission && pending.some((p) => p.run === submission)) return null
     const text = (ownerText ? ownerRowText(row.content) : visibleInputText(row.content)).trim()
     const at = Number(row.timestamp ?? row.created_at)
-    if (!text || !Number.isFinite(at)) return null
+    // A machine-tagged row (a heavy-work continuation, a follow-through wake) is never claimed by its words.
+    if (!text || !Number.isFinite(at) || MACHINE_INPUT.test(text)) return null
     // Closest admission at or before the row.
     let best = null
     for (const p of pending) {
@@ -3118,6 +3123,10 @@ function buildWizardServer(options, lifetime) {
   // Routed owner turns (issue 379): off unless WIZARD_ROUTED_OWNER_TURNS=1. Each agent's own queue and state.db, never main's.
   // Screenshot owner turns (issue 145): off unless WIZARD_OWNER_SCREENSHOT_TURNS=1.
   const ownerScreenshotTurns = options.ownerScreenshotTurns === true
+  // Issue 145: Retry rebuilds the owner's restored turn (WIZARD_OWNER_TURN_RETRY=1); finished owner sends outlive queue
+  // retention in a words-only ledger (WIZARD_OWNER_TURN_LEDGER=1). Both off by default.
+  const ownerTurnRetry = options.ownerTurnRetry === true
+  const ownerTurnLedger = options.ownerTurnLedger === true
   const routedOwnerTurns = options.routedOwnerTurns === true
     ? (raw, queue, sessionId, agent) => {
         const home = routedAgentMedia(agent)?.home
@@ -3125,7 +3134,7 @@ function buildWizardServer(options, lifetime) {
         return restoreOwnerTurns(raw, queue, sessionId, ownerTurnRowMetaAt(home ? join(home, 'state.db') : ''), { ownerText: true, screenshots: ownerScreenshotTurns })
       }
     : null
-  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, queuedHistory: queuedOwnerHistory, restoreOwnerTurns: routedOwnerTurns, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, queuedHistory: queuedOwnerHistory, restoreOwnerTurns: routedOwnerTurns, keepOwnerTurns: ownerTurnLedger, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
     ...(options.runQueueLaunchWaitMs !== undefined ? { launchWaitMs: Number(options.runQueueLaunchWaitMs) } : {}),
     decorateDispatch: (agentId, sessionId, body) => {
       const note = heavyNotices(agentId, sessionId)
@@ -3167,6 +3176,7 @@ function buildWizardServer(options, lifetime) {
     },
     acknowledgeHeavyNotices,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
+    ownerTurnRetry,
     clientViewContext,
     noteAgentInput: (agent, sessionId, runId, value, createdAt) => {
       const body = JSON.stringify({ input: value.input })
@@ -4121,6 +4131,7 @@ function buildWizardServer(options, lifetime) {
     const runHasNoAgent = options.runHasNoAgent ?? (async (runId) => !(await hermesRunHasAgent(fetchImpl, upstreamOrigin, hermesKey, runId)))
     runQueue = new DurableRunQueue({
       ...providerRecoveryOptions,
+      keepOwnerTurns: ownerTurnLedger,
       statePath: runQueueStatePath,
       maxActive,
       reservedInteractive: Number(options.runQueueInteractiveReserve ?? Math.min(2, maxActive - 1)),
@@ -7377,7 +7388,13 @@ function buildWizardServer(options, lifetime) {
             const wrapped = await enrichSessionListMessages(Buffer.from(JSON.stringify({ data: [row] })), false)
             const detailed = JSON.parse(decorateSessionTitles(wrapped, false).toString('utf8')).data[0]
             const saved = runQueue?.savedRetry(row.id)
-            detailed.wizard_retry_input = saved ? queuedInputTextOf(saved.body) : truth?.requestPreview || await fullRetryInput(offset => hermesJson(`/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`))
+            const retryPage = offset => hermesJson(`/api/sessions/${encodeURIComponent(row.id)}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`)
+            // Issue 145, point 2 (WIZARD_OWNER_TURN_RETRY=1): Hermes 0.22.5+ stamps the owner's own turn internal_notification,
+            // which Hermes' truth and the plain history scan skip. Restore the owner's turns on each page first.
+            const ownerRetry = !saved && ownerTurnRetry && runQueue?.admittedForSession('direct', row.id).length > 0
+              ? await fullRetryInput(async offset => ownerRetryRows(JSON.parse(restoreOwnerTurns(Buffer.from(JSON.stringify(await retryPage(offset))), runQueue, row.id, ownerTurnRowMeta, { screenshots: ownerScreenshotTurns }).toString('utf8'))))
+              : ''
+            detailed.wizard_retry_input = saved ? queuedInputTextOf(saved.body) : ownerRetry || truth?.requestPreview || await fullRetryInput(retryPage)
             if (saved) {
               detailed.wizard_retry_run_id = saved.publicRunId
               detailed.status = saved.status

@@ -15,7 +15,7 @@ import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { readArchivedSessions } from './archived-sessions.mjs'
 import { listPayload } from './session-list-view.mjs'
-import { fullRetryInput, searchMessageText } from './session-detail.mjs'
+import { fullRetryInput, ownerRetryRows, searchMessageText } from './session-detail.mjs'
 import { createListWindows, selectWindow } from './session-list-window.mjs'
 import { classifyRunError } from './run-error.mjs'
 const listWindows = new WeakMap()
@@ -839,11 +839,14 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     if (method === 'GET' && searchParams.get('view') === 'detail' && /^\/api\/sessions\/[^/]+$/u.test(upstreamPath)) {
       const payload=JSON.parse(result.toString('utf8')), row=payload.session||payload;
       if (!row.wizard_retry_run_id && !row.wizard_retry_input) row.wizard_retry_input=await fullRetryInput(async offset=> {
-        const page=await registry.fetchAgent(agent, `${upstreamPath}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`,{headers,redirect:'manual',signal:controller.signal});
+        // Issue 145, point 2 (WIZARD_OWNER_TURN_RETRY=1): read through this agent's queue, which restores the owner's own
+        // turns (WIZARD_ROUTED_OWNER_TURNS=1), so Retry can rebuild a turn Hermes stamped internal_notification.
+        const ownerRetry=ctx.ownerTurnRetry===true && typeof ctx.fetchAgent==='function';
+        const page=await (ownerRetry ? ctx.fetchAgent : registry.fetchAgent)(agent, `${upstreamPath}/messages?order=latest&limit=100&offset=${offset}&include_compacted=true`,{headers,redirect:'manual',signal:controller.signal,...(ownerRetry ? { wizardHistory:true } : {})});
         if(!page.ok) throw new AgentError(502,'upstream_unavailable','agent.runtime');
         const raw=Buffer.from(await page.arrayBuffer());
         if(secrets.some(secret=>raw.includes(Buffer.from(secret)))) throw new AgentError(502,'unsafe_upstream_response','agent.response');
-        return JSON.parse(raw.toString('utf8'));
+        return ownerRetry ? ownerRetryRows(JSON.parse(raw.toString('utf8'))) : JSON.parse(raw.toString('utf8'));
       });
       result=Buffer.from(JSON.stringify(payload));
       if (ctx.projectAgentHistory) result=await ctx.projectAgentHistory(result,agent,sessionIdFromPath(upstreamPath));
