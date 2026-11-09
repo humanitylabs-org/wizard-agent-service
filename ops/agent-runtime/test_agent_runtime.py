@@ -359,6 +359,12 @@ class RuntimeUnitTest(unittest.TestCase):
         self.assertTrue(flags and flags <= known, flags - known)
         self.assertIn("--token-file", flags)
 
+    def test_unit_lets_sg_reach_the_docker_group(self):
+        blocking = {"NoNewPrivileges", "RestrictSUIDSGID", "LockPersonality", "RestrictAddressFamilies",
+                    "SystemCallFilter", "ProtectSystem", "ProtectHome", "PrivateTmp", "ReadWritePaths",
+                    "ReadOnlyPaths", "PrivateUsers", "DynamicUser"}
+        self.assertEqual(blocking & set(self.unit()), set())
+
     def test_secrets_come_only_from_the_environment_file(self):
         unit = self.unit()
         self.assertEqual(unit["EnvironmentFile"], ["%h/.config/wizard-agent-runtime/runtime.env"])

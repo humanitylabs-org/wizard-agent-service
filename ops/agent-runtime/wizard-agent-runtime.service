@@ -22,7 +22,8 @@ ExecStart=/usr/bin/python3 %h/.local/share/wizard-agent-runtime/current/agent_ru
 Restart=on-failure
 RestartSec=3
 UMask=0077
-NoNewPrivileges=yes
+# No NoNewPrivileges, seccomp or path sandboxing: a user unit has no docker group, so agent_runtime.py
+# reaches Docker through setgid `sg docker`, which those options block (ops/host-container/README.md).
 
 [Install]
 WantedBy=default.target
