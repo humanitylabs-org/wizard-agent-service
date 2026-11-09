@@ -20,7 +20,9 @@ export function retryDelaySeconds(value, fallback, now = Date.now()) {
 export function admissionFailure(error) {
   const code = error?.code
   const messages = {
-    permission_denied: 'This conversation belongs to another Hermes surface. Continue there; Wizard cannot send into it.',
+    // 9 Nov 2026: a thread started in another app (Telegram) is listed in Chats, but Hermes refuses every reply
+    // WizardOS sends into it (gateway/session_api_turn.py: foreign session source). Retry can never succeed.
+    permission_denied: 'This chat was started in another app, such as Telegram, so WizardOS can’t add to it. Your message is saved. Reply in that app, or start a new chat.',
     idempotency_key_conflict: 'This reply conflicts with an earlier delivery. It was not sent again.',
     admission_conflict: 'Hermes could not identify this admission safely. It was not sent again.',
   }

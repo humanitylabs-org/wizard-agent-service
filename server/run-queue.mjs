@@ -72,9 +72,14 @@ const parseJson = (value, fallback) => {
 // A failed run whose provider sign-in expired names the connection app that fixes it
 // (provider-reconnect.mjs). Classified at read time so runs that failed before this
 // existed (and stored payloads) get the same plain message and Open button.
+// Hermes names why it refused an accepted run as a bare code (`error: "permission_denied"`) or as `{ code }`.
+export const runErrorCode = (payload) => typeof payload?.error === 'string' ? payload.error
+  : typeof payload?.error?.code === 'string' ? payload.error.code : ''
 const failureProjection = (record) => {
   const payload = record.payload && typeof record.payload === 'object' ? record.payload : {}
-  const safeError = typeof payload.safe_error === 'string' ? payload.safe_error : ''
+  // 9 Nov 2026: a refusal Hermes reports on the run (not on the POST) carried no words, so the thread said only
+  // "didn't finish, Retry" for a reply no retry can deliver. Read time, so stored failures get the words too.
+  const safeError = typeof payload.safe_error === 'string' ? payload.safe_error : admissionFailure({ code: runErrorCode(payload) }) || ''
   if (record.status !== 'failed') return { safeError }
   const body = parseJson(record.body, null)
   // Why it failed (run-error.mjs): wizard_last_run_error on the thread row.

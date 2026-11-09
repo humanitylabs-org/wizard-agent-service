@@ -924,6 +924,8 @@ function durableScreenshotCandidate(record) {
 const OWNER_TURN_WINDOW_SECONDS = 24 * 3600
 const SUPERSEDED_STATUSES = new Set(['interrupted', 'failed', 'cancelled', 'canceled'])
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'canceled', 'interrupted'])
+// A send Hermes never delivered: the owner's message stays in the thread, marked Not sent, until Retry lands it.
+const UNSENT_STATUSES = new Set(['failed', 'interrupted'])
 // Hermes re-renders attachments in a row's text (markers, paths), so long messages match on their opening words.
 const sameTurnText = (left, right) => left === right || (left.length >= 60 && right.length >= 60 && left.slice(0, 60) === right.slice(0, 60))
 // Unambiguous machine-tagged inputs the Service itself queues (follow-through, heavy, scheduler, reporter, relays).
@@ -977,12 +979,16 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, {
     // (follow-through, heavy, scheduler, reporter) is a bracketed string and never an owner turn.
     const listShaped = Array.isArray(body?.input)
     const owner = !body?._wizard_background_recovery && Boolean(input || shot) && (listShaped || (typeof body?.input === 'string' && !MACHINE_INPUT.test(input)))
-    if ((input || shot || id) && owner && Number.isFinite(at)) pending.push({ input, shot, at, id, run, owner, listShaped, status: String(record?.status ?? ''), publicRunId: String(record?.publicRunId ?? ''), used: false })
+    if ((input || shot || id) && owner && Number.isFinite(at)) pending.push({ input, shot, at, id, run, owner, listShaped, status: String(record?.status ?? ''), publicRunId: String(record?.publicRunId ?? ''), chain: String(record?.retrySourceId || record?.publicRunId || ''), sentAt: Number(record?.retryOrderAt) || at, used: false })
   }
   // An interrupted/failed attempt that a later queued run retried (the queue records the retry source) is the same
-  // message: show it once, through the retry.
+  // message: show it once, through the retry. Every resend names the FIRST send as its source (9 Nov 2026: three
+  // never-started resends and two Retries of one message showed as five copies once it landed), so only the newest
+  // row of each chain can stand for the message.
   const retried = new Set((Array.isArray(records) ? records : []).map((record) => record?.retrySourceId).filter(Boolean))
-  for (const p of pending) p.superseded = SUPERSEDED_STATUSES.has(p.status) && retried.has(p.publicRunId)
+  const newest = new Map()
+  for (const p of pending) newest.set(p.chain, p) // records arrive in admission order
+  for (const p of pending) p.superseded = SUPERSEDED_STATUSES.has(p.status) && (retried.has(p.publicRunId) || newest.get(p.chain) !== p)
   if (!pending.length) return result
   if (!result.includes('internal_notification') && !pending.some((p) => p.listShaped && !p.superseded)) return result
   let payload
@@ -1066,9 +1072,12 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, {
       const missing = pending.filter((p) => p.listShaped && !p.used && !p.superseded && (p.input || p.shot) && TERMINAL_STATUSES.has(p.status)
         && p.at <= high && (coversOldest || p.at >= low)).sort((left, right) => left.at - right.at)
       for (const p of missing) {
+        // A resend sits where the owner sent it (the chain's first send), not where Wizard last resent it.
+        const at = UNSENT_STATUSES.has(p.status) ? p.sentAt : p.at
         const anchor = payload.data.findIndex((row) => row && typeof row === 'object' && row.display_kind !== 'hidden'
-          && !String(row.content ?? '').startsWith('[CONTEXT COMPACTION') && Number(row.timestamp ?? row.created_at) > p.at)
-        const row = { id: `queue-${p.publicRunId}`, session_id: sessionId, role: 'user', timestamp: p.at, content: p.shot || p.input }
+          && !String(row.content ?? '').startsWith('[CONTEXT COMPACTION') && Number(row.timestamp ?? row.created_at) > at)
+        const row = { id: `queue-${p.publicRunId}`, session_id: sessionId, role: 'user', timestamp: at, content: p.shot || p.input,
+          ...(UNSENT_STATUSES.has(p.status) ? { wizard_queue: { status: p.status, reason: 'not_sent', public_run_id: p.publicRunId } } : {}) }
         payload.data.splice(anchor < 0 ? payload.data.length : anchor, 0, row)
         p.used = true
         changed = true
@@ -1110,23 +1119,30 @@ export function queuedOwnerHistory(runQueue, sessionId) {
 // text, unless Hermes already shows it. `wizard_queue` tells the client to paint it as Queued / Waiting for a slot.
 const sameInFlightText = (left, right) => Boolean(left) && Boolean(right)
   && (sameTurnText(left, right) || (left.length >= 8 && right.startsWith(left) && /^\s/u.test(right.slice(left.length))))
+// 9 Nov 2026: a reply Hermes refused or never started (gateway restart, a thread another app owns, three resends that
+// never started) also has no row, so James's message vanished once the phone's own copy expired, leaving only
+// "Reply not sent". The newest row of each resend chain that failed stays in the thread too, marked `failed`.
+// A resend keeps the time the owner sent it (retryOrderAt), so it sits where he sent it and matches his own copy.
 export function projectInFlightOwnerTurns(result, runQueue, sessionId) {
   if (!runQueue || typeof sessionId !== 'string' || !sessionId || typeof runQueue.queuedForSession !== 'function') return result
   let records
   try { records = runQueue.queuedForSession('direct', sessionId) } catch { return result }
   if (!Array.isArray(records)) return result
   const retried = new Set(records.map((record) => record?.retrySourceId).filter(Boolean))
+  const newest = new Map()
+  for (const record of records) newest.set(record?.retrySourceId || record?.publicRunId, record) // admission order
   const turns = []
   for (const record of records) {
     const status = String(record?.status ?? '')
-    if (!status || TERMINAL_STATUSES.has(status) || retried.has(record?.publicRunId)) continue
+    const unsent = UNSENT_STATUSES.has(status) && newest.get(record?.retrySourceId || record?.publicRunId) === record
+    if (!status || (TERMINAL_STATUSES.has(status) && !unsent) || (retried.has(record?.publicRunId) && !unsent)) continue
     let body = null
     try { body = JSON.parse(String(record?.body ?? '{}')) } catch { /* unreadable body */ }
     const input = visibleInputText(body?.input).trim()
-    const at = Number(record?.createdAt)
+    const at = Number(record?.retryOrderAt) || Number(record?.createdAt)
     const owner = !body?._wizard_background_recovery && !record?.continuation && Boolean(input)
       && (Array.isArray(body?.input) || (typeof body?.input === 'string' && !MACHINE_INPUT.test(input)))
-    if (owner && Number.isFinite(at)) turns.push({ input, at, status, reason: String(record?.waitingReason ?? ''), publicRunId: String(record.publicRunId) })
+    if (owner && Number.isFinite(at)) turns.push({ input, at, status, reason: unsent ? 'not_sent' : String(record?.waitingReason ?? ''), publicRunId: String(record.publicRunId), unsent })
   }
   try {
     for (const steer of typeof runQueue.acceptedSteersForSession === 'function' ? runQueue.acceptedSteersForSession(sessionId) : []) {
@@ -1143,16 +1159,22 @@ export function projectInFlightOwnerTurns(result, runQueue, sessionId) {
   if (!newestIncluded) return result
   const shown = payload.data
     .filter((row) => row && typeof row === 'object' && (row.role ?? row.author) === 'user' && row.display_kind !== 'hidden')
-    .map((row) => ({ text: visibleInputText(row.content).trim(), at: Number(row.timestamp ?? row.created_at) }))
+    .map((row) => ({ text: visibleInputText(row.content).trim(), at: Number(row.timestamp ?? row.created_at), visible: !row.display_kind || row.display_kind === 'final' }))
+  // A failed send older than this page belongs on an older page (older pages are left alone above).
+  const stamped = payload.data.map((row) => Number(row?.timestamp ?? row?.created_at)).filter(Number.isFinite)
+  const coversOldest = !page || (page.order === 'oldest' ? Number(page.offset || 0) === 0 : Number(page.returned) < Number(page.limit))
+  const oldest = stamped.length && !coversOldest ? Math.min(...stamped) : -Infinity
   let changed = false
   for (const turn of turns.sort((a, b) => a.at - b.at)) {
-    const landed = shown.some((row) => sameInFlightText(turn.input, row.text) && Number.isFinite(row.at) && row.at >= turn.at - 5)
+    if (turn.unsent && turn.at < oldest) continue
+    // A failed send counts as shown only by a row the owner can see: an internal copy nothing claimed stays hidden.
+    const landed = shown.some((row) => sameInFlightText(turn.input, row.text) && Number.isFinite(row.at) && row.at >= turn.at - 5 && (row.visible || !turn.unsent))
     if (landed) continue
     const row = { id: `queue-${turn.publicRunId}`, session_id: sessionId, role: 'user', timestamp: turn.at, content: turn.input,
       wizard_queue: { status: turn.status, reason: turn.reason || (turn.status === 'queued' ? 'capacity' : ''), public_run_id: turn.publicRunId } }
     const anchor = payload.data.findIndex((existing) => existing && typeof existing === 'object' && Number(existing.timestamp ?? existing.created_at) > turn.at)
     payload.data.splice(anchor < 0 ? payload.data.length : anchor, 0, row)
-    shown.push({ text: turn.input, at: turn.at })
+    shown.push({ text: turn.input, at: turn.at, visible: true })
     changed = true
   }
   if (changed && payload.pagination && typeof payload.pagination === 'object' && Number.isFinite(Number(payload.pagination.returned))) payload.pagination.returned = payload.data.length
@@ -1785,6 +1807,11 @@ export function projectWizardMessageHistory(result, sourceResult = result) {
     if (role === 'user') {
       projected.content = projectMemoryContent(projected.content)
       if (Object.hasOwn(projected, 'display_content')) projected.display_content = projectMemoryContent(projected.display_content)
+      // The queue's own copy of an owner message Hermes has not taken in: the client marks it Queued or Not sent.
+      const queue = message.wizard_queue
+      if (queue && typeof queue === 'object' && typeof queue.status === 'string') {
+        projected.wizard_queue = { status: safeHistoryText(queue.status, 40), reason: safeHistoryText(queue.reason, 40), public_run_id: safeHistoryText(queue.public_run_id, 120) }
+      }
     }
     // Completion is authoritative; visible text alone may be commentary or a partial.
     const kind = String(message.display_kind ?? '')

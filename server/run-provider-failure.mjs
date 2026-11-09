@@ -74,7 +74,8 @@ export function normalizeProviderPreflightFailure(payload) {
 
 // Read-only history projection. Preflight never wrote a transcript row: surface its
 // service-owned receipt on the newest page, with a stable assistant identity/time.
-// Never invent an owner message; the original request remains in the durable queue.
+// Never invent an owner message here: the original request remains in the durable queue, which shows it in the
+// thread marked Not sent (service.mjs projectInFlightOwnerTurns).
 export function projectProviderSignInHistory(result, record, params = new URLSearchParams()) {
   let payload
   try { payload = JSON.parse(result.toString('utf8')) } catch { return result }

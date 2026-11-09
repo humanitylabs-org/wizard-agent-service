@@ -143,7 +143,10 @@ it('main HTTP chat history, failed receipt and full Retry input agree without a 
   const run = await (await fetch(origin + `/wizard/hermes/v1/runs/${admission.run_id}`)).json()
   expect(run.status).toBe('failed')
   const history = await (await fetch(origin + '/wizard/hermes/api/sessions/wizard_signin/messages?view=wizard&order=latest')).json()
-  expect(history.data).toHaveLength(0)
+  // 9 Nov 2026 (James): the message he sent never leaves the thread. No assistant notice is invented; his own
+  // message shows once, from the saved request, marked Not sent until sign-in and Retry deliver it.
+  expect(history.data).toHaveLength(1)
+  expect(history.data[0]).toMatchObject({ role: 'user', content: JSON.parse(body).input, wizard_queue: { status: 'failed', reason: 'not_sent' } })
   const detail = await (await fetch(origin + '/wizard/hermes/api/sessions/wizard_signin?view=detail')).json()
   expect(detail.wizard_retry_input).toBe(JSON.parse(body).input)
 })
