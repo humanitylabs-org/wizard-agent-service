@@ -62,7 +62,7 @@ a.go{display:inline-block;margin-top:1rem;padding:.65rem 1.1rem;border-radius:99
 <h1>This page moved</h1>
 <p>Reports now live in Pages. This old address has no matching page, so it was probably renamed or removed.</p>
 ${where}
-<a class="go" href="${escapeHtml(pagesUrl || '/')}">Open Pages</a>
+<a class="go" target="_top" href="${escapeHtml(pagesUrl || '/')}">Open Pages</a>
 </main>
 <script>${APPEARANCE_CLIENT}</script>
 </body></html>
