@@ -92,7 +92,8 @@ import { placeAgentFiles } from './agent-files.mjs'
 import { createIncognito, isIncognitoPath } from './incognito.mjs'
 import { AgentChatInputs } from './agent-chat-inputs.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
-import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf } from './principals.mjs'
+import { createBrowserBoundary } from './browser-boundary.mjs'
+import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf, sameSecret } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 import { DEFAULT_PRIVATE_ACCESS_SOCKET, createPhoneSetup } from './phone-setup.mjs'
@@ -2568,7 +2569,7 @@ const SHELL_RESPONSE_HEADERS = ['content-type', 'content-length', 'content-encod
 
 // Fetch one static shell file for a verified tailnet request. Only plain request headers go out (no identity,
 // cookies or credentials), and only content headers come back; redirects must stay on this origin.
-function proxyShellStatic(request, response, shellOrigin, url, body) {
+function proxyShellStatic(request, response, shellOrigin, url, body, browserBoundary = false) {
   return new Promise((resolvePromise) => {
     // Build on the shell origin explicitly: a path such as "//other.host/x" must never become the host.
     const target = new URL(shellOrigin)
@@ -2576,6 +2577,9 @@ function proxyShellStatic(request, response, shellOrigin, url, body) {
     target.search = url.search
     const headers = { host: target.host }
     for (const name of SHELL_REQUEST_HEADERS) if (typeof request.headers[name] === 'string') headers[name] = request.headers[name]
+    if (browserBoundary) for (const name of ['sec-fetch-dest', 'sec-fetch-mode', 'sec-fetch-site']) {
+      if (typeof request.headers[name] === 'string') headers[name] = request.headers[name]
+    }
     if (body !== undefined) {
       // The forwarded POST keeps its Origin so a same-origin receiver can still check it.
       if (typeof request.headers.origin === 'string') headers.origin = request.headers.origin
@@ -2585,6 +2589,7 @@ function proxyShellStatic(request, response, shellOrigin, url, body) {
     const upstream = httpRequest(target, { method: request.method, headers }, (reply) => {
       const out = {}
       for (const name of SHELL_RESPONSE_HEADERS) if (reply.headers[name] !== undefined) out[name] = reply.headers[name]
+      if (browserBoundary && reply.headers['cross-origin-opener-policy'] !== undefined) out['cross-origin-opener-policy'] = reply.headers['cross-origin-opener-policy']
       if (out.location && !/^\/(?![\/\\])/u.test(String(out.location))) { reply.resume(); sendJson(response, 502, { error: 'upstream_unavailable' }); resolvePromise(); return }
       response.writeHead(reply.statusCode || 502, out)
       reply.pipe(response)
@@ -2883,6 +2888,8 @@ function buildWizardServer(options, lifetime) {
   const ownerTurnRowMeta = ownerTurnRowMetaAt(hermesStatePath)
   const helmDbPath = options.helmDbPath ? resolve(String(options.helmDbPath)) : ''
   const hermesKey = options.hermesKey ?? ''
+  // Browser owner boundary (issue 133): off unless WIZARD_BROWSER_BOUNDARY=1 (server/browser-boundary.mjs).
+  const browserBoundary = createBrowserBoundary(options.browserBoundary)
   const baseRequireAccess = options.requireAccess ?? true
   const baseAccessVerifier = options.accessVerifier
   if (baseRequireAccess && typeof baseAccessVerifier !== 'function') throw new Error('An access verifier (Tailscale Serve or Cloudflare Access) is required')
@@ -5700,6 +5707,18 @@ function buildWizardServer(options, lifetime) {
       if (await servePhoneFeed(request, response, options.phoneFeedDir)) return
       const principal = await (tailnetIngress ? tailnetPrincipals : principals).attach(request)
       if (principal.kind === 'refused') { sendJson(response, url.pathname.startsWith('/wizard/v1/agent-heavy/') ? 403 : principal.status, { error: principal.error, check: principal.check }); return }
+      const staticRequest = ['GET', 'HEAD'].includes(request.method) && shellStaticPath(url.pathname, uxPrefix)
+      // Dedicated machine routes keep their own credentials and downstream route gates.
+      // This exemption never grants an owner principal and is never available on Serve.
+      const machineRequest = browserBoundary.enabled && !tailnetIngress && (
+        (request.method === 'POST' && /^\/wizard\/internal\/(?:agents|heavy|schedules|supervisor)\//u.test(url.pathname)
+          && sameSecret(String(request.headers.authorization || '').replace(/^Bearer /u, ''), options.heavyToken))
+        || (['/wizard/mcp', '/wizard/standard-chats/mcp', '/wizard/v1/agent-context'].includes(url.pathname) && Boolean(bridge?.agentFor(request)))
+      )
+      if (!browserBoundary.allows(request, principal, { staticRequest, machineRequest })) {
+        sendJson(response, 401, { error: 'shell_token_required', check: 'browser_boundary' })
+        return
+      }
       if (isAgentIngress(request) && !agentIngressPathAllowed(request.method, url.pathname)) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
       const namedAgent = url.pathname.match(/^\/wizard\/v1\/agents\/([a-z][a-z0-9-]{0,30})(?:\/|$)/u)?.[1]
       if (principal.kind === 'agent' && namedAgent && (!agents?.read(namedAgent) || agents.read(namedAgent)?.role === 'recovery')) { sendJson(response, 404, { error: 'agent_not_found', check: 'agent.id' }); return }
@@ -5718,7 +5737,7 @@ function buildWizardServer(options, lifetime) {
         if (!accessVerifier || !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (url.pathname === '/wizard/standard-chats/mcp' || url.pathname === '/wizard/mcp' || url.pathname.startsWith('/wizard/mcp/') || url.pathname === '/wizard/v1/agent-context') { sendJson(response, 403, { error: 'box_only' }); return }
         if (tailnetShellOrigin && shellStaticPath(url.pathname, uxPrefix) && ['GET', 'HEAD'].includes(request.method ?? '')) {
-          await proxyShellStatic(request, response, tailnetShellOrigin, url)
+          await proxyShellStatic(request, response, tailnetShellOrigin, url, undefined, browserBoundary.enabled)
           return
         }
       }
