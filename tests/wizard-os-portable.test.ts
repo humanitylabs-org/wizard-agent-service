@@ -147,20 +147,33 @@ describe('WizardOS settings, bootstrap and apps', () => {
   })
 
   // The shell's link switches (wizard-ux links.js): without this block settings.json `links` never reached it.
-  it('links: reader and panel are off by default and only an exact true turns one on', () => {
-    expect(normalizeSettings({}).links).toEqual({ reader: false, panel: false })
-    expect(normalizeSettings({ links: { reader: 'yes', panel: 1 } }).links).toEqual({ reader: false, panel: false })
-    expect(normalizeSettings({ links: [true] }).links).toEqual({ reader: false, panel: false })
+  // Panel is core (James, 9 Nov 2026: "make this part of core"): on unless an exact `false` opts out. Reader stays off.
+  it('links: panel is on by default and only an exact false turns it off; reader stays off unless exactly true', () => {
+    expect(normalizeSettings({}).links).toEqual({ reader: false, panel: true })
+    expect(normalizeSettings({ links: {} }).links).toEqual({ reader: false, panel: true })
+    expect(normalizeSettings({ links: { reader: 'yes', panel: 1 } }).links).toEqual({ reader: false, panel: true })
+    expect(normalizeSettings({ links: [true] }).links).toEqual({ reader: false, panel: true })
     expect(normalizeSettings({ links: { panel: true } }).links).toEqual({ reader: false, panel: true })
+    expect(normalizeSettings({ links: { panel: false } }).links).toEqual({ reader: false, panel: false })
+    expect(normalizeSettings({ links: { reader: true, panel: false } }).links).toEqual({ reader: true, panel: false })
   })
 
-  it('bootstrap carries the links switches to front ends', async () => {
+  it('bootstrap carries the links switches to front ends: panel on for a settings file without the key', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wizard-os-'))
-    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ links: { panel: true } }))
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ network: { base_url: 'https://wizard.tail1234.ts.net' } }))
     const hermes = await startHermes(STOCK)
     const wizard = await startWizard({ upstreamOrigin: hermes.origin, joinedDelegation: 'prefer', settingsPath: join(dir, 'settings.json') })
     const body = await (await fetch(`${wizard}/wizard/v1/bootstrap`)).json()
     expect(body.settings.links).toEqual({ reader: false, panel: true })
+  })
+
+  it('bootstrap honours an explicit links.panel false opt-out', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wizard-os-'))
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ links: { panel: false } }))
+    const hermes = await startHermes(STOCK)
+    const wizard = await startWizard({ upstreamOrigin: hermes.origin, joinedDelegation: 'prefer', settingsPath: join(dir, 'settings.json') })
+    const body = await (await fetch(`${wizard}/wizard/v1/bootstrap`)).json()
+    expect(body.settings.links).toEqual({ reader: false, panel: false })
   })
 
   it('rejects an invalid time zone instead of guessing one', () => {
