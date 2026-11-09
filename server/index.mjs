@@ -1,3 +1,4 @@
+import { browserBoundaryFromEnv } from './browser-boundary.mjs'
 import { defaultKeeperSocket } from './run-stream-keeper.mjs'
 import { createCloudflareAccessVerifier, createTailnetIngress, createWizardServer } from './service.mjs'
 import { containerGateway, createTailnetAccessVerifier, createSettingsTailnetVerifier } from './tailnet-access.mjs'
@@ -100,6 +101,7 @@ const accessVerifier = authMode === 'tailscale' ? tailnetVerifier : authMode ===
   jwksUrl: process.env.WIZARD_ACCESS_JWKS_URL,
 }) : undefined
 server = createWizardServer({
+  ownerPrivateNotes: process.env.WIZARD_OWNER_PRIVATE_NOTES === '1',
   distDir: process.env.WIZARD_STATIC_DIR || '.ui-live',
   upstreamOrigin: process.env.HERMES_ORIGIN || 'http://127.0.0.1:8642',
   helmOrigin: process.env.WIZARD_HELM_ORIGIN || 'http://127.0.0.1:8836',
@@ -153,6 +155,7 @@ server = createWizardServer({
   heavyRpcOrigin: process.env.WIZARD_HEAVY_RPC_ORIGIN || '',
 
   requireAccess,
+  browserBoundary: browserBoundaryFromEnv(),
   ownerProof,
   helperContinueOrigins: (process.env.WIZARD_HELPER_CONTINUE_ORIGINS || '').split(',').map(value => value.trim()).filter(Boolean),
   accessVerifier,
