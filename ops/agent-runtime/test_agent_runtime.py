@@ -1,6 +1,7 @@
 """Restricted runtime driver: env contract, no fallback, vendored files checked. Run: python3 -m unittest ops/agent-runtime/test_agent_runtime.py"""
 import hashlib
 import json
+import re
 import shutil
 import socket
 import subprocess
@@ -333,6 +334,40 @@ class RestrictedDriverTest(unittest.TestCase):
             fh.write("\n# changed\n")
         with self.assertRaises(SystemExit):
             ar.verify_vendored(copy)
+
+
+class RuntimeUnitTest(unittest.TestCase):
+    """The runtime's systemd unit lives in git and keeps secrets in an EnvironmentFile (issue 416)."""
+    HERE = Path(__file__).resolve().parent
+
+    def unit(self) -> dict[str, list[str]]:
+        keys: dict[str, list[str]] = {}
+        for line in (self.HERE / "wizard-agent-runtime.service").read_text().splitlines():
+            if line and not line.startswith(("#", "[")) and "=" in line:
+                key, value = line.split("=", 1)
+                keys.setdefault(key, []).append(value)
+        return keys
+
+    def test_unit_starts_current_release_with_known_flags(self):
+        unit = self.unit()
+        self.assertEqual(len(unit["ExecStart"]), 1)
+        argv = unit["ExecStart"][0].split()
+        self.assertEqual(argv[1], "%h/.local/share/wizard-agent-runtime/current/agent_runtime.py")
+        flags = {a for a in argv if a.startswith("--")}
+        source = (self.HERE / "agent_runtime.py").read_text()
+        known = set(re.findall(r'add_argument\("(--[a-z-]+)"', source))
+        self.assertTrue(flags and flags <= known, flags - known)
+        self.assertIn("--token-file", flags)
+
+    def test_secrets_come_only_from_the_environment_file(self):
+        unit = self.unit()
+        self.assertEqual(unit["EnvironmentFile"], ["%h/.config/wizard-agent-runtime/runtime.env"])
+        self.assertNotIn("Environment", unit)
+        example = (self.HERE / "wizard-agent-runtime.env.example").read_text()
+        defined = {l.split("=", 1)[0]: l.split("=", 1)[1] for l in example.splitlines() if l and not l.startswith("#")}
+        used = set(re.findall(r"\$\{?([A-Z_]+)", unit["ExecStart"][0]))
+        self.assertEqual(used, set(defined))
+        self.assertTrue(all(v == "" for v in defined.values()), "example must not carry values")
 
 
 if __name__ == "__main__":
