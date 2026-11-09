@@ -24,7 +24,7 @@ import { agentReadablePaths, projectPrivateFilePaths } from './private-file-proj
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
 import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
-import { DurableRunQueue, queueRequestHash, queuedInputTextOf } from './run-queue.mjs'
+import { DurableRunQueue, NOT_STARTED_REQUEUE_PREFIX, queueRequestHash, queuedInputTextOf } from './run-queue.mjs'
 import { createHeavyIntegration, HEAVY_KIND } from './heavy-integration.mjs'
 import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
@@ -922,6 +922,14 @@ function durableScreenshotCandidate(record) {
 // appended: the repr is replaced with the queued input text and the notice part is dropped. Owner turns (list-shaped input) whose Hermes row is missing entirely (compaction,
 // lineage) are restored from the queue as synthetic user rows. Machine-tagged strings never become owner turns.
 const OWNER_TURN_WINDOW_SECONDS = 24 * 3600
+// When the owner's message was really sent. Wizard's own automatic resend of a reply Hermes never started
+// (`wizard-not-started-requeue-N-…`) is a new queue row created minutes later, but it is the same message: the
+// queue keeps the first send's time in `retryOrderAt`. Without this the thread said "sent 5 minutes ago" for a
+// message the owner sent an hour earlier (9 Nov 2026). Null for every other row (manual Retry keeps its own time).
+export function ownerSentAt(record) {
+  const original = Number(record?.retryOrderAt)
+  return String(record?.idempotencyKey ?? '').startsWith(NOT_STARTED_REQUEUE_PREFIX) && Number.isFinite(original) && original > 0 ? original : null
+}
 const SUPERSEDED_STATUSES = new Set(['interrupted', 'failed', 'cancelled', 'canceled'])
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'canceled', 'interrupted'])
 // Hermes re-renders attachments in a row's text (markers, paths), so long messages match on their opening words.
@@ -970,7 +978,7 @@ export function restoreOwnerTurns(result, runQueue, sessionId, rowMeta = null, {
     // Only set when the input carries an image, so text-only turns match exactly as before.
     const marked = screenshots && Array.isArray(body?.input) ? screenshotInputText(body.input).trim() : ''
     const shot = marked.includes(DURABLE_SCREENSHOT_MARKER) && marked !== input ? marked : ''
-    const at = Number(record?.payload?.created_at ?? record?.createdAt)
+    const at = ownerSentAt(record) ?? Number(record?.payload?.created_at ?? record?.createdAt)
     const id = typeof record?.payload?.admission_id === 'string' ? record.payload.admission_id : ''
     const run = typeof record?.upstreamRunId === 'string' ? record.upstreamRunId : ''
     // The owner's app sends list-shaped input (or a plain sentence typed in older builds); every machine message
@@ -1093,7 +1101,7 @@ export function queuedOwnerHistory(runQueue, sessionId) {
     let body = null
     try { body = JSON.parse(String(record?.body ?? '{}')) } catch { /* unreadable body */ }
     const input = visibleInputText(body?.input).trim()
-    const at = Number(record?.createdAt)
+    const at = ownerSentAt(record) ?? Number(record?.createdAt)
     const owner = !body?._wizard_background_recovery && Boolean(input)
       && (Array.isArray(body?.input) || (typeof body?.input === 'string' && !MACHINE_INPUT.test(input)))
     if (!owner || !Number.isFinite(at)) continue
@@ -1123,7 +1131,7 @@ export function projectInFlightOwnerTurns(result, runQueue, sessionId) {
     let body = null
     try { body = JSON.parse(String(record?.body ?? '{}')) } catch { /* unreadable body */ }
     const input = visibleInputText(body?.input).trim()
-    const at = Number(record?.createdAt)
+    const at = ownerSentAt(record) ?? Number(record?.createdAt)
     const owner = !body?._wizard_background_recovery && !record?.continuation && Boolean(input)
       && (Array.isArray(body?.input) || (typeof body?.input === 'string' && !MACHINE_INPUT.test(input)))
     if (owner && Number.isFinite(at)) turns.push({ input, at, status, reason: String(record?.waitingReason ?? ''), publicRunId: String(record.publicRunId) })
