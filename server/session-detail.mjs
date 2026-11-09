@@ -14,6 +14,19 @@ export async function searchMessageText(fetchPage, query) {
   }
   throw new Error('search history limit reached');
 }
+// Issue 145, point 2: once the owner's own turns are restored on a history page (their internal_notification kind
+// cleared), a restored multipart row still holds the content list. Retry reads text, so give it the owner's words.
+const retryPartText = (part) => typeof part === 'string' ? part
+  : Array.isArray(part) ? part.map(retryPartText).filter(Boolean).join('\n')
+  : !part || typeof part !== 'object' ? ''
+  : typeof part.text === 'string' ? (part.text.startsWith('[System:') ? '' : part.text)
+  : retryPartText(part.content)
+export function ownerRetryRows(page) {
+  for (const key of ['data', 'messages', 'items']) for (const row of Array.isArray(page?.[key]) ? page[key] : []) {
+    if (row && typeof row === 'object' && row.role === 'user' && !row.display_kind && Array.isArray(row.content)) row.content = retryPartText(row.content)
+  }
+  return page
+}
 export async function fullRetryInput(fetchPage) {
   for (let offset=0; offset<100000; offset+=100) {
     const p=await fetchPage(offset), rows=p.data||p.messages||p.items||[];

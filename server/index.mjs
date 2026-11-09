@@ -193,6 +193,10 @@ server = createWizardServer({
   routedOwnerTurns: process.env.WIZARD_ROUTED_OWNER_TURNS === '1',
   // Owner turns with an inline screenshot, which Hermes flattens to "[screenshot]" (issue 145). Off by default.
   ownerScreenshotTurns: process.env.WIZARD_OWNER_SCREENSHOT_TURNS === '1',
+  // Retry rebuilds the owner's own restored turn (issue 145). Off by default.
+  ownerTurnRetry: process.env.WIZARD_OWNER_TURN_RETRY === '1',
+  // Finished owner sends keep their words after queue retention prunes them (issue 145). Off by default.
+  ownerTurnLedger: process.env.WIZARD_OWNER_TURN_LEDGER === '1',
   // Alongside boxes (host Tailscale, no helper): a phone visit through the shell's tailnet address marks the
   // phone step seen (issue 146). Off by default.
   hostPhoneSeen: process.env.WIZARD_HOST_PHONE_SEEN === '1',

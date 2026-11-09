@@ -17,6 +17,20 @@ const HEAVY_COLUMNS = new Set(['body', 'dispatch_body', 'worker_dispatch_body'])
 const RETRIABLE = new Set([408, 409, 425, 429, 500, 502, 503, 504])
 const PUBLIC_ID = /^wizardq_[0-9a-f]{32}$/
 const SAFE_KEY = /^[^\p{Cc}]{1,256}$/u
+// Owner-turn ledger (issue 145): newest rows kept, service-written sends never kept.
+const OWNER_LEDGER_LIMIT = 10_000
+const OWNER_LEDGER_SERVICE_KEY = /^(?:wizard-heavy-|wizard-follow-through-|wizard-helper-receipt-|schedule:)/u
+const OWNER_LEDGER_IMAGE_TYPES = new Set(['image', 'image_url', 'input_image'])
+function slimOwnerInput(input) {
+  if (typeof input === 'string') return input
+  if (Array.isArray(input)) return input.map(slimOwnerInput)
+  if (!input || typeof input !== 'object') return null
+  if (OWNER_LEDGER_IMAGE_TYPES.has(input.type)) return { type: input.type }
+  const kept = {}
+  for (const key of ['role', 'type', 'text']) if (typeof input[key] === 'string') kept[key] = input[key]
+  if (input.content !== undefined) kept.content = slimOwnerInput(input.content)
+  return kept
+}
 // Only service-owned continuation metadata selects the background lane. Manual
 // Continue is an interactive request; model text never determines scheduling.
 export const isBackgroundContinuation = record => Boolean(record.continuation)
@@ -197,6 +211,9 @@ export class DurableRunQueue {
     cancelUpstream = null,
     onRequeued = () => {},
     onNotStartedGaveUp = () => {},
+    // Issue 145, point 3 (WIZARD_OWNER_TURN_LEDGER=1): before retention deletes a finished owner send, keep its
+    // words (attachments stripped) so the owner's own message can still be matched or restored afterwards.
+    keepOwnerTurns = false,
   }) {
     if (!statePath) throw new Error('Wizard run queue state path is required')
     if (!Number.isSafeInteger(maxActive) || maxActive < 1 || maxActive > 64) throw new Error('Wizard run queue capacity is invalid')
@@ -236,6 +253,7 @@ export class DurableRunQueue {
     this.cancelUpstream = cancelUpstream
     this.onRequeued = onRequeued
     this.onNotStartedGaveUp = onNotStartedGaveUp
+    this.keepOwnerTurns = keepOwnerTurns === true
     this.stalledSince = new Map()
     this.statements = new Map()
     this.failureProjections = new Map()
@@ -337,6 +355,11 @@ export class DurableRunQueue {
     })
     if (this.database.prepare('SELECT 1 FROM wizard_run_queue WHERE agent_id <> ? LIMIT 1').get(this.agentId)) throw new Error('Wizard run queue belongs to another agent')
     this.database.exec('CREATE TABLE IF NOT EXISTS wizard_provider_signin_seen (public_run_id TEXT PRIMARY KEY REFERENCES wizard_run_queue(public_run_id) ON DELETE CASCADE);')
+    if (this.keepOwnerTurns) this.database.exec(`CREATE TABLE IF NOT EXISTS wizard_owner_turn_ledger (
+      public_run_id TEXT PRIMARY KEY, runtime TEXT NOT NULL, session_id TEXT NOT NULL, body TEXT NOT NULL, status TEXT NOT NULL,
+      upstream_run_id TEXT NOT NULL, admission_id TEXT NOT NULL DEFAULT '', retry_source_id TEXT NOT NULL DEFAULT '',
+      retry_order_at REAL NOT NULL DEFAULT 0, admitted_at REAL NOT NULL, created_at REAL NOT NULL);
+      CREATE INDEX IF NOT EXISTS wizard_owner_turn_ledger_session ON wizard_owner_turn_ledger(runtime, session_id, created_at);`)
     this.database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000;')
     } catch (error) {
       try { this.database.close() } catch { /* preserve original */ }
@@ -458,9 +481,39 @@ export class DurableRunQueue {
 
   admittedForSession(runtime, sessionId) {
     if (!['direct', 'operator'].includes(runtime) || typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) return []
-    return this.database.prepare(`SELECT * FROM wizard_run_queue
+    const live = this.database.prepare(`SELECT * FROM wizard_run_queue
       WHERE runtime = ? AND session_id = ? AND upstream_run_id <> ''
       ORDER BY created_at, public_run_id`).all(runtime, sessionId).map((row) => this._record(row))
+    if (!this.keepOwnerTurns) return live
+    const kept = this.database.prepare(`SELECT * FROM wizard_owner_turn_ledger WHERE runtime = ? AND session_id = ?
+      ORDER BY created_at, public_run_id`).all(runtime, sessionId).map((row) => ({
+      publicRunId: row.public_run_id, runtime: row.runtime, sessionId: row.session_id, idempotencyKey: '', body: row.body,
+      continuation: null, status: row.status, upstreamRunId: row.upstream_run_id,
+      payload: { created_at: Number(row.admitted_at), ...(row.admission_id ? { admission_id: row.admission_id } : {}) },
+      retrySourceId: row.retry_source_id || '', retryOrderAt: Number(row.retry_order_at) || 0,
+      createdAt: Number(row.created_at), updatedAt: Number(row.created_at), terminalAt: Number(row.created_at), ownerTurnLedger: true }))
+    if (!kept.length) return live
+    return [...kept, ...live].sort((a, b) => a.createdAt - b.createdAt || (a.publicRunId < b.publicRunId ? -1 : a.publicRunId > b.publicRunId ? 1 : 0))
+  }
+
+  // Keeps only what owner-turn matching reads: the input's words and the kind of each image (never its bytes).
+  _keepOwnerTurns(doomed) {
+    const insert = this.database.prepare(`INSERT OR IGNORE INTO wizard_owner_turn_ledger (public_run_id, runtime, session_id, body,
+      status, upstream_run_id, admission_id, retry_source_id, retry_order_at, admitted_at, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+    for (const row of doomed) {
+      if (row.runtime !== 'direct' || !row.upstream_run_id || parseJson(row.continuation_json, null)
+        || OWNER_LEDGER_SERVICE_KEY.test(String(row.idempotency_key ?? ''))) continue
+      let body
+      try { body = JSON.parse(row.body) } catch { continue }
+      if (!body || typeof body !== 'object' || body._wizard_background_recovery || body.input === undefined) continue
+      const payload = parseJson(row.payload_json, {})
+      const admittedAt = Number(payload?.created_at)
+      insert.run(row.public_run_id, row.runtime, row.session_id, JSON.stringify({ input: slimOwnerInput(body.input) }), row.status,
+        row.upstream_run_id, typeof payload?.admission_id === 'string' ? payload.admission_id : '', row.retry_source_id || '',
+        Number(row.retry_order_at) || 0, Number.isFinite(admittedAt) ? admittedAt : Number(row.created_at), Number(row.created_at))
+    }
+    this.database.prepare(`DELETE FROM wizard_owner_turn_ledger WHERE public_run_id IN (
+      SELECT public_run_id FROM wizard_owner_turn_ledger ORDER BY created_at DESC LIMIT -1 OFFSET ${OWNER_LEDGER_LIMIT})`).run()
   }
 
   /** Every queued row for a thread, including ones that have not reached Hermes (no upstream run yet). */
@@ -1653,11 +1706,23 @@ export class DurableRunQueue {
     const now = nowSeconds()
     if (!force && now - (this.lastPruneAt ?? 0) < 60) return
     this.lastPruneAt = now
-    this.database.prepare(`DELETE FROM wizard_run_queue WHERE public_run_id IN (
-      SELECT public_run_id FROM wizard_run_queue INDEXED BY wizard_run_queue_terminal
+    const doomed = `SELECT public_run_id FROM wizard_run_queue INDEXED BY wizard_run_queue_terminal
        WHERE terminal_at IS NOT NULL AND terminal_at < ?
           AND idempotency_key NOT LIKE 'schedule:%'
-       ORDER BY terminal_at DESC LIMIT -1 OFFSET 128
-    )`).run(now - 7 * 24 * 60 * 60)
+       ORDER BY terminal_at DESC LIMIT -1 OFFSET 128`
+    const cutoff = now - 7 * 24 * 60 * 60
+    if (this.keepOwnerTurns) {
+      this.database.exec('BEGIN IMMEDIATE')
+      try {
+        this._keepOwnerTurns(this.database.prepare(`SELECT * FROM wizard_run_queue WHERE public_run_id IN (${doomed})`).all(cutoff))
+        this.database.prepare(`DELETE FROM wizard_run_queue WHERE public_run_id IN (${doomed})`).run(cutoff)
+        this.database.exec('COMMIT')
+      } catch (error) {
+        try { this.database.exec('ROLLBACK') } catch { /* keep the original error */ }
+        throw error
+      }
+      return
+    }
+    this.database.prepare(`DELETE FROM wizard_run_queue WHERE public_run_id IN (${doomed})`).run(cutoff)
   }
 }
