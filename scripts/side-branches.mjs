@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // Read-only census of leftover live-first side branches (issue 418): every `integration/*`, `live/*` and `live-*`
 // branch on the remote, split into
-//   safe          no commit that is not already on main (patch-id compare, like `git cherry`), no open PR;
+//   safe          no commit that is not already on main (patch-id compare, like `git cherry`, plus any merge
+//                 commit that adds content of its own), no open PR;
 //   needs-decision carries commits main does not have: land by PR, abandon with sign-off, or keep with a reason;
 //   held          tied to an open PR, so it is left alone until that PR is merged or closed.
 // `owner-snapshot/*` and every other prefix are never listed. The script changes nothing: it only prints.
@@ -21,6 +22,19 @@ function gitIn(cwd) {
   return (...args) => execFileSync('git', args, { cwd, encoding: 'utf8', maxBuffer: 64 << 20 }).trim();
 }
 
+// True only when a two-parent merge adds nothing of its own: re-merging its parents gives exactly its tree.
+// Conflicts, octopus merges or an older git without `merge-tree --write-tree` all count as not clean.
+function cleanMerge(git, sha) {
+  try {
+    const parents = git('rev-list', '--parents', '-n', '1', sha).split(' ').slice(1);
+    if (parents.length !== 2) return false;
+    const tree = git('merge-tree', '--write-tree', parents[0], parents[1]).split('\n')[0];
+    return tree === git('rev-parse', `${sha}^{tree}`);
+  } catch {
+    return false;
+  }
+}
+
 export function sideBranches({ cwd = process.cwd(), remote = 'origin', base = 'main', openPrs = [] } = {}) {
   const git = gitIn(cwd);
   const baseRef = `refs/remotes/${remote}/${base}`;
@@ -33,7 +47,11 @@ export function sideBranches({ cwd = process.cwd(), remote = 'origin', base = 'm
   const rows = names.map(name => {
     const ref = prefix + name;
     // `git cherry base ref`: "+" = a commit whose change is not on base, "-" = an equivalent change already landed.
-    const unique = git('cherry', baseRef, ref).split('\n').filter(l => l.startsWith('+')).length;
+    // `git cherry` skips merge commits, so a merge whose result differs from a clean re-merge of its parents
+    // (a conflict resolution or an edit made inside the merge) is counted as unique too.
+    const cherry = git('cherry', baseRef, ref).split('\n').filter(l => l.startsWith('+')).length;
+    const merges = git('rev-list', '--merges', `${baseRef}..${ref}`).split('\n').filter(Boolean);
+    const unique = cherry + merges.filter(m => !cleanMerge(git, m)).length;
     const last = git('log', '-1', '--format=%cs', ref);
     const group = open.has(name) ? 'held' : unique === 0 ? 'safe' : 'needs-decision';
     return { name, unique, last, group };
@@ -89,6 +107,7 @@ export function main(argv = process.argv.slice(2), { cwd = process.cwd(), log = 
   let o;
   try {
     o = parseArgs(argv);
+    if (o.printDelete && !o.openPrs) throw new Error('--print-delete needs --open-prs, so an open PR head is never offered for deletion');
     const openPrs = o.openPrs ? openPrHeads(readFileSync(o.openPrs, 'utf8')) : [];
     if (!o.openPrs) err('note: no --open-prs file given, so no branch is marked held');
     const r = sideBranches({ cwd, remote: o.remote, base: o.base, openPrs });
