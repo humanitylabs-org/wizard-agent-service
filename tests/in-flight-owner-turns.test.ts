@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { projectInFlightOwnerTurns, queuedOwnerHistory } from '../server/service.mjs'
+import { ownerSentAt, projectInFlightOwnerTurns, queuedOwnerHistory } from '../server/service.mjs'
 const SID = 'wizard_1_abc'
 const row = (publicRunId: string, text: string, status: string, createdAt: number, extra: any = {}) => ({
   publicRunId, sessionId: SID, status, createdAt, waitingReason: extra.waitingReason ?? '', retrySourceId: extra.retrySourceId ?? '',
@@ -60,4 +60,21 @@ it('keeps a longer queued message visible when Hermes only shows a shorter one i
   const history = [{ id: 1, role: 'user', content: 'also check', timestamp: 101 }]
   const out = run(page(history), [row('wizardq_3', 'also check the footer', 'running', 102)])
   expect(out.data.map((r: any) => r.content)).toEqual(['also check', 'also check the footer'])
+})
+
+describe('a message Wizard resent because Hermes never started it keeps its first send time', () => {
+  // 9 Nov 2026: the thread said "sent 5 minutes ago" for a voice note sent an hour earlier, because the
+  // third automatic resend is a new queue row created minutes ago. The queue keeps the first send in retryOrderAt.
+  const resent = row('wizardq_3', 'fix the errored threads', 'queued', 4000, { retrySourceId: 'wizardq_1' })
+  const resentRow = { ...resent, idempotencyKey: 'wizard-not-started-requeue-3-wizardq_2', retryOrderAt: 1000 }
+  it('shows the first send time in the in-flight projection and in the new-thread history', () => {
+    expect(run(page([]), [resentRow]).data[0].timestamp).toBe(1000)
+    expect(JSON.parse(queuedOwnerHistory(queue([resentRow]), SID)!.toString()).data[0].timestamp).toBe(1000)
+  })
+  it('does not shift anything else: a manual Retry or a first send keeps its own created time', () => {
+    const manual = { ...row('wizardq_4', 'try again', 'queued', 4000, { retrySourceId: 'wizardq_1' }), idempotencyKey: 'wos-retry-1', retryOrderAt: 1000 }
+    expect(run(page([]), [manual]).data[0].timestamp).toBe(4000)
+    expect(run(page([]), [row('wizardq_5', 'hello', 'queued', 4000)]).data[0].timestamp).toBe(4000)
+    expect(ownerSentAt({ idempotencyKey: 'wizard-not-started-requeue-1-x', retryOrderAt: 0 })).toBeNull()
+  })
 })
