@@ -73,6 +73,47 @@ test('redacts label values in JSON, colon and quoted equals formats', () => {
   }
 })
 
+for (const quote of ['"', "'"]) {
+  for (const depth of [1, 2, 3]) {
+    test(`redacts ${quote === '"' ? 'double' : 'single'}-quoted labelled passwords through ${depth} JSON layers`, () => {
+      const fragments = ['alpha', 'beta', 'gamma']
+      const secret = fragments.join(' ')
+      let value = `password: ${quote}${secret}${quote}`
+      let expected = `password: ${quote}[redacted]${quote}`
+      for (let layer = 0; layer < depth; layer++) {
+        value = JSON.stringify({ message: value, reason: 'busy' })
+        expected = JSON.stringify({ message: expected, reason: 'busy' })
+      }
+      const raw = `HTTP 500: ${value}; retry later`
+      const payloads = [
+        { status: 'failed', error: raw },
+        { status: 'failed', error: { message: raw } },
+        { status: 'failed', error: 'Run failed', output: `Provider said: ${raw}` },
+        { status: 'failed', error: 'Run failed', final_response: { message: `Provider said: ${raw}` } },
+      ]
+      for (const payload of payloads) {
+        const result = classifyRunError(payload)
+        assert.equal(result?.code, 'unknown', 'provider status must survive')
+        assertRedacted(result, secret, 'JSON labelled password')
+        for (const fragment of fragments) {
+          assert.equal(result.message.includes(fragment), false, 'no password fragment may survive')
+        }
+        assert.equal(result.message === `HTTP 500: ${expected}; retry later`, true, 'JSON fields and outside explanation must survive')
+        assert.deepEqual(classifyRunError({ status: 'failed', error: result.message }), result, 'label redaction must remain idempotent')
+      }
+    })
+  }
+}
+
+test('preserves decoded unquoted label markers across JSON passes', () => {
+  const secret = ['alpha', 'beta', 'gamma'].join('')
+  const value = JSON.stringify({ message: `password: ${secret}`, reason: 'busy' })
+  const result = classifyRunError({ status: 'failed', error: `HTTP 500: ${value}; retry later` })
+  assertRedacted(result, secret, 'JSON unquoted label')
+  assert.equal(result.message === 'HTTP 500: {"message":"password: [redacted]","reason":"busy"}; retry later', true, 'redaction markers must not gain trailing brackets')
+  assert.deepEqual(classifyRunError({ status: 'failed', error: result.message }), result)
+})
+
 test('redacts entire long quoted values before applying the message bound', () => {
   const secret = ['HiddenBeginning', ' private words "with quotes" and \\ escapes '.repeat(30), 'HiddenEnd'].join('')
   const formats = [

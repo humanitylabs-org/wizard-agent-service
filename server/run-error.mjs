@@ -58,22 +58,31 @@ function httpStatusOf(text) {
 // Allow an underscore before a recognized prefix; arbitrary joined words and unknown secrets remain unproven.
 const CREDENTIAL = /(?<![A-Za-z0-9])(?:(?:sk-|rk-|pk-|sess-)[A-Za-z0-9_+/.=*-]+|AIza[A-Za-z0-9_-]+|(?:ghp_|gho_|ghu_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]+|eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/g
 const KEYISH = /[A-Za-z0-9][A-Za-z0-9_\-+/=.*]{15,}/g
-// Consume whole quoted values (including escaped quotes) before the message is shortened.
-const LABELED_SECRET = /(\b(?:(?:api|access|refresh|auth|client)[ _-]?)?(?:key|token|secret|password)(?:[ _-]provided)?["']?\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)/gi
+// Consume whole quoted values before shortening; serialized opening quotes are
+// handled at the decoded-string boundary, never as unquoted values.
+const LABELED_SECRET = /(\b(?:(?:api|access|refresh|auth|client)[ _-]?)?(?:key|token|secret|password)(?:[ _-]provided)?["']?\s*[:=]\s*)(?!\\+["'])(\[redacted\]|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;}\]]+)/gi
 const BEARER = /\bBearer\s+(?!\[redacted\])(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s"',;}\]]+)/gi
 // Always consume from an escaped opening quote through the end of this input.
 // JSON decoding bounds the input to one complete string; raw trailing prose is discarded.
 const ESCAPED_BEARER = /\bBearer\s+\\+["'][\s\S]*/gi
 const JSON_STRING = /"(?:\\.|[^"\\])*"/g
 
-function redactBearers(raw) {
-  const redact = (value) => value.replace(ESCAPED_BEARER, 'Bearer [redacted]').replace(BEARER, 'Bearer [redacted]')
-  // Decode complete JSON string literals first so serialized quotes cannot become
-  // token boundaries. Re-encoding preserves the surrounding JSON and explanation.
+function redactBearersAndLabels(raw) {
+  // Bearer values must be consumed before a label can consume the word Bearer.
+  const redact = (value) => value
+    .replace(ESCAPED_BEARER, 'Bearer [redacted]')
+    .replace(BEARER, 'Bearer [redacted]')
+    .replace(LABELED_SECRET, (_match, label, secret) => {
+      const quote = secret[0] === '"' || secret[0] === "'" ? secret[0] : ''
+      return `${label}${quote}[redacted]${quote}`
+    })
+  // Decode complete JSON string literals before redacting both supported forms.
+  // Recurse for serialized JSON inside a string; each decoded input is shorter.
+  // Re-encoding preserves the surrounding JSON and explanation.
   const serialized = raw.replace(JSON_STRING, (value) => {
     try {
       const decoded = JSON.parse(value)
-      const redacted = redact(decoded)
+      const redacted = redactBearersAndLabels(decoded)
       return redacted === decoded ? value : JSON.stringify(redacted)
     } catch {
       return value
@@ -85,12 +94,7 @@ function redactBearers(raw) {
 function messageOf(payload) {
   const said = [payload.output, payload.final_response].map((v) => /Provider said:\s*([^\n]+)/.exec(textOf(v))?.[1]).find(Boolean)
   const raw = said || textOf(payload.error) || ''
-  // Redact Bearer values before a label can consume the word Bearer and leave its value.
-  return redactBearers(raw)
-    .replace(LABELED_SECRET, (_match, label, value) => {
-      const quote = value[0] === '"' || value[0] === "'" ? value[0] : ''
-      return `${label}${quote}[redacted]${quote}`
-    })
+  return redactBearersAndLabels(raw)
     .replace(CREDENTIAL, '[redacted]')
     .replace(KEYISH, (m) => /[A-Za-z]/.test(m) && /\d/.test(m) ? '[redacted]' : m)
     .replace(/\s+/g, ' ').trim().slice(0, 200)
