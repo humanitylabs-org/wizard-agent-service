@@ -704,6 +704,29 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.ok(document.headers.get('content-type').startsWith('text/plain'))
     assert.ok(document.headers.get('content-disposition').includes('synthetic.txt'))
   },
+  'file-store-retention': async s => {
+    // Issue 422: the built-in file store never forgets a file because more than 5,000 came after it.
+    const firstBytes = Buffer.from('PARITY_FIRST_UPLOAD_BYTES\n')
+    const r = await s.upload(firstBytes, 'first-upload.txt', 'text/plain'); assert.equal(r.status, 201)
+    const first = (await r.json()).file
+    const indexPath = join(s.root, 'media.json'), index = JSON.parse(readFileSync(indexPath))
+    for (let n = 0; n < 5_001; n += 1) index.files.push({ id: `wf_${n.toString(16).padStart(32, '0')}`, rel: `Inbox/2026-10-10/filler-${n}.txt`, filename: `filler-${n}.txt`, mime: 'text/plain', bytes: 1, sha256: `filler-${n}`, created_at: '2026-10-10T12:00:00.000Z', duplicate_of: null })
+    writeFileSync(indexPath, JSON.stringify(index))
+    const later = await s.upload(Buffer.from('PARITY_LATER_UPLOAD\n'), 'later.txt', 'text/plain'); assert.equal(later.status, 201)
+    assert.equal(JSON.parse(readFileSync(indexPath)).files.length, 5_003, 'no count limit drops records')
+    const dup = await s.upload(firstBytes, 'first-again.txt', 'text/plain'); assert.equal(dup.status, 201)
+    assert.equal((await dup.json()).file.duplicate_of, first.id, 'duplicate detection still sees the first file')
+    const before = statSync(indexPath, { bigint: true })
+    const opened = await s.raw(`/wizard/files/${first.id}/content`)
+    assert.equal(opened.status, 200); assert.ok(opened.headers.get('content-type').startsWith('text/plain'))
+    assert.deepEqual(Buffer.from(await opened.arrayBuffer()), firstBytes)
+    const after = statSync(indexPath, { bigint: true })
+    assert.deepEqual([after.ino, after.mtimeNs], [before.ino, before.mtimeNs], 'opening an attachment does not rewrite the list')
+    await admit(s, { input: 'Read the first attached document again', wizard_file_ids: [first.id] })
+    const body = sent(s), text = typeof body.input === 'string' ? body.input : body.input[0].content[0].text
+    assert.ok(text.includes('trusted_path') && !text.includes('placement_error'), 'the agent still resolves the first file')
+    if (['container', 'restricted'].includes(s.kind)) assert.deepEqual(Buffer.from(s.placed.at(-1).payload.data_base64, 'base64'), firstBytes)
+  },
   'read-receipts': async s => {
     const now = Date.now(), record = { agent_id: s.id, session_id: 'wizard_parity', updatedAt: new Date(now).toISOString(), previewFingerprint: 'synthetic', messageCount: 2, status: 'completed', seenAt: now }
     const retiredKey = 'agent/retired/direct:retired-thread'
