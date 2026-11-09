@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createServer, type Server } from 'node:http'
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../server/service.mjs'
-import { externalUrl, normalizeSettings } from '../server/wizard-os-settings.mjs'
+import { externalUrl, normalizeSettings, readSettings } from '../server/wizard-os-settings.mjs'
 import { routerSystemPrompt } from '../server/voice-router.mjs'
 
 const servers: Server[] = []
@@ -147,20 +147,63 @@ describe('WizardOS settings, bootstrap and apps', () => {
   })
 
   // The shell's link switches (wizard-ux links.js): without this block settings.json `links` never reached it.
-  it('links: reader and panel are off by default and only an exact true turns one on', () => {
-    expect(normalizeSettings({}).links).toEqual({ reader: false, panel: false })
-    expect(normalizeSettings({ links: { reader: 'yes', panel: 1 } }).links).toEqual({ reader: false, panel: false })
-    expect(normalizeSettings({ links: [true] }).links).toEqual({ reader: false, panel: false })
+  // Panel is core (James, 9 Nov 2026: "make this part of core"): on unless an exact `false` opts out. Reader stays off.
+  it('links: panel is on by default and only an exact false turns it off; reader stays off unless exactly true', () => {
+    expect(normalizeSettings({}).links).toEqual({ reader: false, panel: true })
+    expect(normalizeSettings({ links: {} }).links).toEqual({ reader: false, panel: true })
+    expect(normalizeSettings({ links: { reader: 'yes', panel: 1 } }).links).toEqual({ reader: false, panel: true })
+    expect(normalizeSettings({ links: [true] }).links).toEqual({ reader: false, panel: true })
     expect(normalizeSettings({ links: { panel: true } }).links).toEqual({ reader: false, panel: true })
+    expect(normalizeSettings({ links: { panel: false } }).links).toEqual({ reader: false, panel: false })
+    expect(normalizeSettings({ links: { reader: true, panel: false } }).links).toEqual({ reader: true, panel: false })
   })
 
-  it('bootstrap carries the links switches to front ends', async () => {
+  it('bootstrap carries the links switches to front ends: panel on for a settings file without the key', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wizard-os-'))
-    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ links: { panel: true } }))
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ clock: { timezone: 'UTC' } }))
     const hermes = await startHermes(STOCK)
     const wizard = await startWizard({ upstreamOrigin: hermes.origin, joinedDelegation: 'prefer', settingsPath: join(dir, 'settings.json') })
     const body = await (await fetch(`${wizard}/wizard/v1/bootstrap`)).json()
     expect(body.settings.links).toEqual({ reader: false, panel: true })
+  })
+
+  it('bootstrap honours an explicit links.panel false opt-out', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wizard-os-'))
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ links: { panel: false } }))
+    const hermes = await startHermes(STOCK)
+    const wizard = await startWizard({ upstreamOrigin: hermes.origin, joinedDelegation: 'prefer', settingsPath: join(dir, 'settings.json') })
+    const body = await (await fetch(`${wizard}/wizard/v1/bootstrap`)).json()
+    expect(body.settings.links).toEqual({ reader: false, panel: false })
+  })
+
+  // The off-by-default trial release persisted the whole normalized object on every settings PUT (a response
+  // style or agent name change), writing {reader:false, panel:false} for owners who never chose either. That exact
+  // shape is read as "not chosen" (panel on); an owner's own {"panel": false} still opts out.
+  it('links: the trial release\'s auto-written {reader:false, panel:false} is not an owner opt-out', () => {
+    expect(normalizeSettings({ links: { reader: false, panel: false } }).links).toEqual({ reader: false, panel: true })
+    expect(normalizeSettings({ links: { panel: false } }).links).toEqual({ reader: false, panel: false })
+    expect(normalizeSettings({ links: { reader: true, panel: false } }).links).toEqual({ reader: true, panel: false })
+  })
+
+  it('a settings PUT never writes link defaults into settings.json; owner-written link keys are kept and an owner PUT of panel false sticks', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wizard-os-'))
+    const path = join(dir, 'settings.json'), proof = 'synthetic-owner-proof-'.repeat(3)
+    const put = async (origin: string, body: object) => fetch(`${origin}/wizard/v1/settings`, { method: 'PUT', headers: { 'x-wizard-owner-proof': proof, 'content-type': 'application/json' }, body: JSON.stringify(body) })
+    for (const [stored, expected] of [[undefined, undefined], [{ panel: false }, { panel: false }], [{ reader: true }, { reader: true }], [{ reader: false, panel: false }, undefined]] as const) {
+      writeFileSync(path, JSON.stringify(stored === undefined ? { clock: { timezone: 'UTC' } } : { links: stored }))
+      const server = createWizardServer({ requireAccess: false, ownerProof: proof, settingsPath: path, followThrough: false })
+      await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
+      const origin = `http://127.0.0.1:${(server.address() as any).port}`
+      try {
+        expect((await put(origin, { response_style: 'concise' })).status).toBe(200)
+        expect(JSON.parse(readFileSync(path, 'utf8')).links, JSON.stringify(stored)).toEqual(expected)
+        expect(readSettings(path).settings.links.panel).toBe(stored?.panel !== false || (stored as any)?.reader === false)
+        expect((await put(origin, { links: { reader: false, panel: false } })).status).toBe(200)
+        expect(readSettings(path).settings.links.panel, 'an owner PUT of panel false opts out').toBe(false)
+        expect((await put(origin, { response_style: 'own' })).status).toBe(200)
+        expect(readSettings(path).settings.links.panel, 'and stays out across later PUTs').toBe(false)
+      } finally { await new Promise<void>(resolve => server.close(() => resolve())) }
+    }
   })
 
   it('rejects an invalid time zone instead of guessing one', () => {

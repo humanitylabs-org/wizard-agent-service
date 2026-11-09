@@ -42,7 +42,7 @@ import { connectedProviderModels, createAiUsageReader } from './ai-usage.mjs'
 import { confirmedClaudePoolExhaustion, CLAUDE_POOL_SAFE_ERROR } from './claude-cooldown-bridge.mjs'
 import { decorateReconnect } from './provider-reconnect.mjs'
 import { projectProviderSignInHistory, providerSignInEvents } from './run-provider-failure.mjs'
-import { bootstrapPayload, readApps, readSettings, normalizeSettings, recordResponseStyleSwitch, RESPONSE_STYLES, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
+import { bootstrapPayload, readApps, readSettings, normalizeSettings, ownerLinks, recordResponseStyleSwitch, RESPONSE_STYLES, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
 import { readUiPreferences, updateUiPreferences, patchUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
@@ -6231,7 +6231,10 @@ function buildWizardServer(options, lifetime) {
         if (agents?.read(settings.agents.default_agent_id)?.role === 'recovery') throw new AgentError(409, 'recovery_cannot_be_default', 'agents.default_agent_id')
         mkdirSync(dirname(settingsPath), { recursive: true, mode: 0o700 })
         const temporary = `${settingsPath}.${process.pid}.tmp`
-        writeFileSync(temporary, `${JSON.stringify({ ...stored, ...settings, agents: { ...stored.agents, ...settings.agents } }, null, 2)}\n`, { mode: 0o600 })
+        // links: only owner-written keys, never the normalized defaults (ownerLinks in wizard-os-settings.mjs).
+        const written = { ...stored, ...settings, agents: { ...stored.agents, ...settings.agents }, links: ownerLinks(stored.links, input.links) }
+        if (written.links === undefined) delete written.links
+        writeFileSync(temporary, `${JSON.stringify(written, null, 2)}\n`, { mode: 0o600 })
         renameSync(temporary, settingsPath)
         sendJson(response, 200, { settings: publicSettingsFor(request, settings) }); return
       }

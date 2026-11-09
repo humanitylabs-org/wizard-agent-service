@@ -139,14 +139,38 @@ export function normalizeSettings(raw, { canStartAgent = (id) => id === 'hermes'
       phone_started_at: validStamp(setup.phone_started_at),
       phone_seen_at: validStamp(setup.phone_seen_at),
     },
-    // How the shell opens links that leave Wizard. Both off by default, only an exact `true` turns one on:
-    // reader routes them into the installed Browser Reader; panel (a trial, 9 Nov 2026) opens them on the
-    // WizardOS Android app in a browser panel over Wizard (Brave when installed). Desktop ignores panel.
+    // How the shell opens links that leave Wizard. reader (off unless an exact `true`) routes them into the
+    // installed Browser Reader. panel is core (James, 9 Nov 2026: "make this part of core"): on unless an exact
+    // `false` opts out; the WizardOS Android app opens them in a browser panel over Wizard (a Custom Tab drawn by
+    // the phone's default browser). Desktop, PWA and Mac ignore panel.
+    // The off-by-default trial release (9 Nov 2026) wrote exactly {reader:false, panel:false} on every settings PUT
+    // for owners who never chose: that shape is "not chosen", so panel stays on. ownerLinks() keeps PUTs from
+    // writing it again.
     links: {
       reader: links.reader === true,
-      panel: links.panel === true,
+      panel: links.panel !== false || trialDefaultLinks(links),
     },
   }
+}
+
+/** The exact `links` block the off-by-default trial release auto-wrote on any settings PUT: not an owner choice. */
+function trialDefaultLinks(links) {
+  return Boolean(links) && typeof links === 'object' && !Array.isArray(links) && links.reader === false && links.panel === false
+    && Object.keys(links).length === 2
+}
+
+/**
+ * The `links` block a settings PUT writes: only keys an owner wrote (stored, then this request), never the defaults
+ * (so a later default change reaches them), minus a default-valued reader and the trial release's auto-written block.
+ * Returns undefined when nothing is left, so settings.json carries no `links` key.
+ */
+export function ownerLinks(stored, input) {
+  const block = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const merged = { ...(trialDefaultLinks(stored) ? {} : block(stored)), ...block(input) }
+  const out = {}
+  for (const key of ['reader', 'panel']) if (typeof merged[key] === 'boolean') out[key] = merged[key]
+  if (out.reader === false) delete out.reader
+  return Object.keys(out).length ? out : undefined
 }
 
 /** An absolute link for use outside Wizard: base_url + path. '' when this box has no outside address yet. */
