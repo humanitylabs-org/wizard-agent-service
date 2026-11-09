@@ -160,7 +160,7 @@ describe('WizardOS settings, bootstrap and apps', () => {
 
   it('bootstrap carries the links switches to front ends: panel on for a settings file without the key', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wizard-os-'))
-    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ network: { base_url: 'https://wizard.tail1234.ts.net' } }))
+    writeFileSync(join(dir, 'settings.json'), JSON.stringify({ clock: { timezone: 'UTC' } }))
     const hermes = await startHermes(STOCK)
     const wizard = await startWizard({ upstreamOrigin: hermes.origin, joinedDelegation: 'prefer', settingsPath: join(dir, 'settings.json') })
     const body = await (await fetch(`${wizard}/wizard/v1/bootstrap`)).json()
@@ -190,7 +190,7 @@ describe('WizardOS settings, bootstrap and apps', () => {
     const path = join(dir, 'settings.json'), proof = 'synthetic-owner-proof-'.repeat(3)
     const put = async (origin: string, body: object) => fetch(`${origin}/wizard/v1/settings`, { method: 'PUT', headers: { 'x-wizard-owner-proof': proof, 'content-type': 'application/json' }, body: JSON.stringify(body) })
     for (const [stored, expected] of [[undefined, undefined], [{ panel: false }, { panel: false }], [{ reader: true }, { reader: true }], [{ reader: false, panel: false }, undefined]] as const) {
-      writeFileSync(path, JSON.stringify(stored === undefined ? { network: { base_url: 'https://wizard.tail1234.ts.net' } } : { links: stored }))
+      writeFileSync(path, JSON.stringify(stored === undefined ? { clock: { timezone: 'UTC' } } : { links: stored }))
       const server = createWizardServer({ requireAccess: false, ownerProof: proof, settingsPath: path, followThrough: false })
       await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve))
       const origin = `http://127.0.0.1:${(server.address() as any).port}`
