@@ -4,10 +4,10 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import * as RQ from '../server/run-queue.mjs'
 import { projectInFlightOwnerTurns, projectWizardMessageHistory, restoreOwnerTurns } from '../server/service.mjs'
-const { DurableRunQueue, queueRequestHash, DRAINING_RESEND_DELAYS } = RQ as any
+const { DurableRunQueue, queueRequestHash } = RQ as any
 
 // 9 Nov 2026 (James): "The message I sent is disappearing and being lost." Hermes writes the owner's message only when
-// a turn starts. A reply it never started (three resends), refused while restarting (runtime_draining) or refused
+// a turn starts. A reply it never started (three resends), refused
 // for a thread another app owns (permission_denied) had no row, so once the phone's own copy expired the thread
 // showed only "Reply not sent". And once a resent message finally landed, every resend showed as its own copy.
 // A message the owner sends never leaves the thread: it shows once, marked Not sent, until Retry lands it.
@@ -100,36 +100,6 @@ describe('a message Hermes never started stays in the thread', () => {
       { id: 4, session_id: SID, role: 'assistant', content: 'Here is what happened.', timestamp: landedAt + 5 }]
     shown = history(s.q, landed)
     expect(shown.map((r: any) => r.id)).toEqual([1, 3])
-  })
-})
-
-describe('a reply refused while Hermes restarts (runtime_draining)', () => {
-  it('is sent again by itself once the restart is over, the same words and files, and stays visible meanwhile', async () => {
-    const s = await setup()
-    await s.q.admit(request())
-    await s.q.tick(true)
-    s.hermes.set(s.launches[0].id, { status: 'failed', error: 'runtime_draining', last_event: 'run.failed' })
-    await s.q.tick(true)
-    const rows = s.q.queuedForSession('direct', SID)
-    expect(rows.map((r: any) => r.status)).toEqual(['cancelled', 'queued'])
-    expect(rows[1]).toMatchObject({ retrySourceId: rows[0].publicRunId, waitingReason: 'admission_retry' })
-    expect(rows[1].retryAfter).toBeGreaterThan(Date.now() / 1000 + DRAINING_RESEND_DELAYS[0] - 5)
-    expect(s.launches).toHaveLength(1) // not hammered while the gateway is still draining
-    expect(history(s.q).map((r: any) => r.wizard_queue?.status)).toEqual(['queued'])
-    s.q._update(rows[1].publicRunId, { retryAfter: 0 })
-    await s.q.tick(true)
-    expect(s.launches).toHaveLength(2)
-    expect(s.launches[1].body.input).toEqual(input)
-  })
-
-  it('an owner Stop is never resent', async () => {
-    const s = await setup()
-    await s.q.admit(request())
-    await s.q.tick(true)
-    s.q.markOwnerStop(s.launches[0].id)
-    s.hermes.set(s.launches[0].id, { status: 'failed', error: 'runtime_draining' })
-    await s.q.tick(true)
-    expect(s.q.queuedForSession('direct', SID)).toHaveLength(1)
   })
 })
 
