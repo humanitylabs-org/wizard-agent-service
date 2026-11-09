@@ -12,8 +12,12 @@
 // feed, phone-feed.mjs) is answered earlier in the request path; the bare `/reports/wizard-os` is left alone
 // here too, so every byte the updater and the release mirror see stays exactly as it was.
 import { readFileSync, realpathSync, statSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { join, resolve, sep } from 'node:path'
 import { pageSlugValid } from './pages.mjs'
+
+// Canonical Appearance v1 tokens (wizard-os style/tokens.css, byte-identical copy): the dark standalone fallback.
+const TOKENS_CSS = readFileSync(fileURLToPath(new URL('./reports-moved/tokens.css', import.meta.url)), 'utf8')
 
 export const REPORTS_RESERVED_SLUGS = new Set(['wizard-os'])
 export const REPORTS_MOVED_FILE = '.reports-moved.json'
@@ -46,17 +50,18 @@ export const REPORTS_MOVED_CSP = "default-src 'none'; style-src 'unsafe-inline';
 export function movedPageHtml({ pagesUrl, path = '' } = {}) {
   const where = path ? `<p class="path">${escapeHtml(path)}</p>` : ''
   return `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
+<html lang="en"><head><script>try{if(window.parent!==window)document.documentElement.classList.add('wz-hosted')}catch(e){document.documentElement.classList.add('wz-hosted')}</script><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
 <title>This page moved · WizardOS</title>
 <style>
-:root{color-scheme:dark}
-html,body{margin:0;min-height:100%;background:var(--wz-canvas,#0b0a12);color:var(--wz-text,#f3efff);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
-html:not([data-wz-hosted]) body{background:var(--wz-base,#0b0a12)}
-main{max-width:34rem;margin:0 auto;padding:12vh 1.25rem 2rem}
-h1{font-size:1.4rem;margin:0 0 .5rem}
-p{margin:.5rem 0;color:var(--wz-text-secondary,#b9b0d8)}
-.path{font:.85rem ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--wz-text-muted,#7d74a3);overflow-wrap:anywhere;padding:.5rem .75rem;background:var(--wz-surface,rgba(243,239,255,.06));border:1px solid var(--wz-border,rgba(205,190,255,.24));border-radius:.6rem}
-a.go{display:inline-block;margin-top:1rem;padding:.65rem 1.1rem;border-radius:999px;background:var(--wz-accent,#b99bff);color:var(--wz-on-accent,#05030c);font-weight:600;text-decoration:none}
+${TOKENS_CSS}
+html,body{margin:0;min-height:100%;background:var(--wz-canvas);color:var(--wz-text);font-family:var(--wz-font-ui);font-size:var(--wz-text-lg);line-height:var(--wz-line-height)}
+html.wz-hosted,html[data-wz-hosted]{background:transparent}
+html.wz-hosted body,html[data-wz-hosted] body{background:transparent}
+main{max-width:34rem;margin:0 auto;padding:12vh var(--wz-space-4) var(--wz-space-5)}
+h1{font-size:var(--wz-text-title);margin:0 0 var(--wz-space-2)}
+p{margin:var(--wz-space-2) 0;color:var(--wz-text-secondary)}
+.path{font-family:var(--wz-font-mono);font-size:var(--wz-text-md);color:var(--wz-text-muted);overflow-wrap:anywhere;padding:var(--wz-space-2) var(--wz-space-3);background:var(--wz-surface);border:1px solid var(--wz-border);border-radius:var(--wz-radius-tile)}
+a.go{display:inline-flex;align-items:center;min-height:var(--wz-target);margin-top:var(--wz-space-4);padding:0 var(--wz-space-5);border-radius:var(--wz-radius-pill);background:var(--wz-accent);color:var(--wz-on-accent);font-weight:600;text-decoration:none}
 </style></head>
 <body><main>
 <h1>This page moved</h1>

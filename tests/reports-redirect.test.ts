@@ -97,7 +97,7 @@ describe('old /reports/<slug>/ links', () => {
       const html = r.body.toString()
       expect(html).toContain('This page moved')
       expect(html).toContain('href="/wizard-os-home/?open=pages"')
-      expect(html).toContain('--wz-canvas')
+      expect(html).toContain('var(--wz-canvas)'); expect(html).toContain('--wz-base: #05030c')
       expect(html).toContain('wizard:appearance')
       expect(r.headers.location).toBeUndefined()
     }
