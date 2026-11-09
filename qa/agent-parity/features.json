@@ -256,6 +256,22 @@
       "policy_exemptions": []
     },
     {
+      "id": "restart-refused-resend",
+      "description": "A reply Hermes accepted but refused with runtime_draining because the gateway began a restart is sent again by itself once (same words, same thread), with no Retry; reading it again never sends a duplicate.",
+      "layer": "server",
+      "fixture": "restart-refused-resend",
+      "how_to_test": "Admit a real HTTP run, make the fixture Hermes fail it with error runtime_draining, then read the run on main, host-profile, container and restricted. Require exactly one automatic resend carrying the owner's words and no further sends on later reads. Synthetic HTTP fixture evidence, not a live gateway restart.",
+      "source_refs": [
+        "server/run-queue.mjs",
+        "server/routed-run-queue.mjs"
+      ],
+      "reference_tests": [
+        "tests/restart-refused-resend.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "policy_exemptions": []
+    },
+    {
       "id": "provider-signin-recovery",
       "description": "A diagnosed expired sign-in waits for an observed unavailable-to-ready transition and resends the saved request once on the same locked model route; a stale picker retry on another model is refused, not misacknowledged or duplicated.",
       "layer": "server",

@@ -323,6 +323,25 @@ export const serverChecks = {
     assert.deepEqual({ code: list.runError?.code, provider: list.runError?.provider }, want, `${s.kind}: compact row`)
     assert.match(list.runError.message, /subscription has ended/)
   },
+  // 8-9 Nov 2026: a gateway restart drain failed every accepted-but-unstarted reply with runtime_draining and
+  // each thread showed "Reply not sent" until James tapped Retry. The queue now sends it again by itself, once.
+  'restart-refused-resend': async s => {
+    const input = 'Synthetic owner words sent while the gateway restarted.'
+    const first = await admit(s, { input })
+    const sends = () => s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path))
+    const before = sends().length
+    const upstream = [...s.runs.values()].at(-1)
+    Object.assign(upstream, { status: 'failed', error: 'runtime_draining', updated_at: Date.now() / 1000, output: '' })
+    for (let n = 0; n < 40 && sends().length === before; n++) {
+      await s.request('/v1/runs/' + first.run_id)
+      await new Promise(r => setTimeout(r, 25))
+    }
+    assert.equal(sends().length, before + 1, `${s.kind}: one automatic resend after the restart refusal`)
+    const resent = sends().at(-1).body
+    assert.ok(JSON.stringify(resent.input ?? resent.message).includes(input), `${s.kind}: the resend carries the owner's words`)
+    for (let n = 0; n < 6; n++) { await s.request('/v1/runs/' + first.run_id); await new Promise(r => setTimeout(r, 25)) }
+    assert.equal(sends().length, before + 1, `${s.kind}: no duplicate resend`)
+  },
   'provider-signin-recovery': async s => {
     const input = 'Synthetic saved owner words: keep this exact message.'
     const first = await admit(s, { input, model: 'fixture-model', provider: 'anthropic' })
