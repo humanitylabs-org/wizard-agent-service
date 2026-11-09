@@ -298,6 +298,31 @@ export const serverChecks = {
     assert.equal(writes().length, before, 'listing routed work never dispatches an owned-work correction')
     assert.ok(!writes().some(r => JSON.stringify(r.body).includes('[Wizard follow-through] Your last reply lists')))
   },
+  // wizard-ux issue 166: a failed run names why (ended plan, usage limit, network) on the thread row,
+  // the same structured field on every kind's full and compact list rows.
+  'run-failure-reason': async s => {
+    const first = await admit(s, { input: 'Synthetic request for an ended plan', model: 'fixture-model' })
+    s.sessions.get('wizard_parity').hidden = false
+    const upstream = [...s.runs.values()].at(-1)
+    Object.assign(upstream, { status: 'failed', updated_at: Date.now() / 1000, output: '',
+      error: 'HTTP 402: Your ChatGPT subscription has ended. Renew your plan to keep using Codex.',
+      runtime: { provider: 'openai-codex', model: 'fixture-model' } })
+    const read = await s.request('/v1/runs/' + first.run_id)
+    assert.equal(read.status, 200); assert.equal((await read.json()).status, 'failed')
+    const find = async (view) => {
+      for (let n = 0; n < 40; n++) {
+        const item = (await (await s.request('/api/sessions' + view)).json()).data.find(x => x.id === 'wizard_parity')
+        if (item?.status === 'failed') return item
+        await new Promise(r => setTimeout(r, 25))
+      }
+      assert.fail(`${s.kind}: the failed run lists as failed (${view || 'full'})`)
+    }
+    const full = await find(''), list = await find('?view=list')
+    const want = { code: 'provider_billing', provider: 'openai-codex' }
+    assert.deepEqual({ code: full.wizard_last_run_error?.code, provider: full.wizard_last_run_error?.provider }, want, `${s.kind}: full row`)
+    assert.deepEqual({ code: list.runError?.code, provider: list.runError?.provider }, want, `${s.kind}: compact row`)
+    assert.match(list.runError.message, /subscription has ended/)
+  },
   'provider-signin-recovery': async s => {
     const input = 'Synthetic saved owner words: keep this exact message.'
     const first = await admit(s, { input, model: 'fixture-model', provider: 'anthropic' })

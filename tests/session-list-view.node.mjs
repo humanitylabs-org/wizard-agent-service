@@ -8,7 +8,8 @@ const fixture = { id: 'synthetic', title: 'A full title '.repeat(20), agent: { i
   wizard_helper_status: { phase: 'returned', canContinue: true }, wizard_safe_error: 'Safe failure', wizard_attention_level: 'critical', wizard_waiting_on: 'helper', wizard_background: 'helper',
   wizard_title_renames: [{ from: 'Old', to: 'New', at: 123 }], wizard_attention: { state: 'needs_you', ask: 'Check me', subject: 'Subject' },
   wizard_follow_up: { active: true, count: 1, names: ['Knowledge MVP'], nextRun: '2026-10-24T01:00:00.000Z' },
-  wizard_reconnect: { kind: 'provider_signed_out', provider: 'claude', app_id: 'wizard-claude', installed: true, app_status: 'expired' } };
+  wizard_reconnect: { kind: 'provider_signed_out', provider: 'claude', app_id: 'wizard-claude', installed: true, app_status: 'expired' },
+  wizard_last_run_error: { code: 'provider_billing', provider: 'openai-codex', message: 'Synthetic plan ended' } };
 test('list keeps exact grouping/unread/ack/model/helper inputs and full title', () => {
   const full = normalizeFull(fixture), list = listRow(fixture);
   for (const key of Object.keys(full).filter(k => !['request','renames','source','runtime','preview'].includes(k))) assert.deepEqual(list[key],full[key],key);

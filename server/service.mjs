@@ -640,6 +640,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               if (direct.queueReason === 'provider_access') {
                 delete projected.wizard_safe_error
                 delete projected.wizard_reconnect
+                delete projected.wizard_last_run_error
                 if (!projected.wizard_request_preview) projected.wizard_request_preview = direct.preview
               }
             } else if (truth?.active && external && TERMINAL_RUN_STATUSES.has(external.status)) {
@@ -662,6 +663,8 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               if (latestDirect.safeError) projected.wizard_safe_error = latestDirect.safeError
               // Provider sign-in expired: name the connection app that fixes it (provider-reconnect.mjs).
               if (latestDirect.reconnect) projected.wizard_reconnect = latestDirect.reconnect
+              // Why it failed (run-error.mjs): subscription ended, usage limit, network …
+              if (latestDirect.runError) projected.wizard_last_run_error = latestDirect.runError
               if (!projected.preview && latestDirect.preview) projected.preview = latestDirect.preview
               if (projected.wizard_pending_first_send) {
                 // A send Wizard never delivered: show it as an error thread with James's own words and Retry.
@@ -677,6 +680,9 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               projected.wizard_reconnect = latestDirect.reconnect
               projected.wizard_safe_error = ''
             }
+            if (latestDirect?.status === 'failed' && latestDirect.runError && projected.status === 'failed') {
+              projected.wizard_last_run_error = latestDirect.runError
+            }
             // A failure the owner explicitly dismissed stops demanding attention
             // until a newer request or run changes the failure identity.
             if (!operator && dismissedFailures && ['failed', 'interrupted'].includes(String(projected.status ?? ''))) {
@@ -684,6 +690,7 @@ function filterSessionList(result, operator, records = [], directRuns = [], exte
               if (failureKey && dismissedFailures.isDismissed(session.id, failureKey)) {
                 delete projected.status
                 delete projected.wizard_reconnect
+                delete projected.wizard_last_run_error
                 if (projected.wizard_pending_first_send) return null  // James dismissed a send that never went through
               }
             }
@@ -7339,6 +7346,7 @@ function buildWizardServer(options, lifetime) {
               if (saved.waitingReason === 'provider_access') {
                 delete detailed.wizard_safe_error
                 delete detailed.wizard_reconnect
+                delete detailed.wizard_last_run_error
               }
             }
             result = Buffer.from(JSON.stringify(payload.session ? { ...payload, session: detailed } : detailed))

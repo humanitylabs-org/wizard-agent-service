@@ -17,6 +17,7 @@ import { readArchivedSessions } from './archived-sessions.mjs'
 import { listPayload } from './session-list-view.mjs'
 import { fullRetryInput, searchMessageText } from './session-detail.mjs'
 import { createListWindows, selectWindow } from './session-list-window.mjs'
+import { classifyRunError } from './run-error.mjs'
 const listWindows = new WeakMap()
 const agentListSnapshots = new WeakMap()
 const profileRunCache = new WeakMap()
@@ -48,6 +49,12 @@ export async function loadAgentSessionRows(ctx, agent, { headers = {}, secrets =
 
 // Every runtime uses the same Wizard status/title projection. Fetch through the
 // registry so a restricted ingress stays on its mode-0600 Unix socket.
+// A routed agent's failed run carries the same structured reason as a main-agent row.
+const runErrorField = (run) => {
+  const value = classifyRunError(run)
+  return value ? { wizard_last_run_error: value } : {}
+}
+
 export async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
   if (!profileRunCache.has(ctx)) profileRunCache.set(ctx, new Map())
   const cache = profileRunCache.get(ctx), result = new Array(rows.length)
@@ -83,6 +90,8 @@ export async function projectProfileSessions(ctx, agent, rows, headers, secrets)
           wizard_last_run_idempotency_key: ref.idempotency_key || '',
           wizard_assigned_at: run.created_at, wizard_last_user_at: run.created_at,
           ...(run.runtime?.model ? { model: run.runtime.model, provider: run.runtime.provider || '' } : {}),
+          // Why it failed (run-error.mjs), same field as the main agent's rows.
+          ...runErrorField(run),
           ...(!active && run.output ? { wizard_last_assistant_at: run.updated_at,
             latest_message: { role: 'assistant', content: stripStatus(run.output), timestamp: run.updated_at } } : {}),
         } : row

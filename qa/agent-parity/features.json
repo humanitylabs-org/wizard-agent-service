@@ -237,6 +237,25 @@
       ]
     },
     {
+      "id": "run-failure-reason",
+      "description": "A failed run names why it failed on the thread row (wizard_last_run_error on full rows, runError on compact list rows): provider_auth, provider_billing, provider_quota, network or unknown, with the provider route and the provider's own words. wizard-ux shows it behind the off-by-default wizard/failure-reason tweak.",
+      "layer": "server",
+      "fixture": "run-failure-reason",
+      "how_to_test": "Fail a real HTTP admission on the openai-codex route with a synthetic HTTP 402 plan-ended error, read the run, then list the thread in the full and ?view=list shapes on main, host-profile, container and restricted. Require code provider_billing, provider openai-codex and the provider's words. Synthetic HTTP fixture evidence, not live provider proof.",
+      "source_refs": [
+        "server/run-error.mjs",
+        "server/run-queue.mjs",
+        "server/agents-http.mjs",
+        "server/session-list-view.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/run-error.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "policy_exemptions": []
+    },
+    {
       "id": "provider-signin-recovery",
       "description": "A diagnosed expired sign-in waits for an observed unavailable-to-ready transition and resends the saved request once on the same locked model route; a stale picker retry on another model is refused, not misacknowledged or duplicated.",
       "layer": "server",
