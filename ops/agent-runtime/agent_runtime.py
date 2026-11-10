@@ -101,7 +101,8 @@ def import_process_lock(agents, agent_id):
 def docker(args: list[str], *, input_text: str | None = None, timeout: int = 900, check: bool = True,
            env: dict | None = None) -> subprocess.CompletedProcess:
     sock = Path("/var/run/docker.sock")
-    if sock.exists() and os.access(sock, os.W_OK):
+    # An explicit endpoint (including rootless Docker) uses this user's Docker CLI directly.
+    if os.environ.get("DOCKER_HOST") or (sock.exists() and os.access(sock, os.W_OK)):
         cmd = ["docker", *args]
     else:   # the owner is in the docker group but this login session is not (e.g. a systemd user unit)
         cmd = ["sg", "docker", "-c", shlex.join(["docker", *args])]
@@ -111,6 +112,23 @@ def docker(args: list[str], *, input_text: str | None = None, timeout: int = 900
         sys.stderr.write(f"[agent-runtime] docker {' '.join(args[:3])} failed\n")
         raise RuntimeFailure("docker_failed")
     return run
+
+
+_ROOTLESS: list = []
+
+
+def rootless_docker() -> bool:
+    """Resolve the daemon's uid mapping; a failed probe must not choose an identity."""
+    if not _ROOTLESS:
+        try:
+            r = docker(["info", "--format", "{{json .SecurityOptions}}"], timeout=15, check=False)
+            options = json.loads(r.stdout) if r.returncode == 0 else None
+        except (OSError, subprocess.TimeoutExpired, ValueError, TypeError):
+            options = None
+        if not isinstance(options, list) or not all(isinstance(option, str) for option in options):
+            raise RuntimeFailure("docker_security_options_unavailable")
+        _ROOTLESS.append("name=rootless" in options)
+    return _ROOTLESS[0]
 
 
 def container_for(project: str, service: str) -> str:
@@ -391,6 +409,7 @@ class RestrictedDriver:
         gateway_key = self.agents.secret(agent["id"], "gateway.key")
         if not api_key or not gateway_key:
             raise RuntimeFailure("agent_not_prepared", 409)
+        rootless = rootless_docker()
         env = {
             "AGENT_PROJECT": self.project(agent["id"]),
             "AGENT_HOME_VOLUME": str(self.agents.home(agent["id"])),
@@ -399,8 +418,10 @@ class RestrictedDriver:
             "AGENT_UPLINK_SUBNET": str(uplink),
             "AGENT_SANDBOX_SUBNET": str(sandbox),
             "AGENT_GATEWAY_DIR": str(self.agents.root / agent["id"] / "gateway"),
-            "AGENT_EDGE_UID": str(os.getuid()),
-            "AGENT_EDGE_GID": str(os.getgid()),
+            # The edge must own the Service's socket directory. Under rootless Docker this helper's uid is
+            # container uid 0 (the daemon's own host user, not host root); any other container uid is a subuid.
+            "AGENT_EDGE_UID": "0" if rootless else str(os.getuid()),
+            "AGENT_EDGE_GID": "0" if rootless else str(os.getgid()),
             "SIDECAR_IMAGE": SIDECAR_IMAGE,   # the same image sync_home runs, whatever the compose default becomes
         }
         # Clear ambient helper credentials; only the independently authorized path
