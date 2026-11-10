@@ -656,6 +656,8 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   const { registry, sendJson } = ctx
   if (isPrivateAgent(registry,agent.id) && method === 'GET' && upstreamPath === '/api/sessions' && searchParams.has('q') && principalOf(request).kind !== 'owner') { sendJson(response,403,{error:'owner_required'}); return }
   const deleting = method === 'DELETE' && /^\/api\/sessions\/[A-Za-z0-9._:-]{1,200}$/u.test(upstreamPath) && searchParams.size === 0
+  // Chats channels (issue 440): a channel feed needs the channel store, and the channel must be this agent's.
+  if (method === 'GET' && upstreamPath === '/api/sessions' && searchParams.has('channel') && ctx.channelStore?.memberSet(searchParams.get('channel'))?.agent !== agent.id) { sendJson(response, 404, { error: 'channel_not_found' }); return }
   if (deleting && principalOf(request).kind !== 'owner') { sendJson(response,403,{error:'owner_required'}); return }
   if (!deleting && !ctx.isAllowedProxyRequest(method, upstreamPath, searchParams)) { sendJson(response, 404, { error: 'not_found' }); return }
   const hasBody = method === 'PATCH' || (method === 'POST' && !upstreamPath.endsWith('/stop'))
@@ -735,7 +737,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     headers.set('X-Wizard-Watcher-Preserve', request.headers['x-wizard-watcher-preserve'] === '1' ? '1' : '0')
   }
   const query = new URLSearchParams(searchParams)
-  for (const key of ['window','q','overrides','snapshot','cursor','fields','mode']) query.delete(key)
+  for (const key of ['window','q','overrides','snapshot','cursor','fields','mode','channel']) query.delete(key)
   query.delete('view')
   query.delete('snapshot')
   const controller = new AbortController()
@@ -790,6 +792,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       } catch { /* nothing to pin */ }
     }
     if (deleting) ctx.forgetAgentInput?.(agent, decodeURIComponent(upstreamPath.split('/')[3]))
+    if (deleting) { try { ctx.channelStore?.forget(agent.id, decodeURIComponent(upstreamPath.split('/')[3])) } catch { /* pruned later */ } }
     if (method === 'POST' && /^\/v1\/runs\/[^/]+\/steer$/u.test(upstreamPath)) {
       const runId = runIdFromPath(upstreamPath)
       const pair = registry.runThread?.(agent.id, runId)
@@ -801,13 +804,15 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     const messageHistory = method === 'GET' && /^\/api\/sessions\/[^/]+\/messages$/u.test(upstreamPath)
     if (method === 'GET' && upstreamPath === '/api/sessions') {
       const listing = JSON.parse(result.toString('utf8'))
-      if (searchParams.get('window') !== 'archive-50' && !searchParams.has('q')) {
+      // Chats channels (issue 440): a channel feed takes the windowed path below, scoped to this agent's channel.
+      const channelFeed = searchParams.has('channel')
+      if (searchParams.get('window') !== 'archive-50' && !searchParams.has('q') && !channelFeed) {
         for (const key of ['data', 'sessions', 'items']) if (Array.isArray(listing[key])) listing[key] = await projectProfileSessions(ctx, agent, listing[key], headers, secrets)
         result = Buffer.from(JSON.stringify(listing))
       }
       registry.observeSessions?.(agent.id, (listing.data ?? listing.sessions ?? listing.items ?? []).map(row => row?.id))
       await registry.refreshCatalog?.(agent.id).catch(() => undefined)
-      if (searchParams.get('window') === 'archive-50' || searchParams.has('q')) {
+      if (searchParams.get('window') === 'archive-50' || searchParams.has('q') || channelFeed) {
         if (!listWindows.has(ctx)) listWindows.set(ctx, createListWindows({ archiveDays: () => ctx.archiveAfterDays?.() ?? 7 }))
         if (!agentListSnapshots.has(ctx)) agentListSnapshots.set(ctx,new Map())
         const statePath=ctx.agentStatePath?.(agent) ?? join(registry.agentsDir,agent.id,'home','state.db')
@@ -848,7 +853,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
         }
         const payload=searchParams.get('mode')==='body'
           ? {object:'list',data:[...hits||[]].map(([id,snippet])=>({id,agent:agent.id,snippet})),search_total:hits?.size||0,mode:hits?.mode||'titles',partial:hits?.partial||false,timings:{list_ms,...hits?.timings}}
-          : await listWindows.get(ctx)({params:searchParams,scope:agent.id,load:async()=>rows.map(row=>hits?.has(row.id)?{...row,agent:agent.id,wizard_search_text:hits.get(row.id),wizard_search_match:true}:{...row,agent:agent.id})})
+          : await listWindows.get(ctx)({params:searchParams,scope:agent.id,members:channelFeed?(f=>f?.agent===agent.id?f.ids:null)(ctx.channelStore.memberSet(searchParams.get('channel'))):null,load:async()=>rows.map(row=>hits?.has(row.id)?{...row,agent:agent.id,wizard_search_text:hits.get(row.id),wizard_search_match:true}:{...row,agent:agent.id})})
         result=Buffer.from(JSON.stringify(payload))
       }
       if (ctx.projectFollowUps) result = ctx.projectFollowUps(result, agent.id)
@@ -860,7 +865,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       }
       // One thread already claimed by another agent must not break this agent's whole list.
       for (const id of sessionIdsIn(result)) registry.pin(id, agent.id, 'runtime_verified')
-      if(searchParams.get('view') === 'list') result=Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), searchParams.get('q'))))
+      if(searchParams.get('view') === 'list') result=Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), searchParams.get('q'), ctx.channelStore || null)))
     } else if (/^\/api\/sessions(?:\/[^/]+)?$/u.test(upstreamPath)) result = decorateThreadAgent(result, info)
     if (method === 'POST' && upstreamPath === '/v1/runs') result = Buffer.from(JSON.stringify({ ...JSON.parse(result.toString('utf8')), agent_id: agent.id }))
     if (method === 'GET' && searchParams.get('view') === 'detail' && /^\/api\/sessions\/[^/]+$/u.test(upstreamPath)) {

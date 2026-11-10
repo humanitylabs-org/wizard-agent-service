@@ -575,6 +575,53 @@ export const serverChecks = {
     assert.equal((await put([])).status, 200)
     assert.ok(s.sessions.has('wizard_parity'), 'removing a Space does not delete its threads')
   },
+  // Issue 440 (WIZARD_CHANNEL_STORE=1): channels.sqlite through each runtime's real Service route.
+  'chats-channels': async s => {
+    const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const other = s.id === 'hermes' ? 'other-agent' : 'hermes'
+    const row = s.sessions.get('wizard_parity'); row.hidden = false
+    // Hermes' own list `preview` is the head of the first user message; main reads the whole one from state.db.
+    row.preview = 'Synthetic first channel request'
+    row.messages.push({ role: 'user', timestamp: Date.now() / 1000 - 5, content: 'Synthetic first channel request, in full' })
+    const channels = async () => (await (await s.raw('/wizard/v1/channels')).json()).channels
+    assert.deepEqual((await channels()).map(c => [c.name, c.kind, c.pinned]), [['Alerts', 'alerts', true]], 'a fresh install lists Alerts')
+    const make = async (name, agent) => { const r = await s.raw('/wizard/v1/channels', json('POST', { name, agent })); assert.equal(r.status, 201); return r.json() }
+    const own = await make('Synthetic channel', s.id), foreign = await make('FOREIGN_CHANNEL_CANARY', other)
+    const move = async (channelId, agent) => s.raw('/wizard/v1/channels/membership', json('PUT', { sessionId: 'wizard_parity', channelId, ...(agent ? { agent } : {}) }))
+    assert.equal((await move(own.id)).status, 200)
+    assert.equal((await move(foreign.id, s.id)).status, 409, 'a thread files only into its own agent\'s channel')
+    // Main's canonical census was seeded empty at startup: refresh it until the thread shows (as head-row-owner-write-parity).
+    const listed = async (want = true) => {
+      let last
+      for (let attempt = 0; attempt < 40; attempt++) {
+        if (s.kind === 'main') await (await s.request('/api/sessions?limit=100')).json()
+        last = (await (await s.request('/api/sessions?view=list')).json()).data.find(x => x.id === 'wizard_parity')
+        if (last && (!want || last.channel)) return last
+        await new Promise(r => setTimeout(r, 25))
+      }
+      return last
+    }
+    const item = await listed()
+    assert.equal(item.channel, own.id)
+    assert.equal(item.firstRequest, s.kind === 'main' ? 'Synthetic first channel request, in full' : 'Synthetic first channel request', 'main reads state.db; routed kinds use Hermes\' first-message head')
+    assert.ok(item.firstRequest.length <= 400)
+    const feed = await s.request(`/api/sessions?view=list&channel=${own.id}`); assert.equal(feed.status, 200)
+    const page = await feed.json()
+    assert.deepEqual([page.window, page.order, page.data.map(x => x.id)], ['channel', 'oldest', ['wizard_parity']])
+    assert.equal(page.data[0].channel, own.id)
+    assert.equal((await s.request(`/api/sessions?view=list&channel=${foreign.id}`)).status, 404, 'another agent\'s channel feed is not served here')
+    assert.equal((await s.request('/api/sessions?view=list&channel=missing-channel')).status, 404)
+    assert.ok(!JSON.stringify(page).includes('FOREIGN_CHANNEL_CANARY'))
+    // Old shells read the projection, and a full PUT cannot erase the membership.
+    assert.equal((await s.raw('/wizard/v1/ui-preferences', json('PUT', { spaces: [] }))).status, 200)
+    const spaces = (await (await s.raw('/wizard/v1/ui-preferences')).json()).spaces
+    assert.deepEqual(spaces.find(x => x.id === own.id).threads, ['wizard_parity'])
+    await s.restart()
+    assert.equal((await listed()).channel, own.id, 'durable membership')
+    assert.equal((await channels()).filter(c => c.kind === 'alerts').length, 1, 'a restart adds no second Alerts')
+    assert.equal((await move(null, s.id)).status, 200)
+    assert.equal((await listed(false)).channel, undefined)
+  },
   'nonimage-files': async s => {
     const bytes = Buffer.from('PARITY_DOCUMENT_UNDISCLOSED_TOKEN\n')
     const r = await s.upload(bytes, 'fixture.txt', 'text/plain'); assert.equal(r.status, 201)

@@ -74,9 +74,24 @@ export function slimRow(raw) {
   const s=normalizeFull(raw);
   return {id:s.id,agent:s.agent || s.agent_id || 'hermes',title:s.title,preview:s.preview.slice(0,160),status:s.status,...(s.queueReason?{queueReason:s.queueReason}:{}),cardTime:cardTime(s),archived:s.archived};
 }
+// Chats channels (issue 440): `channel=<id>` lists that channel's threads oldest-first. `members` is the
+// channel's member id Set for this agent (null: no such channel here, or the channel store is off).
+const startedAt = (raw, s) => {
+  const v = raw.wizard_started_at ?? raw.started_at ?? raw.created_at;
+  const t = typeof v === 'number' && isFinite(v) ? (Math.abs(v) < 1e12 ? v * 1000 : v) : time(v);
+  return Number.isFinite(t) ? t : time(first(s.requestAt, s.lastUserAt, s.updatedAt));
+};
+export function selectChannel(rows, members) {
+  const entries=rows.map(raw=>({raw,s:normalizeFull(raw)})).filter(x=>x.s && !x.s.hidden && members.has(x.s.id));
+  for (const x of entries) x.t=startedAt(x.raw, x.s);
+  entries.sort((a,b)=>Number.isFinite(a.t)!==Number.isFinite(b.t) ? (Number.isFinite(a.t)?-1:1) : (Number.isFinite(a.t)?a.t-b.t:0) || a.s.id.localeCompare(b.s.id));
+  return {rows:entries.map(x=>x.raw), archive_total:0, archive_returned:0, archive_cursor:null};
+}
 export function createListWindows({ now=Date.now, ttl=30000, archiveDays=() => 7, reuseSelections=false }={}) {
   const snapshots=new Map(), selections=new Map();
-  return async function page({params, scope, load, dispositions={}}) {
+  return async function page({params, scope, load, dispositions={}, members=null}) {
+    const channel=params.get('channel');
+    if(channel!==null) return channelPage({params, scope, load, members, channel});
     const slim=params.get('fields')==='slim';
     const offset=Number(params.get('offset')||0), limit=Math.min(slim?500:100,Math.max(1,Number(params.get('limit')||100)));
     const days=archiveDaysOf(archiveDays());
@@ -114,4 +129,22 @@ export function createListWindows({ now=Date.now, ttl=30000, archiveDays=() => 7
       window:'archive-50',window_projected:true,archive_total:meta.archive_total,archive_returned:meta.archive_returned,
       archive_cursor:!params.get('q') && nextArchive<meta.archive_total ? `${snap.id}:${nextArchive}` : null,search_total:meta.search_total};
   };
+  // Same offset paging and 30-second snapshot rules as the archive window; no archive cursor.
+  async function channelPage({params, scope, load, members, channel}) {
+    if(!members) throw Object.assign(new Error('channel not found'),{status:404});
+    if(params.has('cursor') || params.has('q') || params.get('fields')==='slim') throw Object.assign(new Error('invalid channel listing'),{status:400});
+    const offset=Number(params.get('offset')||0), limit=Math.min(100,Math.max(1,Number(params.get('limit')||100)));
+    const signature=JSON.stringify(['channel',scope,channel]), at=now();
+    let snap=offset>0 && snapshots.get(params.get('snapshot'));
+    if(offset>0 && (!snap || snap.expiresAt<at || snap.signature!==signature)) throw Object.assign(new Error('session listing snapshot expired'),{status:409});
+    if(!snap) {
+      const selected=selectChannel(await load(), members);
+      snap={...selected,build:createHash('sha256').update(JSON.stringify(selected)).digest('hex').slice(0,24),id:randomUUID(),signature,expiresAt:now()+ttl};
+      snapshots.set(snap.id,snap);
+      for(const [key,v] of snapshots) if(v.expiresAt<at || snapshots.size>32) snapshots.delete(key);
+    }
+    const data=snap.rows.slice(offset,offset+limit);
+    return {object:'list',data,limit,offset,build:snap.build,has_more:offset+data.length<snap.rows.length,snapshot:snap.id,
+      window:'channel',channel,order:'oldest',channel_total:snap.rows.length,window_projected:true};
+  }
 }

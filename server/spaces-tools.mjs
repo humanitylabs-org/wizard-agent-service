@@ -15,7 +15,10 @@ const definitions = [
 ].map(([name, description, inputSchema]) => ({ name, description: `[Wizard Spaces] ${description}`, inputSchema }))
 const fail = message => { throw new Error(message) }
 const summary = s => ({ id: s.id, name: s.name, count: s.threads.length })
-export function createSpacesTools({ path, loadThreads, threadExists, agentExists = () => true }) {
+// `channels` (issue 440, WIZARD_CHANNEL_STORE=1): the same tools read and write the channel store instead.
+const channelSummary = c => ({ id: c.id, name: c.name, count: c.count })
+export function createSpacesTools({ path, loadThreads, threadExists, agentExists = () => true, channels = null }) {
+  const own = (id, agent) => { if (!channels) return readUiPreferences(path).spaces.some(s => s.id === id && spaceAgent(s) === agent); try { return channels.get(id).agent === agent } catch { return false } }
   return {
     list: () => definitions,
     async call(name, args, agent) {
@@ -38,19 +41,21 @@ export function createSpacesTools({ path, loadThreads, threadExists, agentExists
             .filter(row => words.every(word => `${row.id} ${row.title} ${row.subject}`.toLowerCase().includes(word)))
           result = { threads: matches.slice(offset, offset + limit), total: matches.length, offset, has_more: offset + limit < matches.length }
         } else if (name === 'spaces_list') {
-          result = { spaces: readUiPreferences(path).spaces.filter(s => spaceAgent(s) === agent).map(summary) }
+          result = { spaces: channels ? channels.list({ agent }).channels.filter(c => !c.archived).map(channelSummary) : readUiPreferences(path).spaces.filter(s => spaceAgent(s) === agent).map(summary) }
         } else {
           if (name === 'spaces_create') {
             if (typeof args.name !== 'string' || !args.name.trim() || args.name.length > 60 || /[\u0000-\u001f\u007f]/u.test(args.name)) fail('invalid_arguments')
           } else {
             if (!normalizeSpaceId(args.space_id)) fail('not_found')
             // Refuse a foreign target before history lookup (same answer as missing).
-            if (!readUiPreferences(path).spaces.some(s => s.id === args.space_id && spaceAgent(s) === agent)) fail('not_found')
+            if (!own(args.space_id, agent)) fail('not_found')
             if (name !== 'spaces_delete') {
               if (!Array.isArray(args.thread_ids) || args.thread_ids.length > 500 || args.thread_ids.some(id => typeof id !== 'string' || !threadId.test(id))) fail('invalid_arguments')
               for (const id of new Set(args.thread_ids)) if (!await threadExists(agent, id)) fail('thread_not_found')
             }
           }
+          if (channels) result = channelCall(channels, name, args, agent, own)
+          else {
           // No await from this fresh read through atomic rename. Owner PUTs and status filing share this process.
           let spaces = readUiPreferences(path).spaces
           let space
@@ -73,13 +78,28 @@ export function createSpacesTools({ path, loadThreads, threadExists, agentExists
           }
           const saved = updateUiPreferences(path, { spaces })
           result = name === 'spaces_delete' ? { deleted: space.id } : { space: summary(saved.spaces.find(s => s.id === space.id)) }
+          }
         }
         return { content: [{ type: 'text', text: JSON.stringify(result) }] }
       } catch (error) {
         // Never echo arguments, runtime exceptions, titles or foreign metadata in errors.
         const allowed = new Set(['not_found', 'thread_not_found', 'invalid_arguments', 'spaces_limit', 'threads_limit'])
+        if (error?.code === 'channels_limit') error.message = 'spaces_limit'
+        if (error?.code === 'channel_not_found') error.message = 'not_found'
         return { isError: true, content: [{ type: 'text', text: allowed.has(error.message) ? error.message : 'spaces_unavailable' }] }
       }
     },
   }
+}
+
+// Synchronous from the ownership check through the write; the store's own transaction keeps each change atomic.
+function channelCall(channels, name, args, agent, own) {
+  if (name === 'spaces_create') return { space: channelSummary(channels.create({ name: args.name, agent, reuseName: true })) }
+  if (!own(args.space_id, agent)) fail('not_found') // may have been deleted while checking thread ownership
+  if (name === 'spaces_delete') return channels.remove(args.space_id)
+  for (const id of new Set(args.thread_ids)) {
+    if (name === 'spaces_add') channels.move({ sessionId: id, channelId: args.space_id, agent, filedBy: 'agent' })
+    else if (channels.channelOf(agent, id) === args.space_id) channels.move({ sessionId: id, channelId: null, agent })
+  }
+  return { space: channelSummary(channels.get(args.space_id)) }
 }
