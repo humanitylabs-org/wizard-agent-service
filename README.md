@@ -80,7 +80,7 @@ Tailscale source inclusion is not activation. Read [the activation and immutable
 | `WIZARD_TAILNET_SHELL_ORIGIN` | — | Loopback/container origin of the Wizard shell's static files, served to verified phones on the tailnet listener (GET/HEAD only, no identity forwarded). Alternative: `WIZARD_UX_DIR` |
 | `WIZARD_REQUIRE_CF_ACCESS` | `1` | Older switch: `0` means no access check (same as `WIZARD_AUTH_MODE=none`) |
 | `WIZARD_STATIC_DIR` | `.ui-live` | Optional static front end to serve at `/wizard/` |
-| `WIZARD_HERMES_STATE_PATH` | unset | Optional explicit Hermes session database (read-only); never inferred from the host home |
+| `WIZARD_HERMES_STATE_PATH` | unset | Optional explicit Hermes session database (read-only); never inferred from the host home. `/wizard/health` reports it as `hermes_state` (`reason: stale_mount` when Hermes replaced a bind-mounted `state.db`/`-wal`/`-shm` and the container needs a restart) |
 | `WIZARD_STT_ORIGIN` | `http://127.0.0.1:8864` | Voice-to-text |
 | `WIZARD_INBOX_*` | see `ops/` | Wizard Files (uploads) |
 | `WIZARD_UPLOAD_RESERVE_BYTES` | `5368709120` (5 GiB) | Resumable uploads (`/wizard/v1/uploads`, `/wizard/v1/shares`) are refused with 507 when a file would leave less free disk than this |
