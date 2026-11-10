@@ -40,7 +40,8 @@ export async function loadAgentSessionRows(ctx, agent, { headers = {}, secrets =
   }
   const known = new Set(all.map(row => row?.id))
   let archived = []
-  try { archived = readArchivedSessions(ctx.archivePath ?? ctx.agentStatePath?.(agent) ?? join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), { limit: archiveLimit }) }
+  const readArchive = () => readArchivedSessions(ctx.archivePath ?? ctx.agentStatePath?.(agent) ?? join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), { limit: archiveLimit })
+  try { archived = ctx.archiveRead ? ctx.archiveRead('archive', readArchive) : readArchive() }
   catch (error) { if (requireComplete) throw error }
   if (requireComplete && archived.length >= archiveLimit) throw new AgentError(502, 'incomplete_listing', 'agent.archive')
   for (const row of archived) if (!known.has(row.id) && (!ctx.isThreadVisible || ctx.isThreadVisible(row))) all.push(row)

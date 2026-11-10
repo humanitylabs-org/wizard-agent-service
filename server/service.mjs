@@ -99,6 +99,7 @@ import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 import { DEFAULT_PRIVATE_ACCESS_SOCKET, createPhoneSetup } from './phone-setup.mjs'
 import { readArchivedSessions } from './archived-sessions.mjs'
+import { createHermesStateHealth } from './hermes-state-health.mjs'
 import { createMainProviderAttach } from './main-provider-attach.mjs'
 export { readArchivedSessions }
 
@@ -2881,6 +2882,7 @@ function buildWizardServer(options, lifetime) {
   const sttOrigin = confinedUpstream(options.sttOrigin ?? 'http://127.0.0.1:8864')
   const helmOrigin = options.helmOrigin ? confinedUpstream(options.helmOrigin) : ''
   const hermesStatePath = options.hermesStatePath ? resolve(String(options.hermesStatePath)) : ''
+  const hermesStateHealth = createHermesStateHealth({ dbPath: hermesStatePath, stat: options.hermesStateStat, log: options.hermesStateLog })
   // Hermes' history API omits display_metadata/platform_message_id; read them by primary key (read-only) so an owner
   // row can be tied to its queued run by Hermes' submission id.
   // Routed agents (WIZARD_ROUTED_OWNER_TURNS, off by default) use the same reader on their own state.db.
@@ -3285,7 +3287,7 @@ function buildWizardServer(options, lifetime) {
       const registry = id !== MAIN_AGENT_ID ? agents : { ...agents, fetchAgent: (_agent, path, init) => fetchImpl(`${upstreamOrigin}${path}`, init) }
       const headers = key ? { Authorization: `Bearer ${key}` } : {}
       const secrets = [key].filter(Boolean)
-      const rows = await loadAgentSessionRows({ registry, isThreadVisible: agentCtx.isThreadVisible, agentStatePath: agentCtx.agentStatePath, ...(id === MAIN_AGENT_ID ? { archivePath: hermesStatePath || '' } : {}) }, agent, {
+      const rows = await loadAgentSessionRows({ registry, isThreadVisible: agentCtx.isThreadVisible, agentStatePath: agentCtx.agentStatePath, ...(id === MAIN_AGENT_ID ? { archivePath: hermesStatePath || '', archiveRead: hermesStateHealth.read } : {}) }, agent, {
         headers, secrets,
         signal: AbortSignal.timeout(15000), archiveLimit: 100000, requireComplete: true,
       })
@@ -3441,12 +3443,12 @@ function buildWizardServer(options, lifetime) {
   // turns running on other surfaces, the Helm closure overlay) still reads state.db, read-only, and
   // only when WIZARD_HERMES_STATE_PATH (options.hermesStatePath) names it. spec/AGENT_BRIDGE.md
   // "Agent adapter" keeps the list.
-  const pendingFirstSendReader = options.pendingFirstSendReader ?? ((ids) => (hermesStatePath ? readPendingFirstSendSessions(hermesStatePath, ids) : []))
-  const archivedSessionReader = options.archivedSessionReader ?? (() => (hermesStatePath ? readArchivedSessions(hermesStatePath) : []))
+  const pendingFirstSendReader = options.pendingFirstSendReader ?? ((ids) => (hermesStatePath ? hermesStateHealth.read('pending-first-send', () => readPendingFirstSendSessions(hermesStatePath, ids)) : []))
+  const archivedSessionReader = options.archivedSessionReader ?? (() => (hermesStatePath ? hermesStateHealth.read('archive', () => readArchivedSessions(hermesStatePath)) : []))
   const sessionArchivedReader = options.sessionArchivedReader ?? null
   const canonicalSessionReader = options.canonicalSessionReader
     ?? (!options.canonicalSessionListing ? null
-      : hermesStatePath && helmDbPath && existsSync(helmDbPath) ? () => readCanonicalSessions(hermesStatePath, helmDbPath)
+      : hermesStatePath && helmDbPath && existsSync(helmDbPath) ? () => hermesStateHealth.read('list', () => readCanonicalSessions(hermesStatePath, helmDbPath))
         : () => readCanonicalSessionsHttp((path) => hermesJson(path), { archived: archivedSessionReader }))
   const canonicalSessionSnapshots = new Map()
   let canonicalSessionCache = { sessions: null, expiresAt: 0, assistantRevision: '' }
@@ -6493,7 +6495,10 @@ function buildWizardServer(options, lifetime) {
         finally { clearTimeout(timer) }
         const summary = await queueSummary
         const queue = runQueue ? { ...(summary ?? { queue_stale: true }), ...(heavyWork ? { heavy: heavyWork.summary() } : {}) } : undefined
-        sendJson(response, 200, { status: 'ok', upstream_reachable: reachable, ...(queue ? { queue } : {}) })
+        // hermes_state: the read-only session database (archive, other-surface turns). ok:false with
+        // reason stale_mount means Hermes replaced a mounted file and the container needs a restart (issue 430).
+        const hermesState = hermesStateHealth.report()
+        sendJson(response, 200, { status: 'ok', upstream_reachable: reachable, ...(queue ? { queue } : {}), ...(hermesState ? { hermes_state: hermesState } : {}) })
         return
       }
 
