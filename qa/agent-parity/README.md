@@ -23,3 +23,13 @@ The owned-open-work exception records James's 27 Oct 2026 "Archimedes only" scop
 Its HTTP assertions prove routed kinds receive no new instructions, keep done status,
 and receive no automatic correction. Main service continuation and restart behavior
 are additionally exercised by `tests/owned-open-work.test.ts`.
+
+## Browser groups
+
+`browser.mjs` runs the real Service and the unmodified shell in a browser, against synthetic runtimes, one group
+at a time (`QA_GROUP`): `static`, `compose`, `working`, `media`, `resume` and `offline`. `resume` (feature
+`stream-resume`) cuts every Service connection mid-reply, goes offline, and loses frames past retention, using
+the fixture's opt-in numbered event script (`fixtureEventScript`, `s.eventScript(runId).push(...)`). `offline`
+(feature `offline-start`) allows service workers and reloads the shell with the browser offline. These two need
+no fake media devices, so they also run on Linux with `QA_CHROMIUM` and `QA_PLAYWRIGHT` set. Their evidence is
+synthetic-runtime browser evidence, not live provider acceptance.
