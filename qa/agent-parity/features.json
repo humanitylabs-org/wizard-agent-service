@@ -50,6 +50,16 @@
   ],
   "features": [
     {
+      "id": "new-chat-unreachable-agent",
+      "description": "A new chat starts even when another, optional agent on the box is registered as running but cannot be reached: the anti-claim scan skips an agent that cannot answer for a fresh client-minted id (wizard_<ms>_<12 hex>) that no agent was ever pinned to; ids an agent is known to hold (pin or session catalog) and arbitrary ids still fail closed.",
+      "layer": "server",
+      "fixture": "new-chat-unreachable-agent",
+      "how_to_test": "With a second registered agent whose upstream refuses connections (no sealed catalog), through each main, host-profile, container and restricted agent's own Service route: POST /api/sessions with a fresh wizard_<ms>_<12 hex> id returns 201 on that runtime and a first /v1/runs send for another fresh id returns 202; an arbitrary non-fresh id still returns 503 agent_unavailable; on main, the same new chat without an agent name also lands on the default agent. tests/round2-boundaries.test.ts covers pinned ids of the unreachable agent (still refused: 503 by id, 409 thread_agent_pinned for a claim) and an answering agent behind the unreachable one still colliding. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": ["server/agents-http.mjs", "server/service.mjs"],
+      "reference_tests": ["tests/round2-boundaries.test.ts", "qa/agent-parity/server-checks.mjs"],
+      "policy_exemptions": []
+    },
+    {
       "id": "tools-list-cache-hints",
       "description": "The wizard MCP gateway's tools/list carries SEP-2549 cache hints (ttlMs, cacheScope private) so a caching client such as Hermes lazy: true can register app tools at chat start; only a complete discovery is cacheable (one day), and any visible app that is stopped, failing, malformed, filtered, paginated or replaced during the request makes the reply ttlMs 0.",
       "layer": "server",
