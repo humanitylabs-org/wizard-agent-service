@@ -979,6 +979,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "main-provider-attach",
+      "description": "Connecting a provider never attaches it to the main agent: with WIZARD_MAIN_PROVIDER_ATTACH on, the main agent's picker lists only attached providers (the configured one first), a model change onto an unattached provider is refused before Hermes, and the owner attaches providers explicitly. Routed agents keep their own allowed models.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile, container TCP, restricted Unix ingress) with mainProviderAttach on: read the model options, then ask for a thread model change onto an unattached provider (openai-codex). Main lists only the attached configured provider and answers 409 provider_not_attached; routed kinds keep their single own-provider row, no attach fields, and 409 model_not_allowed. No refused change reaches any Hermes, and an allowed model change still succeeds. tests/main-provider-attach.test.ts covers the switch off, attach/detach and the pool. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/main-provider-attach.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/main-provider-attach.test.ts"
+      ],
+      "fixture": "main-provider-attach",
+      "policy_exemptions": []
+    },
+    {
       "id": "file-store-retention",
       "description": "The built-in file store keeps every upload findable by id: after more than 5,000 later uploads the first attachment still opens, still resolves for the agent and is still found as a duplicate; opening it never rewrites the index.",
       "layer": "server",

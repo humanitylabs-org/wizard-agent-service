@@ -704,6 +704,29 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.ok(document.headers.get('content-type').startsWith('text/plain'))
     assert.ok(document.headers.get('content-disposition').includes('synthetic.txt'))
   },
+  'main-provider-attach': async s => {
+    // Issue 428: with the switch on, only the main agent's picker is narrowed to the providers attached to it, and
+    // a model change onto an unattached provider never reaches Hermes. Routed kinds keep their own allowed models.
+    const options = await (await s.request('/api/model/options')).json()
+    const before = s.seen.length
+    const refused = await s.request('/api/sessions/wizard_parity/model', post({ model: 'gpt-6.1-sol', provider: 'openai-codex' }))
+    assert.equal(refused.status, 409)
+    assert.ok(!s.seen.slice(before).some(r => r.path.endsWith('/model')), 'a refused provider switch never reaches any Hermes')
+    if (s.kind === 'main') {
+      assert.deepEqual(options.wizard_attached_providers, ['anthropic'], 'the configured provider is attached first')
+      assert.deepEqual(options.providers.map(p => p.slug), ['anthropic'])
+      assert.equal((await refused.json()).error, 'provider_not_attached')
+      const state = await (await s.raw('/wizard/v1/main-providers', { headers: s.ownerHeaders })).json()
+      assert.deepEqual(state.attached, ['anthropic'])
+    } else {
+      assert.equal(options.wizard_attached_providers, undefined, 'routed agents are untouched')
+      assert.equal(options.providers.length, 1); assert.equal(options.providers[0].slug, options.provider)
+      assert.equal((await refused.json()).error, 'model_not_allowed')
+    }
+    const allowed = s.kind === 'main' ? { model: 'fixture-other', provider: 'anthropic' } : { model: options.providers[0].models.at(-1) }
+    const changed = await s.request('/api/sessions/wizard_parity/model', post(allowed))
+    assert.ok(changed.status < 300, `attached provider still changes the model (${changed.status})`)
+  },
   'file-store-retention': async s => {
     // Issue 422: the built-in file store never forgets a file because more than 5,000 came after it.
     const firstBytes = Buffer.from('PARITY_FIRST_UPLOAD_BYTES\n')
