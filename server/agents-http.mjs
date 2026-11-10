@@ -618,6 +618,7 @@ export const FRESH_CLIENT_THREAD_ID = /^wizard_\d{13}_[0-9a-f]{12}$/u
  * client-minted id that no agent was ever pinned to (`tolerateUnreachable`), an agent that cannot
  * answer cannot hold it either: its positive sightings live in the session catalog, which
  * sessionExists consults before it throws. A later real collision still gets 409 thread_agent_pinned.
+ * Only standard (non-private) agents are skipped this way; an unreachable private agent still fails closed.
  */
 async function heldByOtherAgents(ctx, registry, agentId, sessionId, { tolerateUnreachable = false } = {}) {
   const tolerate = tolerateUnreachable && FRESH_CLIENT_THREAD_ID.test(sessionId)
@@ -627,7 +628,9 @@ async function heldByOtherAgents(ctx, registry, agentId, sessionId, { tolerateUn
     try {
       if (await ctx.sessionExists(agent.id, sessionId, { strict: true })) others.push(agent.id)
     } catch (error) {
-      if (!(tolerate && error instanceof AgentError && error.status === 503 && error.error === 'agent_unavailable')) throw error
+      // A private agent's never-observed history keeps the fail-closed anti-claim answer: its ids are never
+      // claimable by another agent on the strength of an id's shape alone.
+      if (!(tolerate && agent.privacy !== 'private' && error instanceof AgentError && error.status === 503 && error.error === 'agent_unavailable')) throw error
     }
   }
   return others

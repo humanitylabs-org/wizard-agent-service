@@ -200,6 +200,12 @@ it('an unreachable agent still refuses ids it is known to hold, and answering ag
   const clash = await s.call('/wizard/hermes/api/sessions?agent=hermes', 'POST', { id: held, source: 'wizard-mobile' })
   expect([clash.status, (await clash.json()).error]).toEqual([409, 'thread_agent_pinned'])
   expect(s.histories.get('hermes')!.has(held)).toBe(false)
+  // An unreachable private agent keeps the fail-closed answer: a never-observed private id is never claimable.
+  const hidden = await s.create('Hidden', 'private')
+  s.down.add(hidden.id)
+  const sealed = await s.call('/wizard/hermes/api/sessions', 'POST', { id: freshId(), source: 'wizard-mobile' })
+  expect([sealed.status, (await sealed.json()).error]).toEqual([503, 'agent_unavailable'])
+  s.down.delete(hidden.id)
   // The target itself unreachable is still a plain 503: nothing can be created there.
   const own = await s.call(`/wizard/hermes/api/sessions?agent=${pi.id}`, 'POST', { id: freshId(), source: 'wizard-mobile' })
   expect(own.status).toBe(503)
