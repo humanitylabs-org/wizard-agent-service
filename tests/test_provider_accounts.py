@@ -271,5 +271,11 @@ class AccountsTest(unittest.TestCase):
         self.assertEqual([c['id'] for c in broken['credentials']], ['a1b2c3', 'd4e5f6'])
         self.assertEqual(broken['status'], 'ready')
 
+# CI's quality job runs this file; the renewal/status regressions live next door, so run them here too.
+_STATUS = importlib.util.spec_from_file_location('provider_account_status_tests', Path(__file__).with_name('test_provider_account_status.py'))
+_status = importlib.util.module_from_spec(_STATUS)
+_STATUS.loader.exec_module(_status)
+StatusTests = _status.StatusTests
+
 if __name__ == '__main__':
     unittest.main()
