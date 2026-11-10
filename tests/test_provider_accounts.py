@@ -21,6 +21,8 @@ def row(identity='a', id='r1', label='Work'):
 class AccountsTest(unittest.TestCase):
     def setUp(self):
         m._CACHE.clear()
+        m._IDENTITIES.clear()
+        m._SEEN.clear()
         self.calls = []
 
     def fetch(self, provider, **kwargs):
@@ -157,6 +159,117 @@ class AccountsTest(unittest.TestCase):
         self.assertEqual(out['accounts'][0]['name'], 'p***@e***')
         out = m.provider_accounts('chatgpt', lambda _: [row(label='sk-secret')], self.fetch)
         self.assertEqual(out['accounts'][0]['name'], 'ChatGPT subscription')
+
+    def claude_rows(self, profiles):
+        """Fake the Claude profile/usage endpoints per opaque token; returns the list of profile calls."""
+        calls = []
+        original = m._anthropic_get
+        def fake(path, token):
+            if path == 'profile':
+                calls.append(token)
+                if profiles.get(token) is None:
+                    raise OSError('401')
+                return profiles[token]
+            return {'five_hour': {'utilization': 10, 'resets_at': None}}
+        m._anthropic_get = fake
+        self.addCleanup(setattr, m, '_anthropic_get', original)
+        return calls
+
+    @staticmethod
+    def claude(id, token, source='manual:hermes_pkce', priority=None):
+        r = {'id': id, 'label': 'Claude', 'auth_type': 'oauth', 'source': source, 'access_token': token}
+        if priority is not None:
+            r['priority'] = priority
+        return r
+
+    def test_claude_duplicate_sign_in_is_one_row_with_a_removable_grant(self):
+        # Owner report (issue 434): signing in to an already-added Claude account again showed it twice.
+        import hashlib
+        acct = {'account': {'uuid': 'acc-11111111', 'email': 'other@example.com'},
+                'organization': {'uuid': 'org-22222222', 'organization_type': 'claude_max'}}
+        code = {'account': {'uuid': 'acc-33333333', 'email': 'me@example.com'},
+                'organization': {'uuid': 'org-44444444'}}
+        calls = self.claude_rows({'tok-old': acct, 'tok-new': acct, 'tok-code': code})
+        rows = [self.claude('9f3a1c', 'tok-code', source='claude_code', priority=2),
+                self.claude('a1b2c3', 'tok-old', priority=0), self.claude('d4e5f6', 'tok-new', priority=1)]
+        before = m.provider_accounts('claude', lambda _: rows[:2], self.fetch)['accounts']
+        m._CACHE.clear()
+        out = m.provider_accounts('claude', lambda _: rows, self.fetch)
+        self.assertEqual(out['accountCount'], 2)
+        mirror, added = out['accounts']
+        self.assertEqual(mirror['mirror'], 'claude-code')
+        self.assertEqual(mirror['credentialCount'], 1)
+        self.assertEqual(added['credentialCount'], 2)
+        # Newest sign-in first: Use first targets the grant that still renews; each one can be removed.
+        self.assertEqual([c['id'] for c in added['credentials']], ['d4e5f6', 'a1b2c3'])
+        self.assertTrue(all(c['managed'] for c in added['credentials']))
+        self.assertTrue(added['actions']['remove'])
+        self.assertEqual(added['priority'], 0)
+        # The row keeps the ID it had before the duplicate arrived.
+        self.assertEqual(added['id'], before[1]['id'])
+        self.assertEqual(added['id'], hashlib.sha256(b'anthropic:a1b2c3').hexdigest()[:24])
+        self.assertEqual(added['emailHash'], hashlib.sha256(b'other@example.com').hexdigest()[:16])
+        self.assertEqual(added['plan'], 'Max')
+        # One profile lookup per token and listing serves both identity and usage labels.
+        self.assertEqual(sorted(calls), ['tok-code', 'tok-code', 'tok-new', 'tok-old', 'tok-old'])
+        text = json.dumps(out)
+        for secret in ('acc-1111', 'org-2222', 'other@example.com', 'tok-'):
+            self.assertNotIn(secret, text)
+        # After the owner removes the duplicate, the same row remains with one grant.
+        m._CACHE.clear()
+        after = m.provider_accounts('claude', lambda _: rows[:2], self.fetch)['accounts']
+        self.assertEqual([a['id'] for a in after], [a['id'] for a in before])
+        self.assertEqual(after[1]['credentialCount'], 1)
+
+    def test_claude_same_email_in_another_organization_stays_separate(self):
+        email = {'uuid': 'acc-11111111', 'email': 'other@example.com'}
+        self.claude_rows({'tok-a': {'account': email, 'organization': {'uuid': 'org-aaaaaaaa'}},
+                          'tok-b': {'account': email, 'organization': {'uuid': 'org-bbbbbbbb'}},
+                          'tok-c': {'account': {'email': 'other@example.com'}, 'organization': {}}})
+        rows = [self.claude('a1', 'tok-a'), self.claude('b2', 'tok-b'), self.claude('c3', 'tok-c')]
+        out = m.provider_accounts('claude', lambda _: rows, self.fetch)
+        self.assertEqual(out['accountCount'], 3)
+        self.assertEqual([a['credentialCount'] for a in out['accounts']], [1, 1, 1])
+
+    def test_claude_mirror_of_the_same_account_keeps_its_own_row(self):
+        acct = {'account': {'uuid': 'acc-11111111'}, 'organization': {'uuid': 'org-22222222'}}
+        self.claude_rows({'tok-code': acct, 'tok-added': acct})
+        rows = [self.claude('m1', 'tok-code', source='claude_code'), self.claude('a1', 'tok-added')]
+        out = m.provider_accounts('claude', lambda _: rows, self.fetch)
+        self.assertEqual(out['accountCount'], 2)
+        self.assertEqual([a.get('mirror') for a in out['accounts']], ['claude-code', None])
+
+    def test_claude_grant_whose_profile_is_unreadable_keeps_its_known_account(self):
+        acct = {'account': {'uuid': 'acc-11111111'}, 'organization': {'uuid': 'org-22222222'}}
+        profiles = {'tok-old': acct, 'tok-new': acct}
+        self.claude_rows(profiles)
+        rows = [self.claude('a1', 'tok-old'), self.claude('b2', 'tok-new')]
+        self.assertEqual(m.provider_accounts('claude', lambda _: rows, self.fetch)['accountCount'], 1)
+        m._CACHE.clear()
+        profiles['tok-old'] = None   # e.g. the older grant's token stopped working
+        self.assertEqual(m.provider_accounts('claude', lambda _: rows, self.fetch)['accountCount'], 1)
+        # A grant never seen with a readable profile is not guessed into any account.
+        rows.append(self.claude('c3', 'tok-unknown'))
+        self.assertEqual(m.provider_accounts('claude', lambda _: rows, self.fetch)['accountCount'], 2)
+
+    def test_claude_folded_row_survives_use_first_reordering_the_pool(self):
+        acct = {'account': {'uuid': 'acc-11111111'}, 'organization': {'uuid': 'org-22222222'}}
+        self.claude_rows({'tok-old': acct, 'tok-new': acct})
+        old, new = self.claude('a1b2c3', 'tok-old', priority=0), self.claude('d4e5f6', 'tok-new', priority=1)
+        first = m.provider_accounts('claude', lambda _: [old, new], self.fetch)['accounts'][0]
+        # Use first on the newer sign-in: stock `hermes auth priority` moves it to the front of the pool.
+        new['priority'], old['priority'] = 0, 1
+        m._CACHE.clear()
+        moved = m.provider_accounts('claude', lambda _: [new, old], self.fetch)['accounts'][0]
+        self.assertEqual(moved['id'], first['id'])
+        self.assertEqual([c['id'] for c in moved['credentials']], ['d4e5f6', 'a1b2c3'])
+        self.assertTrue(moved['preferred'])
+        # A newer sign-in that stopped working never speaks for the row while an older one still works.
+        new['last_status'] = 'invalid'
+        m._CACHE.clear()
+        broken = m.provider_accounts('claude', lambda _: [new, old], self.fetch)['accounts'][0]
+        self.assertEqual([c['id'] for c in broken['credentials']], ['a1b2c3', 'd4e5f6'])
+        self.assertEqual(broken['status'], 'ready')
 
 if __name__ == '__main__':
     unittest.main()

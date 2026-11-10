@@ -159,7 +159,9 @@ def _anthropic_quota(token):
                     rows.append(row)
     plan = email = None
     try:
-        prof = _anthropic_get('profile', token)
+        prof = _claude_profile(token)
+        if prof is None:
+            raise OSError('profile unavailable')
         raw = str((prof.get('account') or {}).get('email') or '').strip()
         # The pattern already bounds the length; keep the exact address so emailHash matches the app's own hash.
         email = raw if re.fullmatch(r'[^@\s]{1,64}@[^@\s]{1,120}', raw) else None
@@ -171,6 +173,62 @@ def _anthropic_quota(token):
         pass  # A missing label never breaks usage.
     usage = {'fetchedAt': _iso(datetime.now(timezone.utc)), 'limits': rows, 'paid': None} if rows else None
     return plan, usage, email
+
+
+def _claude_profile(token):
+    """The Claude OAuth profile for one stored token (no refresh), cached briefly; None when unavailable."""
+    key = ('profile', hashlib.sha256(token.encode()).hexdigest())
+    with _LOCK:
+        cached = _CACHE.get(key)
+    if cached and time.monotonic() - cached[0] < 60:
+        return cached[1]
+    try:
+        prof = _anthropic_get('profile', token)
+    except Exception:
+        prof = None  # Never leak provider errors or tokens.
+    with _LOCK:
+        if len(_CACHE) > 256:
+            _CACHE.clear()
+        _CACHE[key] = (time.monotonic(), prof)
+    return prof
+
+
+_IDENTITIES = {}   # credential id -> provider-attested Claude identity, kept across token renewals
+_SEEN = {}         # credential id -> order this process first saw it (pool order at start; Use first reorders the pool)
+
+
+def _seen(cid):
+    with _LOCK:
+        if cid not in _SEEN:
+            if len(_SEEN) > 1024:
+                _SEEN.clear()
+            _SEEN[cid] = len(_SEEN)
+        return _SEEN[cid]
+
+
+def _claude_identity(row):
+    """Provider-attested Claude identity of one grant: the profile's account and organization IDs.
+
+    One email can belong to several organizations, so the email alone never folds two grants. A grant whose
+    profile cannot be read now (for example an expired token) keeps the identity last seen for that credential
+    ID, and otherwise stays its own row."""
+    cid = str(row.get('id') or '')
+    token = row.get('access_token') or ''
+    prof = _claude_profile(token) if token else None
+    identity = None
+    if isinstance(prof, dict):
+        account = (prof.get('account') or {}).get('uuid')
+        org = (prof.get('organization') or {}).get('uuid')
+        if all(isinstance(v, str) and re.fullmatch(r'[A-Za-z0-9-]{8,80}', v) for v in (account, org)):
+            identity = json.dumps(['claude', account, org])
+    with _LOCK:
+        if identity and cid:
+            if len(_IDENTITIES) > 512:
+                _IDENTITIES.clear()
+            _IDENTITIES[cid] = identity
+        elif cid:
+            identity = _IDENTITIES.get(cid)
+    return identity
 
 
 def _quota(provider, row, fetch):
@@ -271,22 +329,52 @@ def provider_accounts(provider, read=None, fetch=None, renew=None):
         from agent.account_usage import fetch_account_usage
         fetch = fetch_account_usage
     rows = [r for r in read(slug) if isinstance(r, dict) and r.get('auth_type') == 'oauth']
+    claude_ids = {}
+    if slug == 'anthropic':
+        # Added Claude grants of the same account and organization are one subscription row; the sheet lists each
+        # sign-in so the owner can remove a duplicate. The Claude Code mirror keeps its own row (the app folds it
+        # into the original sign-in).
+        added = [r for r in rows if str(r.get('source', '')) != 'claude_code' and r.get('id')]
+        for r in added:
+            _seen(str(r['id']))
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            claude_ids = dict(zip([id(r) for r in added], executor.map(_claude_identity, added)))
     grouped = {}
     for row in rows:
         claims = _claims(row.get('access_token') or '')
         auth = claims.get('https://api.openai.com/auth') or {}
         principal = (auth.get('chatgpt_account_id'), claims.get('sub'))
         # Deduplicate only provider-attested identity; never by email or nickname.
-        identity = json.dumps(principal) if provider == 'chatgpt' and all(principal) else str(row.get('id') or '')
+        identity = json.dumps(principal) if provider == 'chatgpt' and all(principal) else \
+            claude_ids.get(id(row)) or str(row.get('id') or '')
         if not identity:
             continue
         key = hashlib.sha256((slug + ':' + identity).encode()).hexdigest()[:24]
         grouped.setdefault(key, []).append((row, claims))
+    if slug == 'anthropic':
+        # A folded Claude row keeps the ID it had before the duplicate arrived (its oldest grant's), so an open
+        # sheet or a pending Use first still finds it. Age comes from first sight, never from pool order, because
+        # Use first moves a grant to the front of the pool.
+        def oldest(aliases):
+            return min((r for r, _ in aliases), key=lambda r: _seen(str(r.get('id'))))
+        grouped = {hashlib.sha256((slug + ':' + str(oldest(aliases).get('id'))).encode()).hexdigest()[:24]: aliases
+                   for aliases in grouped.values()}
 
     def project(item):
         key, aliases = item
-        # Prefer an independent manual login over a singleton mirror.
-        row, claims = sorted(reversed(aliases), key=lambda a: not str(a[0].get('source', '')).startswith('manual:'))[0]
+        if slug == 'anthropic' and len(aliases) > 1:
+            # Claude: a working, newest added sign-in speaks for the row and is listed first, so Use first targets
+            # the grant that still renews (signing in to the same account again can invalidate its older grants).
+            def rank(a):
+                r = a[0]
+                return (not _manual(r), str(r.get('last_status') or '') in ('invalid', 'disabled'),
+                        -_seen(str(r.get('id'))))
+            aliases = sorted(aliases, key=rank)
+            row, claims = aliases[0]
+        else:
+            # Prefer an independent manual login over a singleton mirror.
+            row, claims = sorted(reversed(aliases), key=lambda a: not _manual(a[0]))[0]
+        order = [r for r, _ in aliases]
         renew_failed = False
         # The Claude Code login mirror is renewed by its owner (the Claude app runs the official CLI).
         if _expired(row, claims) and str(row.get('source', '')) != 'claude_code':
@@ -332,7 +420,7 @@ def provider_accounts(provider, read=None, fetch=None, renew=None):
                 'credentials': [{'id': r['id'], 'name': _text(r.get('label'), 'Grant'),
                                  'managed': str(r.get('source', '')).startswith('manual:') and not str(r['id']).isdigit(),
                                  'priority': _rank(r)}
-                                for r, _ in aliases if r.get('id')],
+                                for r in order if r.get('id')],
                 'actions': {'reconnect': True, 'remove': True, 'prefer': _can_lead(slug, [r for r, _ in aliases], rows)}}
 
     with ThreadPoolExecutor(max_workers=4) as executor:
