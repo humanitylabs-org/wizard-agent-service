@@ -99,6 +99,7 @@ import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 import { DEFAULT_PRIVATE_ACCESS_SOCKET, createPhoneSetup } from './phone-setup.mjs'
 import { readArchivedSessions } from './archived-sessions.mjs'
+import { createMainProviderAttach } from './main-provider-attach.mjs'
 export { readArchivedSessions }
 
 export const BODY_LIMIT = 12 * 1024 * 1024
@@ -3054,6 +3055,11 @@ function buildWizardServer(options, lifetime) {
     },
   }) : null
   if (agents && bridge) { gatewayAgents = agents; bridge.appsChanged() }
+  // Switch WIZARD_MAIN_PROVIDER_ATTACH (issue 428): a provider sign-in joins the box's pool only; the main agent
+  // uses just the providers the owner attached to it (the onboarding choice is attached first).
+  const mainProviderAttach = options.mainProviderAttach === true && agentsDir
+    ? createMainProviderAttach({ path: join(agentsDir, '.main-providers.json'), loadOptions: () => hermesJson('/api/model/options') })
+    : null
   // App → agent binding (spec/AGENTS.md): per installed app, Service-owned, default = the main agent.
   const appBindings = agents && bridgeOsHome && options.appBindings !== false
     ? createAppBindings({ osHome: bridgeOsHome, registry: agents, appsJsonPath, launcherPath })
@@ -6419,6 +6425,22 @@ function buildWizardServer(options, lifetime) {
           catch { throw Object.assign(new Error('invalid schedule body'), { status: 400 }) }
         } })) return
       }
+      if (url.pathname === '/wizard/v1/main-providers') {
+        if (!mainProviderAttach) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (request.method === 'GET') { sendJson(response, 200, await mainProviderAttach.state(), { 'Cache-Control': 'no-store' }); return }
+        if (request.method !== 'PUT') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        // Attaching a provider to the agent is the owner's own decision, never an app's or an agent's.
+        if (principalOf(request).kind !== 'owner') { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (!String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
+        let value
+        try { value = JSON.parse((await readBoundedBody(request, 16 * 1024)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_json' }); return }
+        try { mainProviderAttach.set(value) } catch (error) { sendJson(response, error.status || 400, { error: error.code || 'invalid_request' }); return }
+        sendJson(response, 200, await mainProviderAttach.state())
+        return
+      }
       if (agentCtx && (url.pathname === '/wizard/v1/agent-options' || url.pathname.startsWith('/wizard/v1/agents') || url.pathname.startsWith('/wizard/v1/agent-grants'))) {
         if (await handleAgentsApi(agentCtx, url, request, response)) return
       }
@@ -7030,6 +7052,12 @@ function buildWizardServer(options, lifetime) {
             return
           }
         }
+        // Issue 428: the main agent's model picker lists only the providers attached to it.
+        if (mainProviderAttach && !operator && request.method === 'GET' && upstreamPath === '/api/model/options' && url.searchParams.size === 0) {
+          if (!hermesKey) { sendJson(response, 503, { error: 'service_unavailable' }); return }
+          sendJson(response, 200, mainProviderAttach.filterOptions(await hermesJson('/api/model/options')), { 'Cache-Control': 'no-store' })
+          return
+        }
         // Embedders without the agent registry use the same admission rule.
         let unscopedBody
         if (!agentResolution && request.method === 'POST' && isTurnWritePath(upstreamPath)) {
@@ -7113,6 +7141,13 @@ function buildWizardServer(options, lifetime) {
         const hasBody = request.method === 'PATCH' || request.method === 'POST' && !upstreamPath.endsWith('/stop')
         if (hasBody && !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
         let body = hasBody ? (agentResolution?.bodyRead ? agentResolution.body : unscopedBody ?? await readBoundedBody(request)) : undefined
+        if (mainProviderAttach && !operator && body && request.method === 'POST'
+          && (upstreamPath === '/v1/runs' || upstreamPath === '/api/sessions' || /^\/api\/sessions\/[^/]+\/model$/u.test(upstreamPath))) {
+          let requested = null
+          try { requested = JSON.parse(body.toString('utf8')) } catch { requested = null }
+          const refused = await mainProviderAttach.refusal(requested)
+          if (refused) { sendJson(response, 409, refused); return }
+        }
         if (request.method === 'POST' && upstreamPath.endsWith('/resolve-unknown')) {
           if (operator || !(await runContract()).unknownResolution) { sendJson(response, 404, { error: { code: 'not_supported' } }); return }
           const current = await hermesJson(upstreamPath.replace(/\/resolve-unknown$/, ''), {}, true)

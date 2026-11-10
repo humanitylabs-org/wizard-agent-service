@@ -189,6 +189,9 @@ server = createWizardServer({
   // Agent builder offers Claude from a connected Claude app (wizard.ai-connection/2 models) when the gateway's
   // anthropic slug reads signed out (issue 409). Off by default.
   agentClaudeFromApp: process.env.WIZARD_AGENT_CLAUDE_FROM_APP === '1',
+  // A provider sign-in joins the box's provider pool only; the main agent uses just the providers the owner
+  // attached to it via PUT /wizard/v1/main-providers (issue 428). Off by default.
+  mainProviderAttach: process.env.WIZARD_MAIN_PROVIDER_ATTACH === '1',
   // Routed agents' owner turns stamped internal_notification by Hermes 0.22.7 (issue 379). Off by default.
   routedOwnerTurns: process.env.WIZARD_ROUTED_OWNER_TURNS === '1',
   // Owner turns with an inline screenshot, which Hermes flattens to "[screenshot]" (issue 145). Off by default.
