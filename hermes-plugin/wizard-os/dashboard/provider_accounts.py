@@ -5,7 +5,8 @@ credentials. Quota requests explicitly name each credential and forbid refresh. 
 exception is an already-expired grant: Hermes renews tokens only when it uses them, so an idle
 subscription's meter would go blank. That grant is renewed through Hermes' own pool
 (`try_refresh_matching`, which holds the cross-process single-use refresh lock), at most once per
-grant per _RENEW_EVERY seconds; a grant Hermes cannot renew is reported as `expired`.
+grant per _RENEW_EVERY seconds; a grant Hermes cannot renew (or has marked `dead`) is reported as
+`expired`, and a token still past expiry is never sent to the usage endpoint.
 No provider-wide OAuth start/logout routes are exposed as account operations.
 """
 from __future__ import annotations
@@ -25,7 +26,8 @@ _NAMES = {"chatgpt": "ChatGPT", "claude": "Claude"}
 _CACHE = {}
 _LOCK = threading.Lock()
 _RENEW_EVERY = 600
-_RENEWED = {}   # credential id -> monotonic time of the last renewal attempt
+_RENEWED = {}   # credential id -> (monotonic time of the last renewal attempt, renewal failed: True/False/None)
+_BROKEN = ('invalid', 'disabled', 'dead')   # Hermes states of a grant that no longer works
 
 
 def _claims(token):
@@ -49,26 +51,40 @@ def _expired(row, claims):
 
 
 def _renew(slug, row, read):
-    """Renew one expired grant through stock Hermes. Returns (fresh row or None, renewal failed)."""
+    """Renew one expired grant through stock Hermes. Returns (fresh row or None, renewal failed).
+
+    `failed` is True when Hermes refused the renewal, None when the attempt was inconclusive (refresh lock busy,
+    older Hermes, network) or ran recently. A refusal is remembered until the next attempt window, so the row keeps
+    reading `expired` instead of flipping back to ready between listings."""
     cid = row.get('id')
     if not cid:
         return None, True
     now = time.monotonic()
     with _LOCK:
         last = _RENEWED.get(cid)
-        if last is not None and now - last < _RENEW_EVERY:
-            return None, None          # tried recently: report what the store says, no new attempt
-        _RENEWED[cid] = now
+        if last is not None and now - last[0] < _RENEW_EVERY:
+            return None, (True if last[1] is True else None)   # tried recently: no new attempt
+        if len(_RENEWED) > 512:
+            _RENEWED.clear()
+        _RENEWED[cid] = (now, None)
     try:
         from agent.credential_pool import load_pool
-        if not load_pool(slug).try_refresh_matching(credential_id=cid):
-            return None, True
-        fresh = next((r for r in read(slug) if isinstance(r, dict) and r.get('id') == cid), None)
-        if fresh and fresh.get('access_token') and fresh.get('access_token') != row.get('access_token'):
-            return fresh, False
-        return None, True
+        renewed = load_pool(slug).try_refresh_matching(credential_id=cid)
     except Exception:
-        return None, True   # never leak provider errors or tokens
+        return None, None   # inconclusive: never claim expired; never leak provider errors or tokens
+    failed, fresh = True, None
+    if renewed:
+        try:
+            fresh = next((r for r in read(slug) if isinstance(r, dict) and r.get('id') == cid), None)
+        except Exception:
+            fresh = None
+        if fresh and fresh.get('access_token') and fresh.get('access_token') != row.get('access_token'):
+            failed = False
+        else:
+            fresh = None
+    with _LOCK:
+        _RENEWED[cid] = (now, failed)
+    return fresh, failed
 
 
 def _masked(value):
@@ -367,23 +383,28 @@ def provider_accounts(provider, read=None, fetch=None, renew=None):
             # the grant that still renews (signing in to the same account again can invalidate its older grants).
             def rank(a):
                 r = a[0]
-                return (not _manual(r), str(r.get('last_status') or '') in ('invalid', 'disabled'),
+                return (not _manual(r), str(r.get('last_status') or '') in _BROKEN, _expired(*a),
                         -_seen(str(r.get('id'))))
             aliases = sorted(aliases, key=rank)
             row, claims = aliases[0]
         else:
-            # Prefer an independent manual login over a singleton mirror.
-            row, claims = sorted(reversed(aliases), key=lambda a: not _manual(a[0]))[0]
+            # A working grant speaks for the account (so a stale duplicate is not renewed while a live one exists),
+            # then an independent manual login over a singleton mirror.
+            row, claims = sorted(reversed(aliases), key=lambda a: (
+                str(a[0].get('last_status') or '') in _BROKEN, _expired(*a), not _manual(a[0])))[0]
         order = [r for r, _ in aliases]
         renew_failed = False
-        # The Claude Code login mirror is renewed by its owner (the Claude app runs the official CLI).
-        if _expired(row, claims) and str(row.get('source', '')) != 'claude_code':
+        dead = str(row.get('last_status') or '') == 'dead'
+        # The Claude Code login mirror is renewed by its owner (the Claude app runs the official CLI). A `dead`
+        # grant was terminally refused; Hermes clears it only on a new sign-in, so it is not renewed here.
+        if _expired(row, claims) and not dead and str(row.get('source', '')) != 'claude_code':
             fresh, renew_failed = renew(slug, row, read)
             if fresh:
                 row, claims = fresh, _claims(fresh.get('access_token') or '')
             elif renew_failed is None:
                 renew_failed = str(row.get('last_status') or '') not in ('', 'ok', 'ready')
-        plan, usage = _quota(slug, row, fetch)
+        # A token still past expiry cannot read usage; never send it to the provider.
+        plan, usage = (None, None) if _expired(row, claims) else _quota(slug, row, fetch)
         auth = claims.get('https://api.openai.com/auth') or {}
         profile = claims.get('https://api.openai.com/profile') or {}
         raw = profile.get('email') or claims.get('email')
@@ -404,7 +425,7 @@ def provider_accounts(provider, read=None, fetch=None, renew=None):
         if state == 'ok':
             state = 'ready'
         state = state if state in {'ready', 'exhausted', 'rate_limited', 'invalid', 'disabled'} else 'needs_attention'
-        if renew_failed or state == 'invalid':
+        if renew_failed or dead or state == 'invalid':
             # The grant can't be renewed: the owner must sign in again (the app offers Reconnect).
             state = 'expired'
             extra['error'] = {'code': 'expired', 'message': 'This sign-in expired. Reconnect it to keep using it.'}
