@@ -7590,6 +7590,13 @@ function buildWizardServer(options, lifetime) {
           result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots, agentPathAliases)
           if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result, historySource)
         }
+        // Issue 440: hydrate the first owner request before the credential and private-path guards below,
+        // so state.db text gets exactly the same redaction and fail-closed scan as every other list field.
+        const channelListing = channelStore && !operator && upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions'
+          && url.searchParams.get('view') === 'list' && contentType.includes('application/json')
+        if (channelListing) {
+          try { const listed = JSON.parse(result.toString('utf8')); withFirstRequests(listed); result = Buffer.from(JSON.stringify(listed)) } catch { /* not a list body */ }
+        }
         const privatePaths = [...inboxTrustedRoots, ...responseTrustedPaths, ...trustedPaths]
         // Recovery notes can contain a raw attachment location outside a file
         // marker. Keep history/listing readable without exposing that location.
@@ -7603,9 +7610,7 @@ function buildWizardServer(options, lifetime) {
         const forbidden = [hermesKey, inboxToken, ...privatePaths].filter(Boolean).map((value) => Buffer.from(value))
         if (forbidden.some((value) => result.includes(value))) { sendJson(response, 502, { error: 'unsafe_upstream_response' }); return }
         if (upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions' && url.searchParams.get('view') === 'list') {
-          const listed = JSON.parse(result.toString('utf8'))
-          if (channelStore && !operator) withFirstRequests(listed)
-          result = Buffer.from(JSON.stringify(listPayload(listed, url.searchParams.get('q'), channelStore && !operator ? channelStore : null)))
+          result = Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), url.searchParams.get('q'), channelStore && !operator ? channelStore : null)))
         }
         // A deleted thread leaves its channel (issue 440).
         if (channelStore && !operator && upstream.ok && request.method === 'DELETE' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {

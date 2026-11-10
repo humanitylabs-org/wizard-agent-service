@@ -619,6 +619,21 @@ export const serverChecks = {
     await s.restart()
     assert.equal((await listed()).channel, own.id, 'durable membership')
     assert.equal((await channels()).filter(c => c.kind === 'alerts').length, 1, 'a restart adds no second Alerts')
+    // Routed archived threads have no Hermes preview; their post text comes from the agent's own state.db.
+    // (Main reads every row's first request from its state.db already.)
+    if (s.kind !== 'main') {
+      row.archived = true; row.preview = ''
+      const archivedFeed = await (await s.request(`/api/sessions?view=list&channel=${own.id}`)).json()
+      assert.deepEqual(archivedFeed.data.map(x => [x.id, x.archived]), [['wizard_parity', true]], 'the feed keeps archived posts')
+      assert.equal(archivedFeed.data[0].firstRequest, 'Synthetic first channel request, in full', 'archived post text')
+      row.archived = false; row.preview = 'Synthetic first channel request'
+    }
+    if (s.kind === 'main') {
+      // The first request passes the same fail-closed credential scan as every other list field.
+      row.messages.unshift({ role: 'user', timestamp: 1, content: 'Synthetic parity-main-secret request' })
+      assert.equal((await s.request('/api/sessions?view=list')).status, 502)
+      row.messages.shift()
+    }
     assert.equal((await move(null, s.id)).status, 200)
     assert.equal((await listed(false)).channel, undefined)
   },

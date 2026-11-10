@@ -7,7 +7,7 @@
 // and the agent-scoped thread/run proxy used when a request names a non-main agent or a thread pinned to one.
 import { Readable } from 'node:stream'
 import { randomUUID, createHash } from 'node:crypto'
-import { indexedSearchWords } from './session-truth.mjs'
+import { indexedSearchWords, readHermesFirstRequests } from './session-truth.mjs'
 import { replyEpoch } from './open-ask.mjs'
 import { guardOwnerThreadWrite, isTurnWritePath, withoutAgentToAgentTurns } from './owner-thread-write.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
@@ -56,6 +56,20 @@ const runErrorField = (run) => {
   return value ? { wizard_last_run_error: value } : {}
 }
 
+// Chats channels (issue 440): Hermes' list `preview` is a thread's first-message head, but archived rows read
+// from the agent's own state.db carry none. Read their first owner request there (when the Service can read
+// it; a restricted agent's cannot, and those rows keep no firstRequest). Text naming a secret is dropped.
+function archivedFirstRequests(ctx, agent, listed, secrets) {
+  const rows = ['data', 'sessions', 'items'].flatMap(key => Array.isArray(listed?.[key]) ? listed[key] : [])
+    .filter(row => row && typeof row.id === 'string' && !row.preview && !Object.hasOwn(row, 'wizard_first_request'))
+  if (!rows.length || listed.mode === 'body' || listed.fields === 'slim') return
+  let firsts
+  try { firsts = readHermesFirstRequests(ctx.agentStatePath?.(agent) ?? join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), rows.map(row => row.id)) } catch { return }
+  for (const row of rows) {
+    const first = firsts.get(row.id)
+    if (typeof first === 'string' && !secrets.some(secret => first.includes(secret))) row.wizard_first_request = first
+  }
+}
 export async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
   if (!profileRunCache.has(ctx)) profileRunCache.set(ctx, new Map())
   const cache = profileRunCache.get(ctx), result = new Array(rows.length)
@@ -865,7 +879,11 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       }
       // One thread already claimed by another agent must not break this agent's whole list.
       for (const id of sessionIdsIn(result)) registry.pin(id, agent.id, 'runtime_verified')
-      if(searchParams.get('view') === 'list') result=Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), searchParams.get('q'), ctx.channelStore || null)))
+      if(searchParams.get('view') === 'list') {
+        const listed=JSON.parse(result.toString('utf8'))
+        if (ctx.channelStore) archivedFirstRequests(ctx, agent, listed, secrets)
+        result=Buffer.from(JSON.stringify(listPayload(listed, searchParams.get('q'), ctx.channelStore || null)))
+      }
     } else if (/^\/api\/sessions(?:\/[^/]+)?$/u.test(upstreamPath)) result = decorateThreadAgent(result, info)
     if (method === 'POST' && upstreamPath === '/v1/runs') result = Buffer.from(JSON.stringify({ ...JSON.parse(result.toString('utf8')), agent_id: agent.id }))
     if (method === 'GET' && searchParams.get('view') === 'detail' && /^\/api\/sessions\/[^/]+$/u.test(upstreamPath)) {
