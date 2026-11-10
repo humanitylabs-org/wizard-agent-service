@@ -194,6 +194,16 @@ def _claude_profile(token):
 
 
 _IDENTITIES = {}   # credential id -> provider-attested Claude identity, kept across token renewals
+_SEEN = {}         # credential id -> order this process first saw it (pool order at start; Use first reorders the pool)
+
+
+def _seen(cid):
+    with _LOCK:
+        if cid not in _SEEN:
+            if len(_SEEN) > 1024:
+                _SEEN.clear()
+            _SEEN[cid] = len(_SEEN)
+        return _SEEN[cid]
 
 
 def _claude_identity(row):
@@ -325,6 +335,8 @@ def provider_accounts(provider, read=None, fetch=None, renew=None):
         # sign-in so the owner can remove a duplicate. The Claude Code mirror keeps its own row (the app folds it
         # into the original sign-in).
         added = [r for r in rows if str(r.get('source', '')) != 'claude_code' and r.get('id')]
+        for r in added:
+            _seen(str(r['id']))
         with ThreadPoolExecutor(max_workers=4) as executor:
             claude_ids = dict(zip([id(r) for r in added], executor.map(_claude_identity, added)))
     grouped = {}
@@ -341,17 +353,28 @@ def provider_accounts(provider, read=None, fetch=None, renew=None):
         grouped.setdefault(key, []).append((row, claims))
     if slug == 'anthropic':
         # A folded Claude row keeps the ID it had before the duplicate arrived (its oldest grant's), so an open
-        # sheet or a pending Use first still finds it; removing the duplicate leaves the ID unchanged too.
-        grouped = {hashlib.sha256((slug + ':' + str(aliases[0][0].get('id'))).encode()).hexdigest()[:24]: aliases
+        # sheet or a pending Use first still finds it. Age comes from first sight, never from pool order, because
+        # Use first moves a grant to the front of the pool.
+        def oldest(aliases):
+            return min((r for r, _ in aliases), key=lambda r: _seen(str(r.get('id'))))
+        grouped = {hashlib.sha256((slug + ':' + str(oldest(aliases).get('id'))).encode()).hexdigest()[:24]: aliases
                    for aliases in grouped.values()}
 
     def project(item):
         key, aliases = item
-        # Prefer an independent manual login over a singleton mirror.
-        row, claims = sorted(reversed(aliases), key=lambda a: not str(a[0].get('source', '')).startswith('manual:'))[0]
-        # Claude: the newest added sign-in is listed first, so Use first targets the grant that still renews
-        # (signing in to the same account again can invalidate its older grants).
-        order = [row] + [r for r, _ in aliases if r is not row] if slug == 'anthropic' else [r for r, _ in aliases]
+        if slug == 'anthropic' and len(aliases) > 1:
+            # Claude: a working, newest added sign-in speaks for the row and is listed first, so Use first targets
+            # the grant that still renews (signing in to the same account again can invalidate its older grants).
+            def rank(a):
+                r = a[0]
+                return (not _manual(r), str(r.get('last_status') or '') in ('invalid', 'disabled'),
+                        -_seen(str(r.get('id'))))
+            aliases = sorted(aliases, key=rank)
+            row, claims = aliases[0]
+        else:
+            # Prefer an independent manual login over a singleton mirror.
+            row, claims = sorted(reversed(aliases), key=lambda a: not _manual(a[0]))[0]
+        order = [r for r, _ in aliases]
         renew_failed = False
         # The Claude Code login mirror is renewed by its owner (the Claude app runs the official CLI).
         if _expired(row, claims) and str(row.get('source', '')) != 'claude_code':

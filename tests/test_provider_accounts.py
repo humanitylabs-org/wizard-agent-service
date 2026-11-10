@@ -22,6 +22,7 @@ class AccountsTest(unittest.TestCase):
     def setUp(self):
         m._CACHE.clear()
         m._IDENTITIES.clear()
+        m._SEEN.clear()
         self.calls = []
 
     def fetch(self, provider, **kwargs):
@@ -250,6 +251,25 @@ class AccountsTest(unittest.TestCase):
         # A grant never seen with a readable profile is not guessed into any account.
         rows.append(self.claude('c3', 'tok-unknown'))
         self.assertEqual(m.provider_accounts('claude', lambda _: rows, self.fetch)['accountCount'], 2)
+
+    def test_claude_folded_row_survives_use_first_reordering_the_pool(self):
+        acct = {'account': {'uuid': 'acc-11111111'}, 'organization': {'uuid': 'org-22222222'}}
+        self.claude_rows({'tok-old': acct, 'tok-new': acct})
+        old, new = self.claude('a1b2c3', 'tok-old', priority=0), self.claude('d4e5f6', 'tok-new', priority=1)
+        first = m.provider_accounts('claude', lambda _: [old, new], self.fetch)['accounts'][0]
+        # Use first on the newer sign-in: stock `hermes auth priority` moves it to the front of the pool.
+        new['priority'], old['priority'] = 0, 1
+        m._CACHE.clear()
+        moved = m.provider_accounts('claude', lambda _: [new, old], self.fetch)['accounts'][0]
+        self.assertEqual(moved['id'], first['id'])
+        self.assertEqual([c['id'] for c in moved['credentials']], ['d4e5f6', 'a1b2c3'])
+        self.assertTrue(moved['preferred'])
+        # A newer sign-in that stopped working never speaks for the row while an older one still works.
+        new['last_status'] = 'invalid'
+        m._CACHE.clear()
+        broken = m.provider_accounts('claude', lambda _: [new, old], self.fetch)['accounts'][0]
+        self.assertEqual([c['id'] for c in broken['credentials']], ['a1b2c3', 'd4e5f6'])
+        self.assertEqual(broken['status'], 'ready')
 
 if __name__ == '__main__':
     unittest.main()
