@@ -50,6 +50,16 @@
   ],
   "features": [
     {
+      "id": "tools-list-cache-hints",
+      "description": "The wizard MCP gateway's tools/list carries SEP-2549 cache hints (ttlMs, cacheScope private) so a caching client such as Hermes lazy: true can register app tools at chat start; only a complete discovery is cacheable (one day), and any visible app that is stopped, failing, malformed, filtered, paginated or replaced during the request makes the reply ttlMs 0.",
+      "layer": "server",
+      "fixture": "tools-list-cache-hints",
+      "how_to_test": "Through each main, host-profile, container and restricted agent's own gateway credential and transport (restricted: Unix socket), install a synthetic answering MCP app and call tools/list: its tool is listed with ttlMs 86400000 and cacheScope private. Add a second visible app that cannot be reached: the answering app's tool is still listed and ttlMs is 0. tests/agent-bridge-cache.node.mjs covers failure, cached retry, recovery, empty/malformed/paginated/filtered discovery, stopped apps and grant or registry changes during discovery through the production gateway with a synthetic transport. Not stock Hermes cache registration or reconnect.",
+      "source_refs": ["server/agent-bridge.mjs"],
+      "reference_tests": ["tests/agent-bridge-cache.node.mjs", "tests/agent-bridge.test.ts", "qa/agent-parity/server-checks.mjs"],
+      "policy_exemptions": []
+    },
+    {
       "id": "viewer-desktop-fit-keys",
       "description": "Scoped chat media opens the shared viewer: desktop images fit the viewport, Left/Right navigate in order, close restores the exact thread and draft, and phone open/Back remains scoped after cold selected-agent restore.",
       "layer": "ux",

@@ -970,6 +970,48 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     setApps(['parity-qa', 'parity-video'])
     assert.doesNotMatch((await call()).content[0].text, /not allowed/u, 'on again: no restart needed')
   },
+  'tools-list-cache-hints': async s => {
+    // Issue 435: tools/list carries SEP-2549 cache hints so Hermes `lazy: true` can register app tools at chat start.
+    // A complete discovery is cacheable for a day; an app that cannot answer makes the whole list ttlMs 0.
+    const { createServer } = await import('node:http')
+    const app = createServer((req, res) => {
+      let body = ''; req.on('data', c => { body += c }); req.on('end', () => {
+        const msg = JSON.parse(body || '{}')
+        if (msg.id === undefined) { res.writeHead(202); return res.end() }
+        const result = msg.method === 'tools/list' ? { tools: [{ name: 'make_short', description: 'Synthetic', inputSchema: { type: 'object', properties: {} } }] } : { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'parity-video', version: '1' } }
+        res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }))
+      })
+    })
+    await new Promise(resolve => app.listen(0, '127.0.0.1', resolve))
+    try {
+      const osHome = join(s.root, 'os')
+      const video = { id: 'parity-video', name: 'Synthetic Video', status: 'running', provides: ['short-form-video'], mcp: { url: `http://127.0.0.1:${app.address().port}/mcp` } }
+      const down = { id: 'parity-down', name: 'Synthetic Down', status: 'running', provides: ['notes'], mcp: { url: 'http://127.0.0.1:9/mcp' } }
+      const parityQa = { id: 'parity-qa', name: 'Synthetic Parity App', view: '/parity/', agent_binding: true }
+      const install = (apps, ids) => {
+        writeFileSync(join(s.root, 'apps.json'), JSON.stringify({ schema: 1, apps: [parityQa, ...apps] }))
+        if (s.kind === 'main') return writeFileSync(join(osHome, 'agents', '.main-agent.json'), JSON.stringify({ schema: 1, wizard_apps: ['parity-qa', ...ids], agent_apps: [] }))
+        const file = join(osHome, 'agents', s.id, 'agent.json'), agent = JSON.parse(readFileSync(file, 'utf8'))
+        agent.permissions.wizard_apps = ['parity-qa', ...ids]; agent.permissions.agent_apps = []
+        writeFileSync(file, JSON.stringify(agent))
+      }
+      const list = async () => {
+        const r = await s.agentMcp('tools/list')
+        assert.equal(r.status, 200, 'gateway answers with this kind\'s own credential and transport')
+        return (await r.json()).result
+      }
+      install([video], ['parity-video']); await s.restart()
+      const healthy = await list()
+      assert.ok(healthy.tools.some(t => t.name === 'parity_video__make_short'), `${s.kind}: app tool listed`)
+      assert.equal(healthy.ttlMs, 24 * 60 * 60 * 1000, `${s.kind}: complete discovery is cacheable for a day`)
+      assert.equal(healthy.cacheScope, 'private')
+      install([video, down], ['parity-video', 'parity-down']); await s.restart()
+      const partial = await list()
+      assert.ok(partial.tools.some(t => t.name === 'parity_video__make_short'), `${s.kind}: answering app still listed`)
+      assert.equal(partial.ttlMs, 0, `${s.kind}: an app that did not answer makes the list uncacheable`)
+      assert.equal(partial.cacheScope, 'private')
+    } finally { await new Promise(resolve => app.close(resolve)) }
+  },
   'finished-run-leaves-working': async s => {
     await finishedRunLeavesWorking(s)
     if (s.kind !== 'main') return
