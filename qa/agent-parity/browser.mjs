@@ -275,16 +275,18 @@ async function offlineChecks({s,context,page,record,load,open,root}){
  await page.waitForFunction(()=>!!navigator.serviceWorker?.controller,null,{timeout:30000})
  const cached=()=>page.evaluate(async()=>{const out=[];for(const n of await caches.keys())for(const r of await (await caches.open(n)).keys())out.push({cache:n,path:new URL(r.url).pathname});return out})
  await until(async()=>{const k=(await cached()).filter(x=>x.cache==='wos-shell-v1').map(x=>x.path);return k.includes('/wizard-os-home/')&&k.some(p=>p.endsWith('/live.js'))&&k.some(p=>p.endsWith('/chats.js'))},'shell copied for an offline start',30000)
- const stored=()=>page.evaluate(()=>new Promise(res=>{const r=indexedDB.open('wos-thread-cache',1);r.onupgradeneeded=()=>r.result.createObjectStore('t',{keyPath:'id'});r.onerror=()=>res(null);r.onsuccess=()=>{try{const g=r.result.transaction('t').objectStore('t').get('wizard_parity');g.onsuccess=()=>res(g.result?.rows?.length||0);g.onerror=()=>res(null)}catch{res(0)}}}))
+ const stored=()=>page.evaluate(()=>new Promise(res=>{const r=indexedDB.open('wos-thread-cache',1);r.onupgradeneeded=()=>r.result.createObjectStore('t',{keyPath:'id'});r.onerror=()=>res(null);r.onsuccess=()=>{try{const g=r.result.transaction('t').objectStore('t').get('wizard_parity');g.onsuccess=()=>res(g.result?{rows:Array.isArray(g.result.rows)?g.result.rows.length:0}:false);g.onerror=()=>res(null)}catch{res(false)}}}))
  const main=s.kind==='main'
- if(main)await until(async()=>await stored()>0,'main thread saved on this device');else{await sleep(1500);assert.equal(await stored(),0,'a routed thread is never stored')}
+ // Any record at all counts as stored (metadata or empty rows too), and every seeded word is looked for offline.
+ const seeded=['Synthetic saved thread','Synthetic saved question','Synthetic saved answer']
+ if(main)await until(async()=>(await stored())?.rows>0,'main thread saved on this device');else{await sleep(1500);assert.equal(await stored(),false,'a routed thread is never stored, not even as metadata')}
  const keys=await cached();assert.ok(!keys.some(x=>x.path.startsWith('/wizard/')),'no /wizard/* API or private media response is cached: '+JSON.stringify(keys.filter(x=>x.path.startsWith('/wizard/'))))
  await context.setOffline(true);await page.reload({waitUntil:'domcontentloaded'})
  await page.waitForFunction(()=>!!window.__wos&&!!window.WizLive&&!!window.WosChat,null,{timeout:30000});assert.equal(await page.evaluate(()=>navigator.onLine),false)
  assert.ok(await page.evaluate(()=>!!document.querySelector('[data-chats],#app,body')),'shell painted from the worker copy')
  let label='routed thread: no saved copy'
  if(main){({chat}=await open());await until(async()=>(await chat.innerText()).includes('Synthetic saved answer'),'saved copy painted offline');await chat.locator('.ch-saved').waitFor({timeout:10000});label=(await chat.locator('.ch-saved').innerText()).trim();assert.match(label,/Saved copy/)}
- else{await root();await sleep(1500);assert.ok(!(await page.locator('body').innerText()).includes('Synthetic saved answer'),'no stored routed transcript appears offline');assert.equal(await stored(),0)}
+ else{await root();await sleep(1500);const body=await page.locator('body').innerText();for(const w of seeded)assert.ok(!body.includes(w),`no stored routed thread text appears offline: ${w}`);assert.equal(await stored(),false)}
  await context.setOffline(false);await page.reload({waitUntil:'domcontentloaded'});await page.waitForFunction(()=>window.__wos?.live?.ok,null,{timeout:45000})
  record('offline-start',`Offline reload opened the shell from the scoped worker copy; ${main?'main thread showed its labelled saved copy ('+label+')':'routed thread was never stored and nothing appeared'}; no /wizard/* response cached (${keys.length} cached files)`)
 }
