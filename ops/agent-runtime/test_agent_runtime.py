@@ -62,6 +62,9 @@ class ClaudeLoginMountTest(unittest.TestCase):
 
 class RestrictedDriverTest(unittest.TestCase):
     def setUp(self):
+        rootful = mock.patch.object(ar, "_ROOTLESS", [False])
+        rootful.start()
+        self.addCleanup(rootful.stop)
         self.tmp = Path(tempfile.mkdtemp()).resolve()   # macOS: /var is a symlink to /private/var
         self.agents = ar.Agents(self.tmp / "agents", None)
         self.driver = ar.RestrictedDriver(self.agents, ar.RESTRICTED_DIR, "")
@@ -374,6 +377,91 @@ class RuntimeUnitTest(unittest.TestCase):
         used = set(re.findall(r"\$\{?([A-Z_]+)", unit["ExecStart"][0]))
         self.assertEqual(used, set(defined))
         self.assertTrue(all(v == "" for v in defined.values()), "example must not carry values")
+
+
+class RootlessDockerTest(unittest.TestCase):
+    """Rootless Docker (DOCKER_HOST=unix:///run/user/<uid>/docker.sock, no /var/run/docker.sock): plain docker,
+    and the edge runs as container uid 0, which is the daemon's own user there, never host root."""
+
+    def setUp(self):
+        ar._ROOTLESS.clear()
+        self.addCleanup(ar._ROOTLESS.clear)
+
+    def test_docker_host_uses_plain_docker_not_sg(self):
+        done = subprocess.CompletedProcess([], 0, "", "")
+        with mock.patch.dict(ar.os.environ, {"DOCKER_HOST": "unix:///run/user/1000/docker.sock"}), \
+                mock.patch.object(ar.subprocess, "run", return_value=done) as run:
+            ar.docker(["ps"])
+        self.assertEqual(run.call_args[0][0][:2], ["docker", "ps"])
+
+    def test_rootless_detected_from_security_options_once(self):
+        out = subprocess.CompletedProcess([], 0, '["name=seccomp,profile=builtin","name=rootless","name=cgroupns"]', "")
+        with mock.patch.object(ar, "docker", return_value=out) as docker:
+            self.assertTrue(ar.rootless_docker()); self.assertTrue(ar.rootless_docker())
+        self.assertEqual(docker.call_count, 1)
+
+    def test_rootful_info_is_not_rootless(self):
+        out = subprocess.CompletedProcess([], 0, '["name=seccomp,profile=builtin"]', "")
+        with mock.patch.object(ar, "docker", return_value=out):
+            self.assertFalse(ar.rootless_docker())
+
+    def test_failed_info_refuses_identity_and_retries_after_recovery(self):
+        outputs = [subprocess.CompletedProcess([], 1, "", "starting"),
+                   subprocess.CompletedProcess([], 0, '["name=rootless"]', "")]
+        with mock.patch.object(ar, "docker", side_effect=outputs) as docker:
+            with self.assertRaisesRegex(ar.RuntimeFailure, "docker_security_options_unavailable"):
+                ar.rootless_docker()
+            self.assertTrue(ar.rootless_docker())
+            self.assertTrue(ar.rootless_docker())
+        self.assertEqual(docker.call_count, 2)
+
+    def test_malformed_security_options_do_not_choose_an_identity(self):
+        for text in ('', 'null', '{}', '"name=rootless"', '[null]', 'not-json'):
+            ar._ROOTLESS.clear()
+            with self.subTest(text=text), mock.patch.object(ar, "docker", return_value=
+                    subprocess.CompletedProcess([], 0, text, "")):
+                with self.assertRaisesRegex(ar.RuntimeFailure, "docker_security_options_unavailable"):
+                    ar.rootless_docker()
+                self.assertEqual(ar._ROOTLESS, [])
+
+    def test_rootless_option_matches_a_complete_option(self):
+        with mock.patch.object(ar, "docker", return_value=
+                subprocess.CompletedProcess([], 0, '["name=rootless-other"]', "")):
+            self.assertFalse(ar.rootless_docker())
+
+    def test_env_uses_one_identity_probe_for_uid_and_gid(self):
+        driver = object.__new__(ar.RestrictedDriver)
+        driver.agents = mock.Mock(root=Path('/fixture/agents'))
+        driver.agents.secret.return_value = 'synthetic-runtime-key'
+        driver.agents.home.return_value = Path('/fixture/agents/daily/home')
+        driver.image = 'fixture-image'
+        agent = {'id': 'daily', 'runtime': {'network': {
+            'uplink': '10.250.0.16/28', 'sandbox': '10.251.0.16/28'}}}
+        for rootless in (True, False):
+            with self.subTest(rootless=rootless), mock.patch.object(ar, 'rootless_docker', return_value=rootless) as probe, \
+                    mock.patch.object(ar.os, 'getuid', return_value=4321), \
+                    mock.patch.object(ar.os, 'getgid', return_value=8765):
+                env = driver.env(agent)
+                self.assertEqual(probe.call_count, 1)
+                self.assertEqual(env['AGENT_EDGE_UID'], '0' if rootless else '4321')
+                self.assertEqual(env['AGENT_EDGE_GID'], '0' if rootless else '8765')
+
+    def test_probe_process_failures_are_structured_and_not_cached(self):
+        for error in (subprocess.TimeoutExpired('docker', 15), FileNotFoundError('fixture')):
+            with self.subTest(error=type(error).__name__), mock.patch.object(ar, 'docker', side_effect=error):
+                with self.assertRaisesRegex(ar.RuntimeFailure, 'docker_security_options_unavailable'):
+                    ar.rootless_docker()
+                self.assertEqual(ar._ROOTLESS, [])
+
+    def test_missing_or_unwritable_default_socket_uses_sg(self):
+        for exists, writable in ((False, False), (True, False)):
+            with self.subTest(exists=exists), mock.patch.dict(ar.os.environ, {}, clear=True), \
+                    mock.patch.object(ar.Path, 'exists', return_value=exists), \
+                    mock.patch.object(ar.os, 'access', return_value=writable), \
+                    mock.patch.object(ar.subprocess, 'run', return_value=
+                        subprocess.CompletedProcess([], 0, '', '')) as run:
+                ar.docker(['info'], timeout=5)
+                self.assertEqual(run.call_args.args[0], ['sg', 'docker', '-c', 'docker info'])
 
 
 if __name__ == "__main__":

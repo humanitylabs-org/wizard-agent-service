@@ -37,6 +37,8 @@ class RestrictedImportTests(unittest.TestCase):
         self.plan.update(move=True, gateway_url='http://edge:8923/wizard/mcp', image='fixture:restricted')
         h.approve(self.plan)
         def fake_docker(args, **kw):
+            if args == ['info', '--format', '{{json .SecurityOptions}}']:
+                return type('Result', (), {'stdout': '[]', 'returncode': 0})()
             if args[0] == 'run' and '/target/.import-transfer/home' in args[-1]:
                 mount = next(a for a in args if a.startswith('type=bind,src='))
                 base = Path(mount.split('src=', 1)[1].split(',dst=')[0])

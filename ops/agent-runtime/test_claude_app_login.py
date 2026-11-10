@@ -25,10 +25,13 @@ class ClaudeLoginTest(unittest.TestCase):
         self.calls = []; self.installed = True; self.connected = True; self.seeder = True; self.kind = 'volume'
         self.patch = mock.patch.object(ar, 'docker', side_effect=self.fake)
         self.patch.start(); self.addCleanup(self.patch.stop)
+        ar._ROOTLESS.clear(); self.addCleanup(ar._ROOTLESS.clear)
 
     def fake(self, args, timeout=0, env=None, check=True):
         self.calls.append((args, env))
         output, code = '', 0
+        if args[0] == 'info':   # the rootless identity probe: a rootful daemon
+            output = '["name=seccomp,profile=builtin"]'
         if args[0] == 'ps':
             if 'label=com.docker.compose.service=wizard-claude-engine' in args:
                 output = 'app-engine' if self.installed else ''
