@@ -117,7 +117,9 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
     };
   }
 
-export function listRow(item, q = '') {
+// Chats channels (issue 440, WIZARD_CHANNEL_STORE=1): the row's channel id and its first owner request.
+export const FIRST_REQUEST_MAX = 400;
+export function listRow(item, q = '', channels = null) {
   const s = normalizeFull(item);
   if (!s) return null;
   const { request, renames, source, runtime, ...row } = s;
@@ -125,13 +127,21 @@ export function listRow(item, q = '') {
   const needle = String(q || '').toLowerCase().trim().split(/\s+/)[0];
   const body = [s.preview, s.request, clean(item.wizard_search_text), s.title].find(t => needle && t.toLowerCase().includes(needle));
   const at = body ? Math.max(0, body.toLowerCase().indexOf(needle)-40) : 0;
-  return { ...row, preview: s.preview.slice(0, 140), listVersion: 1,
+  let channelFields = {};
+  if (channels) {
+    const channel = channels.channelOf(s.agent || s.agent_id || 'hermes', s.id);
+    // Hermes' own `preview` is the head of the thread's first user message; the main agent reads the whole one.
+    // A main row carries wizard_first_request ('' when it has no visible owner message); routed rows fall back.
+    const firstRequest = clean(text(Object.hasOwn(item, 'wizard_first_request') ? item.wizard_first_request : item.preview)).slice(0, FIRST_REQUEST_MAX);
+    channelFields = { ...(channel ? { channel } : {}), ...(firstRequest ? { firstRequest } : {}) };
+  }
+  return { ...row, preview: s.preview.slice(0, 140), listVersion: 1, ...channelFields,
     ...(body ? { searchSnippet: (at ? '…' : '') + body.slice(at, at+140) } : {}) };
 
 }
-export function listPayload(payload, q = '') {
+export function listPayload(payload, q = '', channels = null) {
   if (payload.mode === 'body' || payload.mode === 'titles' || payload.fields === 'slim') { const {window_projected,...visible}=payload; return { ...visible, view:'list', list_version:1 }; }
-  for (const key of ['data', 'sessions', 'items']) if (Array.isArray(payload[key])) payload[key] = payload[key].map(row => listRow(row, q)).filter(Boolean);
+  for (const key of ['data', 'sessions', 'items']) if (Array.isArray(payload[key])) payload[key] = payload[key].map(row => listRow(row, q, channels)).filter(Boolean);
   const { window_projected, ...visible } = payload;
   return { ...visible, view: 'list', list_version: 1 };
 }

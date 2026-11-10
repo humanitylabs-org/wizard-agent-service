@@ -10,6 +10,7 @@ const featureScenes = {
   'thread-tracker': kind => scene(kind, { threadTracker: true }),
   'routed-owner-turns': kind => scene(kind, { routedOwnerTurns: true }),
   'main-provider-attach': kind => scene(kind, { mainProviderAttach: true }),
+  'chats-channels': kind => scene(kind, { channelStore: true, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true }),
   'owner-screenshot-turns': kind => scene(kind, { routedOwnerTurns: true, ownerScreenshotTurns: true }),
   'owner-turn-retry': kind => scene(kind, { routedOwnerTurns: true, ownerTurnRetry: true }),
   'owner-turn-ledger': kind => scene(kind, { routedOwnerTurns: true, ownerTurnLedger: true }),

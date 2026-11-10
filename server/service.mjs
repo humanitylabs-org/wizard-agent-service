@@ -17,7 +17,7 @@ import { contentDisposition } from './content-disposition.mjs'
 import { createDevices, devicesTool } from './devices.mjs'
 import { projectOpenAskSession, backgroundHelperStatus, threadBackground, liveWorker, ENDED_WITH_ERROR, replyEpoch } from './open-ask.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
-import { indexedSearchWords, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, createHermesSessionTruthReader, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
+import { indexedSearchWords, readHermesFirstRequests, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, createHermesSessionTruthReader, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, directRunStamps, heavyJobStamps, listCacheMode, mergeStamps, projectListSlices, createJoinedListCheck } from './session-list-cache.mjs'
 import { createListEvidenceLane } from './list-evidence-lane.mjs'
 import { agentReadablePaths, projectPrivateFilePaths } from './private-file-projection.mjs'
@@ -45,6 +45,8 @@ import { projectProviderSignInHistory, providerSignInEvents } from './run-provid
 import { bootstrapPayload, readApps, readSettings, normalizeSettings, ownerLinks, recordResponseStyleSwitch, RESPONSE_STYLES, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
 import { readUiPreferences, updateUiPreferences, patchUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
+import { createChannelStore, channelRequest } from './channel-store.mjs'
+import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigration } from './channel-spaces.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
@@ -202,7 +204,7 @@ ${STATUS_PROTOCOL_INSTRUCTIONS}`
 const allowed = [
   { method: 'GET', pattern: /^\/v1\/capabilities$/, query: new Set() },
   { method: 'GET', pattern: /^\/api\/model\/options$/, query: new Set() },
-  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children', 'snapshot', 'view', 'window', 'q', 'overrides', 'cursor', 'fields', 'mode']) },
+  { method: 'GET', pattern: /^\/api\/sessions$/, query: new Set(['limit', 'offset', 'include_children', 'snapshot', 'view', 'window', 'q', 'overrides', 'cursor', 'fields', 'mode', 'channel']) },
   { method: 'POST', pattern: /^\/api\/sessions$/, query: new Set() },
   { method: 'GET', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set(['view']) },
   { method: 'PATCH', pattern: new RegExp(`^/api/sessions/${ID}$`), query: new Set() },
@@ -228,7 +230,9 @@ export function isAllowedProxyRequest(method, pathname, searchParams) {
     if (searchParams.has('view') && searchParams.get('view') !== 'list') return false
     if (searchParams.has('window') && searchParams.get('window') !== 'archive-50') return false
     if (searchParams.has('cursor') && (searchParams.get('window') !== 'archive-50' || searchParams.has('q'))) return false
-    if (['window','q','overrides','cursor','fields','mode'].some(k => searchParams.has(k)) && searchParams.get('view') !== 'list') return false
+    if (['window','q','overrides','cursor','fields','mode','channel'].some(k => searchParams.has(k)) && searchParams.get('view') !== 'list') return false
+    // A channel feed (issue 440) pages by offset/snapshot only.
+    if (searchParams.has('channel') && (!/^[a-z0-9-]{1,48}$/.test(searchParams.get('channel') ?? '') || ['q', 'cursor', 'fields', 'mode'].some(k => searchParams.has(k)))) return false
     if ((searchParams.get('q') || '').length > 300 || (searchParams.get('overrides') || '').length > 32000) return false
     if (searchParams.has('fields') && (searchParams.get('fields') !== 'slim' || searchParams.get('window') !== 'archive-50')) return false
     if (searchParams.has('mode') && (searchParams.get('mode') !== 'body' || !searchParams.has('q'))) return false
@@ -3113,7 +3117,27 @@ function buildWizardServer(options, lifetime) {
     }
     return null
   }
-  const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
+  // Chats channels, phase 2 (issue 440, WIZARD_CHANNEL_STORE=1, off by default): channels.sqlite replaces
+  // ui-preferences `spaces`. First boot copies the Spaces once, seeds Alerts, and drops main memberships
+  // whose thread is gone from state.db. ui-preferences.json itself is never rewritten here.
+  const channelStore = options.channelStore === true ? (() => {
+    let store
+    try { store = createChannelStore(resolve(bridgeOsHome || wizardOsHome(), 'channels.sqlite')) }
+    catch (error) { console.error(`[channels] store unavailable, channels stay off: ${String(error?.message || error).slice(0, 200)}`); return null }
+    // An unreadable or invalid preferences file is not migrated (nor marked done) until it reads cleanly.
+    const spaces = spacesForMigration(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
+    if (spaces) store.migrateSpaces(spaces)
+    else console.error('[channels] ui-preferences.json is unreadable or its spaces are invalid; Spaces not copied yet')
+    store.seedAlerts()
+    if (hermesStatePath && existsSync(hermesStatePath)) {
+      try {
+        const db = new DatabaseSync(hermesStatePath, { readOnly: true })
+        try { const known = db.prepare('SELECT 1 FROM sessions WHERE id=?'); store.prune(MAIN_AGENT_ID, id => !!known.get(id)) } finally { db.close() }
+      } catch { /* unreadable: keep every membership */ }
+    }
+    return store
+  })() : null
+  const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), channelStore)
   // Only this thread's jobs are read, and only for done/check. Callers projecting a list pass one
   // snapshot for all rows; the done-row follow-up evidence is read only when the thread owns a job.
   // Every Chats list build guards its done rows; one handle and a per-session revision memo keep
@@ -3277,8 +3301,9 @@ function buildWizardServer(options, lifetime) {
   if (agentCtx) agentCtx.mainHasSession = (sessionId) => agentCtx.sessionExists(MAIN_AGENT_ID, sessionId)
   if (agentCtx) agentCtx.askMax = askMaxNow
   if (agentCtx) agentCtx.archiveAfterDays = () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays
+  if (agentCtx) agentCtx.channelStore = channelStore
   spacesTools = createSpacesTools({
-    path: resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'),
+    path: resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), channels: channelStore,
     agentExists: id => Boolean(agents?.read(id)),
     threadExists: (id, thread) => agentCtx.sessionExists(id, thread, { strict: true }),
     loadThreads: async id => {
@@ -4310,9 +4335,19 @@ function buildWizardServer(options, lifetime) {
   if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
 
   const listWindowPage = createListWindows({ reuseSelections: true, archiveDays: () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays })
+  // The main agent's first visible request per listed row (issue 440). Read failures leave the key absent.
+  const withFirstRequests = listed => {
+    const rows = ['data', 'sessions', 'items'].flatMap(key => Array.isArray(listed?.[key]) ? listed[key] : [])
+    if (!hermesStatePath || !rows.length || listed.mode === 'body' || listed.fields === 'slim') return
+    let firsts
+    try { firsts = hermesStateHealth.read('first-request', () => readHermesFirstRequests(hermesStatePath, rows.map(row => row?.id))) } catch { return }
+    for (const row of rows) if (row && firsts.has(row.id)) row.wizard_first_request = firsts.get(row.id)
+  }
   const canonicalSessionPage = async (operator, searchParams, request) => {
+    if (searchParams.has('channel') && (!channelStore || operator)) throw Object.assign(new Error('channel not found'), { status: 404 })
+    if (searchParams.has('channel') && !canonicalSessionReader) throw Object.assign(new Error('channel feed unavailable'), { status: 503 })
     if (!canonicalSessionReader) return null
-    if (!operator && (searchParams.get('window') === 'archive-50' || searchParams.has('q'))) {
+    if (!operator && (searchParams.get('window') === 'archive-50' || searchParams.has('q') || searchParams.has('channel'))) {
       const requireAccess = request[TAILNET_INGRESS] || baseRequireAccess
       const accessVerifier = request[TAILNET_INGRESS] ? tailnetVerifier : baseAccessVerifier
       const access = requireAccess ? await verifiedAccess(request, accessVerifier) : { claims: null }
@@ -4331,7 +4366,8 @@ function buildWizardServer(options, lifetime) {
         const hits=await searchHermesSessionTextAsync(hermesStatePath,cached.map(s=>s.id),q,request.headers['x-wizard-search-scope'] || scope)
         return {object:'list',window_projected:true,data:[...hits].map(([id,snippet])=>({id,agent:'hermes',snippet})),search_total:hits.size,mode:hits.mode,partial:hits.partial,timings:{list_ms,...hits.timings}}
       }
-      return listWindowPage({ params: searchParams, scope, dispositions: threadDispositionStore.get(scope), load: async () => {
+      const feed = searchParams.has('channel') ? channelStore.memberSet(searchParams.get('channel')) : null
+      return listWindowPage({ params: searchParams, scope, dispositions: threadDispositionStore.get(scope), members: feed?.agent === MAIN_AGENT_ID ? feed.ids : null, load: async () => {
         if (!searchParams.get('q') && listCache.mode() === 'on') {
           // The window selector normalizes into separate objects and never mutates
           // these rows. Keep identity so its selection can be shared across polls.
@@ -6081,8 +6117,29 @@ function buildWizardServer(options, lifetime) {
           try { patch = JSON.parse((await readBoundedBody(request, UI_PREFERENCES_MAX_BYTES)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_preferences' }); return }
         }
         try {
-          sendJson(response, 200, seed ? seedUiPreferences(path, patch) : request.method === 'GET' ? readUiPreferences(path) : request.method === 'PATCH' ? patchUiPreferences(path, patch) : updateUiPreferences(path, patch), { 'Cache-Control': 'no-store' })
+          sendJson(response, 200, seed ? seedUiPreferences(path, patch)
+            : channelStore ? (request.method === 'GET' ? readWithChannels(path, channelStore) : request.method === 'PATCH' ? patchWithChannels(path, channelStore, patch) : putWithChannels(path, channelStore, patch))
+            : request.method === 'GET' ? readUiPreferences(path) : request.method === 'PATCH' ? patchUiPreferences(path, patch) : updateUiPreferences(path, patch), { 'Cache-Control': 'no-store' })
         } catch (error) { sendJson(response, error?.status === 400 ? 400 : 503, { error: error?.status === 400 ? 'invalid_preferences' : 'preferences_unavailable' }) }
+        return
+      }
+      // Chats channels (issue 440): same owner surface, access and cross-site rules as ui-preferences.
+      if (url.pathname === '/wizard/v1/channels' || url.pathname === '/wizard/v1/channels/membership') {
+        if (!channelStore) { sendJson(response, 404, { error: 'not_found' }); return }
+        const membership = url.pathname.endsWith('/membership')
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        const methods = membership ? ['GET', 'PUT'] : ['GET', 'POST', 'PATCH']
+        if (!methods.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: methods.join(', ') }); return }
+        if (request.method !== 'GET' && request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_site_write' }); return }
+        let body = null
+        if (request.method !== 'GET') {
+          if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
+          try { body = JSON.parse((await readBoundedBody(request, 64 * 1024)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+          if (!body || typeof body !== 'object' || Array.isArray(body)) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        }
+        try {
+          sendJson(response, request.method === 'POST' ? 201 : 200, channelRequest(channelStore, request.method, membership, url.searchParams, body), { 'Cache-Control': 'no-store' })
+        } catch (error) { sendJson(response, [400, 404, 409].includes(error?.status) ? error.status : 503, { error: [400, 404, 409].includes(error?.status) ? error.code || 'invalid_request' : 'channels_unavailable' }) }
         return
       }
       if (url.pathname.startsWith('/wizard/views/')) {
@@ -7284,7 +7341,7 @@ function buildWizardServer(options, lifetime) {
         const upstreamQuery = new URLSearchParams(url.searchParams)
         upstreamQuery.delete('view')
         upstreamQuery.delete('snapshot')
-        for (const key of ['window','q','overrides','cursor','fields','mode']) upstreamQuery.delete(key)
+        for (const key of ['window','q','overrides','cursor','fields','mode','channel']) upstreamQuery.delete(key)
         const upstreamSearch = upstreamQuery.size ? `?${upstreamQuery}` : ''
         const canonicalPage = request.method === 'GET' && upstreamPath === '/api/sessions'
           ? await canonicalSessionPage(operator, url.searchParams, request)
@@ -7533,6 +7590,13 @@ function buildWizardServer(options, lifetime) {
           result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots, agentPathAliases)
           if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result, historySource)
         }
+        // Issue 440: hydrate the first owner request before the credential and private-path guards below,
+        // so state.db text gets exactly the same redaction and fail-closed scan as every other list field.
+        const channelListing = channelStore && !operator && upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions'
+          && url.searchParams.get('view') === 'list' && contentType.includes('application/json')
+        if (channelListing) {
+          try { const listed = JSON.parse(result.toString('utf8')); withFirstRequests(listed); result = Buffer.from(JSON.stringify(listed)) } catch { /* not a list body */ }
+        }
         const privatePaths = [...inboxTrustedRoots, ...responseTrustedPaths, ...trustedPaths]
         // Recovery notes can contain a raw attachment location outside a file
         // marker. Keep history/listing readable without exposing that location.
@@ -7546,7 +7610,11 @@ function buildWizardServer(options, lifetime) {
         const forbidden = [hermesKey, inboxToken, ...privatePaths].filter(Boolean).map((value) => Buffer.from(value))
         if (forbidden.some((value) => result.includes(value))) { sendJson(response, 502, { error: 'unsafe_upstream_response' }); return }
         if (upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions' && url.searchParams.get('view') === 'list') {
-          result = Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), url.searchParams.get('q'))))
+          result = Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), url.searchParams.get('q'), channelStore && !operator ? channelStore : null)))
+        }
+        // A deleted thread leaves its channel (issue 440).
+        if (channelStore && !operator && upstream.ok && request.method === 'DELETE' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {
+          try { channelStore.forget(MAIN_AGENT_ID, decodeURIComponent(upstreamPath.split('/')[3])) } catch { /* membership is pruned on next boot */ }
         }
         response.writeHead(responseStatus, { ...responseHeaders, 'Content-Length': result.length })
         response.end(result)

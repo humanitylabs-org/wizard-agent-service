@@ -192,6 +192,9 @@ server = createWizardServer({
   // A provider sign-in joins the box's provider pool only; the main agent uses just the providers the owner
   // attached to it via PUT /wizard/v1/main-providers (issue 428). Off by default.
   mainProviderAttach: process.env.WIZARD_MAIN_PROVIDER_ATTACH === '1',
+  // Chats channels phase 2 (issue 440): channels and thread membership in ~/.wizard-os/channels.sqlite, served at
+  // /wizard/v1/channels; ui-preferences `spaces` becomes a read-only projection. Off by default.
+  channelStore: process.env.WIZARD_CHANNEL_STORE === '1',
   // Routed agents' owner turns stamped internal_notification by Hermes 0.22.7 (issue 379). Off by default.
   routedOwnerTurns: process.env.WIZARD_ROUTED_OWNER_TURNS === '1',
   // Owner turns with an inline screenshot, which Hermes flattens to "[screenshot]" (issue 145). Off by default.

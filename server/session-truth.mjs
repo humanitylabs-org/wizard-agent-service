@@ -448,6 +448,31 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
   return truth
 }
 
+// Chats channels (issue 440): each thread's first visible owner request, for the channel feed's post text.
+// One ascending seek per thread on (session_id, timestamp); stops at the first visible request. Missing
+// threads are absent from the map; a thread with no visible request maps to ''.
+export function readHermesFirstRequests(path, sessionIds, options = {}) {
+  const ids = boundedIds(sessionIds)
+  const out = new Map()
+  if (!ids.length) return out
+  const db = Object.hasOwn(options, 'db') ? options.db : openReadOnly(path)
+  if (!db) return out
+  try {
+    const columns = new Set(preparedRead(db, 'PRAGMA table_info(messages)').all().map(row => row.name))
+    const kind = columns.has('display_kind') ? 'display_kind' : 'NULL AS display_kind'
+    const known = preparedRead(db, 'SELECT 1 FROM sessions WHERE id=?')
+    const rows = preparedRead(db, `SELECT content, ${kind} FROM messages WHERE session_id=? AND role='user' AND ${retainedMessagesWhere(columns)}
+      AND trim(COALESCE(content,''))<>'' ORDER BY timestamp ASC LIMIT 50`)
+    for (const id of ids) {
+      if (!known.get(id)) continue
+      let first = ''
+      for (const row of rows.iterate(id)) if (visibleUserRequest(row.content, row.display_kind)) { first = String(row.content).trim(); break }
+      out.set(id, first.slice(0, 4000))
+    }
+    return out
+  } finally { if (!Object.hasOwn(options, 'db')) try { db.close() } catch { /* read-only cleanup */ } }
+}
+
 export function readHelmActivitySessionIds(path, activityIds) {
   const ids = boundedIds(activityIds)
   const sessions = new Map()
