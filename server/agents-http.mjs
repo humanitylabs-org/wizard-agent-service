@@ -575,9 +575,8 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
     const targetExists = ctx.sessionExists ? await ctx.sessionExists(explicit, sessionId, { strict: true }) : false
     if (!targetExists) {
       const others = [...knownPins]
-      if (ctx.sessionExists && !others.length) {
-        for (const agent of registry.list()) if (agent.id !== explicit && agent.role !== 'recovery' && await ctx.sessionExists(agent.id, sessionId, { strict: true })) others.push(agent.id)
-      } else if (!ctx.sessionExists && explicit !== MAIN_AGENT_ID && await ctx.mainHasSession(sessionId)) others.push(MAIN_AGENT_ID)
+      if (ctx.sessionExists && !others.length) others.push(...await heldByOtherAgents(ctx, registry, explicit, sessionId, { tolerateUnreachable: true }))
+      else if (!ctx.sessionExists && explicit !== MAIN_AGENT_ID && await ctx.mainHasSession(sessionId)) others.push(MAIN_AGENT_ID)
       // Includes never-pinned private histories: a credential cannot claim their ids for another agent.
       assertAgentTargets(registry, request, others)
       if (others.length) throw new AgentError(409, 'thread_agent_pinned', 'thread.agent_pinned')
@@ -597,8 +596,7 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
   const agentId = explicit || pinned || routed || (newChat ? registry.defaultAgentId?.() : '') || MAIN_AGENT_ID
   assertAgentTargets(registry, request, [agentId])
   if (newChat && sessionId && !serverMinted && !explicit && !knownPins.includes(agentId) && ctx.sessionExists && !await ctx.sessionExists(agentId, sessionId, { strict: true })) {
-    const others = []
-    for (const agent of registry.list()) if (agent.id !== agentId && agent.role !== 'recovery' && await ctx.sessionExists(agent.id, sessionId, { strict: true })) others.push(agent.id)
+    const others = await heldByOtherAgents(ctx, registry, agentId, sessionId, { tolerateUnreachable: !knownPins.length })
     assertAgentTargets(registry, request, others)
     if (others.length) throw new AgentError(409, 'thread_agent_pinned', 'thread.agent_pinned')
   }
@@ -608,6 +606,34 @@ export async function resolveProxyAgent(ctx, { method, upstreamPath, searchParam
   await guardOwnerThreadWrite({ method, upstreamPath, body: bodyValue,
     sessionExists: id => ctx.sessionExists ? ctx.sessionExists(agentId, id, { strict: true }) : ctx.mainHasSession(id) })
   return { agentId, body, bodyRead: body !== undefined, sessionId, routed: Boolean(routed) }
+}
+
+// The shape every Wizard client mints for a brand-new chat: wizard_<ms>_<12 hex> (shell live.js / outbox.js).
+export const FRESH_CLIENT_THREAD_ID = /^wizard_\d{13}_[0-9a-f]{12}$/u
+
+/**
+ * Other agents that already hold `sessionId` (the anti-claim scan for a client-chosen thread id).
+ * An agent that does not answer and has no catalog row for the id throws 503 agent_unavailable.
+ * Issue 448: one unreachable optional agent used to block every new chat on the box. For a fresh
+ * client-minted id that no agent was ever pinned to (`tolerateUnreachable`), an agent that cannot
+ * answer cannot hold it either: its positive sightings live in the session catalog, which
+ * sessionExists consults before it throws. A later real collision still gets 409 thread_agent_pinned.
+ * Only standard (non-private) agents are skipped this way; an unreachable private agent still fails closed.
+ */
+async function heldByOtherAgents(ctx, registry, agentId, sessionId, { tolerateUnreachable = false } = {}) {
+  const tolerate = tolerateUnreachable && FRESH_CLIENT_THREAD_ID.test(sessionId)
+  const others = []
+  for (const agent of registry.list()) {
+    if (agent.id === agentId || agent.role === 'recovery') continue
+    try {
+      if (await ctx.sessionExists(agent.id, sessionId, { strict: true })) others.push(agent.id)
+    } catch (error) {
+      // A private agent's never-observed history keeps the fail-closed anti-claim answer: its ids are never
+      // claimable by another agent on the strength of an id's shape alone.
+      if (!(tolerate && agent.privacy !== 'private' && error instanceof AgentError && error.status === 503 && error.error === 'agent_unavailable')) throw error
+    }
+  }
+  return others
 }
 
 function modelAllowed(agent, value) {

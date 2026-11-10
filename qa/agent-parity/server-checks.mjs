@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { post, png, scene } from './fixture.mjs'
+import { PRESETS } from '../../server/agents.mjs'
 import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
@@ -726,6 +727,28 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     const allowed = s.kind === 'main' ? { model: 'fixture-other', provider: 'anthropic' } : { model: options.providers[0].models.at(-1) }
     const changed = await s.request('/api/sessions/wizard_parity/model', post(allowed))
     assert.ok(changed.status < 300, `attached provider still changes the model (${changed.status})`)
+  },
+  'new-chat-unreachable-agent': async s => {
+    // Issue 448: one unreachable optional agent (no sealed catalog) must not stop new chats on this agent.
+    // Registered after the scene's own session-create, as running, with an upstream that refuses connections.
+    const quiet = join(s.root, 'os', 'agents', 'parity-quiet'); mkdirSync(quiet, { recursive: true })
+    writeFileSync(join(quiet, 'agent.json'), JSON.stringify({ schema: 1, id: 'parity-quiet', label: 'Parity unreachable agent', harness: 'hermes', privacy: 'standard', appearance: { glyph: 'spark', hue: 200 }, model: { provider: 'anthropic', model: 'fixture-model', allowed_models: ['fixture-model'], fallback: false }, permissions: { preset: 'standard', ...PRESETS.find(p => p.id === 'standard').permissions }, runtime: { kind: 'container', app_id: 'agent-parity-quiet', port: 9 }, created_at: Date.now() / 1000 }))
+    writeFileSync(join(quiet, 'runtime.key'), 'parity-quiet-secret', { mode: 0o600 })
+    assert.ok((await (await s.raw('/wizard/v1/agents')).json()).agents.some(a => a.id === 'parity-quiet'), 'the unreachable agent is registered')
+    const fresh = () => `wizard_${Date.now()}_${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`
+    const created = fresh(), r = await s.request('/api/sessions', post({ id: created, source: 'wizard-mobile' }))
+    assert.equal(r.status, 201, `${s.kind}: new chat with a fresh client id while another agent is unreachable`)
+    assert.ok(s.sessions.has(created), `${s.kind}: created on this agent's own runtime`)
+    const sent = fresh(), run = await s.request('/v1/runs', post({ session_id: sent, input: 'First message of a new chat' }))
+    assert.equal(run.status, 202, `${s.kind}: first send of a new chat is admitted`)
+    // An id that is not a fresh client mint keeps the fail-closed anti-claim answer.
+    const odd = await s.request('/api/sessions', post({ id: 'wizard_not_fresh', source: 'wizard-mobile' }))
+    assert.deepEqual([odd.status, (await odd.json()).error], [503, 'agent_unavailable'], `${s.kind}: arbitrary ids still fail closed`)
+    if (s.kind === 'main') {
+      // A new chat that names no agent goes to the default agent the same way.
+      const plain = fresh(), p = await s.raw('/wizard/hermes/api/sessions', post({ id: plain, source: 'wizard-mobile' }))
+      assert.equal(p.status, 201); assert.ok(s.sessions.has(plain))
+    }
   },
   'file-store-retention': async s => {
     // Issue 422: the built-in file store never forgets a file because more than 5,000 came after it.

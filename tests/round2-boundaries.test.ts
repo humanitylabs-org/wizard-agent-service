@@ -31,6 +31,7 @@ async function scene({ queued = false, manifest = null as any } = {}) {
   const calls: any[] = [], histories = new Map<string, Set<string>>([['hermes', new Set(['wizard_old'])]])
   const dispatch = { healthy: false }
   const ports = new Map<number, string>([[1, 'hermes']]), status = new Map<string, string>()
+  const down = new Set<string>() // running agents whose upstream refuses connections
   const runtime = {
     inspect: async (id: string) => ({status: status.get(id) ?? 'running', generation: `${id}:${status.get(id) ?? 'running'}`}),
     census: async (id: string) => ({...await runtime.inspect(id), ids: [...histories.get(id)!]}),
@@ -42,6 +43,7 @@ async function scene({ queued = false, manifest = null as any } = {}) {
     const u = new URL(String(url)), agent = ports.get(Number(u.port))
     if (u.host === "127.0.0.1:7") { if (u.pathname === "/helm/api/state") return json({archived_threads:[{id:"t-123456789abc",status:"processed"}],threads:[]}); throw new Error("unexpected fake helm path "+u.pathname) }; if (!agent) throw new Error("network forbidden: "+url)
     const method = init.method || 'GET', body = init.body ? JSON.parse(String(init.body)) : null
+    if (down.has(agent)) throw new TypeError('fetch failed: connection refused')
     calls.push({ agent, method, path: u.pathname, body })
     if (status.get(agent) === 'stopped') return json({ error: 'offline' }, 503)
     if (u.pathname === '/v1/capabilities') return json({ features: {} })
@@ -71,7 +73,7 @@ async function scene({ queued = false, manifest = null as any } = {}) {
     const r = await call('/wizard/v1/agents', 'POST', { label, harness: 'hermes', permissions: { preset: privacy }, model: { provider: 'tinfoil', model: 'glm-5-3' } })
     const value = await r.json(); expect([r.status, value.error]).toEqual([201, undefined]); return value.agent
   }
-  return { dir, settingsPath, agentsDir, base, call, create, calls, histories, status, dispatch, manifestPath, serverOptions, service }
+  return { dir, settingsPath, agentsDir, base, call, create, calls, histories, status, down, dispatch, manifestPath, serverOptions, service }
 }
 
 import { execFileSync } from 'node:child_process'
@@ -161,6 +163,52 @@ it('never-seen unavailable secondary alone retains the explicit 503 fail-closed 
   await s.create('Never up')
   const r = await s.call('/wizard/hermes/api/sessions', 'POST', { id: 'wizard_fresh' })
   expect([r.status, await r.json()]).toEqual([503, { error: 'agent_unavailable', check: 'agent.history' }])
+})
+
+// Issue 448: a running agent that stopped answering (no sealed catalog) blocked every new chat on the box.
+const freshId = () => `wizard_${Date.now()}_${Math.random().toString(16).slice(2).padEnd(12, '0').slice(0, 12)}`
+it('an unreachable optional agent does not block a new chat with a fresh client id', async () => {
+  const s = await scene(), pi = await s.create('Pi')
+  s.down.add(pi.id)
+  const id = freshId()
+  const r = await s.call('/wizard/hermes/api/sessions', 'POST', { id, source: 'wizard-mobile' })
+  expect([r.status, (await r.json()).error]).toEqual([201, undefined])
+  expect(s.histories.get('hermes')!.has(id)).toBe(true)
+  // Naming the agent (a new chat in that agent's own Chats) and a first send through /v1/runs take the same path.
+  const named = freshId(), runId = freshId()
+  expect((await s.call('/wizard/hermes/api/sessions?agent=hermes', 'POST', { id: named, source: 'wizard-mobile' })).status).toBe(201)
+  expect((await s.call('/wizard/hermes/v1/runs', 'POST', { session_id: runId, input: 'hi' })).status).toBe(202)
+  expect(s.histories.get('hermes')!.has(runId)).toBe(true)
+})
+
+it('an unreachable agent still refuses ids it is known to hold, and answering agents still collide', async () => {
+  const s = await scene(), pi = await s.create('Pi'), other = await s.create('Other')
+  const seen = freshId(), held = freshId()
+  s.histories.get(pi.id)!.add(seen)
+  // An authenticated read records the sighting in the session catalog, which outlives the agent going quiet.
+  expect((await s.call(`/wizard/hermes/api/sessions/${seen}?agent=${pi.id}`)).status).toBe(200)
+  s.down.add(pi.id)
+  // By id alone it is still that agent's thread (not silently opened on the default agent) ...
+  const r = await s.call('/wizard/hermes/api/sessions', 'POST', { id: seen, source: 'wizard-mobile' })
+  expect([r.status, (await r.json()).error]).toEqual([503, 'agent_unavailable'])
+  // ... and no other agent can claim it while it is away.
+  const claim = await s.call('/wizard/hermes/api/sessions?agent=hermes', 'POST', { id: seen, source: 'wizard-mobile' })
+  expect([claim.status, (await claim.json()).error]).toEqual([409, 'thread_agent_pinned'])
+  expect(s.histories.get('hermes')!.has(seen)).toBe(false)
+  s.histories.get(other.id)!.add(held)
+  // Past the unreachable agent the scan still reaches an answering one that holds the id.
+  const clash = await s.call('/wizard/hermes/api/sessions?agent=hermes', 'POST', { id: held, source: 'wizard-mobile' })
+  expect([clash.status, (await clash.json()).error]).toEqual([409, 'thread_agent_pinned'])
+  expect(s.histories.get('hermes')!.has(held)).toBe(false)
+  // An unreachable private agent keeps the fail-closed answer: a never-observed private id is never claimable.
+  const hidden = await s.create('Hidden', 'private')
+  s.down.add(hidden.id)
+  const sealed = await s.call('/wizard/hermes/api/sessions', 'POST', { id: freshId(), source: 'wizard-mobile' })
+  expect([sealed.status, (await sealed.json()).error]).toEqual([503, 'agent_unavailable'])
+  s.down.delete(hidden.id)
+  // The target itself unreachable is still a plain 503: nothing can be created there.
+  const own = await s.call(`/wizard/hermes/api/sessions?agent=${pi.id}`, 'POST', { id: freshId(), source: 'wizard-mobile' })
+  expect(own.status).toBe(503)
 })
 
 it('stop captures latest history and start invalidates/rereads the stopped catalog before claims', async () => {
