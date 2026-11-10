@@ -56,6 +56,31 @@ test('a failing read is logged once with its SQLite code, re-thrown, and clears 
   assert.deepEqual(health.report(), { ok: true })
 })
 
+test('one reader recovering does not hide another reader that still fails', (t) => {
+  const health = createHermesStateHealth({ dbPath: join(scratch(t), 'state.db'), log: () => {} })
+  const malformed = Object.assign(new Error('database disk image is malformed'), { errcode: 11 })
+  assert.throws(() => health.read('archive', () => { throw malformed }))
+  assert.deepEqual(health.read('list', () => []), [])
+  const report = health.report()
+  assert.equal(report.ok, false)
+  assert.deepEqual(report.failing, ['archive'])
+  assert.deepEqual(health.read('archive', () => []), [])
+  assert.deepEqual(health.report(), { ok: true })
+})
+
+test('alternating health polls and failing reads still log each kind once per five minutes', (t) => {
+  const dir = scratch(t), db = join(dir, 'state.db'), lines = []
+  sessionsDb(db)
+  writeFileSync(`${db}-wal`, '')
+  const health = createHermesStateHealth({ dbPath: db, stat: unlinkedWal, log: (l) => lines.push(l), now: () => 1_000 })
+  const malformed = Object.assign(new Error('database disk image is malformed'), { errcode: 11 })
+  for (let i = 0; i < 5; i++) {
+    health.report()
+    assert.throws(() => health.read('archive', () => { throw malformed }))
+  }
+  assert.equal(lines.length, 2)
+})
+
 test('/wizard/health reports hermes_state: ok on a live database, stale_mount after Hermes replaced its -wal', async (t) => {
   const dir = scratch(t), db = join(dir, 'state.db')
   sessionsDb(db)

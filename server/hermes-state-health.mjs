@@ -32,12 +32,14 @@ const errorCode = (error) => {
 }
 
 export function createHermesStateHealth({ dbPath = '', stat = statSync, log = console.warn, now = Date.now } = {}) {
-  let lastError = null
-  let lastLog = { key: '', at: 0 }
+  // Each reader keeps its own failure until that same reader succeeds again; logs are throttled per key.
+  const errors = new Map()
+  const loggedAt = new Map()
   const note = (key, line) => {
     const at = now()
-    if (key === lastLog.key && at - lastLog.at < LOG_EVERY_MS) return
-    lastLog = { key, at }
+    if (loggedAt.has(key) && at - loggedAt.get(key) < LOG_EVERY_MS) return
+    loggedAt.set(key, at)
+    if (loggedAt.size > 64) loggedAt.delete(loggedAt.keys().next().value)
     try { log(line) } catch { /* logging never breaks a read */ }
   }
   const stale = () => staleHermesStateFiles(dbPath, { stat })
@@ -47,13 +49,14 @@ export function createHermesStateHealth({ dbPath = '', stat = statSync, log = co
     read(where, fn) {
       try {
         const value = fn()
-        lastError = null
+        errors.delete(where)
         return value
       } catch (error) {
         const files = stale()
-        lastError = { where, code: errorCode(error), message: String(error?.message ?? error).slice(0, 200), at: new Date(now()).toISOString() }
-        note(`${where}:${lastError.code}:${files.join(',')}`,
-          `[hermes-state] ${where} read of ${dbPath} failed (${lastError.code}: ${lastError.message})${files.length ? `; stale mount: ${files.join(', ')}. ${hint}` : ''}`)
+        const failure = { where, code: errorCode(error), message: String(error?.message ?? error).slice(0, 200), at: new Date(now()).toISOString() }
+        errors.set(where, failure)
+        note(`${where}:${failure.code}:${files.join(',')}`,
+          `[hermes-state] ${where} read of ${dbPath} failed (${failure.code}: ${failure.message})${files.length ? `; stale mount: ${files.join(', ')}. ${hint}` : ''}`)
         throw error
       }
     },
@@ -62,10 +65,12 @@ export function createHermesStateHealth({ dbPath = '', stat = statSync, log = co
       if (!dbPath) return null
       const files = stale()
       if (files.length) note(`stale:${files.join(',')}`, `[hermes-state] stale mount: ${files.join(', ')}. ${hint}`)
+      const failures = [...errors.values()]
+      const lastError = failures.sort((a, b) => b.at.localeCompare(a.at))[0]
       return {
-        ok: !files.length && !lastError,
-        ...(files.length ? { reason: 'stale_mount', stale: files, hint } : lastError ? { reason: 'read_failed' } : {}),
-        ...(lastError ? { last_error: lastError } : {}),
+        ok: !files.length && !failures.length,
+        ...(files.length ? { reason: 'stale_mount', stale: files, hint } : failures.length ? { reason: 'read_failed' } : {}),
+        ...(failures.length ? { failing: failures.map((f) => f.where).sort(), last_error: lastError } : {}),
       }
     },
   }
