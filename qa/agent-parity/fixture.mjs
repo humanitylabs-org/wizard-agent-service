@@ -95,6 +95,7 @@ export async function scene(kind, serverOptions = {}) {
     // including restricted Unix ingress, not just the browser's write fence.
     if (serverOptions.fixtureReadOnly?.() && !['GET', 'HEAD'].includes(req.method)) return json(403, { error: 'fixture_read_only' })
     const streamRun = run => {
+        if (serverOptions.fixtureEventScript) return scriptedEvents(run, res, true)
         res.writeHead(200, { 'Content-Type': 'text/event-stream' })
         if (!serverOptions.fixtureHoldEvents) return res.end('event: tool.progress\ndata: {"name":"fixture","message":"working"}\n\nevent: run.completed\ndata: {"output":"Fixture reply"}\n\n')
         res.write(`event: run.started\ndata: ${JSON.stringify(run)}\n\n`)
@@ -167,10 +168,47 @@ export async function scene(kind, serverOptions = {}) {
     if (rm) {
       const run = runs.get(rm[1]); if (!run) return json(404, { error: 'not_found' })
       if (rm[2] === 'stop') run.status = 'cancelled'
-      if (rm[2] === 'events') return streamRun(run)
+      if (rm[2] === 'events') return serverOptions.fixtureEventScript ? scriptedEvents(run, res) : streamRun(run)
       return json(200, rm[2] ? { ok: true } : run)
     }
     return json(404, { error: 'fixture_route_missing', path })
+  }
+  // Opt-in scripted run stream. A test appends frames with push(); `oldest` drops older frames the way a runtime's
+  // retention does. GET /v1/runs/<id>/events (the shape stock Hermes serves) numbers every frame (`id:` + data.seq)
+  // and replays the run from its oldest retained frame on each read, after a replay.truncated notice when frames are
+  // gone. A model-locked turn's single chat/stream response carries the same frames in Hermes' session vocabulary,
+  // which the Service's locked-run bridge numbers and replays itself.
+  const eventScripts = new Map()
+  const eventScript = runId => {
+    let script = eventScripts.get(runId)
+    if (!script) {
+      script = { frames: [], oldest: 1, reads: 0, open: new Set(),
+        push(event, fields = {}) { const seq = script.frames.length + 1; script.frames.push({ event, run_id: runId, ...fields, seq }); for (const wake of script.open) wake(); return seq } }
+      eventScripts.set(runId, script)
+    }
+    return script
+  }
+  const SESSION_NAMES = { 'message.delta': 'assistant.delta' }
+  const scriptedEvents = (run, res, session = false) => {
+    const script = eventScript(run.run_id)
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store' })
+    let sent
+    if (session) { res.write(`event: run.started\ndata: ${JSON.stringify(run)}\n\n`); sent = script.frames.length }
+    else {
+      script.reads += 1; sent = script.oldest - 1
+      if (script.oldest > 1) res.write(`event: replay.truncated\ndata: ${JSON.stringify({ event: 'replay.truncated', run_id: run.run_id, oldest_retained_seq: script.oldest })}\n\n`)
+    }
+    const wake = () => {
+      for (const frame of script.frames.slice(sent)) {
+        sent = frame.seq
+        if (session) { const { seq: _q, event, ...rest } = frame; res.write(`event: ${SESSION_NAMES[event] || event}\ndata: ${JSON.stringify({ ...rest, tool_name: rest.tool })}\n\n`) }
+        else res.write(`id: ${frame.seq}\nevent: ${frame.event}\ndata: ${JSON.stringify(frame)}\n\n`)
+      }
+      if (script.frames.some(f => /^run\.(completed|failed|cancelled|interrupted)$/.test(f.event))) { script.open.delete(wake); clearInterval(beat); res.end() }
+    }
+    const beat = setInterval(() => res.write(': synthetic heartbeat\n\n'), 250)
+    script.open.add(wake); res.on('close', () => { script.open.delete(wake); clearInterval(beat) })
+    wake()
   }
   const upstream = createServer(handler), socket = createServer(handler)
   const upstreamOrigin = `http://127.0.0.1:${(await listen(upstream)).port}`
@@ -213,7 +251,7 @@ export async function scene(kind, serverOptions = {}) {
   // deadline. A fresh connection avoids ECONNRESET unrelated to the contract.
   const request = (path, init = {}) => { syncMessages(); return fetch(`${base}/wizard/hermes${path}${path.includes('?') ? '&' : '?'}agent=${id}`, { ...init, headers: { ...owner, Connection: 'close', ...init.headers } }) }
   const closeServer = async s => { await new Promise(resolve => { s.closeAllConnections(); s.close(resolve) }); await s.drained }
-  return { runtimePorts: { main: Number(new URL(upstreamOrigin).port), container: containerPort }, dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, placed, request, media, agentHome, stt, signin, origin: () => base, ownerHeaders: owner, get server() { return wizard },
+  return { runtimePorts: { main: Number(new URL(upstreamOrigin).port), container: containerPort }, dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, eventScript, placed, request, media, agentHome, stt, signin, origin: () => base, ownerHeaders: owner, get server() { return wizard },
     // The runtime's own gateway credential and transport, never owner proof: main and unrestricted agents over TCP,
     // a restricted agent only through its own per-agent socket.
     setSupervisorSeal: (privacy, shared) => {

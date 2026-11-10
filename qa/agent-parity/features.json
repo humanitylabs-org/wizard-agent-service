@@ -1308,6 +1308,45 @@
       "policy_exemptions": []
     },
     {
+      "id": "stream-resume",
+      "description": "A live reply resumes by seq after a dropped stream: no doubled words, offline waits for the network, a replay gap drops the partial text, never a second admission",
+      "layer": "ux",
+      "how_to_test": "Run QA_GROUP=resume QA_KINDS=main,host-profile,container,restricted QA_UX_ROOT=<ux> QA_OUT=<fresh-output> QA_EXTERNAL_ROOT=<worker-root> node qa/agent-parity/browser.mjs (Linux also needs QA_CHROMIUM=<chrome> QA_PLAYWRIGHT=<playwright>). Per kind, the real shell sends one turn through the real Service; the synthetic runtime streams numbered frames (GET /v1/runs/<id>/events replays from the oldest retained frame; a model-locked turn's chat/stream is numbered and replayed by the Service's locked-run bridge). Every Service connection is cut mid-reply: the next read replays and the live bubble shows each word once. Offline, no stream read happens until the browser is back online, then it resumes at once. A replay that lost frames (past the 4000-frame retention, replay.truncated) drops the partial text and the transcript answer shows once. One admission throughout. Synthetic-runtime browser evidence, not live provider acceptance.",
+      "source_refs": [
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats.js",
+        "server/run-event-log.mjs",
+        "server/locked-run-bridge.mjs",
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "qa/agent-parity/browser.mjs",
+        "wizard-ux/tests/run-streaming.test.mjs",
+        "tests/run-event-log.node.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "offline-start",
+      "description": "After one online visit the shell opens offline from its scoped worker copy; main threads show this device's saved copy, labelled; routed threads are never stored; no /wizard/* response is cached",
+      "layer": "ux",
+      "how_to_test": "Run QA_GROUP=offline QA_KINDS=main,host-profile,container,restricted QA_UX_ROOT=<ux> QA_OUT=<fresh-output> QA_EXTERNAL_ROOT=<worker-root> node qa/agent-parity/browser.mjs (Linux also needs QA_CHROMIUM=<chrome> QA_PLAYWRIGHT=<playwright>). Per kind, with service workers allowed: open the thread online, wait for the scoped worker to hold the shell (wos-shell-v1 has the page, live.js and chats.js), assert no cache entry under /wizard/ (APIs, attachments, files), then reload with the browser offline. The shell boots from the worker copy. Main: the thread paints this device's saved copy with its Saved copy label. Routed kinds: the thread was never written to the wos-thread-cache store and its words appear nowhere offline. Back online the shell reconnects. Release replacement (one release at a time) is kind-independent and covered by wizard-ux/tests/shell-offline-sw.test.mjs.",
+      "source_refs": [
+        "wizard-ux/web/sw.js",
+        "wizard-ux/web/pwa-install.js",
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats.js",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "qa/agent-parity/browser.mjs",
+        "wizard-ux/tests/shell-offline-sw.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "history-pagination",
       "description": "Load bounded newest/oldest history pages and search an older thread",
       "layer": "server",
