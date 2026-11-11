@@ -79,7 +79,7 @@ function archivedFirstRequests(ctx, agent, listed, secrets) {
 const firstPostCache = new WeakMap()
 const FIRST_POST_CACHE_MAX = 5000, FIRST_POST_FETCHES = 4, FIRST_POST_RETRY_MS = 30_000
 function firstPostState(ctx) {
-  if (!firstPostCache.has(ctx)) firstPostCache.set(ctx, { posts: new Map(), queue: new Map(), busy: 0, failed: new Map() })
+  if (!firstPostCache.has(ctx)) firstPostCache.set(ctx, { posts: new Map(), queue: new Map(), busy: 0, failed: new Map(), memos: new Map() })
   return firstPostCache.get(ctx)
 }
 const postNames = (post, secrets) => post && secrets.some(secret => post.text.includes(secret) || post.attachments.some(f => f.name.includes(secret)))
@@ -107,8 +107,9 @@ async function routedFirstPosts(ctx, agent, listed, secrets, headers) {
   if (!rows.length || listed.mode === 'body' || listed.fields === 'slim') return
   let posts = new Map(), restore = null
   try { restore = await ctx.ownerTurnRestore?.(agent) ?? null } catch { /* no restore: as in this agent's history */ }
-  try { posts = readHermesFirstPosts(ctx.agentStatePath?.(agent) || join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), rows.map(row => row.id), { restore }) } catch { /* unreadable: read through the runtime */ }
   const state = firstPostState(ctx), now = Date.now()
+  if (!state.memos.has(agent.id)) state.memos.set(agent.id, new Map())
+  try { posts = readHermesFirstPosts(ctx.agentStatePath?.(agent) || join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), rows.map(row => row.id), { restore, memo: state.memos.get(agent.id) }) } catch { /* unreadable: read through the runtime */ }
   for (const row of rows) {
     const key = `${agent.id} ${row.id}`
     if (posts.has(row.id)) { const post = posts.get(row.id); row.wizard_first_post = postNames(post, secrets) ? null : post; continue }

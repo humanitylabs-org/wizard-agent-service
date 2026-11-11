@@ -5,7 +5,8 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { firstPostOf, firstPostOfHistory, readHermesFirstPosts } from '../server/first-post.mjs'
+import { batchedOwnerTurnRestore, firstPostOf, firstPostOfHistory, needsOwnerTurnRestore, readHermesFirstPosts } from '../server/first-post.mjs'
+import { DurableRunQueue } from '../server/run-queue.mjs'
 import { listPayload, listRow } from '../server/session-list-view.mjs'
 import { restoreOwnerTurns } from '../server/service.mjs'
 
@@ -171,5 +172,117 @@ describe('first post follows the owner turns of the view=wizard history', () => 
     const history = JSON.parse(restoreOwnerTurns(Buffer.from(JSON.stringify(page)), queue, SID, null).toString()).data
     expect(firstPostOfHistory(history, false)).toEqual({ text: owner, attachments: [] })
     expect(readHermesFirstPosts(stateDb(rows), [SID], { restore }).get(SID)).toEqual(firstPostOfHistory(history, false))
+  })
+})
+
+// AI review round 2 (11 Nov 2026): the list is polled, so the owner-turn restore must not run a queue scan per row on
+// every poll. Posts the restore cannot change skip it, decided posts are kept, and the rest share one queue read.
+describe('first posts stay cheap per poll', () => {
+  const owner = 'Plan the synthetic garden with care'
+  const listBody = (sid: string, text: string) => JSON.stringify({ session_id: sid, input: [{ role: 'user', content: [{ type: 'text', text }] }] })
+  const stateDb = (threads: Record<string, [string, string, string | null, number][]>) => {
+    const d = mkdtempSync(join(tmpdir(), 'first-post-poll-')); dirs.push(d)
+    const path = join(d, 'state.db'), db = new DatabaseSync(path)
+    db.exec('CREATE TABLE sessions(id TEXT PRIMARY KEY); CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, display_kind TEXT, timestamp REAL)')
+    const put = db.prepare('INSERT INTO messages(session_id, role, content, display_kind, timestamp) VALUES(?,?,?,?,?)')
+    for (const [sid, rows] of Object.entries(threads)) {
+      db.prepare('INSERT INTO sessions(id) VALUES(?)').run(sid)
+      for (const [role, content, kind, at] of rows) put.run(sid, role, content, kind, at)
+    }
+    db.close()
+    return path
+  }
+  const send = (sid: string, n: string, text: string, at: number) => ({ publicRunId: `wizardq_${sid}_${n}`, upstreamRunId: `run_${sid}_${n}`, status: 'completed', createdAt: at, body: listBody(sid, text), payload: { created_at: at } })
+  const records = (sid: string) => sid === 'stamped' || sid === 'lost' ? [send(sid, 'a', owner, 1000)]
+    : sid === 'plain' ? [send(sid, 'a', owner, 1000)]
+    // Codex review: Hermes compacted away the first owner turn and kept a later plain one.
+    : sid === 'compacted' ? [send(sid, 'a', owner, 1000), send(sid, 'b', 'A later synthetic owner message', 1010)] : []
+  const counting = () => {
+    const calls = { single: [] as string[], batches: [] as string[][] }
+    const queue = {
+      admittedForSession: (runtime: string, sid: string) => { calls.single.push(sid); return runtime === 'direct' ? records(sid) : [] },
+      admittedForSessions: (runtime: string, ids: string[]) => { calls.batches.push(ids); return new Map(ids.map(id => [id, runtime === 'direct' ? records(id) : []])) },
+      sendsUpTo: (pairs: [string, number][]) => new Map(pairs.map(([id, at]) => [id, records(id).filter(r => r.createdAt <= at).length])),
+    }
+    return { calls, restore: batchedOwnerTurnRestore(queue, (raw: Buffer, view: any, sid: string) => restoreOwnerTurns(raw, view, sid, null)) as any }
+  }
+  const threads = {
+    plain: [['user', owner, null, 1001], ['assistant', 'Synthetic reply', 'final', 1002]],
+    stamped: [['user', owner, 'internal_notification', 1001], ['assistant', 'Synthetic reply', 'final', 1002]],
+    lost: [['assistant', 'Synthetic reply', 'final', 1005]],
+    agent: [['user', '[reporter] Synthetic nudge.', null, 1001]],
+    compacted: [['user', 'A later synthetic owner message', null, 1011], ['assistant', 'Synthetic reply', 'final', 1012]],
+  } as Record<string, [string, string, string | null, number][]>
+  it('needsOwnerTurnRestore: only pages whose first owner message the restore can change', () => {
+    expect(needsOwnerTurnRestore([{ role: 'user', content: owner }])).toBe(false)
+    expect(needsOwnerTurnRestore([{ role: 'user', content: '[reporter] x' }, { role: 'user', content: owner }])).toBe(false)
+    expect(needsOwnerTurnRestore([{ role: 'user', content: owner, display_kind: 'internal_notification' }])).toBe(true)
+    expect(needsOwnerTurnRestore([{ role: 'user', content: '[reporter] x' }])).toBe(true)
+    expect(needsOwnerTurnRestore([])).toBe(true)
+  })
+  it('one batched queue read per page, only for threads that need the restore; same posts as per-thread restores', () => {
+    const path = stateDb(threads), ids = Object.keys(threads), { calls, restore } = counting()
+    const posts = readHermesFirstPosts(path, ids, { restore })
+    expect(calls.batches).toEqual([['stamped', 'lost', 'agent', 'compacted']])
+    expect(calls.single).toEqual([])
+    const perThread = (raw: Buffer, sid: string) => restoreOwnerTurns(raw, { admittedForSession: (_r: string, id: string) => records(id) }, sid, null)
+    expect(Object.fromEntries(posts)).toEqual(Object.fromEntries(readHermesFirstPosts(path, ids, { restore: perThread })))
+    expect(posts.get('plain')).toEqual({ text: owner, attachments: [] })
+    expect(posts.get('stamped')).toEqual({ text: owner, attachments: [] })
+    expect(posts.get('lost')).toEqual({ text: owner, attachments: [] })
+    expect(posts.get('agent')).toBeNull()
+    // The owner turn Hermes compacted away is still the post, as in the thread's view=wizard history.
+    expect(posts.get('compacted')).toEqual({ text: owner, attachments: [] })
+  })
+  it('a decided post is kept until the thread\'s first rows or newest reply change, or the memo ages out', () => {
+    const path = stateDb(threads), ids = Object.keys(threads), memo = new Map(), { calls, restore } = counting()
+    const first = readHermesFirstPosts(path, ids, { restore, memo, now: 1_000_000 })
+    expect(calls.batches.length).toBe(1)
+    expect(Object.fromEntries(readHermesFirstPosts(path, ids, { restore, memo, now: 1_060_000 }))).toEqual(Object.fromEntries(first))
+    expect(calls.batches.length).toBe(1)
+    // A new reply in one thread: only that thread is read again.
+    const db = new DatabaseSync(path)
+    db.prepare('INSERT INTO messages(session_id, role, content, display_kind, timestamp) VALUES(?,?,?,?,?)').run('agent', 'assistant', 'Later', 'final', 1010)
+    db.close()
+    readHermesFirstPosts(path, ids, { restore, memo, now: 1_070_000 })
+    expect(calls.batches.at(-1)).toEqual(['agent'])
+    // An owner message arriving in an agent-started thread changes its first rows, so it becomes the post.
+    const db2 = new DatabaseSync(path)
+    db2.prepare('INSERT INTO messages(session_id, role, content, display_kind, timestamp) VALUES(?,?,?,?,?)').run('agent', 'user', 'Synthetic owner answer', null, 1020)
+    db2.close()
+    expect(readHermesFirstPosts(path, ids, { restore, memo, now: 1_080_000 }).get('agent')).toEqual({ text: 'Synthetic owner answer', attachments: [] })
+    // After ten minutes everything is decided again.
+    readHermesFirstPosts(path, ids, { restore, memo, now: 1_080_000 + 10 * 60_000 })
+    expect(calls.batches.at(-1)).toEqual(['stamped', 'lost', 'compacted'])
+  })
+  it('DurableRunQueue.admittedForSessions equals admittedForSession per thread, with and without the owner-turn ledger', () => {
+    for (const keepOwnerTurns of [false, true]) {
+      const d = mkdtempSync(join(tmpdir(), 'first-post-queue-')); dirs.push(d)
+      const queue = new DurableRunQueue({ statePath: join(d, 'q.sqlite3'), launch: async () => ({}), lookup: async () => ({}),
+        activeSessionIds: async () => [], canDispatch: async () => false, keepOwnerTurns } as any) as any
+      const insert = queue.database.prepare(`INSERT INTO wizard_run_queue (public_run_id, runtime, session_id, idempotency_key, request_hash, body,
+        trusted_paths_json, status, upstream_run_id, payload_json, created_at, updated_at, terminal_at, continuation_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+      const old = Date.now() / 1000 - 30 * 86400
+      let n = 0
+      for (const sid of ['s1', 's2', 's3']) for (let i = 0; i < 3; i++) {
+        n++
+        insert.run(`wizardq_${sid}_${i}`, i === 2 ? 'operator' : 'direct', sid, `k${n}`, 'h', listBody(sid, `${owner} ${i}`), '[]', 'completed', i === 1 && sid === 's2' ? '' : `run_${n}`,
+          JSON.stringify({ created_at: old + 10 - n }), old + 10 - n, old + 10 - n, old + 10 - n, 'null')
+      }
+      for (let i = 0; i < 130; i++) insert.run(`wizardq_fill${i}`, 'direct', `other${i}`, `f${i}`, 'h', '{}', '[]', 'completed', `run_f${i}`, '{}', old + 100 + i, old + 100 + i, old + 100 + i, 'null')
+      if (keepOwnerTurns) queue._pruneTerminal(true)
+      const ids = ['s1', 's2', 's3', 'missing']
+      const batch = queue.admittedForSessions('direct', ids)
+      for (const id of ids) expect(batch.get(id)).toEqual(queue.admittedForSession('direct', id))
+      expect(batch.get('s1').length).toBe(2)
+      expect(queue.admittedForSessions('heavy', ids).size).toBe(0)
+      const counts = queue.sendsUpTo([['s1', old + 8.5], ['s2', old + 100], ['missing', old + 100], ['s3', Number.NaN]])
+      // Never fewer than the direct sends restoreOwnerTurns would read up to then (the operator send counts too).
+      expect(counts.get('s1')).toBeGreaterThanOrEqual(queue.admittedForSession('direct', 's1').filter((r: any) => r.createdAt <= old + 8.5).length)
+      if (!keepOwnerTurns) expect(counts.get('s1')).toBe(2)
+      expect(counts.get('missing')).toBe(0)
+      expect(counts.has('s3')).toBe(false)
+      queue.close()
+    }
   })
 })

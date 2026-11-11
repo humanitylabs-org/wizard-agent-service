@@ -496,6 +496,54 @@ export class DurableRunQueue {
     return [...kept, ...live].sort((a, b) => a.createdAt - b.createdAt || (a.publicRunId < b.publicRunId ? -1 : a.publicRunId > b.publicRunId ? 1 : 0))
   }
 
+  /** admittedForSession for many threads in one read (issue 446, Chats Channels posts): Map sessionId -> records,
+   *  each list exactly what admittedForSession(runtime, sessionId) returns. Uses the session index: the planner
+   *  otherwise picks the (runtime, idempotency_key) index and walks every record of the runtime. */
+  admittedForSessions(runtime, sessionIds) {
+    const out = new Map()
+    if (!['direct', 'operator'].includes(runtime)) return out
+    const ids = [...new Set((Array.isArray(sessionIds) ? sessionIds : []).filter((id) => typeof id === 'string' && id && id.length <= 512))]
+    for (const id of ids) out.set(id, [])
+    for (let start = 0; start < ids.length; start += 200) {
+      const chunk = ids.slice(start, start + 200), marks = chunk.map(() => '?').join(',')
+      const live = this.database.prepare(`SELECT * FROM wizard_run_queue INDEXED BY wizard_run_queue_session_latest
+        WHERE session_id IN (${marks}) AND runtime = ? AND upstream_run_id <> ''
+        ORDER BY created_at, public_run_id`).all(...chunk, runtime)
+      for (const row of live) out.get(row.session_id)?.push(this._record(row))
+      if (!this.keepOwnerTurns) continue
+      const kept = this.database.prepare(`SELECT * FROM wizard_owner_turn_ledger WHERE runtime = ? AND session_id IN (${marks})
+        ORDER BY created_at, public_run_id`).all(runtime, ...chunk)
+      const ledger = new Map()
+      for (const row of kept) {
+        if (!ledger.has(row.session_id)) ledger.set(row.session_id, [])
+        ledger.get(row.session_id).push({
+          publicRunId: row.public_run_id, runtime: row.runtime, sessionId: row.session_id, idempotencyKey: '', body: row.body,
+          continuation: null, status: row.status, upstreamRunId: row.upstream_run_id,
+          payload: { created_at: Number(row.admitted_at), ...(row.admission_id ? { admission_id: row.admission_id } : {}) },
+          retrySourceId: row.retry_source_id || '', retryOrderAt: Number(row.retry_order_at) || 0,
+          createdAt: Number(row.created_at), updatedAt: Number(row.created_at), terminalAt: Number(row.created_at), ownerTurnLedger: true })
+      }
+      for (const [id, records] of ledger) {
+        out.set(id, [...records, ...out.get(id)].sort((a, b) => a.createdAt - b.createdAt || (a.publicRunId < b.publicRunId ? -1 : a.publicRunId > b.publicRunId ? 1 : 0)))
+      }
+    }
+    return out
+  }
+
+  /** For each [sessionId, at]: how many sends (any runtime, also kept owner turns) the queue holds for that thread
+   *  created at or before `at`. Read from the session indexes alone, never a record body (issue 446). */
+  sendsUpTo(pairs) {
+    const out = new Map()
+    const live = this.database.prepare(`SELECT COUNT(*) AS n FROM wizard_run_queue INDEXED BY wizard_run_queue_session_latest
+      WHERE session_id = ? AND created_at <= ?`)
+    const kept = this.keepOwnerTurns ? this.database.prepare('SELECT COUNT(*) AS n FROM wizard_owner_turn_ledger WHERE runtime = ? AND session_id = ? AND created_at <= ?') : null
+    for (const [sessionId, at] of Array.isArray(pairs) ? pairs.slice(0, 500) : []) {
+      if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 512 || !Number.isFinite(at)) continue
+      out.set(sessionId, Number(live.get(sessionId, at)?.n ?? 0) + (kept ? Number(kept.get('direct', sessionId, at)?.n ?? 0) : 0))
+    }
+    return out
+  }
+
   // Keeps only what owner-turn matching reads: the input's words and the kind of each image (never its bytes).
   _keepOwnerTurns(doomed) {
     const insert = this.database.prepare(`INSERT OR IGNORE INTO wizard_owner_turn_ledger (public_run_id, runtime, session_id, body,
