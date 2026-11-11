@@ -284,7 +284,7 @@ describe('agent bridge: MCP gateway', () => {
     expect(init.json.result.instructions).toContain('wizard-job-<job>')
     const list = await rpc(base, { jsonrpc: '2.0', id: 2, method: 'tools/list' }, init.session)
     const names = list.json.result.tools.map((t) => t.name)
-    expect(names.filter(name => !name.startsWith('spaces_'))).toEqual(['wizard_apps', 'wizard_devices', 'wizard_agents__list', 'wizard_agents__memory_read', 'wizard_agents__skills_list', 'wizard_agents__skill_read', 'wizard_agents__notes_list', 'wizard_agents__notes_read', 'hello_wizard__wizard_time', 'hello_wizard__wizard_echo'])
+    expect(names.filter(name => !name.startsWith('spaces_'))).toEqual(['wizard_apps', 'wizard_devices', 'wizard_transcribe', 'wizard_agents__list', 'wizard_agents__memory_read', 'wizard_agents__skills_list', 'wizard_agents__skill_read', 'wizard_agents__notes_list', 'wizard_agents__notes_read', 'hello_wizard__wizard_time', 'hello_wizard__wizard_echo'])
     expect(names).toContain('spaces_list')
     expect(list.json.result.ttlMs).toBe(24 * 60 * 60 * 1000)
     expect(list.json.result.cacheScope).toBe('private')

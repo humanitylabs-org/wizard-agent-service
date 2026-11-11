@@ -1863,6 +1863,22 @@
         "qa/agent-parity/server-checks.mjs"
       ],
       "policy_exemptions": []
+    },
+    {
+      "id": "agent-audio-transcription",
+      "description": "A standard agent transcribes an audio file in its own home from a chat with the gateway tool wizard_transcribe (the box's Wizard Voice Service), instead of installing speech software; paths are confined to that agent's own home and private agents do not get the tool",
+      "layer": "runtime",
+      "how_to_test": "From a chat on each agent kind (main, host-profile, container, restricted), ask the agent to transcribe a short synthetic wav it holds in its home; verify wizard_transcribe is listed on that agent's gateway, the call reads that agent's own home (/opt/data) and returns the text, a path outside the home or another agent's home is refused, and a private agent is not offered the tool. tests/transcribe.test.ts runs the real agent registry for each kind with a fake voice service; synthetic fixture evidence, not live voice proof.",
+      "source_refs": [
+        "server/transcribe.mjs",
+        "server/service.mjs",
+        "server/agent-bridge.mjs"
+      ],
+      "reference_tests": [
+        "tests/transcribe.test.ts"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
     }
   ]
 }
