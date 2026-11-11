@@ -694,6 +694,8 @@ export const serverChecks = {
     }
     const turnWords = await ownerTurn('wizard_parity_turn')
     turnCheck(await listed('wizard_parity_turn'), turnWords, 'state.db read')
+    // AI review round 2: the decided post is kept between polls, and a kept post is the same post.
+    turnCheck(await listed('wizard_parity_turn'), turnWords, 'second poll (kept post)')
     const agentStarted = await listed('wizard_parity_agent', false)
     assert.ok(agentStarted && !Object.hasOwn(agentStarted, 'firstRequest') && !Object.hasOwn(agentStarted, 'firstAttachments'), 'an agent-started thread has neither field')
     if (s.kind !== 'main') {

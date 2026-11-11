@@ -76,7 +76,7 @@ import { serveAppView } from './app-views.mjs'
 import { serveChatsView } from './chats-views.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { listPayload } from './session-list-view.mjs'
-import { readHermesFirstPosts } from './first-post.mjs'
+import { batchedOwnerTurnRestore, readHermesFirstPosts } from './first-post.mjs'
 import { fullRetryInput, ownerRetryRows } from './session-detail.mjs'
 import { createListWindows } from './session-list-window.mjs'
 import { standardChatRpc } from './standard-chats.mjs'
@@ -3310,7 +3310,7 @@ function buildWizardServer(options, lifetime) {
   if (agentCtx) agentCtx.ownerTurnRestore = async agent => {
     if (!routedQueues || !routedOwnerTurns) return null
     const queue = await routedQueues.queueFor(agent)
-    return queue ? (raw, sessionId) => routedOwnerTurns(raw, queue, sessionId, agent) : null
+    return queue ? batchedOwnerTurnRestore(queue, (raw, view, sessionId) => routedOwnerTurns(raw, view, sessionId, agent)) : null
   }
   spacesTools = createSpacesTools({
     path: resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), channels: channelStore,
@@ -4346,6 +4346,7 @@ function buildWizardServer(options, lifetime) {
 
   const listWindowPage = createListWindows({ reuseSelections: true, archiveDays: () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays })
   // The main agent's first visible request per listed row (issue 440). Read failures leave the key absent.
+  const mainFirstPostMemo = new Map()
   const withFirstRequests = listed => {
     const rows = ['data', 'sessions', 'items'].flatMap(key => Array.isArray(listed?.[key]) ? listed[key] : [])
     if (!hermesStatePath || !rows.length || listed.mode === 'body' || listed.fields === 'slim') return
@@ -4353,8 +4354,9 @@ function buildWizardServer(options, lifetime) {
       // Issue 446: the whole first owner message, for the post's words and photos.
       let posts
       // The owner's own turns Hermes stamped internal_notification are restored first, exactly as in view=wizard history.
-      const restore = (raw, sessionId) => restoreOwnerTurns(raw, runQueue, sessionId, ownerTurnRowMeta, { screenshots: ownerScreenshotTurns })
-      try { posts = hermesStateHealth.read('first-post', () => readHermesFirstPosts(hermesStatePath, rows.map(row => row?.id), { restore })) } catch { return }
+      // One batched queue read per page, and only for threads whose post the restore can change; decided posts are kept.
+      const restore = batchedOwnerTurnRestore(runQueue, (raw, queue, sessionId) => restoreOwnerTurns(raw, queue, sessionId, ownerTurnRowMeta, { screenshots: ownerScreenshotTurns }))
+      try { posts = hermesStateHealth.read('first-post', () => readHermesFirstPosts(hermesStatePath, rows.map(row => row?.id), { restore, memo: mainFirstPostMemo })) } catch { return }
       for (const row of rows) if (row && posts.has(row.id)) row.wizard_first_post = posts.get(row.id)
       return
     }

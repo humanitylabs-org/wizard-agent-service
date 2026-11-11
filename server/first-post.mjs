@@ -103,12 +103,46 @@ function storedContent(content) {
   try { const parts = JSON.parse(content); return Array.isArray(parts) ? parts : content } catch { return content }
 }
 
+// Issue 446 round 2: the list is polled, so a decided post is kept per thread and only read again when the thread's
+// first user rows (ids and display kinds) or its newest reply change, or after FIRST_POST_MEMO_MS.
+const FIRST_POST_MEMO_MAX = 5000, FIRST_POST_MEMO_MS = 10 * 60_000
+
+/** Whether the owner-turn restore can change this page's first post: it only clears internal_notification rows the
+ *  queue claims and puts back owner turns Hermes no longer holds, so a page whose first owner message comes before
+ *  any internal_notification row is already decided. A page with no owner message at all still needs it. */
+export function needsOwnerTurnRestore(rows) {
+  for (const row of Array.isArray(rows) ? rows : []) {
+    if (!row || row.role !== 'user') continue
+    if (row.display_kind === 'internal_notification') return true
+    if (ownerMessage(row)) return false
+  }
+  return true
+}
+
+/** A restore(raw, sessionId) over `queue` (a DurableRunQueue) whose prepare(ids) loads every listed thread's queued
+ *  sends in one session-indexed read, so the restore costs one queue query per page instead of one per thread.
+ *  `run(raw, queueView, sessionId)` is the owner-turn restore itself (restoreOwnerTurns with its options). */
+export function batchedOwnerTurnRestore(queue, run) {
+  if (!queue || typeof run !== 'function') return null
+  let batch = null
+  const view = { admittedForSession: (runtime, sessionId) => runtime === 'direct' && batch?.has(sessionId) ? batch.get(sessionId) : queue.admittedForSession(runtime, sessionId) }
+  const restore = (raw, sessionId) => run(raw, view, sessionId)
+  restore.prepare = (ids) => {
+    batch = null
+    if (typeof queue.admittedForSessions !== 'function' || !ids.length) return
+    try { batch = queue.admittedForSessions('direct', ids) } catch { batch = null /* per-thread reads */ }
+  }
+  return restore
+}
+
 /** Each listed thread's post from a Hermes state.db: Map id -> post, or null for an agent-started thread.
  *  Threads the file doesn't hold (or an unreadable file) are absent. Each thread's first user rows are read as a
- *  history page and, when `restore(raw, sessionId)` is given, passed through the same owner-turn restore the
- *  thread's view=wizard history uses, so the post is the first message that history shows as the owner's.
+ *  history page and, when `restore(raw, sessionId)` is given and the page needs it (needsOwnerTurnRestore), passed
+ *  through the same owner-turn restore the thread's view=wizard history uses, so the post is the first message that
+ *  history shows as the owner's. With `memo` (a Map kept by the caller), a decided post is reused while the thread's
+ *  first user rows and newest reply are unchanged.
  *  Whole messages are parsed: the file marker comes after the owner's words, so a cut message would lose its photos. */
-export function readHermesFirstPosts(path, sessionIds, { restore = null } = {}) {
+export function readHermesFirstPosts(path, sessionIds, { restore = null, memo = null, now = Date.now() } = {}) {
   const out = new Map(), ids = boundedIds(sessionIds)
   if (!ids.length || !path || !existsSync(path)) return out
   let db
@@ -117,31 +151,49 @@ export function readHermesFirstPosts(path, sessionIds, { restore = null } = {}) 
     const columns = new Set(preparedRead(db, 'PRAGMA table_info(messages)').all().map(row => row.name))
     const kind = columns.has('display_kind') ? 'display_kind' : 'NULL AS display_kind'
     const known = preparedRead(db, 'SELECT 1 FROM sessions WHERE id=?')
-    const read = preparedRead(db, `SELECT id, content, ${kind}, timestamp FROM messages WHERE session_id=? AND role='user'
-      AND ${retainedMessagesWhere(columns)} AND trim(COALESCE(content,''))<>'' ORDER BY timestamp ASC, id ASC LIMIT 50`)
+    const userRows = `FROM messages WHERE session_id=? AND role='user'
+      AND ${retainedMessagesWhere(columns)} AND trim(COALESCE(content,''))<>'' ORDER BY timestamp ASC, id ASC LIMIT 50`
+    // Ids and kinds only: what the memo is keyed by, without loading any message body.
+    const shape = preparedRead(db, `SELECT id, ${kind} ${userRows}`)
+    const read = preparedRead(db, `SELECT id, content, ${kind}, timestamp ${userRows}`)
     // The thread's newest other row (a reply), so the restore sees how far the history reaches even when Hermes no
     // longer holds the owner's own row: it puts back every queued owner turn up to there, as the history page does.
     const reach = preparedRead(db, `SELECT id, role, ${kind}, timestamp FROM messages WHERE session_id=? AND role<>'user'
       AND ${retainedMessagesWhere(columns)} AND COALESCE(${columns.has('display_kind') ? 'display_kind' : 'NULL'},'')<>'hidden'
       AND substr(COALESCE(content,''),1,19)<>'[CONTEXT COMPACTION' ORDER BY timestamp DESC, id DESC LIMIT 1`)
+    const pages = []
     for (const id of ids) {
       if (!known.get(id)) continue
+      const other = typeof restore === 'function' ? reach.get(id) : null
+      const key = `${shape.all(id).map(row => `${row.id}:${row.display_kind || ''}`).join(',')}|${other ? other.id : ''}|${typeof restore === 'function' ? 1 : 0}`
+      const kept = memo?.get(id)
+      if (kept && kept.key === key && now - kept.at < FIRST_POST_MEMO_MS) { out.set(id, kept.post); continue }
       let rows = read.all(id).map(row => ({ id: Number(row.id), session_id: id, role: 'user', content: storedContent(row.content),
         timestamp: row.timestamp, ...(row.display_kind ? { display_kind: row.display_kind } : {}) }))
-      if (typeof restore === 'function') {
-        const other = rows.length < 50 ? reach.get(id) : null
-        if (other) rows = [...rows, { id: Number(other.id), session_id: id, role: String(other.role), content: '', timestamp: other.timestamp,
-          ...(other.display_kind ? { display_kind: other.display_kind } : {}) }].sort((a, b) => Number(a.timestamp) - Number(b.timestamp) || a.id - b.id)
-      }
-      if (rows.length && typeof restore === 'function') {
+      const restoring = typeof restore === 'function' && needsOwnerTurnRestore(rows)
+      if (restoring && other && rows.length < 50) rows = [...rows, { id: Number(other.id), session_id: id, role: String(other.role), content: '', timestamp: other.timestamp,
+        ...(other.display_kind ? { display_kind: other.display_kind } : {}) }].sort((a, b) => Number(a.timestamp) - Number(b.timestamp) || a.id - b.id)
+      pages.push({ id, key, rows, restoring: restoring && rows.length > 0 })
+    }
+    const restored = pages.filter(page => page.restoring)
+    if (restored.length && typeof restore.prepare === 'function') { try { restore.prepare(restored.map(page => page.id)) } catch { /* per-thread reads */ } }
+    for (const page of pages) {
+      let rows = page.rows
+      if (page.restoring) {
         try {
-          const raw = Buffer.from(JSON.stringify({ object: 'list', session_id: id, data: rows, pagination: { order: 'oldest', offset: 0, limit: 50, returned: rows.length } }))
-          const restored = JSON.parse(Buffer.from(restore(raw, id)).toString('utf8'))
-          if (Array.isArray(restored?.data)) rows = restored.data
+          const raw = Buffer.from(JSON.stringify({ object: 'list', session_id: page.id, data: rows, pagination: { order: 'oldest', offset: 0, limit: 50, returned: rows.length } }))
+          const result = JSON.parse(Buffer.from(restore(raw, page.id)).toString('utf8'))
+          if (Array.isArray(result?.data)) rows = result.data
         } catch { /* unrestored rows: internal_notification owner turns stay hidden, as in that history */ }
       }
-      out.set(id, firstPostOfHistory(rows, false) ?? null)
+      const post = firstPostOfHistory(rows, false) ?? null
+      out.set(page.id, post)
+      if (memo) {
+        memo.delete(page.id); memo.set(page.id, { key: page.key, post, at: now })
+        while (memo.size > FIRST_POST_MEMO_MAX) memo.delete(memo.keys().next().value)
+      }
     }
+    if (restored.length && typeof restore.prepare === 'function') { try { restore.prepare([]) } catch { /* released */ } }
     return out
   } finally { try { db.close() } catch { /* read-only cleanup */ } }
 }
