@@ -1182,8 +1182,18 @@ verified()
 
 
 def docker_stream(args: list[str], header: bytes, source, length: int, timeout: int) -> tuple[int, str, str]:
-    """Run docker with `header` + exactly `length` bytes of `source` on stdin; always drain `source`."""
+    """Run docker with `header` + exactly `length` bytes of `source` on stdin; always drain `source`.
+
+    A watchdog kills the process once `timeout` passes, also while stdin writes are blocked."""
     proc = subprocess.Popen(docker_cmd(args), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    expired = threading.Event()
+
+    def kill():
+        expired.set()
+        proc.kill()
+    watchdog = threading.Timer(timeout, kill)
+    watchdog.daemon = True
+    watchdog.start()
     left, open_pipe = length, True
     try:
         try:
@@ -1191,7 +1201,10 @@ def docker_stream(args: list[str], header: bytes, source, length: int, timeout: 
         except (BrokenPipeError, OSError):
             open_pipe = False
         while left > 0:
-            block = source.read(min(1 << 20, left))
+            try:
+                block = source.read(min(1 << 20, left))
+            except OSError:
+                break
             if not block:
                 break
             left -= len(block)
@@ -1199,15 +1212,18 @@ def docker_stream(args: list[str], header: bytes, source, length: int, timeout: 
                 try:
                     proc.stdin.write(block)
                 except (BrokenPipeError, OSError):
-                    open_pipe = False   # the script refused early; keep reading so the client gets an answer
+                    open_pipe = False   # refused early or killed; keep reading so the client gets an answer
         try:
             proc.stdin.close()
         except (BrokenPipeError, OSError):
             pass
-        out, err = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.communicate()
+        out, err = proc.communicate()
+    finally:
+        watchdog.cancel()
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    if expired.is_set():
         raise RuntimeFailure("file_placement_timeout", 504)
     if left:
         raise RuntimeFailure("invalid_file", 400)

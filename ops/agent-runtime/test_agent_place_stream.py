@@ -90,6 +90,15 @@ class PlaceStreamTest(unittest.TestCase):
         self.assertEqual(cm.exception.status, 409)
         self.assertEqual(self.calls, [])
 
+    def test_timeout_holds_while_the_container_stops_reading(self):
+        import time
+        with mock.patch.object(ar, 'docker_cmd', return_value=[sys.executable, '-c', 'import time; time.sleep(60)']):
+            started = time.monotonic()
+            with self.assertRaises(ar.RuntimeFailure) as cm:
+                ar.docker_stream(['exec'], b'{}\n', io.BytesIO(self.data), len(self.data), timeout=1)
+        self.assertEqual((cm.exception.code, cm.exception.status), ('file_placement_timeout', 504))
+        self.assertLess(time.monotonic() - started, 20)
+
     def test_existing_conflicting_file_is_not_overwritten(self):
         result = self.place()
         path = self.root / result['path'].removeprefix('/opt/data/')
