@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { join } from 'node:path'
 import { scene, image, png, post } from './fixture.mjs'
 import { serverChecks } from './server-checks.mjs'
 import { queueChecks } from './queue-checks.mjs'
@@ -11,6 +12,7 @@ const featureScenes = {
   'routed-owner-turns': kind => scene(kind, { routedOwnerTurns: true }),
   'main-provider-attach': kind => scene(kind, { mainProviderAttach: true }),
   'chats-channels': kind => scene(kind, { channelStore: true, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true }),
+  'chats-agent-filing': kind => scene(kind, ({ root }) => ({ channelStore: true, channelAgentFiling: true, channelFirstPosts: true, routedOwnerTurns: true, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true, schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),
   'chats-first-posts': kind => scene(kind, { channelFirstPosts: true, routedOwnerTurns: true, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true }),
   'owner-screenshot-turns': kind => scene(kind, { routedOwnerTurns: true, ownerScreenshotTurns: true }),
   'owner-turn-retry': kind => scene(kind, { routedOwnerTurns: true, ownerTurnRetry: true }),

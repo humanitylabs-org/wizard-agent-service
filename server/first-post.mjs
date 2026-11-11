@@ -78,9 +78,14 @@ export function ownerMessage(row) {
 
 /** The first owner message of a history page (oldest first, owner turns already restored). undefined: not decidable
  *  from this page. */
-export function firstPostOfHistory(rows, hasMore) {
+// `agentFirst` (issue 441, channels phase 3): a thread whose first visible message is the agent's (an alert, a
+// reminder, a chat the agent opened) is agent-started even after the owner replies, so its post stays the agent's.
+// Hermes leaves an ordinary reply's display_kind empty (some stores say `final`); commentary and hidden rows are not words.
+const agentSpoke = row => row?.role === 'assistant' && !['commentary', 'hidden'].includes(row.display_kind || '') && contentText(row.content).trim() !== ''
+export function firstPostOfHistory(rows, hasMore, { agentFirst = false } = {}) {
   if (!Array.isArray(rows) || !rows.length) return undefined
   for (const row of rows) {
+    if (agentFirst && agentSpoke(row)) return null
     if (!row || row.role !== 'user') continue
     const content = typeof row.content === 'string' ? row.content : Array.isArray(row.content) ? JSON.stringify(row.content) : ''
     // An owner message with nothing in it yet (a voice note before its words): ask again later.
@@ -149,7 +154,7 @@ export function batchedOwnerTurnRestore(queue, run) {
  *  history shows as the owner's. With `memo` (a Map kept by the caller), a decided post is reused while the thread's
  *  first user rows and newest reply are unchanged.
  *  Whole messages are parsed: the file marker comes after the owner's words, so a cut message would lose its photos. */
-export function readHermesFirstPosts(path, sessionIds, { restore = null, memo = null, now = Date.now() } = {}) {
+export function readHermesFirstPosts(path, sessionIds, { restore = null, memo = null, now = Date.now(), agentFirst = false } = {}) {
   const out = new Map(), ids = boundedIds(sessionIds)
   if (!ids.length || !path || !existsSync(path)) return out
   let db
@@ -168,11 +173,15 @@ export function readHermesFirstPosts(path, sessionIds, { restore = null, memo = 
     const reach = preparedRead(db, `SELECT id, role, ${kind}, timestamp FROM messages WHERE session_id=? AND role<>'user'
       AND ${retainedMessagesWhere(columns)} AND COALESCE(${columns.has('display_kind') ? 'display_kind' : 'NULL'},'')<>'hidden'
       AND substr(COALESCE(content,''),1,19)<>'[CONTEXT COMPACTION' ORDER BY timestamp DESC, id DESC LIMIT 1`)
+    // The thread's first reply with words (agentFirst only): before the first owner message, the agent started it.
+    const firstReply = agentFirst ? preparedRead(db, `SELECT timestamp, id FROM messages WHERE session_id=? AND role='assistant'
+      AND ${retainedMessagesWhere(columns)} AND COALESCE(${columns.has('display_kind') ? 'display_kind' : 'NULL'},'') NOT IN ('commentary','hidden') AND trim(COALESCE(content,''))<>''
+      ORDER BY timestamp ASC, id ASC LIMIT 1`) : null
     const pages = []
     for (const id of ids) {
       if (!known.get(id)) continue
       const other = typeof restore === 'function' ? reach.get(id) : null
-      const key = `${shape.all(id).map(row => `${row.id}:${row.display_kind || ''}`).join(',')}|${other ? other.id : ''}|${typeof restore === 'function' ? 1 : 0}`
+      const key = `${shape.all(id).map(row => `${row.id}:${row.display_kind || ''}`).join(',')}|${other ? other.id : ''}|${typeof restore === 'function' ? 1 : 0}${agentFirst ? '|a' : ''}`
       const kept = memo?.get(id)
       if (kept && kept.key === key && now - kept.at < FIRST_POST_MEMO_MS) { out.set(id, kept.post); continue }
       let rows = read.all(id).map(row => ({ id: Number(row.id), session_id: id, role: 'user', content: storedContent(row.content),
@@ -207,7 +216,11 @@ export function readHermesFirstPosts(path, sessionIds, { restore = null, memo = 
           if (Array.isArray(result?.data)) rows = result.data
         } catch { /* unrestored rows: internal_notification owner turns stay hidden, as in that history */ }
       }
-      const post = firstPostOfHistory(rows, false) ?? null
+      let post = firstPostOfHistory(rows, false) ?? null
+      if (post && firstReply) {
+        const reply = firstReply.get(page.id), owner = rows.find(row => ownerMessage(row))
+        if (reply && owner && Number(reply.timestamp) < Number(owner.timestamp)) post = null
+      }
       out.set(page.id, post)
       if (memo) {
         memo.delete(page.id); memo.set(page.id, { key: page.key, post, at: now })

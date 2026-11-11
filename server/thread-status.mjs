@@ -66,7 +66,7 @@ export function normalizeStatus(value) {
   const title = normalizeTitle(value.title)
   const appId = normalizeAppId(value.app_id)
   const items = normalizeItems(value.items)
-  return { state: mapped, ask, ...(items.length ? { items } : {}), ...(subject ? { subject } : {}), ...(title ? { title } : {}), ...(appId ? { app_id: appId } : {}), ...(normalizeSpaceId(value.space) ? { space: value.space } : {}) }
+  return { state: mapped, ask, ...(items.length ? { items } : {}), ...(subject ? { subject } : {}), ...(title ? { title } : {}), ...(appId ? { app_id: appId } : {}), ...(normalizeSpaceId(value.space) ? { space: value.space } : {}), ...(normalizeSpaceId(value.channel) ? { channel: value.channel } : {}) }
 }
 
 // The last status marker in a reply, or null.

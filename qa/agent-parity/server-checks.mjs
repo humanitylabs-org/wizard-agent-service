@@ -637,6 +637,89 @@ export const serverChecks = {
     assert.equal((await move(null, s.id)).status, 200)
     assert.equal((await listed(false)).channel, undefined)
   },
+  // Issue 441 (WIZARD_CHANNEL_AGENT_FILING=1 on top of the channel store): agent filing and the Alerts channel.
+  'chats-agent-filing': async s => {
+    const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const make = async (name, agent) => { const r = await s.raw('/wizard/v1/channels', json('POST', { name, agent })); assert.equal(r.status, 201); return r.json() }
+    const filed = async (sessionId) => (await (await s.raw(`/wizard/v1/channels/membership?sessionId=${sessionId}&agent=${s.id}`)).json()).channel
+    const alerts = (await (await s.raw('/wizard/v1/channels')).json()).channels.find(c => c.kind === 'alerts')
+    assert.ok(alerts, 'a fresh install has Alerts')
+    const own = await make('Synthetic project', s.id), second = await make('Synthetic second', s.id)
+    const other = s.id === 'hermes' ? 'other-agent' : 'hermes', foreign = await make('FOREIGN_CHANNEL_CANARY', other)
+    // The run note: channel rules and this agent's channels, never Alerts or another agent's.
+    const row = s.sessions.get('wizard_parity'); row.hidden = false
+    const run = await admit(s, { input: 'Synthetic owner chat' })
+    const note = sent(s).instructions
+    assert.ok(note.includes('Channels are on for this owner') && note.includes('this chat\u2019s post name'), 'channel and post-title rules are injected')
+    assert.ok(note.includes(`"id":"${own.id}"`), 'run note lists own channels')
+    assert.ok(!note.includes(`"id":"${alerts.id}"`) && !note.includes('FOREIGN_CHANNEL_CANARY'), 'Alerts and other agents\u2019 channels are not offered')
+    const finish = async (id, status) => {
+      Object.assign([...s.runs.values()].at(-1), { status: 'completed', updated_at: Date.now() / 1000, output: `Synthetic reply\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'done', ask: 'Filed', ...status })}[/WIZARD_STATUS_V1]` })
+      assert.equal((await s.request(`/v1/runs/${id}`)).status, 200)
+    }
+    // A foreign or Alerts channel is refused; then `channel` files the unfiled chat.
+    await finish(run.run_id, { channel: foreign.id })
+    assert.equal(await filed('wizard_parity'), null, 'another agent\u2019s channel is refused')
+    const r2 = await admit(s, { input: 'Synthetic owner chat again' }); await finish(r2.run_id, { channel: alerts.id })
+    assert.equal(await filed('wizard_parity'), null, 'agents never file an owner chat into Alerts')
+    const r3 = await admit(s, { input: 'Synthetic owner chat once more' }); await finish(r3.run_id, { channel: own.id, title: 'Synthetic post name' })
+    assert.equal(await filed('wizard_parity'), own.id, 'status-line channel files an unfiled chat')
+    // Never a move: the owner refiles it, and a later status naming another channel changes nothing.
+    assert.equal((await s.raw('/wizard/v1/channels/membership', json('PUT', { sessionId: 'wizard_parity', channelId: second.id }))).status, 200)
+    const r4 = await admit(s, { input: 'Synthetic owner chat moved' }); await finish(r4.run_id, { channel: own.id })
+    assert.equal(await filed('wizard_parity'), second.id, 'an owner-filed chat is never moved')
+    // `space` stays an alias for one release.
+    assert.equal((await s.request('/api/sessions', post({ id: 'wizard_parity_alias', source: 'wizard-mobile' }))).status, 201)
+    const r5 = await s.request('/v1/runs', post({ session_id: 'wizard_parity_alias', input: 'Synthetic alias chat' })); assert.equal(r5.status, 202)
+    await finish((await r5.json()).run_id, { space: own.id })
+    assert.equal(await filed('wizard_parity_alias'), own.id, 'space is an alias of channel')
+    // Scheduled chats: a new chat goes to its job's channel, else Alerts (main) or stays unfiled (routed agents);
+    // a job posting into an existing thread never files it; the status line cannot file a scheduled chat.
+    const job = async extra => { const r = await s.raw('/wizard/v1/schedules', post({ name: 'Parity · Synthetic reminder', kind: 'remind', prompt: 'Synthetic reminder.', agent: s.id, enabled: false, when: { every: 60 }, ...extra })); assert.equal(r.status, 201, await r.clone().text()); return r.json() }
+    const fire = async created => {
+      const r = await s.raw(`/wizard/v1/schedules/${created.id}/run`, post({})); assert.equal(r.status, 202)
+      const occurrence = await r.json(); await s.server.scheduler.tick(false)
+      const latest = s.server.scheduler.latest(created.id); assert.equal(latest.admitted, 1, latest.error || 'admitted')
+      return { thread: occurrence.thread, runId: JSON.parse(latest.receipt).run_id }
+    }
+    const plain = await fire(await job())
+    assert.equal(await filed(plain.thread), s.kind === 'main' ? alerts.id : null, 'a new scheduled chat lands in Alerts (main) or stays unfiled')
+    await finish(plain.runId, { channel: own.id })
+    assert.equal(await filed(plain.thread), s.kind === 'main' ? alerts.id : null, 'the status line never files a scheduled chat')
+    const routed = await fire(await job({ channel: own.id }))
+    assert.equal(await filed(routed.thread), own.id, 'a job with a channel files its new chat there')
+    assert.equal((await s.raw('/wizard/v1/schedules', post({ name: 'Bad', kind: 'remind', prompt: 'x', agent: s.id, enabled: false, when: { every: 60 }, channel: 'Not An Id' }))).status, 400)
+    const existing = await fire(await job({ thread: 'wizard_parity_alias' }))
+    assert.equal(existing.thread, 'wizard_parity_alias')
+    assert.equal(await filed('wizard_parity_alias'), own.id, 'a run into an existing thread stays where it is')
+    // Owner unfiles the Alerts post; the job's next occurrence does not put it back.
+    if (s.kind === 'main') {
+      assert.equal((await s.raw('/wizard/v1/channels/membership', json('PUT', { sessionId: plain.thread, channelId: null }))).status, 200)
+      const again = await s.raw(`/wizard/v1/schedules/${s.server.scheduler.list().find(j => j.thread === plain.thread).id}/run`, post({})); assert.equal(again.status, 202)
+      await s.server.scheduler.tick(false)
+      assert.equal(await filed(plain.thread), null, 'a later occurrence never re-files the chat')
+    }
+    // An alert the owner replied to stays the agent's post: no firstRequest from the owner's reply (scene has channelFirstPosts).
+    const at = Date.now() / 1000 - 60
+    for (const [id, msgs] of [['wizard_parity_alert', [{ role: 'assistant', timestamp: at, content: 'Synthetic alert words' }, { role: 'user', timestamp: at + 1, content: 'Synthetic owner reply' }]],
+      ['wizard_parity_owner', [{ role: 'user', timestamp: at, content: 'Synthetic owner opener' }, { role: 'assistant', timestamp: at + 1, content: 'Synthetic answer' }]]]) {
+      assert.equal((await s.request('/api/sessions', post({ id, source: 'wizard-mobile' }))).status, 201)
+      const made = s.sessions.get(id); made.hidden = false; made.preview = msgs.find(m => m.role === 'user').content; made.messages.push(...msgs)
+    }
+    const listed = async (id, want) => {
+      let last
+      for (let attempt = 0; attempt < 80; attempt++) {
+        if (s.kind === 'main') await (await s.request('/api/sessions?limit=100')).json()
+        last = (await (await s.request('/api/sessions?view=list&limit=100')).json()).data.find(x => x.id === id)
+        if (last && want(last)) return last
+        await new Promise(r => setTimeout(r, 25))
+      }
+      return last
+    }
+    assert.equal((await listed('wizard_parity_owner', x => Object.hasOwn(x, 'firstRequest')))?.firstRequest, 'Synthetic owner opener')
+    const alertRow = await listed('wizard_parity_alert', x => Object.hasOwn(x, 'firstRequest'))
+    assert.ok(alertRow && !Object.hasOwn(alertRow, 'firstRequest'), 'an agent-started thread with an owner reply carries no firstRequest')
+  },
   'chats-first-posts': async s => {
     const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const at = Date.now() / 1000 - 30
