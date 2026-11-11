@@ -126,6 +126,8 @@ export async function scene(kind, serverOptions = {}) {
     if (path === '/api/sessions') {
       const offset = Number(url.searchParams.get('offset') || 0), limit = Number(url.searchParams.get('limit') || 100)
       const rows = [...sessions.values()].filter(row => !(searchDb && row.archived)).map(row => ({ ...row, message_count: row.messages.length, latest_message: row.messages.at(-1), last_active: row.messages.at(-1)?.timestamp || row.created_at,
+        // Stock Hermes lists each session's start time (gateway/session_live_listing.py s.started_at).
+        started_at: row.started_at ?? row.created_at,
         // Stock Hermes marks a session with a live turn as running; opt-in so older contracts keep their rows.
         ...(serverOptions.fixtureSessionStatus && [...runs.values()].some(r => r.session_id === row.id && ['queued', 'running'].includes(r.status)) ? { status: 'running' } : {}) }))
       return json(200, { data: rows.slice(offset, offset + limit), has_more: offset + limit < rows.length })

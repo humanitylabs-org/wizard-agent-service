@@ -608,6 +608,21 @@ export const serverChecks = {
     const feed = await s.request(`/api/sessions?view=list&channel=${own.id}`); assert.equal(feed.status, 200)
     const page = await feed.json()
     assert.deepEqual([page.window, page.order, page.data.map(x => x.id)], ['channel', 'oldest', ['wizard_parity']])
+    // wizard-ux issue 1289: a feed keeps posts in posting order, so every row (list and feed) carries the thread's start
+    // time, and a later reply moves its activity times but never its start time.
+    const started = new Date(row.created_at * 1000).toISOString()
+    assert.equal(item.startedAt, started, 'list rows carry the thread start time')
+    assert.equal(page.data[0].startedAt, started, 'feed rows carry the thread start time')
+    row.messages.push({ role: 'assistant', timestamp: Date.now() / 1000 + 60, content: 'Synthetic later reply' })
+    let replied
+    for (let attempt = 0; attempt < 40 && !(replied && replied.messageCount === row.messages.length); attempt++) {
+      if (s.kind === 'main') await (await s.request('/api/sessions?limit=100')).json()
+      replied = (await (await s.request('/api/sessions?view=list')).json()).data.find(x => x.id === 'wizard_parity')
+      if (!(replied && replied.messageCount === row.messages.length)) await new Promise(r => setTimeout(r, 25))
+    }
+    assert.equal(replied.messageCount, row.messages.length, 'the reply reached the list')
+    assert.equal(replied.startedAt, started, 'a reply never moves the start time')
+    row.messages.pop()
     assert.equal(page.data[0].channel, own.id)
     assert.equal((await s.request(`/api/sessions?view=list&channel=${foreign.id}`)).status, 404, 'another agent\'s channel feed is not served here')
     assert.equal((await s.request('/api/sessions?view=list&channel=missing-channel')).status, 404)
