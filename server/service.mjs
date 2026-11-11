@@ -3067,7 +3067,7 @@ function buildWizardServer(options, lifetime) {
   }) : null
   if (agents && bridge) {
     gatewayAgents = agents
-    transcribeTools = transcribeTool({ homeOf: id => agents.stateHome(id), allowed: id => agents.read(id)?.privacy !== 'private', sttOrigin, fetchImpl, enabled: () => options.sttConfigured !== false, log: line => process.stdout.write(`[transcribe] ${line}\n`) })
+    transcribeTools = transcribeTool({ homeOf: id => agents.stateHome(id), allowed: id => agents.read(id)?.privacy !== 'private', sttOrigin, fetchImpl, modelInfo: () => sttModelInfo(), readingOf: speechText, enabled: () => options.sttConfigured !== false, log: line => process.stdout.write(`[transcribe] ${line}\n`) })
     bridge.appsChanged()
   }
   // Switch WIZARD_MAIN_PROVIDER_ATTACH (issue 428): a provider sign-in joins the box's pool only; the main agent

@@ -1,9 +1,11 @@
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { TRANSCRIBE_TOOL, resolveAgentAudioPath, transcribeTool } from '../server/transcribe.mjs'
+import { TRANSCRIBE_TOOL, readAgentAudio, resolveAgentAudioPath, transcribeTool } from '../server/transcribe.mjs'
 import { createAgentBridge } from '../server/agent-bridge.mjs'
+import { createAgentRegistry } from '../server/agents.mjs'
+import { speechText } from '../server/service.mjs'
 
 let root: string
 let home: string
@@ -31,7 +33,7 @@ const jsonReply = (value: any, status = 200) => new Response(JSON.stringify(valu
 describe('path confinement', () => {
   it('maps /opt/data, the host path and relative paths into the agent home', () => {
     const real = resolveAgentAudioPath(home, '/opt/data/inbox/2026-11-11/note.wav')
-    expect(real.endsWith('/agents/helper/home/inbox/2026-11-11/note.wav')).toBe(true)
+    expect(real.endsWith(join('agents', 'helper', 'home', 'inbox', '2026-11-11', 'note.wav'))).toBe(true)
     expect(resolveAgentAudioPath(home, 'inbox/2026-11-11/note.wav')).toBe(real)
     expect(resolveAgentAudioPath(home, join(home, 'inbox/2026-11-11/note.wav'))).toBe(real)
   })
@@ -153,5 +155,55 @@ describe('wizard_transcribe', () => {
       expect((await bridge.listTools('helper')).map((x: any) => x.name)).toContain(TRANSCRIBE_TOOL)
       expect(json(await bridge.callTool(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/2026-11-11/note.wav' }, 'helper')).text).toBe('from gateway')
     } finally { bridge.close() }
+  })
+})
+
+describe('hardening', () => {
+  it('reads through a pinned descriptor: refuses a hardlinked or symlinked final component and anything oversize', () => {
+    linkSync(join(home, 'inbox', '2026-11-11', 'note.wav'), join(home, 'twin.wav'))
+    expect(() => readAgentAudio(home, 'twin.wav', 1 << 20)).toThrow(/plain file/)
+    symlinkSync(join(root, 'outside.wav'), join(home, 'sneaky.wav'))
+    expect(() => readAgentAudio(home, 'sneaky.wav', 1 << 20)).toThrow()
+    writeFileSync(join(home, 'ok.wav'), Buffer.from('abcdef'))
+    expect(readAgentAudio(home, '/opt/data/ok.wav', 1 << 20)).toEqual({ name: 'ok.wav', bytes: Buffer.from('abcdef') })
+    expect(() => readAgentAudio(home, 'ok.wav', 3)).toThrow(/limit/)
+  })
+
+  it('sends the discovered transcriber model and keeps only scored speech, like the shell voice routes', async () => {
+    const seen: Seen[] = []
+    const t = tool(jsonReply({ segments: [{ text: ' Hello.', no_speech_prob: 0.01, avg_logprob: -0.1 }, { text: ' you', no_speech_prob: 0.9, avg_logprob: -0.9 }] }), seen, { modelInfo: async () => ({ id: 'speaches-model', segments: true }), readingOf: speechText })
+    expect(json(await t.call(TRANSCRIBE_TOOL, { path: 'inbox/2026-11-11/note.wav' }, 'helper')).text).toBe('Hello.')
+    expect(seen[0].form.get('model')).toBe('speaches-model')
+    expect(seen[0].form.get('response_format')).toBe('verbose_json')
+  })
+})
+
+// Per agent kind (main, host-profile, container, restricted): the real registry resolves each agent's own home, the
+// tool reads only inside it, and a private agent is refused.
+describe('per agent kind', () => {
+  it('resolves each kind to its own home, and never another agent\'s', async () => {
+    const mainHome = join(root, 'main-home'); mkdirSync(join(mainHome, 'profiles', 'prof'), { recursive: true })
+    const registry: any = createAgentRegistry({ agentsDir: join(root, 'registry'), mainHome, localModels: ['fixture-local'], runtime: { apply: async () => ({}), stop: async () => ({}), start: async () => ({}) }, fetchImpl: async () => new Response(JSON.stringify({ data: [], has_more: false })) })
+    const make = async (label: string, preset: string) => (await registry.create({ label, model: { provider: 'tinfoil', model: 'glm-5-3' }, permissions: { preset } })).agent
+    const container = await make('Container', 'standard'); const restricted = await make('Restricted', 'standard'); const priv = await make('Private', 'private')
+    const rewrite = (id: string, runtime: any) => { const file = join(root, 'registry', id, 'agent.json'); const record = JSON.parse(readFileSync(file, 'utf8')); record.runtime = { ...record.runtime, ...runtime }; writeFileSync(file, JSON.stringify(record)) }
+    rewrite(restricted.id, { isolation: 'restricted', network: { uplink: '127.0.0.0/28', sandbox: '127.0.1.0/28' } })
+    const profile = await make('Profile', 'standard')
+    rewrite(profile.id, { kind: 'profile', profile: 'prof' })
+    const place = (id: string, name: string, bytes: string) => { const dir = registry.stateHome(id); mkdirSync(join(dir, 'inbox'), { recursive: true }); writeFileSync(join(dir, 'inbox', name), bytes) }
+    const ids = ['hermes', container.id, restricted.id, profile.id]
+    for (const id of ids) place(id, 'take.wav', `bytes-of-${id}`)
+    place(priv.id, 'take.wav', 'private-bytes')
+    const seen: Seen[] = []
+    const t = transcribeTool({ homeOf: (id: string) => registry.stateHome(id), allowed: (id: string) => registry.read(id)?.privacy !== 'private', sttOrigin: 'http://x', fetchImpl: (async (_u: string, init: any) => { seen.push({ url: _u, form: init.body }); return jsonReply({ text: 'ok' }) }) as any })
+    for (const id of ids) {
+      expect(json(await t.call(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/take.wav' }, id)).text).toBe('ok')
+      expect(await (seen.at(-1)!.form.get('file') as File).text()).toBe(`bytes-of-${id}`)
+    }
+    // Another agent's home is never reachable, by host path or traversal.
+    for (const path of [join(registry.stateHome(priv.id), 'inbox', 'take.wav'), '/opt/data/../' + priv.id + '/home/inbox/take.wav']) expect((await t.call(TRANSCRIBE_TOOL, { path }, container.id)).isError).toBe(true)
+    expect((await t.call(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/take.wav' }, priv.id)).isError).toBe(true)
+    expect(t.list(priv.id)).toEqual([])
+    expect(seen).toHaveLength(ids.length)
   })
 })

@@ -7,7 +7,7 @@
 // own home: a container agent names it /opt/data/... (or a path relative to it); the host path is accepted too.
 // Anything that resolves (after symlinks) outside that home, or is not a regular audio/video file, is refused.
 // Transcript text is returned to the caller and never logged here.
-import { lstatSync, realpathSync, readFileSync, statSync } from 'node:fs'
+import { closeSync, constants, fstatSync, lstatSync, openSync, readSync, realpathSync } from 'node:fs'
 import { basename, extname, isAbsolute, join, resolve, sep } from 'node:path'
 
 export const TRANSCRIBE_TOOL = 'wizard_transcribe'
@@ -68,12 +68,42 @@ export function resolveAgentAudioPath(home, raw) {
 }
 
 /**
+ * Resolve, then read the file through ONE pinned descriptor so a container agent cannot swap the validated file for a
+ * symlink between the check and the read (TOCTOU). The descriptor is opened O_NOFOLLOW, must be a single-link regular
+ * file within the size cap, and its own /proc path must still sit inside the agent's home (this also catches a parent
+ * directory swapped for a symlink). Returns { name, bytes }.
+ */
+export function readAgentAudio(home, raw, maxBytes) {
+  const file = resolveAgentAudioPath(home, raw)
+  const realHome = realpathSync(resolve(home))
+  let fd
+  try {
+    fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  } catch { refuse('The file could not be opened.') }
+  try {
+    const info = fstatSync(fd)
+    if (!info.isFile() || info.nlink !== 1) refuse('That path is not a plain file.')
+    if (info.size < 1) refuse('That file is empty.')
+    if (info.size > maxBytes) refuse(`That file is ${Math.ceil(info.size / 1048576)} MB; the limit is ${Math.floor(maxBytes / 1048576)} MB. Ask the owner for a shorter recording, or split it.`)
+    let actual = ''
+    try { actual = realpathSync(`/proc/self/fd/${fd}`) } catch { /* no /proc: the O_NOFOLLOW + fstat checks above still hold */ }
+    if (actual && !within(realHome, actual)) refuse('That path is outside your own files. Use a path inside your home (/opt/data/...).')
+    const buffer = Buffer.alloc(info.size)
+    let size = 0
+    let n
+    while (size < buffer.length && (n = readSync(fd, buffer, size, buffer.length - size, null)) > 0) size += n
+    return { name: basename(file), bytes: buffer.subarray(0, size) }
+  } finally { closeSync(fd) }
+}
+
+/**
  * Built-in gateway tool for createAgentBridge({ builtins }).
  * `homeOf(agentId)` -> the agent's home folder on the host ('' = none). `allowed(agentId)` says whether the agent may use
  * the tool at all (private agents may not: their audio must not reach the shared voice service's owner buffers). `sttOrigin` is the Wizard Voice Service.
- * `enabled()` false (WIZARD_STT_ENABLED=0) hides the tool, so no agent is promised a transcriber the box lacks.
+ * `modelInfo()` -> {id, segments} of a Speaches-shaped transcriber (the same discovery the shell's voice routes use); `readingOf`
+ * turns its reply into text (drops Whisper's invented words for silence). `enabled()` false (WIZARD_STT_ENABLED=0) hides the tool, so no agent is promised a transcriber the box lacks.
  */
-export function transcribeTool({ homeOf, allowed = () => true, sttOrigin, fetchImpl = fetch, enabled = () => true, maxBytes = TRANSCRIBE_MAX_BYTES, timeoutMs = TRANSCRIBE_TIMEOUT_MS, log = () => {} }) {
+export function transcribeTool({ homeOf, allowed = () => true, sttOrigin, fetchImpl = fetch, enabled = () => true, maxBytes = TRANSCRIBE_MAX_BYTES, modelInfo = async () => ({}), readingOf = (value) => (typeof value?.text === 'string' ? value.text : ''), timeoutMs = TRANSCRIBE_TIMEOUT_MS, log = () => {} }) {
   let inFlight = 0
   return {
     list: (agentId) => (enabled() && (!agentId || allowed(agentId)) ? [TOOL] : []),
@@ -89,12 +119,9 @@ export function transcribeTool({ homeOf, allowed = () => true, sttOrigin, fetchI
         language = typeof args.language === 'string' ? args.language.trim() : ''
         if (!/^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})?$/u.test(language)) return bad('language must be an ISO code such as en or es.')
       }
-      let file
+      let audio
       try {
-        file = resolveAgentAudioPath(homeOf(agentId), args.path)
-        const size = statSync(file).size
-        if (size < 1) return bad('That file is empty.')
-        if (size > maxBytes) return bad(`That file is ${Math.ceil(size / 1048576)} MB; the limit is ${Math.floor(maxBytes / 1048576)} MB. Ask the owner for a shorter recording, or split it.`)
+        audio = readAgentAudio(homeOf(agentId), args.path, maxBytes)
       } catch (error) {
         if (error instanceof Refusal) return bad(error.message)
         return bad('The file could not be read.')
@@ -106,7 +133,10 @@ export function transcribeTool({ homeOf, allowed = () => true, sttOrigin, fetchI
       const timer = setTimeout(() => controller.abort(), timeoutMs)
       try {
         const form = new FormData()
-        form.append('file', new Blob([readFileSync(file)]), basename(file))
+        form.append('file', new Blob([audio.bytes]), audio.name)
+        const info = await modelInfo().catch(() => ({}))
+        if (info?.id) form.append('model', info.id)
+        if (info?.segments) form.append('response_format', 'verbose_json')
         form.append('mode', mode)
         if (language) form.append('language', language)
         let upstream
@@ -124,11 +154,11 @@ export function transcribeTool({ homeOf, allowed = () => true, sttOrigin, fetchI
         let value = null
         try { value = JSON.parse(raw.toString('utf8')) } catch { /* not JSON */ }
         if (upstream.status === 422 && /^no speech detected$/iu.test(String(value?.detail ?? '').trim())) return ok({ text: '', no_speech: true, mode, ms: Date.now() - started })
-        if (!upstream.ok || typeof value?.text !== 'string') {
+        if (!upstream.ok || !value || typeof value !== 'object') {
           log(`transcribe ${agentId}: voice service answered ${upstream.status}`)
           return bad(`The Wizard Voice Service could not transcribe this file (HTTP ${upstream.status}). Tell the owner; do not install speech software.`)
         }
-        const text = value.text.trim().slice(0, 200_000)
+        const text = readingOf(value).trim().slice(0, 200_000)
         return ok({
           text, ...(text ? {} : { no_speech: true }), mode,
           provider: typeof value.provider === 'string' ? value.provider.slice(0, 80) : '',
