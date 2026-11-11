@@ -490,6 +490,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "chat-channels",
+      "description": "Chats Channels view (wizard-ux issues 1254 and 1258, shell switch wizard/chat-channels, off by default): Activity rows show '# channel' under the title; Channels lists the owner's Spaces (A-Z, pinned on top) plus a virtual General last; a channel opens as its Space Focus drawn as a feed of posts (each thread's first owner message with photo thumbnails). The feed's own message box (Send, the box mic or an orb take with a channel in front) starts a new chat filed into that channel's Space at send, paints the post on the Send frame and stays on the feed; General posts unfiled. Each agent's rows and sends stay in that agent's own channels for main and routed threads.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/chat-channels.test.mjs: the real Channels block in web/core/chats.js runs on main, host-profile, container and restricted rows (each agent's rows only in its own Spaces, unfiled routed chats in General, a restricted thread sharing a main thread's id never shows the other's first message, unread marks follow each row's own agent) and sends from the channel box for all four kinds (General unfiled, routed channels keep their own agent, a private agent's model never sent from a main channel). wizard-ux tests/qa-chat-channels.cjs is the synthetic browser run on phone 390x844 and desktop 1440x960 in Nebula and Grove, switch off and on. The Service side (channel store, first posts) is covered by the server cells chats-channels and chats-first-posts. Synthetic source-executed and browser evidence, not live box proof.",
+      "source_refs": [
+        "wizard-ux/web/core/chats.js",
+        "wizard-ux/web/app.js",
+        "wizard-ux/web/tweaks/wizard/chat-channels/tweak.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/chat-channels.test.mjs",
+        "wizard-ux/tests/qa-chat-channels.cjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "session-create",
       "description": "Create a hidden disposable thread",
       "layer": "server",
