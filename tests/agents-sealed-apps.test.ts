@@ -130,8 +130,8 @@ describe('#58 which agents can use an app', () => {
     // Main agent: standard, every current app ticked (no regression for an existing box).
     const mainAgent = (await (await fetch(`${base}/wizard/v1/agents/hermes`)).json()).agent
     expect(mainAgent).toMatchObject({ privacy: 'standard', permissions: { wizard_apps: ['notes'], agent_apps: ['scanner'] } })
-    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'scanner__scan', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
-    expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'scanner__scan', 'wizard_apps', 'wizard_devices', 'wizard_transcribe', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'wizard_apps', 'wizard_devices', 'wizard_transcribe', ...SHARED_AGENT_TOOLS].sort())
     expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
     // A tool outside the agent's list is refused in plain words, and never reaches the app.
     const refused = await mcp(base, gatewayKey(dir, helper.id), 'tools/call', { name: 'scanner__scan', arguments: {} })
@@ -163,7 +163,7 @@ describe('#58 which agents can use an app', () => {
     // The owner narrows the main agent; a stored choice is kept from then on.
     const narrowed = await fetch(`${base}/wizard/v1/agents/hermes`, json({ permissions: { wizard_apps: ['notes'], agent_apps: [] } }, 'PATCH'))
     expect(narrowed.status).toBe(200)
-    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'wizard_apps', 'wizard_devices', 'wizard_transcribe', ...SHARED_AGENT_TOOLS].sort())
     // Install a new app.
     const music = await fakeApp('play')
     writeApps(dir, [appEntry('notes', notes.url), appEntry('scanner', scanner.url, false), appEntry('music', music.url)])
@@ -211,7 +211,7 @@ describe('#58 which agents can use an app', () => {
     const privAgent = (await (await fetch(`${base}/wizard/v1/agents/private`)).json()).agent
     expect(privAgent.permissions.wizard_apps).toEqual(['notes'])
     expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['notes__note_add', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
-    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['scanner__scan', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['scanner__scan', 'wizard_apps', 'wizard_devices', 'wizard_transcribe', ...SHARED_AGENT_TOOLS].sort())
     // Ticked from the private agent's side now writes the gateway into its harness config.
     expect(readFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), 'utf8')).toContain('/wizard/mcp')
     expect((await fetch(`${base}/wizard/v1/apps/nope/agents`)).status).toBe(404)
@@ -438,7 +438,7 @@ describe('agentBridge gateway: container agents only', () => {
     const main = await fakeHermes('main')
     const base = await start(dir, main, { agentBridge: 'gateway' })
     const helper = await create(base, STANDARD('Helper', { wizard_apps: ['notes'] }))
-    expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'wizard_apps', 'wizard_devices', 'wizard_transcribe', ...SHARED_AGENT_TOOLS].sort())
     const allowed = await mcp(base, gatewayKey(dir, helper.id), 'tools/call', { name: 'notes__note_add', arguments: {} })
     expect(allowed.json.result.content[0].text).toBe('ran note_add')
     expect((await mcp(base, MAIN_TOKEN, 'tools/list')).status).toBe(404)
@@ -502,7 +502,7 @@ describe('per-agent access switches (Connections → Agents, Miguel 29 Oct 2026)
     const base = await start(dir, main)
     const helper = await create(base, STANDARD('Helper'))
     expect(helper.permissions).toMatchObject({ wizard_apps: ['notes'], agent_apps: ['scanner'] })
-    expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'scanner__scan', 'wizard_apps', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'scanner__scan', 'wizard_apps', 'wizard_devices', 'wizard_transcribe', ...SHARED_AGENT_TOOLS].sort())
     const picked = await create(base, STANDARD('Picker', { wizard_apps: [] }))
     expect(picked.permissions).toMatchObject({ wizard_apps: [], agent_apps: [] })
     const priv = await create(base, PRIVATE)

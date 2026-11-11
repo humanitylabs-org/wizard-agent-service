@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
 import { createDevices, devicesTool } from './devices.mjs'
+import { transcribeTool } from './transcribe.mjs'
 import { projectOpenAskSession, backgroundHelperStatus, threadBackground, liveWorker, ENDED_WITH_ERROR, replyEpoch } from './open-ask.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { indexedSearchWords, readHermesFirstRequests, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, createHermesSessionTruthReader, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
@@ -2989,11 +2990,14 @@ function buildWizardServer(options, lifetime) {
   let reachOut = null
   let spacesTools = null
   let supervisorTools = null
+  // wizard_transcribe on the gateway (server/transcribe.mjs): the box's Wizard Voice Service on loopback, for the
+  // agent's own audio files. Bound with the agent registry (it resolves each agent's home).
+  let transcribeTools = null
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
       builtins: {
-        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(reachOut?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId)],
-        call: async (name, args, agentId) => (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await reachOut?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
+        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(reachOut?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId), ...(transcribeTools?.list(agentId) || [])],
+        call: async (name, args, agentId) => (await transcribeTools?.call(name, args, agentId)) ?? (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await reachOut?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
       },
       agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
@@ -3061,7 +3065,11 @@ function buildWizardServer(options, lifetime) {
       } catch { return { status: 'error', status_detail: 'not_responding' } }
     },
   }) : null
-  if (agents && bridge) { gatewayAgents = agents; bridge.appsChanged() }
+  if (agents && bridge) {
+    gatewayAgents = agents
+    transcribeTools = transcribeTool({ homeOf: id => agents.stateHome(id), allowed: id => agents.read(id)?.privacy !== 'private', sttOrigin, fetchImpl, enabled: () => options.sttConfigured !== false, log: line => process.stdout.write(`[transcribe] ${line}\n`) })
+    bridge.appsChanged()
+  }
   // Switch WIZARD_MAIN_PROVIDER_ATTACH (issue 428): a provider sign-in joins the box's pool only; the main agent
   // uses just the providers the owner attached to it (the onboarding choice is attached first).
   const mainProviderAttach = options.mainProviderAttach === true && agentsDir

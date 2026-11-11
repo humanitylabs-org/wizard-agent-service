@@ -127,6 +127,7 @@ def render_kernel(apps: list[dict] | None = None, harness: str = "hermes",
         "Never ask the owner what an installed app can answer: call its tools first; if missing, search tools again or retry once. Never guess from old chats or call app URLs.",
         "Answer from the source of truth: owning app for data, live checks for box state, release records for what shipped. Say none found only after checking. Report tool errors.",
         f'"What apps do I have?": call `{meta}`. Report unreachable ones (`wam doctor`).',
+        "Prefer Wizard tools to installing software; never install speech models.",
         "Save routing-only app-job skills.",
     ]
     if job_map or not pointers:
