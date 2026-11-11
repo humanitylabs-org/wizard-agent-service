@@ -76,6 +76,7 @@ import { serveAppView } from './app-views.mjs'
 import { serveChatsView } from './chats-views.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { listPayload } from './session-list-view.mjs'
+import { readHermesFirstPosts } from './first-post.mjs'
 import { fullRetryInput, ownerRetryRows } from './session-detail.mjs'
 import { createListWindows } from './session-list-window.mjs'
 import { standardChatRpc } from './standard-chats.mjs'
@@ -3120,6 +3121,8 @@ function buildWizardServer(options, lifetime) {
   // Chats channels, phase 2 (issue 440, WIZARD_CHANNEL_STORE=1, off by default): channels.sqlite replaces
   // ui-preferences `spaces`. First boot copies the Spaces once, seeds Alerts, and drops main memberships
   // whose thread is gone from state.db. ui-preferences.json itself is never rewritten here.
+  // Chats Channels posts (issue 446): list rows carry firstRequest + firstAttachments read from the first owner message.
+  const channelFirstPosts = options.channelFirstPosts === true
   const channelStore = options.channelStore === true ? (() => {
     let store
     try { store = createChannelStore(resolve(bridgeOsHome || wizardOsHome(), 'channels.sqlite')) }
@@ -3302,6 +3305,7 @@ function buildWizardServer(options, lifetime) {
   if (agentCtx) agentCtx.askMax = askMaxNow
   if (agentCtx) agentCtx.archiveAfterDays = () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays
   if (agentCtx) agentCtx.channelStore = channelStore
+  if (agentCtx) agentCtx.channelFirstPosts = channelFirstPosts
   spacesTools = createSpacesTools({
     path: resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), channels: channelStore,
     agentExists: id => Boolean(agents?.read(id)),
@@ -4339,6 +4343,13 @@ function buildWizardServer(options, lifetime) {
   const withFirstRequests = listed => {
     const rows = ['data', 'sessions', 'items'].flatMap(key => Array.isArray(listed?.[key]) ? listed[key] : [])
     if (!hermesStatePath || !rows.length || listed.mode === 'body' || listed.fields === 'slim') return
+    if (channelFirstPosts) {
+      // Issue 446: the whole first owner message, for the post's words and photos.
+      let posts
+      try { posts = hermesStateHealth.read('first-post', () => readHermesFirstPosts(hermesStatePath, rows.map(row => row?.id))) } catch { return }
+      for (const row of rows) if (row && posts.has(row.id)) row.wizard_first_post = posts.get(row.id)
+      return
+    }
     let firsts
     try { firsts = hermesStateHealth.read('first-request', () => readHermesFirstRequests(hermesStatePath, rows.map(row => row?.id))) } catch { return }
     for (const row of rows) if (row && firsts.has(row.id)) row.wizard_first_request = firsts.get(row.id)
@@ -7592,7 +7603,7 @@ function buildWizardServer(options, lifetime) {
         }
         // Issue 440: hydrate the first owner request before the credential and private-path guards below,
         // so state.db text gets exactly the same redaction and fail-closed scan as every other list field.
-        const channelListing = channelStore && !operator && upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions'
+        const channelListing = (channelStore || channelFirstPosts) && !operator && upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions'
           && url.searchParams.get('view') === 'list' && contentType.includes('application/json')
         if (channelListing) {
           try { const listed = JSON.parse(result.toString('utf8')); withFirstRequests(listed); result = Buffer.from(JSON.stringify(listed)) } catch { /* not a list body */ }
@@ -7610,7 +7621,7 @@ function buildWizardServer(options, lifetime) {
         const forbidden = [hermesKey, inboxToken, ...privatePaths].filter(Boolean).map((value) => Buffer.from(value))
         if (forbidden.some((value) => result.includes(value))) { sendJson(response, 502, { error: 'unsafe_upstream_response' }); return }
         if (upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions' && url.searchParams.get('view') === 'list') {
-          result = Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), url.searchParams.get('q'), channelStore && !operator ? channelStore : null)))
+          result = Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), url.searchParams.get('q'), channelStore && !operator ? channelStore : null, { firstPosts: channelFirstPosts && !operator })))
         }
         // A deleted thread leaves its channel (issue 440).
         if (channelStore && !operator && upstream.ok && request.method === 'DELETE' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {

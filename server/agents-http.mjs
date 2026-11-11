@@ -15,6 +15,7 @@ import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { readArchivedSessions } from './archived-sessions.mjs'
 import { listPayload } from './session-list-view.mjs'
+import { firstPostOfHistory, readHermesFirstPosts } from './first-post.mjs'
 import { fullRetryInput, ownerRetryRows, searchMessageText } from './session-detail.mjs'
 import { createListWindows, selectWindow } from './session-list-window.mjs'
 import { classifyRunError } from './run-error.mjs'
@@ -69,6 +70,51 @@ function archivedFirstRequests(ctx, agent, listed, secrets) {
     const first = firsts.get(row.id)
     if (typeof first === 'string' && !secrets.some(secret => first.includes(secret))) row.wizard_first_request = first
   }
+}
+// Chats Channels posts (issue 446, ctx.channelFirstPosts): every listed row's first owner message, words and photos.
+// The agent's own state.db when the Service can read it (host profile, container); otherwise (a restricted agent's
+// home) one oldest-first history page per thread through the runtime, read in the background a few at a time and
+// kept per agent and thread, so the list never waits for it: a row not read yet has no post fields. A post naming a
+// secret is dropped.
+const firstPostCache = new WeakMap()
+const FIRST_POST_CACHE_MAX = 5000, FIRST_POST_FETCHES = 4, FIRST_POST_RETRY_MS = 30_000
+function firstPostState(ctx) {
+  if (!firstPostCache.has(ctx)) firstPostCache.set(ctx, { posts: new Map(), queue: new Map(), busy: 0, failed: new Map() })
+  return firstPostCache.get(ctx)
+}
+const postNames = (post, secrets) => post && secrets.some(secret => post.text.includes(secret) || post.attachments.some(f => f.name.includes(secret)))
+function pumpFirstPosts(ctx, state) {
+  while (state.busy < FIRST_POST_FETCHES && state.queue.size) {
+    const [key, job] = state.queue.entries().next().value
+    state.queue.delete(key); state.busy++
+    void (async () => {
+      const page = await ctx.registry.fetchAgent(job.agent, `/api/sessions/${encodeURIComponent(job.id)}/messages?order=oldest&limit=50&include_compacted=true`, { headers: job.headers, redirect: 'manual', signal: AbortSignal.timeout(5000) })
+      if (!page.ok) throw new Error('history unavailable')
+      const raw = Buffer.from(await page.arrayBuffer())
+      if (job.secrets.some(secret => raw.includes(Buffer.from(secret)))) { state.posts.set(key, null); return }
+      const body = JSON.parse(raw.toString('utf8'))
+      const post = firstPostOfHistory(body.data ?? body.messages ?? body.items, body.has_more)
+      if (post === undefined) throw new Error('not decidable yet')
+      state.posts.set(key, postNames(post, job.secrets) ? null : post)
+      while (state.posts.size > FIRST_POST_CACHE_MAX) state.posts.delete(state.posts.keys().next().value)
+    })().catch(() => { state.failed.set(key, Date.now()) }).finally(() => { state.busy--; pumpFirstPosts(ctx, state) })
+  }
+}
+function routedFirstPosts(ctx, agent, listed, secrets, headers) {
+  const rows = ['data', 'sessions', 'items'].flatMap(key => Array.isArray(listed?.[key]) ? listed[key] : [])
+    .filter(row => row && typeof row.id === 'string')
+  if (!rows.length || listed.mode === 'body' || listed.fields === 'slim') return
+  let posts = new Map()
+  try { posts = readHermesFirstPosts(ctx.agentStatePath?.(agent) || join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), rows.map(row => row.id)) } catch { /* unreadable: read through the runtime */ }
+  const state = firstPostState(ctx), now = Date.now()
+  for (const row of rows) {
+    const key = `${agent.id} ${row.id}`
+    if (posts.has(row.id)) { const post = posts.get(row.id); row.wizard_first_post = postNames(post, secrets) ? null : post; continue }
+    if (state.posts.has(key)) { row.wizard_first_post = state.posts.get(key); continue }
+    if (now - (state.failed.get(key) || 0) < FIRST_POST_RETRY_MS || state.queue.has(key) || state.queue.size >= 400) continue
+    state.queue.set(key, { agent, id: row.id, headers, secrets })
+  }
+  pumpFirstPosts(ctx, state)
 }
 export async function projectProfileSessions(ctx, agent, rows, headers, secrets) {
   if (!profileRunCache.has(ctx)) profileRunCache.set(ctx, new Map())
@@ -881,8 +927,9 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       for (const id of sessionIdsIn(result)) registry.pin(id, agent.id, 'runtime_verified')
       if(searchParams.get('view') === 'list') {
         const listed=JSON.parse(result.toString('utf8'))
-        if (ctx.channelStore) archivedFirstRequests(ctx, agent, listed, secrets)
-        result=Buffer.from(JSON.stringify(listPayload(listed, searchParams.get('q'), ctx.channelStore || null)))
+        if (ctx.channelFirstPosts) routedFirstPosts(ctx, agent, listed, secrets, headers)
+        else if (ctx.channelStore) archivedFirstRequests(ctx, agent, listed, secrets)
+        result=Buffer.from(JSON.stringify(listPayload(listed, searchParams.get('q'), ctx.channelStore || null, { firstPosts: ctx.channelFirstPosts === true })))
       }
     } else if (/^\/api\/sessions(?:\/[^/]+)?$/u.test(upstreamPath)) result = decorateThreadAgent(result, info)
     if (method === 'POST' && upstreamPath === '/v1/runs') result = Buffer.from(JSON.stringify({ ...JSON.parse(result.toString('utf8')), agent_id: agent.id }))

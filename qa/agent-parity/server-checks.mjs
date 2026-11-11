@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { TITLE_INSTRUCTIONS } from '../../server/thread-titles.mjs'
-import { existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
@@ -636,6 +636,53 @@ export const serverChecks = {
     }
     assert.equal((await move(null, s.id)).status, 200)
     assert.equal((await listed(false)).channel, undefined)
+  },
+  'chats-first-posts': async s => {
+    const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const at = Date.now() / 1000 - 30
+    const photo = { id: 'parity-photo-1', filename: 'synthetic.png', mime: 'image/png', bytes: 4 }, doc = { id: 'parity-doc-1', filename: 'synthetic.pdf', mime: 'application/pdf', bytes: 4 }
+    const message = words => `[Workspace::v1: /opt/data]\n**${words}**\n\n[WIZARD_FILES_V1]\n${JSON.stringify([photo, doc])}\n[/WIZARD_FILES_V1]\n[WizardOS context] Window in front: Synthetic Notes`
+    const long = `Synthetic first post ${'word '.repeat(120)}`.trim()
+    const row = s.sessions.get('wizard_parity'); row.hidden = false
+    row.messages.push({ role: 'user', timestamp: at, content: '[ASYNC DELEGATION BATCH COMPLETE — deleg_parity]\nInternal worker transcript', display_kind: 'async_delegation_complete' },
+      { role: 'user', timestamp: at + 1, content: message(long) }, { role: 'assistant', timestamp: at + 2, content: 'Synthetic reply' })
+    const create = async id => { const r = await s.request('/api/sessions', json('POST', { id, source: 'wizard-mobile' })); assert.equal(r.status, 201); const made = s.sessions.get(id); made.hidden = false; return made }
+    // A thread the agent started: no owner message, so neither field.
+    ;(await create('wizard_parity_agent')).messages.push({ role: 'assistant', timestamp: at, content: 'Synthetic agent-started note' })
+    // Main's canonical census was seeded at startup and routed posts not in a readable state.db are read in the background.
+    const listed = async (id, want = true) => {
+      let last
+      for (let attempt = 0; attempt < 80; attempt++) {
+        if (s.kind === 'main') await (await s.request('/api/sessions?limit=100')).json()
+        last = (await (await s.request('/api/sessions?view=list&limit=100')).json()).data.find(x => x.id === id)
+        if (last && (!want || Object.hasOwn(last, 'firstRequest'))) return last
+        await new Promise(r => setTimeout(r, 25))
+      }
+      return last
+    }
+    const check = (item, label) => {
+      assert.ok(item, `${label}: row listed`)
+      assert.equal(typeof item.firstRequest, 'string', `${label}: firstRequest`)
+      assert.ok(item.firstRequest.length <= 400 && item.firstRequest.length > 300, `${label}: cut at 400 code units`)
+      assert.ok(item.firstRequest.startsWith('Synthetic first post word word'), `${label}: the owner's words, not the internal row`)
+      assert.ok(!/Workspace|WIZARD_|Window in front|synthetic\.pdf|\*/u.test(item.firstRequest), `${label}: cleaned`)
+      assert.deepEqual(item.firstAttachments, [{ id: 'parity-photo-1', name: 'synthetic.png', mime: 'image/png' }], `${label}: images only, as file refs`)
+    }
+    check(await listed('wizard_parity'), 'state.db read')
+    const agentStarted = await listed('wizard_parity_agent', false)
+    assert.ok(agentStarted && !Object.hasOwn(agentStarted, 'firstRequest') && !Object.hasOwn(agentStarted, 'firstAttachments'), 'an agent-started thread has neither field')
+    if (s.kind !== 'main') {
+      // A restricted agent's home is unreadable to the Service: without its state.db the post comes through the runtime.
+      // (The fixture keeps writing through its open handle; root reads any file, so this half needs a normal user.)
+      const db = join(s.agentHome, 'state.db')
+      assert.ok(existsSync(db)); chmodSync(db, 0)
+      try {
+        const routed = await create('wizard_parity_runtime')
+        routed.messages.push({ role: 'user', timestamp: at, content: message(long) }, { role: 'assistant', timestamp: at + 1, content: 'Synthetic reply' })
+        check(await listed('wizard_parity_runtime'), 'runtime history read')
+        assert.ok(s.seen.some(r => r.method === 'GET' && r.path.endsWith('/api/sessions/wizard_parity_runtime/messages')), 'read through the agent runtime')
+      } finally { chmodSync(db, 0o600) }
+    }
   },
   'nonimage-files': async s => {
     const bytes = Buffer.from('PARITY_DOCUMENT_UNDISCLOSED_TOKEN\n')
