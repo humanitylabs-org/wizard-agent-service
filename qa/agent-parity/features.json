@@ -524,7 +524,8 @@
         "wizard-ux/tests/chat-channels.test.mjs",
         "wizard-ux/tests/qa-chat-channels.cjs",
         "wizard-ux/tests/qa-chat-channel-agent-markdown.cjs",
-        "wizard-ux/tests/qa-chat-channel-edit-unsent.cjs"
+        "wizard-ux/tests/qa-chat-channel-edit-unsent.cjs",
+        "wizard-ux/tests/qa-chat-channel-dismiss-unsent.cjs"
       ],
       "fixture": null,
       "policy_exemptions": []
