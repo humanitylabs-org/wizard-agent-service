@@ -64,3 +64,30 @@ applied to the store. The Spaces tools (`spaces_*`) and the status line's `space
 See `docs/chats-list-protocol.md`: rows gain `channel` and `firstRequest`, and `view=list&channel=<id>` is the
 channel feed. With `WIZARD_CHANNEL_FIRST_POSTS=1` (issue 446, off by default) every row of an owner-started thread
 also carries the post itself: `firstRequest` from the whole first owner message and `firstAttachments`, its photos.
+
+## Agent filing and Alerts (phase 3)
+
+Switch: `WIZARD_CHANNEL_AGENT_FILING=1` (Agent Service env, option `channelAgentFiling`), on top of
+`WIZARD_CHANNEL_STORE=1`. Off by default; with it off, phase 2 above is unchanged. Issue:
+humanitylabs-org/wizard-agent-service#441.
+
+- **Status line `channel`.** `WIZARD_STATUS_V1` takes an optional `channel`: one exact channel id from the agent's
+  catalogue. `space` is still read as an alias for one release (`channel` wins when both are given).
+- **Run note.** Every run gets the channel rules and the agent's open channels (id and name). Alerts is never offered,
+  and neither is another agent's channel. In channels mode `title` is the post's short name (what this chat is
+  about), not the project label.
+- **Refusals.** The service files only a chat that is in none of the agent's channels (`filed_by=agent`) and never
+  moves one the owner filed. A status naming Alerts, an archived, missing or other agent's channel files nothing, and
+  so does any status inside a chat the scheduler opened.
+- **Chats the scheduler opens** (a reminder, report or message with no thread of its own, `wizard_start_thread`, a new
+  Supervisor chat): the occurrence that first opens the chat files it into the job's `channel` when that is an open
+  channel of the job's agent, otherwise into the main agent's Alerts channel. A routed agent's job with no channel stays
+  unfiled. A job that posts into an existing thread never files or moves it, and later occurrences never re-file the
+  chat, so an owner's move or unfile stands. A notification-delivery job's hidden thread is not filed.
+- **Per-job channel.** `POST/PATCH /wizard/v1/schedules` accept `channel` (a channel id or `null`) only with the
+  switch on; with it off the field is an unknown-field 400, as before.
+
+- **Agent posts.** With `WIZARD_CHANNEL_FIRST_POSTS=1` as well, a thread whose first message is the agent's (an
+  alert) carries no `firstRequest` even after the owner replies, so the shell keeps showing the agent's post.
+
+Not changed here: a recurring job keeps its one chat (each run is a reply in it), as before.

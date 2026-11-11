@@ -94,7 +94,7 @@ function pumpFirstPosts(ctx, state) {
       const raw = Buffer.from(await page.arrayBuffer())
       if (job.secrets.some(secret => raw.includes(Buffer.from(secret)))) { state.posts.set(key, null); return }
       const body = JSON.parse(raw.toString('utf8'))
-      const post = firstPostOfHistory(body.data ?? body.messages ?? body.items, body.has_more)
+      const post = firstPostOfHistory(body.data ?? body.messages ?? body.items, body.has_more, { agentFirst: ctx.channelAgentFiling === true })
       if (post === undefined) throw new Error('not decidable yet')
       state.posts.set(key, postNames(post, job.secrets) ? null : post)
       while (state.posts.size > FIRST_POST_CACHE_MAX) state.posts.delete(state.posts.keys().next().value)
@@ -109,7 +109,7 @@ async function routedFirstPosts(ctx, agent, listed, secrets, headers) {
   try { restore = await ctx.ownerTurnRestore?.(agent) ?? null } catch { /* no restore: as in this agent's history */ }
   const state = firstPostState(ctx), now = Date.now()
   if (!state.memos.has(agent.id)) state.memos.set(agent.id, new Map())
-  try { posts = readHermesFirstPosts(ctx.agentStatePath?.(agent) || join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), rows.map(row => row.id), { restore, memo: state.memos.get(agent.id) }) } catch { /* unreadable: read through the runtime */ }
+  try { posts = readHermesFirstPosts(ctx.agentStatePath?.(agent) || join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), rows.map(row => row.id), { restore, memo: state.memos.get(agent.id), agentFirst: ctx.channelAgentFiling === true }) } catch { /* unreadable: read through the runtime */ }
   for (const row of rows) {
     const key = `${agent.id} ${row.id}`
     if (posts.has(row.id)) { const post = posts.get(row.id); row.wizard_first_post = postNames(post, secrets) ? null : post; continue }

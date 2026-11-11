@@ -216,8 +216,13 @@ function scheduleBaseInput(job) {
   return `${SCHEDULE_INPUT}\n${skill}${job.prompt}\nIf there is nothing to report, respond exactly [SILENT].`
 }
 
+// Chats channels phase 3 (issue 441): the first occurrence of a job that shows its own chat is the one that files it
+// (into the job's channel, else the default), so an owner's later move or unfile of that chat stands. A notification
+// occurrence keeps the chat hidden, so the first thread-visible one (a fallback included) opens it.
+const opening = (db, job, deliver) => ({ ...(job.channel ? { channel: job.channel } : {}),
+  ...(deliver === 'notification' || db.prepare("SELECT 1 FROM schedule_occurrences WHERE job_id=? AND COALESCE(json_extract(data,'$.deliver'),'')<>'notification' LIMIT 1").get(job.id) ? {} : { opensThread: true }) })
 export class Scheduler {
-  constructor({ statePath, deliver, lookup = null, onWatchResult = null, notifier = null, agentId = agent => agent, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
+  constructor({ statePath, deliver, lookup = null, onWatchResult = null, notifier = null, agentId = agent => agent, channels = false, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
     if (!statePath) throw fail('scheduler state path required', 503)
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
     this.db = new DatabaseSync(statePath)
@@ -244,6 +249,8 @@ export class Scheduler {
     // unavailable at claim time means a notification job falls back to its thread for that occurrence.
     this.notifier = notifier
     this.agentId = agentId
+    // Chats channels phase 3 (issue 441): jobs may name the channel their new chats are filed into.
+    this.channels = channels === true
     this.now = now
     this.timezone = timezone
     this.hermesHome = hermesHome
@@ -387,7 +394,7 @@ export class Scheduler {
   }
   normalize(input, prior = null) {
     if (!input || typeof input !== 'object' || Array.isArray(input)) throw fail('invalid schedule')
-    const allowed = ['name', 'when', 'timezone', 'agent', 'model', 'prompt', 'skill', 'thread', 'enabled', 'kind', 'target', 'deliver', 'report']
+    const allowed = ['name', 'when', 'timezone', 'agent', 'model', 'prompt', 'skill', 'thread', 'enabled', 'kind', 'target', 'deliver', 'report', ...(this.channels ? ['channel'] : [])]
     if (Object.keys(input).some(key => !allowed.includes(key))) throw fail('unknown schedule field')
     const now = this.now()
     const job = { ...(prior ?? {}), ...input }
@@ -437,6 +444,12 @@ export class Scheduler {
     if (job.thread !== undefined && job.thread !== null && !id(job.thread)) throw fail('invalid thread')
     job.thread = job.thread || null
     job.deliver = job.deliver ?? 'thread'
+    // The channel a chat this job opens is filed into (null: the default, Alerts for the main agent). A job
+    // that posts into an existing thread never moves it. Checked against the store when the chat is opened.
+    if (this.channels) {
+      if (job.channel !== undefined && job.channel !== null && !(typeof job.channel === 'string' && /^[a-z0-9-]{1,48}$/.test(job.channel))) throw fail('invalid channel')
+      job.channel = job.channel || null
+    }
     if (!DELIVERIES.includes(job.deliver)) throw fail(`deliver must be ${DELIVERIES.join(' or ')}`)
     if (job.kind === 'return' && job.deliver !== 'thread') throw fail('a return always comes back as its thread')
     job.enabled = job.enabled ?? true
@@ -517,7 +530,7 @@ export class Scheduler {
       try { if (this.notifier?.available(this.agentId(job.agent))) deliver = 'notification' } catch { /* fall back to the thread */ }
     }
     const occurrence = { key, jobId: job.id, scheduledAt: iso(instant), agent: job.agent, thread: job.thread,
-      createThread: Boolean(job.createThread), title: job.threadTitle || (job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`),
+      createThread: Boolean(job.createThread), ...(this.channels && job.createThread ? opening(this.db, job, deliver) : {}), title: job.threadTitle || (job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`),
       kind: job.kind ?? 'run', report: job.agentMessage ? 'message' : reportKind(job), window: job.window ?? null, ...(manual ? { manual: true } : {}), ...(deliver === 'notification' ? { deliver } : job.deliver === 'notification' ? { fallback: true } : {}),
       ...(job.kind === 'return' ? { target: job.target ?? { message: null, excerpt: '' }, note: job.prompt || '' }
         : { body: { session_id: job.thread, input: scheduleInput(job, deliver), ...(job.model ? { model: job.model } : {}) } }) }

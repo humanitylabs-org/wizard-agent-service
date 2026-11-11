@@ -3140,7 +3140,31 @@ function buildWizardServer(options, lifetime) {
     }
     return store
   })() : null
-  const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), channelStore)
+  // Chats channels phase 3 (issue 441, WIZARD_CHANNEL_AGENT_FILING=1, needs the channel store; off by default): the
+  // status line's `channel` files a chat, titles become post names, and a chat the scheduler opens (a reminder, a
+  // report, an agent's new chat) is filed into its job's channel or, by default, the main agent's Alerts channel.
+  const channelAgentFiling = options.channelAgentFiling === true && !!channelStore
+  const scheduledThread = (agent, thread) => {
+    if (!channelAgentFiling) return false
+    // Chats only the scheduler mints (schedules, agent-opened chats, tips): known even after their job is deleted.
+    if (/^wizard_(?:schedule|agent|tips)_/.test(thread)) return true
+    let jobs
+    try { jobs = scheduler ? scheduler.list() : [] } catch { return false } // scheduler is declared below; unset before boot ends
+    const want = agent === MAIN_AGENT_ID ? new Set(['main', MAIN_AGENT_ID]) : new Set([agent])
+    return jobs.some(job => job.createThread && job.thread === thread && want.has(job.agent))
+  }
+  const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), channelStore, { agentFiling: channelAgentFiling, scheduledThread })
+  // Where a chat the scheduler (or the Supervisor) just opened goes: the job's channel when it names an open one of
+  // that agent, else Alerts for the main agent; a routed agent's chat with no channel stays unfiled. Never a move.
+  const fileOpenedThread = (agent, occurrence) => {
+    if (!channelAgentFiling) return ''
+    try {
+      if (occurrence.channel && channelStore.fileIfUnfiled(agent, occurrence.thread, occurrence.channel, 'agent')) return occurrence.channel
+      if (agent !== MAIN_AGENT_ID) return ''
+      const alerts = channelStore.list({ agent: MAIN_AGENT_ID }).channels.find(c => c.kind === 'alerts' && !c.archived)
+      return alerts && channelStore.fileIfUnfiled(agent, occurrence.thread, alerts.id, 'agent') ? alerts.id : ''
+    } catch (error) { console.error(`[channels] new chat not filed: ${String(error?.message || error).slice(0, 160)}`); return '' }
+  }
   // Only this thread's jobs are read, and only for done/check. Callers projecting a list pass one
   // snapshot for all rows; the done-row follow-up evidence is read only when the thread owns a job.
   // Every Chats list build guards its done rows; one handle and a per-session revision memo keep
@@ -3305,6 +3329,7 @@ function buildWizardServer(options, lifetime) {
   if (agentCtx) agentCtx.askMax = askMaxNow
   if (agentCtx) agentCtx.archiveAfterDays = () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays
   if (agentCtx) agentCtx.channelStore = channelStore
+  if (agentCtx) agentCtx.channelAgentFiling = channelAgentFiling
   if (agentCtx) agentCtx.channelFirstPosts = channelFirstPosts
   // Issue 446: a routed agent's owner-turn restore (WIZARD_ROUTED_OWNER_TURNS), the one its view=wizard history uses.
   if (agentCtx) agentCtx.ownerTurnRestore = async agent => {
@@ -4356,7 +4381,7 @@ function buildWizardServer(options, lifetime) {
       // The owner's own turns Hermes stamped internal_notification are restored first, exactly as in view=wizard history.
       // One batched queue read per page, and only for threads whose post the restore can change; decided posts are kept.
       const restore = batchedOwnerTurnRestore(runQueue, (raw, queue, sessionId) => restoreOwnerTurns(raw, queue, sessionId, ownerTurnRowMeta, { screenshots: ownerScreenshotTurns }))
-      try { posts = hermesStateHealth.read('first-post', () => readHermesFirstPosts(hermesStatePath, rows.map(row => row?.id), { restore, memo: mainFirstPostMemo })) } catch { return }
+      try { posts = hermesStateHealth.read('first-post', () => readHermesFirstPosts(hermesStatePath, rows.map(row => row?.id), { restore, memo: mainFirstPostMemo, agentFirst: channelAgentFiling })) } catch { return }
       for (const row of rows) if (row && posts.has(row.id)) row.wizard_first_post = posts.get(row.id)
       return
     }
@@ -5424,6 +5449,9 @@ function buildWizardServer(options, lifetime) {
       if (occurrence.createThread) {
         const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${query}`, { id: occurrence.thread, title: occurrence.title, ...(occurrence.body.model ? { model: occurrence.body.model } : {}) })
         if (!created.ok && created.status !== 409) throw Object.assign(new Error('schedule thread creation failed'), { status: created.status })
+        // Filed once, by the occurrence that first opens the chat: an owner's later move or unfile stands.
+        // A notification job's thread is hidden history, not a chat, so it is not filed.
+        if (occurrence.opensThread && occurrence.deliver !== 'notification') fileOpenedThread(agent, occurrence)
       }
       // A notification job's own thread is history, not a chat: hidden from Chats. If the slot was down and this
       // occurrence falls back to the thread, the thread is shown again so the alert is still seen.
@@ -5458,6 +5486,7 @@ function buildWizardServer(options, lifetime) {
     ...(options.schedulerMaxInflight !== undefined ? { maxInflight: options.schedulerMaxInflight } : {}),
     notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
     agentId: agent => (agent === 'main' ? MAIN_AGENT_ID : agent),
+    channels: channelAgentFiling,
     lookup: lookupBackgroundOccurrence,
     onWatchResult: async job => {
       // A visible watcher result is a real new turn: bring the same thread back from either Defer or Done.

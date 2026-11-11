@@ -87,6 +87,8 @@ export class Supervisor {
   }
   enqueue(key, { agent = 'hermes', thread, input, title = '', createThread = false }) {
     this.db.prepare('INSERT OR IGNORE INTO supervisor_outbox VALUES(?,?,NULL)').run(key, JSON.stringify({ key, agent, thread, title, createThread,
+      // A new Supervisor chat is an agent-started chat: with channels phase 3 on (issue 441) it is filed into Alerts.
+      ...(createThread ? { opensThread: true } : {}),
       body: { session_id: thread, input } }))
   }
   wake(review, key, value) {

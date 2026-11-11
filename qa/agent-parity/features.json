@@ -472,6 +472,26 @@
       "policy_exemptions": []
     },
     {
+      "id": "chats-agent-filing",
+      "description": "Chats channels phase 3 (issue 441, WIZARD_CHANNEL_AGENT_FILING=1 with WIZARD_CHANNEL_STORE=1): the status line's channel field (space as an alias) files an unfiled chat into one of the agent's own channels, the run note carries the channel catalogue and the post-name title rule, and a chat the scheduler opens is filed into its job's channel or, by default, the main agent's Alerts channel.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile, container TCP, restricted Unix ingress) with channelStore, channelAgentFiling and a scheduler state: the run note lists this agent's channels and the post-name rule but never Alerts or another agent's channel; a completed run's status naming another agent's channel or Alerts files nothing, naming its own channel files the unfiled chat, an owner move is never undone by a later status, and space files like channel. Run-now a reminder with no thread: main files it in Alerts, routed kinds leave it unfiled, and its own status line cannot file it; a job with a channel files its new chat there; an invalid channel is a 400; a job into an existing thread leaves it where it is; on main an owner unfile of the Alerts post survives the next occurrence. With channelFirstPosts on too, a thread whose first message is the agent's carries no firstRequest even after the owner replies, while an owner-started thread keeps its opener. tests/channel-agent-filing.test.ts covers the parser, alias, refusal rules, the scheduler field and the switch off. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/thread-spaces.mjs",
+        "server/thread-status.mjs",
+        "server/scheduler.mjs",
+        "server/channel-store.mjs",
+        "server/first-post.mjs",
+        "server/agents-http.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/channel-agent-filing.test.ts"
+      ],
+      "fixture": "chats-agent-filing",
+      "policy_exemptions": []
+    },
+    {
       "id": "chats-first-posts",
       "description": "Chats Channels posts (issue 446, WIZARD_CHANNEL_FIRST_POSTS=1): each view=list row carries firstRequest (the first owner message, cleaned, at most 400 UTF-16 code units) and firstAttachments (that message's images as { id, name, mime } file refs for /wizard/files/<id>/content); a thread the agent started has neither.",
       "layer": "server",
