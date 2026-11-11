@@ -30,7 +30,7 @@ describe('box-wide UI preferences HTTP contract', () => {
     expect((await put(u, { archiveAfterDays: 0, compact: true })).status).toBe(200)
     expect((await put(u, { readyOrder: 'oldest' })).status).toBe(200)
     const u2 = await start(d)
-    expect(await (await fetch(u2)).json()).toEqual({ archiveAfterDays: 0, compact: true, chatAfterAction: 'stay', chatLayout: 'day', readyOrder: 'oldest', subjectOrder: [], pinnedChats: [], spaces: [] })
+    expect(await (await fetch(u2)).json()).toEqual({ archiveAfterDays: 0, compact: true, chatAfterAction: 'stay', chatLayout: 'day', readyOrder: 'oldest', subjectOrder: [], pinnedChats: [], spaces: [], savedWizards: [] })
     expect(readFileSync(join(d, 'settings.json'), 'utf8')).toBe(original)
     expect((await fetch(u2)).headers.get('cache-control')).toBe('no-store')
   })
@@ -124,7 +124,7 @@ describe('box-wide UI preferences HTTP contract', () => {
   it('reads leniently: an invalid stored value defaults only that key', async () => {
     const d = home(); writeFileSync(join(d, 'ui-preferences.json'), JSON.stringify({ archiveAfterDays: 9999, compact: true, readyOrder: 'chaos', subjectOrder: ['a', 'b'] }))
     const u = await start(d); const r = await fetch(u); expect(r.status).toBe(200)
-    expect(await r.json()).toEqual({ archiveAfterDays: 7, compact: true, chatAfterAction: 'stay', chatLayout: 'day', readyOrder: 'newest', subjectOrder: ['a', 'b'], pinnedChats: [], spaces: [] })
+    expect(await r.json()).toEqual({ archiveAfterDays: 7, compact: true, chatAfterAction: 'stay', chatLayout: 'day', readyOrder: 'newest', subjectOrder: ['a', 'b'], pinnedChats: [], spaces: [], savedWizards: [] })
     expect((await put(u, { archiveAfterDays: 9999 })).status).toBe(400)
   })
   it('unparseable stored state serves defaults without overwriting it until the next valid PUT', async () => {
@@ -138,7 +138,7 @@ describe('box-wide UI preferences HTTP contract', () => {
   })
   it('concurrent partial writes preserve all unrelated preferences', async () => {
     const u = await start(home()); await Promise.all([put(u, { compact: true }), put(u, { readyOrder: 'subject' }), put(u, { archiveAfterDays: 14 })])
-    expect(await (await fetch(u)).json()).toEqual({ compact: true, chatAfterAction: 'stay', chatLayout: 'day', readyOrder: 'subject', archiveAfterDays: 14, subjectOrder: [], pinnedChats: [], spaces: [] })
+    expect(await (await fetch(u)).json()).toEqual({ compact: true, chatAfterAction: 'stay', chatLayout: 'day', readyOrder: 'subject', archiveAfterDays: 14, subjectOrder: [], pinnedChats: [], spaces: [], savedWizards: [] })
   })
 })
 
@@ -195,5 +195,37 @@ describe('item operations on shared lists (PATCH)', () => {
     const d = home(), file = join(d, 'ui-preferences.json'); writeFileSync(file, JSON.stringify({ future: { x: 1 }, compact: true }))
     const u = await start(d); expect((await patch(u, [{ op: 'add', key: 'pinnedChats', item: 'wizard_1' }])).status).toBe(200)
     expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({ future: { x: 1 }, compact: true, pinnedChats: ['wizard_1'] })
+  })
+})
+
+// wizard-ux issue 1237: the owner's other Wizards live on the box, so every device signed into it shows the same switcher.
+describe('saved Wizards (box-wide switcher list)', () => {
+  const w = (id: string, url: string, name = 'Wizard ' + id) => ({ id, name, url })
+  it('a Wizard added on one device is read by another, rename and forget act on the box entry, restart keeps it', async () => {
+    const d = home(), desktop = await start(d), phone = await start(d)
+    expect((await (await fetch(phone)).json()).savedWizards).toEqual([])
+    expect((await patch(desktop, [{ op: 'add', key: 'savedWizards', item: w('remote-1', 'https://archimedes.example.ts.net/', 'Archimedes') }])).status).toBe(200)
+    expect((await (await fetch(phone)).json()).savedWizards).toEqual([w('remote-1', 'https://archimedes.example.ts.net/', 'Archimedes')])
+    // Same id or same origin again is a no-op (two devices uploading the same local entry once each).
+    await patch(phone, [{ op: 'add', key: 'savedWizards', item: w('remote-1', 'https://other.example/') }, { op: 'add', key: 'savedWizards', item: w('from-x', 'https://archimedes.example.ts.net/wizard-os-home/') }])
+    expect((await (await fetch(desktop)).json()).savedWizards).toHaveLength(1)
+    expect((await patch(phone, [{ op: 'set', key: 'savedWizards/remote-1/name', item: '  Archie ' }])).status).toBe(200)
+    expect((await (await fetch(await start(d))).json()).savedWizards).toEqual([w('remote-1', 'https://archimedes.example.ts.net/', 'Archie')])
+    expect((await patch(desktop, [{ op: 'remove', key: 'savedWizards', item: 'remote-1' }, { op: 'set', key: 'savedWizards/remote-1/name', item: 'Gone' }])).status).toBe(200)
+    expect((await (await fetch(phone)).json()).savedWizards).toEqual([])
+  })
+  it('rejects malformed entries, credentials in addresses and a list over 100 without writing anything', async () => {
+    const d = home(), u = await start(d)
+    expect((await put(u, { savedWizards: Array.from({ length: 100 }, (_, i) => w('r' + i, `https://w${i}.example/`)) })).status).toBe(200)
+    const before = readFileSync(join(d, 'ui-preferences.json'), 'utf8')
+    for (const ops of [[{ op: 'add', key: 'savedWizards', item: w('r100', 'https://w100.example/') }], [{ op: 'add', key: 'savedWizards', item: w('x', 'ftp://w.example/') }],
+      [{ op: 'add', key: 'savedWizards', item: w('x', 'https://me:pw@w.example/') }], [{ op: 'add', key: 'savedWizards', item: w('x', 'https://w.example') }],
+      [{ op: 'add', key: 'savedWizards', item: { ...w('x', 'https://w.example/'), token: 't' } }], [{ op: 'add', key: 'savedWizards', item: w('bad id', 'https://w.example/') }],
+      [{ op: 'add', key: 'savedWizards', item: w('x', 'https://w.example/', '') }], [{ op: 'remove', key: 'savedWizards', item: 'bad id' }],
+      [{ op: 'set', key: 'savedWizards/r1/name', item: 'a\nb' }], [{ op: 'add', key: 'savedWizards/r1/name', item: 'x' }]])
+      expect((await patch(u, ops)).status).toBe(400)
+    for (const savedWizards of [[w('a', 'https://a.example/'), w('a', 'https://b.example/')], [w('a', 'https://a.example/'), w('b', 'https://a.example/x')], {}, [null]])
+      expect((await put(u, { savedWizards })).status).toBe(400)
+    expect(readFileSync(join(d, 'ui-preferences.json'), 'utf8')).toBe(before)
   })
 })

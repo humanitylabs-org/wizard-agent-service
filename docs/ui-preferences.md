@@ -7,7 +7,7 @@ bypass that check. The API serves no secrets and sends `Cache-Control: no-store`
 The response is a flat JSON object:
 
 ```json
-{"archiveAfterDays":7,"compact":false,"chatLayout":"day","readyOrder":"newest","subjectOrder":[],"pinnedChats":[],"spaces":[]}
+{"archiveAfterDays":7,"compact":false,"chatLayout":"day","readyOrder":"newest","subjectOrder":[],"pinnedChats":[],"spaces":[],"savedWizards":[]}
 ```
 
 PUT accepts a **partial** object and merges only the specified fields. Unknown fields,
@@ -35,6 +35,14 @@ arrays at the root, wrong types and invalid values are rejected (400). Send
   PUT replaces the whole array; shells and tools edit Spaces with PATCH operations (below).
   Wizard UX ships `skills/wizard-spaces` with an owner HTTP read/merge/write/readback helper and
   the requested-collection/back-fill skill; this is not an MCP-token authorization bypass.
+- `savedWizards`: the owner's other Wizards for the shell's Wizard switcher, so every device signed into
+  this box shows the same list (wizard-ux issue 1237). At most 100 `{id,name,url}` records, unique by id
+  and by the address's origin. `id`: `[A-Za-z0-9._:-]{1,120}`; `name`: 1–120 characters, nonblank and
+  without controls; `url`: a normalized `http:`/`https:` URL (what `new URL(x).href` gives) of at most 2048
+  characters, without credentials. Extra record fields are rejected. Name and address only: an entry
+  never grants access to that Wizard, whose own sign-in decides. Default: empty. Separate from the
+  `devices.json` registry (the owner-proof record), which this route never reads or writes. Clients that
+  get no `savedWizards` key back (older services) keep their list on the device.
 
 ## Item operations (PATCH)
 
@@ -50,6 +58,10 @@ synchronous read/merge/atomic rename as PUT and answers with the full preference
 - `{"op":"remove","key":"spaces","item":"<space id>"}`.
 - `{"op":"add"|"remove","key":"spaces/<id>/threads","item":"<thread id>"}` and
   `{"op":"set","key":"spaces/<id>/name","item":"<name>"}`: no-op when the Space no longer exists.
+- `{"op":"add","key":"savedWizards","item":{id,name,url}}`: no-op when that id or that address's origin
+  is already saved (two devices uploading the same Wizard keep one entry).
+- `{"op":"remove","key":"savedWizards","item":"<id>"}` and
+  `{"op":"set","key":"savedWizards/<id>/name","item":"<name>"}`: no-op when the entry no longer exists.
 
 Every operation is idempotent, so a client may resend a batch whose response it never saw. Malformed
 operations, or a result that breaks a key's limits, are a 400 and write nothing. Access, JSON and
