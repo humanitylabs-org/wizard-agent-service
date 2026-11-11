@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { createServer, request as httpRequest } from 'node:http'
 import { DatabaseSync } from 'node:sqlite'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
@@ -34,7 +35,7 @@ export async function scene(kind, serverOptions = {}) {
   const id = kind === 'main' ? 'hermes' : 'parity-agent'
   const osHome = join(root, 'os'), folder = join(osHome, 'agents', id)
   mkdirSync(folder, { recursive: true })
-  const seen = [], sessions = new Map(), runs = new Map(), keys = new Map(), placed = []
+  const seen = [], sessions = new Map(), runs = new Map(), keys = new Map(), placed = [], placedStreams = []
   const heldAdmissions = new Map() // session id -> promise: Hermes is slow to accept this thread's next run
   const hermesHome = join(root, 'hermes')
   const agentHome = kind === 'host-profile' ? join(hermesHome, 'profiles', 'parity-profile') : kind === 'main' ? join(root, 'main-home') : join(folder, 'home')
@@ -237,7 +238,9 @@ export async function scene(kind, serverOptions = {}) {
     providerSignInReady: async () => signin.ready,
     mediaRoot: join(root, 'files'), mediaAgentRoot: '/fixture-owner-files', mediaIndexPath: join(root, 'media.json'), uploadStatePath: join(root, 'uploads.sqlite3'), uploadReserveBytes: 0,
     ...(followUpParity ? { mcpToken: mainMcpToken, schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerEnabled: true, schedulerIntervalMs: 3_600_000 } : {}),
-    agentRuntime: { place: async (agentId, payload) => { placed.push({ agentId, payload }); return { verified: true, path: `/opt/data/inbox/2026-10-22/${payload.filename}` } } } }
+    agentRuntime: { place: async (agentId, payload) => { placed.push({ agentId, payload }); return { verified: true, path: `/opt/data/inbox/2026-10-22/${payload.filename}` } },
+      // Large attachments (issue 464) arrive as a byte stream, not base64 JSON.
+      placeStream: async (agentId, { filename, sha256, bytes, open }) => { const hash = createHash('sha256'); let size = 0; for await (const c of open()) { hash.update(c); size += c.length } placedStreams.push({ agentId, filename, sha256, bytes, size, digest: hash.digest('hex') }); return { verified: true, path: `/opt/data/inbox/2026-10-22/${sha256.slice(0, 16)}-large.bin` } } } }
   // A feature fixture may seed its own app/agent choices and state paths once,
   // after the common runtime exists but before the real Service starts.
   if (typeof serverOptions === 'function') serverOptions = serverOptions({ root, id, folder, osHome })
@@ -253,7 +256,7 @@ export async function scene(kind, serverOptions = {}) {
   // deadline. A fresh connection avoids ECONNRESET unrelated to the contract.
   const request = (path, init = {}) => { syncMessages(); return fetch(`${base}/wizard/hermes${path}${path.includes('?') ? '&' : '?'}agent=${id}`, { ...init, headers: { ...owner, Connection: 'close', ...init.headers } }) }
   const closeServer = async s => { await new Promise(resolve => { s.closeAllConnections(); s.close(resolve) }); await s.drained }
-  return { runtimePorts: { main: Number(new URL(upstreamOrigin).port), container: containerPort }, dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, eventScript, placed, request, media, agentHome, stt, signin, origin: () => base, ownerHeaders: owner, get server() { return wizard },
+  return { runtimePorts: { main: Number(new URL(upstreamOrigin).port), container: containerPort }, dropSearchIndex:()=>{ if(hasSearchIndex) searchStore.exec('DROP TABLE messages_fts_trigram'); hasSearchIndex=false }, kind, id, root, seen, sessions, runs, eventScript, placed, placedStreams, request, media, agentHome, stt, signin, origin: () => base, ownerHeaders: owner, get server() { return wizard },
     // The runtime's own gateway credential and transport, never owner proof: main and unrestricted agents over TCP,
     // a restricted agent only through its own per-agent socket.
     setSupervisorSeal: (privacy, shared) => {

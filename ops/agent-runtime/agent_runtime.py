@@ -98,14 +98,19 @@ def import_process_lock(agents, agent_id):
 
 # ---------------------------------------------------------------- docker
 
-def docker(args: list[str], *, input_text: str | None = None, timeout: int = 900, check: bool = True,
-           env: dict | None = None) -> subprocess.CompletedProcess:
+def docker_cmd(args: list[str]) -> list[str]:
     sock = Path("/var/run/docker.sock")
     # An explicit endpoint (including rootless Docker) uses this user's Docker CLI directly.
     if os.environ.get("DOCKER_HOST") or (sock.exists() and os.access(sock, os.W_OK)):
         cmd = ["docker", *args]
     else:   # the owner is in the docker group but this login session is not (e.g. a systemd user unit)
         cmd = ["sg", "docker", "-c", shlex.join(["docker", *args])]
+    return cmd
+
+
+def docker(args: list[str], *, input_text: str | None = None, timeout: int = 900, check: bool = True,
+           env: dict | None = None) -> subprocess.CompletedProcess:
+    cmd = docker_cmd(args)
     run = subprocess.run(cmd, input=input_text, capture_output=True, text=True, timeout=timeout,
                          env={**os.environ, **env} if env else None)
     if check and run.returncode:
@@ -1087,6 +1092,188 @@ def place(driver, agent: dict, payload: dict) -> dict:
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
+# Large owner attachments (long recordings): raw bytes streamed through `docker exec -i`, never base64 JSON.
+# Keep equal to AGENT_FILE_PLACE_LIMIT in server/agent-files.mjs.
+PLACE_STREAM_LIMIT = 2 * 1024 * 1024 * 1024
+PLACE_STREAM_RESERVE = 256 * 1024 * 1024   # free space left in the agent's home after the copy
+PLACE_STREAM_ERRORS = {"insufficient_space": 507, "file_hash_mismatch": 400, "invalid_file": 400,
+                       "invalid_filename": 400, "file_conflict": 409}
+PLACE_STREAM_SCRIPT = r"""
+import datetime, errno, hashlib, json, os, re, sys
+src = sys.stdin.buffer
+p = json.loads(src.readline())
+name, size, want = p["filename"], p["bytes"], p["sha256"]
+if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,199}", name):
+    raise SystemExit("invalid_filename")
+if not isinstance(size, int) or not 0 < size <= %(limit)d:
+    raise SystemExit("invalid_file")
+def digest(f):
+    h = hashlib.sha256()
+    for block in iter(lambda: f.read(1 << 20), b""):
+        h.update(block)
+    return h.hexdigest()
+def verified():
+    print(json.dumps({"verified": True, "path": "/opt/data/inbox/" + day + "/" + name, "bytes": size, "sha256": want}))
+def existing():
+    try:
+        out = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise SystemExit("file_conflict")
+    with os.fdopen(out, "rb") as f:
+        if digest(f) != want:
+            raise SystemExit("file_conflict")
+    return True
+day = datetime.datetime.now(datetime.timezone.utc).strftime("%%Y-%%m-%%d")
+fd = os.open("/opt/data", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    for part in ("inbox", day):
+        try:
+            os.mkdir(part, 0o700, dir_fd=fd)
+        except FileExistsError:
+            pass
+        next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+        os.close(fd)
+        fd = next_fd
+    # A content-qualified name is idempotent without overwriting existing agent files.
+    if existing():
+        verified()
+        raise SystemExit(0)
+    room = os.statvfs(fd)
+    if room.f_bavail * room.f_frsize < size + %(reserve)d:
+        raise SystemExit("insufficient_space")
+    partial = ".partial-" + os.urandom(8).hex()
+    out = os.open(partial, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+    try:
+        h, left = hashlib.sha256(), size
+        with os.fdopen(out, "wb") as f:
+            while left:
+                block = src.read(min(1 << 20, left))
+                if not block:
+                    raise SystemExit("invalid_file")
+                h.update(block)
+                f.write(block)
+                left -= len(block)
+            if src.read(1):
+                raise SystemExit("invalid_file")
+            f.flush()
+            os.fsync(f.fileno())
+        if h.hexdigest() != want:
+            raise SystemExit("file_hash_mismatch")
+        try:
+            os.link(partial, name, src_dir_fd=fd, dst_dir_fd=fd, follow_symlinks=False)
+        except FileExistsError:
+            if not existing():
+                raise SystemExit("file_conflict")
+    except OSError as error:
+        if error.errno in (errno.ENOSPC, errno.EDQUOT):
+            raise SystemExit("insufficient_space")
+        raise
+    finally:
+        try:
+            os.unlink(partial, dir_fd=fd)
+        except FileNotFoundError:
+            pass
+finally:
+    os.close(fd)
+verified()
+""" % {"limit": PLACE_STREAM_LIMIT, "reserve": PLACE_STREAM_RESERVE}
+
+
+def docker_stream(args: list[str], header: bytes, source, length: int, timeout: int) -> tuple[int, str, str]:
+    """Run docker with `header` + exactly `length` bytes of `source` on stdin; always drain `source`.
+
+    A watchdog kills the process once `timeout` passes, also while stdin writes are blocked."""
+    proc = subprocess.Popen(docker_cmd(args), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    expired = threading.Event()
+
+    def kill():
+        expired.set()
+        proc.kill()
+    watchdog = threading.Timer(timeout, kill)
+    watchdog.daemon = True
+    watchdog.start()
+    left, open_pipe = length, True
+    try:
+        try:
+            proc.stdin.write(header)
+        except (BrokenPipeError, OSError):
+            open_pipe = False
+        while left > 0:
+            try:
+                block = source.read(min(1 << 20, left))
+            except OSError:
+                break
+            if not block:
+                break
+            left -= len(block)
+            if open_pipe:
+                try:
+                    proc.stdin.write(block)
+                except (BrokenPipeError, OSError):
+                    open_pipe = False   # refused early or killed; keep reading so the client gets an answer
+        try:
+            proc.stdin.close()
+        except (BrokenPipeError, OSError):
+            pass
+        out, err = proc.communicate()
+    finally:
+        watchdog.cancel()
+        if proc.poll() is None:
+            proc.kill()
+            proc.communicate()
+    if expired.is_set():
+        raise RuntimeFailure("file_placement_timeout", 504)
+    if left:
+        raise RuntimeFailure("invalid_file", 400)
+    return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+
+
+class BoundedReader:
+    """Reads at most `length` bytes of a request body and can discard the rest."""
+
+    def __init__(self, raw, length: int):
+        self.raw, self.left = raw, length
+
+    def read(self, size: int) -> bytes:
+        block = self.raw.read(min(size, self.left)) if self.left > 0 else b""
+        self.left -= len(block)
+        return block
+
+    def drain(self) -> None:
+        while self.left > 0 and self.read(1 << 20):
+            pass
+
+
+def place_stream(driver, agent: dict, meta: dict, source, length: int) -> dict:
+    from urllib.parse import unquote
+    if (agent.get("permissions") or {}).get("files") == "none":
+        raise RuntimeFailure("agent_files_disabled", 409)
+    if not 0 < length <= PLACE_STREAM_LIMIT:
+        raise RuntimeFailure("file_too_large", 413)
+    digest = meta.get("sha256")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise RuntimeFailure("file_hash_mismatch", 400)
+    name = unquote(meta.get("filename") or "")
+    if not name:
+        raise RuntimeFailure("invalid_filename", 400)
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name.replace("\\", "/").split("/")[-1]).lstrip("._-") or "attachment"
+    name = digest[:16] + "-" + name[:180]
+    service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
+    cid = container_for(driver.project(agent["id"]), service)
+    user = f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    header = (json.dumps({"filename": name, "bytes": length, "sha256": digest}) + "\n").encode()
+    code, out, err = docker_stream(["exec", "-i", "-u", user, cid, "/opt/hermes/.venv/bin/python", "-c", PLACE_STREAM_SCRIPT],
+                                   header, source, length, timeout=120 + length // (1024 * 1024))
+    if code:
+        reason = (err.strip().splitlines() or [""])[-1]
+        if reason in PLACE_STREAM_ERRORS:
+            raise RuntimeFailure(reason, PLACE_STREAM_ERRORS[reason])
+        raise RuntimeFailure("file_placement_failed", 502)
+    return json.loads(out.strip().splitlines()[-1])
+
+
 # ---------------------------------------------------------------- file fetch (agent -> owner: MEDIA lines, read as its uid)
 
 FETCH_LIMIT = 25 * 1024 * 1024
@@ -1199,6 +1386,28 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             self.end_headers()
             self.wfile.write(raw)
 
+        def _place_stream(self, agent_id: str, action: str, length: int) -> None:
+            """Raw-body placement for large owner attachments (auth already checked)."""
+            if self.headers.get("Transfer-Encoding") or not 0 < length <= PLACE_STREAM_LIMIT:
+                self.close_connection = True   # never read an unbounded or oversized body
+                self._json(413, {"error": "file_too_large"})
+                return
+            body = BoundedReader(self.rfile, length)
+            try:
+                agent = agents.read(agent_id)
+                chosen = driver_for(agent, driver, restricted_driver)
+                meta = {"filename": self.headers.get("X-Wizard-Filename", ""), "sha256": self.headers.get("X-Wizard-Sha256", "")}
+                result, code = place_stream(chosen, agent, meta, body, length), 200
+            except RuntimeFailure as error:
+                result, code = {"error": error.code}, error.status
+            except Exception as error:  # noqa: BLE001
+                sys.stderr.write(f"[agent-runtime] {action} {agent_id} failed: {type(error).__name__}\n")
+                result, code = {"error": "runtime_failed"}, 502
+            # Read what the sender still sends, so it gets this answer instead of a broken pipe.
+            body.drain()
+            self.close_connection = True
+            self._json(code, result)
+
         def do_GET(self):  # noqa: N802
             if self.path == "/healthz":
                 self._json(200, {"ok": True})
@@ -1210,7 +1419,7 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             if not hmac.compare_digest(auth.encode(), f"Bearer {token}".encode()):
                 self._json(401, {"error": "unauthorized"})
                 return
-            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver|place|fetch|inspect|census|incognito/start|incognito/stop|incognito/lease)", self.path)
+            m = re.fullmatch(r"/agents/([a-z][a-z0-9-]{0,30})/(apply|start|stop|deliver|place|place-stream|fetch|inspect|census|incognito/start|incognito/stop|incognito/lease)", self.path)
             if not m:
                 self._json(404, {"error": "not_found"})
                 return
@@ -1218,6 +1427,9 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
                 length = int(self.headers.get("Content-Length") or 0)
             except ValueError:
                 self._json(400, {"error": "invalid_length"})
+                return
+            if m.group(2) == "place-stream":
+                self._place_stream(*m.groups(), length)
                 return
             limit = 4 * ((PLACE_LIMIT + 2) // 3) + 4096 if m.group(2) == "place" else 512 * 1024
             if length < 0 or length > limit:
