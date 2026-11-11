@@ -88,6 +88,9 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
       lastUserAt, lastAssistantAt,
       updatedAt: lastUserAt ?? iso(item.wizard_started_at ?? item.updated_at ?? item.last_active ?? item.started_at),
       activityAt: optIso(item.wizard_activity_at) || optIso(item.last_active),
+      // When the thread was started (Hermes sessions.started_at; never moves): a channel feed keeps its posts in this
+      // order, so a new reply never moves a post (wizard-ux issue 1289).
+      startedAt: optIso(item.wizard_started_at ?? item.started_at),
       runId: String(item.wizard_run_id || ''),
       // The idempotency key of the newest run Wizard knows for this thread (= the outbox item id for our sends).
       lastRunKey: String(item.wizard_last_run_idempotency_key || ''),

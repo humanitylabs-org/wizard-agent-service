@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { listRow, normalizeFull } from '../server/session-list-view.mjs';
 const fixture = { id: 'synthetic', title: 'A full title '.repeat(20), agent: { id: 'hermes', label: 'Not needed' }, status: 'failed', message_count: 8,
-  wizard_last_user_at: 1700000000, wizard_last_assistant_at: 1700000100, wizard_activity_at: 1700000101,
+  wizard_started_at: 1699999000, wizard_last_user_at: 1700000000, wizard_last_assistant_at: 1700000100, wizard_activity_at: 1700000101,
   wizard_request_preview: 'FULL REQUEST '.repeat(300), latest_message: { role: 'assistant', content: '<memory-context>not visible</memory-context> **Visible** '+ 'answer '.repeat(50), timestamp: 1700000100 },
   wizard_run_id: 'run-exact', wizard_last_run_idempotency_key: 'key-exact', model: 'model-exact', provider: 'provider-exact', wizard_model_lock_updated_at: 123456789,
   wizard_helper_status: { phase: 'returned', canContinue: true }, wizard_safe_error: 'Safe failure', wizard_attention_level: 'critical', wizard_waiting_on: 'helper', wizard_background: 'helper',
@@ -28,6 +28,21 @@ test('aliases, empty rows and optional metadata remain compatible', () => {
   assert.equal(listRow({title:'missing'}),null);
   assert.equal(listRow({id:'x',status:'accepted'}).status,'queued');
   assert.equal(listRow({id:'x'}).updatedAt,'1970-01-01T00:00:00.000Z');
+  assert.equal(listRow({id:'x'}).startedAt,undefined);
+});
+// wizard-ux issue 1289: a channel feed orders posts by when each thread started, so every list row carries that
+// time, and a later reply (last user/assistant/activity times) never changes it. Main and routed kinds alike.
+test('rows carry the thread start time, unmoved by later replies, main and routed (host-profile, container, restricted)', () => {
+  for (const kind of ['main', 'host-profile', 'container', 'restricted']) {
+    const agent = kind === 'main' ? '' : `qa-${kind}`;
+    // Main rows get wizard_started_at from the Service's state.db read; routed rows carry Hermes' own started_at.
+    const base = { id: `start-${kind}`, title: 'Synthetic', status: 'completed', ...(agent ? { agent, started_at: 1700000000 } : { wizard_started_at: 1700000000 }) };
+    const first = listRow({ ...base, wizard_last_user_at: 1700000000 });
+    const replied = listRow({ ...base, wizard_last_user_at: 1700009000, wizard_last_assistant_at: 1700009100, wizard_activity_at: 1700009100 });
+    assert.equal(first.startedAt, '2023-11-14T22:13:20.000Z', kind);
+    assert.equal(replied.startedAt, first.startedAt, kind);
+    assert.notEqual(replied.updatedAt, first.updatedAt, kind);
+  }
 });
 // A reply can carry a tweak card ([WIZARD_TWEAK_V1]{"id":…}[/WIZARD_TWEAK_V1], wizard-ux core/chat-kit.js). The marker is
 // drawn as a switch in the thread and never shows as text in the Chats list, for the main agent and every routed kind.
