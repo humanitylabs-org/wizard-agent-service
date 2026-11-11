@@ -88,7 +88,8 @@ function pumpFirstPosts(ctx, state) {
     const [key, job] = state.queue.entries().next().value
     state.queue.delete(key); state.busy++
     void (async () => {
-      const page = await ctx.registry.fetchAgent(job.agent, `/api/sessions/${encodeURIComponent(job.id)}/messages?order=oldest&limit=50&include_compacted=true`, { headers: job.headers, redirect: 'manual', signal: AbortSignal.timeout(5000) })
+      // Through the agent's queue with wizardHistory, so its owner turns are restored as in view=wizard history.
+      const page = await (ctx.fetchAgent || ctx.registry.fetchAgent)(job.agent, `/api/sessions/${encodeURIComponent(job.id)}/messages?order=oldest&limit=50&include_compacted=true`, { headers: job.headers, redirect: 'manual', signal: AbortSignal.timeout(5000), wizardHistory: true })
       if (!page.ok) throw new Error('history unavailable')
       const raw = Buffer.from(await page.arrayBuffer())
       if (job.secrets.some(secret => raw.includes(Buffer.from(secret)))) { state.posts.set(key, null); return }
@@ -100,12 +101,13 @@ function pumpFirstPosts(ctx, state) {
     })().catch(() => { state.failed.set(key, Date.now()) }).finally(() => { state.busy--; pumpFirstPosts(ctx, state) })
   }
 }
-function routedFirstPosts(ctx, agent, listed, secrets, headers) {
+async function routedFirstPosts(ctx, agent, listed, secrets, headers) {
   const rows = ['data', 'sessions', 'items'].flatMap(key => Array.isArray(listed?.[key]) ? listed[key] : [])
     .filter(row => row && typeof row.id === 'string')
   if (!rows.length || listed.mode === 'body' || listed.fields === 'slim') return
-  let posts = new Map()
-  try { posts = readHermesFirstPosts(ctx.agentStatePath?.(agent) || join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), rows.map(row => row.id)) } catch { /* unreadable: read through the runtime */ }
+  let posts = new Map(), restore = null
+  try { restore = await ctx.ownerTurnRestore?.(agent) ?? null } catch { /* no restore: as in this agent's history */ }
+  try { posts = readHermesFirstPosts(ctx.agentStatePath?.(agent) || join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), rows.map(row => row.id), { restore }) } catch { /* unreadable: read through the runtime */ }
   const state = firstPostState(ctx), now = Date.now()
   for (const row of rows) {
     const key = `${agent.id} ${row.id}`
@@ -927,7 +929,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       for (const id of sessionIdsIn(result)) registry.pin(id, agent.id, 'runtime_verified')
       if(searchParams.get('view') === 'list') {
         const listed=JSON.parse(result.toString('utf8'))
-        if (ctx.channelFirstPosts) routedFirstPosts(ctx, agent, listed, secrets, headers)
+        if (ctx.channelFirstPosts) await routedFirstPosts(ctx, agent, listed, secrets, headers)
         else if (ctx.channelStore) archivedFirstRequests(ctx, agent, listed, secrets)
         result=Buffer.from(JSON.stringify(listPayload(listed, searchParams.get('q'), ctx.channelStore || null, { firstPosts: ctx.channelFirstPosts === true })))
       }

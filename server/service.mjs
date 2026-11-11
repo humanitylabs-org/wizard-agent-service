@@ -3306,6 +3306,12 @@ function buildWizardServer(options, lifetime) {
   if (agentCtx) agentCtx.archiveAfterDays = () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays
   if (agentCtx) agentCtx.channelStore = channelStore
   if (agentCtx) agentCtx.channelFirstPosts = channelFirstPosts
+  // Issue 446: a routed agent's owner-turn restore (WIZARD_ROUTED_OWNER_TURNS), the one its view=wizard history uses.
+  if (agentCtx) agentCtx.ownerTurnRestore = async agent => {
+    if (!routedQueues || !routedOwnerTurns) return null
+    const queue = await routedQueues.queueFor(agent)
+    return queue ? (raw, sessionId) => routedOwnerTurns(raw, queue, sessionId, agent) : null
+  }
   spacesTools = createSpacesTools({
     path: resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), channels: channelStore,
     agentExists: id => Boolean(agents?.read(id)),
@@ -4346,7 +4352,9 @@ function buildWizardServer(options, lifetime) {
     if (channelFirstPosts) {
       // Issue 446: the whole first owner message, for the post's words and photos.
       let posts
-      try { posts = hermesStateHealth.read('first-post', () => readHermesFirstPosts(hermesStatePath, rows.map(row => row?.id))) } catch { return }
+      // The owner's own turns Hermes stamped internal_notification are restored first, exactly as in view=wizard history.
+      const restore = (raw, sessionId) => restoreOwnerTurns(raw, runQueue, sessionId, ownerTurnRowMeta, { screenshots: ownerScreenshotTurns })
+      try { posts = hermesStateHealth.read('first-post', () => readHermesFirstPosts(hermesStatePath, rows.map(row => row?.id), { restore })) } catch { return }
       for (const row of rows) if (row && posts.has(row.id)) row.wizard_first_post = posts.get(row.id)
       return
     }

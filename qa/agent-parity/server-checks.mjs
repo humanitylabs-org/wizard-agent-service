@@ -669,6 +669,31 @@ export const serverChecks = {
       assert.deepEqual(item.firstAttachments, [{ id: 'parity-photo-1', name: 'synthetic.png', mime: 'image/png' }], `${label}: images only, as file refs`)
     }
     check(await listed('wizard_parity'), 'state.db read')
+    // AI review kick-back: Hermes stamps the owner's own API turn internal_notification. The post is that turn, the one
+    // view=wizard history restores from this kind's queue, never a later steering wrapper or nudge.
+    const ownerTurn = async id => {
+      const words = `Synthetic owner turn for ${id.replaceAll("_", " ")}.`
+      const made = await create(id)
+      await admit(s, { session_id: id, input: [{ role: 'user', content: [{ type: 'text', text: words }] }] })
+      for (let i = 0; i < 80 && !made.messages.some(m => m.role === 'user'); i++) await new Promise(r => setTimeout(r, 25))
+      const owner = made.messages.findLast(m => m.role === 'user')
+      assert.ok(owner, `${id}: the queued owner turn reached this kind's runtime`)
+      owner.display_kind = 'internal_notification'
+      if (s.kind !== 'main') owner.content = [{ type: 'text', text: words }, { type: 'text', text: '[System: synthetic Hermes notice]' }]
+      const t = Number(owner.timestamp)
+      for (const run of s.runs.values()) Object.assign(run, { status: 'completed', output: 'Synthetic reply' })
+      made.messages.push({ role: 'user', timestamp: t + 1, content: '[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once at this position; not tool output] Synthetic steer [/OUT-OF-BAND USER MESSAGE]' },
+        { role: 'user', timestamp: t + 2, content: '[reporter] Your last report does not meet the report format: synthetic.' },
+        { role: 'assistant', timestamp: t + 3, content: 'Synthetic reply' })
+      return words
+    }
+    const turnCheck = (item, words, label) => {
+      assert.ok(item, `${label}: row listed`)
+      assert.equal(item.firstRequest, words, `${label}: the owner's own (internal_notification) turn, not the steer or nudge after it`)
+      assert.deepEqual(item.firstAttachments, [], `${label}: no photos`)
+    }
+    const turnWords = await ownerTurn('wizard_parity_turn')
+    turnCheck(await listed('wizard_parity_turn'), turnWords, 'state.db read')
     const agentStarted = await listed('wizard_parity_agent', false)
     assert.ok(agentStarted && !Object.hasOwn(agentStarted, 'firstRequest') && !Object.hasOwn(agentStarted, 'firstAttachments'), 'an agent-started thread has neither field')
     if (s.kind !== 'main') {
@@ -681,6 +706,8 @@ export const serverChecks = {
         routed.messages.push({ role: 'user', timestamp: at, content: message(long) }, { role: 'assistant', timestamp: at + 1, content: 'Synthetic reply' })
         check(await listed('wizard_parity_runtime'), 'runtime history read')
         assert.ok(s.seen.some(r => r.method === 'GET' && r.path.endsWith('/api/sessions/wizard_parity_runtime/messages')), 'read through the agent runtime')
+        const runtimeWords = await ownerTurn('wizard_parity_runtime_turn')
+        turnCheck(await listed('wizard_parity_runtime_turn'), runtimeWords, 'runtime history read')
       } finally { chmodSync(db, 0o600) }
     }
   },
