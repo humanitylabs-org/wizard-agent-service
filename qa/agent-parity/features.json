@@ -835,6 +835,22 @@
       "policy_exemptions": []
     },
     {
+      "id": "file-large-copy",
+      "description": "Attach a file over the 25 MB inline cap (a long recording) and verify it reaches the agent with a matching hash",
+      "layer": "server",
+      "how_to_test": "Attach a 26 MB audio file; container and restricted agents receive it as a stream (never base64 JSON) with a matching sha256 and a trusted_path, main and host-profile read the shared file, and no placement_error is set.",
+      "source_refs": [
+        "server/agent-files.mjs",
+        "server/agents.mjs",
+        "ops/agent-runtime/agent_runtime.py"
+      ],
+      "reference_tests": [
+        "tests/agent-files-large.test.ts"
+      ],
+      "fixture": "file-large-copy",
+      "policy_exemptions": []
+    },
+    {
       "id": "queue-busy",
       "description": "Keep a run busy",
       "layer": "server",

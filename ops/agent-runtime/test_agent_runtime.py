@@ -464,5 +464,18 @@ class RootlessDockerTest(unittest.TestCase):
                 self.assertEqual(run.call_args.args[0], ['sg', 'docker', '-c', 'docker info'])
 
 
+def _load_place_stream_tests():
+    # CI runs only this file: pull in the streamed-placement tests (issue 464) from their own module.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("test_agent_place_stream", Path(__file__).resolve().parent / "test_agent_place_stream.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.PlaceStreamTest
+
+
+PlaceStreamTest = _load_place_stream_tests()
+
+
 if __name__ == "__main__":
     unittest.main()

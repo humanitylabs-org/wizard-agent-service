@@ -1505,7 +1505,29 @@ export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs =
     }
     return reply
   }
+  // Large owner attachments: raw bytes streamed in the body (never base64 JSON), name and hash in headers.
+  const placeStream = async (id, { filename, sha256, bytes, open }) => {
+    let response
+    try {
+      response = await fetchImpl(new URL(`/agents/${encodeURIComponent(id)}/place-stream`, base), {
+        method: 'POST', redirect: 'error', duplex: 'half',
+        // At least 1 MB/s on top of the normal budget, so a 2 GB recording is not cut off.
+        signal: AbortSignal.timeout(timeoutMs + Math.ceil(Number(bytes) / 1000)),
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/octet-stream', 'Content-Length': String(bytes),
+          'X-Wizard-Filename': encodeURIComponent(String(filename)), 'X-Wizard-Sha256': String(sha256) },
+        body: open(),
+      })
+    } catch { throw Object.assign(new Error('runtime_unreachable'), { code: 'runtime_unreachable' }) }
+    let reply = {}
+    try { reply = await response.json() } catch { reply = {} }
+    if (!response.ok) {
+      const code = typeof reply?.error === 'string' && /^[a-z0-9_.:-]{1,80}$/iu.test(reply.error) ? reply.error : `runtime_http_${response.status}`
+      throw Object.assign(new Error(code), { code })
+    }
+    return reply
+  }
   return {
+    placeStream,
     incognitoStart: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/incognito/start`, payload),
     incognitoStop: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/incognito/stop`, payload),
     incognitoLease: (id, payload) => call('POST', `/agents/${encodeURIComponent(id)}/incognito/lease`, payload),

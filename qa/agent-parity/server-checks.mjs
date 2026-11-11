@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { TITLE_INSTRUCTIONS } from '../../server/thread-titles.mjs'
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
@@ -832,6 +833,21 @@ export const serverChecks = {
       assert.deepEqual(readFileSync(join(s.root, 'files', index.files.find(f => f.id === file.id).rel)), bytes)
     }
     assert.ok(JSON.stringify(await history(s)).includes('WIZARD_FILE_CHIPS_V1'))
+  },
+  'file-large-copy': async s => {
+    // Issue 464: a recording over the 25 MB inline cap reaches container agents as a stream with a matching hash.
+    const bytes = Buffer.alloc(26 * 1024 * 1024 + 7, 'parity-recording-')
+    const r = await s.upload(bytes, 'retreat-day-2.mp3', 'audio/mpeg'); assert.equal(r.status, 201)
+    const file = (await r.json()).file
+    await admit(s, { input: 'Transcribe the attached recording', wizard_file_ids: [file.id] })
+    const body = sent(s), text = typeof body.input === 'string' ? body.input : body.input[0].content[0].text
+    assert.ok(text.includes('trusted_path')); assert.ok(!text.includes('placement_error'), 'a large file must reach the agent')
+    const sha = createHash('sha256').update(bytes).digest('hex')
+    if (['container', 'restricted'].includes(s.kind)) {
+      const streamed = s.placedStreams.at(-1)
+      assert.deepEqual({ size: streamed.size, digest: streamed.digest, bytes: streamed.bytes }, { size: bytes.length, digest: sha, bytes: bytes.length })
+      assert.ok(!s.placed.some(p => p.payload.sha256 === sha), 'large files are never sent as base64 JSON')
+    } else assert.equal(s.placedStreams.length, 0, 'main and host-profile read the shared file, nothing is copied')
   },
   'assistant-media': async s => {
     s.sessions.get('wizard_parity').messages.push({ id: 'media-reply', role: 'assistant', timestamp: Date.now() / 1000, content: `Synthetic output\nMEDIA:${s.media.png}\nImage explanation continues here.\nMEDIA:${s.media.text}` })
