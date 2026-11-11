@@ -119,10 +119,20 @@ export function readHermesFirstPosts(path, sessionIds, { restore = null } = {}) 
     const known = preparedRead(db, 'SELECT 1 FROM sessions WHERE id=?')
     const read = preparedRead(db, `SELECT id, content, ${kind}, timestamp FROM messages WHERE session_id=? AND role='user'
       AND ${retainedMessagesWhere(columns)} AND trim(COALESCE(content,''))<>'' ORDER BY timestamp ASC, id ASC LIMIT 50`)
+    // The thread's newest other row (a reply), so the restore sees how far the history reaches even when Hermes no
+    // longer holds the owner's own row: it puts back every queued owner turn up to there, as the history page does.
+    const reach = preparedRead(db, `SELECT id, role, ${kind}, timestamp FROM messages WHERE session_id=? AND role<>'user'
+      AND ${retainedMessagesWhere(columns)} AND COALESCE(${columns.has('display_kind') ? 'display_kind' : 'NULL'},'')<>'hidden'
+      AND substr(COALESCE(content,''),1,19)<>'[CONTEXT COMPACTION' ORDER BY timestamp DESC, id DESC LIMIT 1`)
     for (const id of ids) {
       if (!known.get(id)) continue
       let rows = read.all(id).map(row => ({ id: Number(row.id), session_id: id, role: 'user', content: storedContent(row.content),
         timestamp: row.timestamp, ...(row.display_kind ? { display_kind: row.display_kind } : {}) }))
+      if (typeof restore === 'function') {
+        const other = rows.length < 50 ? reach.get(id) : null
+        if (other) rows = [...rows, { id: Number(other.id), session_id: id, role: String(other.role), content: '', timestamp: other.timestamp,
+          ...(other.display_kind ? { display_kind: other.display_kind } : {}) }].sort((a, b) => Number(a.timestamp) - Number(b.timestamp) || a.id - b.id)
+      }
       if (rows.length && typeof restore === 'function') {
         try {
           const raw = Buffer.from(JSON.stringify({ object: 'list', session_id: id, data: rows, pagination: { order: 'oldest', offset: 0, limit: 50, returned: rows.length } }))
