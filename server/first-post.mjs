@@ -75,11 +75,11 @@ export function firstPostFields(post) {
   return post && typeof post === 'object' ? { firstRequest: post.text, firstAttachments: post.attachments } : {}
 }
 
-const RAW_MAX = 65_536
 /** Each listed thread's post from a Hermes state.db: Map id -> post, or null for an agent-started thread.
- *  Threads the file doesn't hold (or an unreadable file) are absent. */
+ *  Threads the file doesn't hold (or an unreadable file) are absent. The whole message is parsed (SQLite returns
+ *  it whole anyway): the file marker comes after the owner's words, so a cut message would lose its photos. */
 export function readHermesFirstPosts(path, sessionIds, read = readHermesFirstRequests) {
   const out = new Map()
-  for (const [id, content] of read(path, sessionIds, { max: RAW_MAX })) out.set(id, content ? firstPostOf(content) : null)
+  for (const [id, content] of read(path, sessionIds, { max: Number.MAX_SAFE_INTEGER })) out.set(id, content ? firstPostOf(content) : null)
   return out
 }
