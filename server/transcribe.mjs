@@ -20,7 +20,7 @@ const AUDIO_EXTENSIONS = new Set(['.wav', '.mp3', '.m4a', '.aac', '.ogg', '.oga'
 
 const TOOL = {
   name: TRANSCRIBE_TOOL,
-  description: '[Wizard OS] Transcribe an audio or voice file (wav, mp3, m4a, ogg, opus, flac, webm, mp4 …) to text with the box\'s own Wizard Voice Service. Use this for ANY audio or voice transcription request. Never install Whisper, faster-whisper or any other local speech software, and never download speech models: this tool is the transcriber. Pass the file\'s path inside your own home, e.g. /opt/data/inbox/2026-11-11/note.m4a (or a path relative to it). Long recordings are split and joined by the service; allow a few minutes. Files up to 32 MB.',
+  description: '[WizardOS] Transcribe an audio or voice file (wav, mp3, m4a, ogg, opus, flac, webm, mp4 …) to text with the box\'s own Wizard Voice Service. Use this for ANY audio or voice transcription request. Never install Whisper, faster-whisper or any other local speech software, and never download speech models: this tool is the transcriber. Pass the file\'s path inside your own home, e.g. /opt/data/inbox/2026-11-11/note.m4a (or a path relative to it). Long recordings are split and joined by the service; allow a few minutes. Files up to 32 MB.',
   inputSchema: {
     type: 'object',
     properties: {
