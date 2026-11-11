@@ -195,6 +195,9 @@ server = createWizardServer({
   // Chats channels phase 2 (issue 440): channels and thread membership in ~/.wizard-os/channels.sqlite, served at
   // /wizard/v1/channels; ui-preferences `spaces` becomes a read-only projection. Off by default.
   channelStore: process.env.WIZARD_CHANNEL_STORE === '1',
+  // Chats Channels posts (issue 446): view=list rows carry firstRequest (the first owner message, cleaned, at most
+  // 400 code units) and firstAttachments (its photos as file refs). Off by default.
+  channelFirstPosts: process.env.WIZARD_CHANNEL_FIRST_POSTS === '1',
   // Routed agents' owner turns stamped internal_notification by Hermes 0.22.7 (issue 379). Off by default.
   routedOwnerTurns: process.env.WIZARD_ROUTED_OWNER_TURNS === '1',
   // Owner turns with an inline screenshot, which Hermes flattens to "[screenshot]" (issue 145). Off by default.

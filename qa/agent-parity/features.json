@@ -472,6 +472,24 @@
       "policy_exemptions": []
     },
     {
+      "id": "chats-first-posts",
+      "description": "Chats Channels posts (issue 446, WIZARD_CHANNEL_FIRST_POSTS=1): each view=list row carries firstRequest (the first owner message, cleaned, at most 400 UTF-16 code units) and firstAttachments (that message's images as { id, name, mime } file refs for /wizard/files/<id>/content); a thread the agent started has neither.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile, container TCP, restricted Unix ingress) with channelFirstPosts on: give the parity thread an internal user row, then an owner message with a Workspace prefix, markdown, 500+ characters, a WIZARD_FILES_V1 marker holding a PNG and a PDF and a trailing WizardOS context note; read view=list and check firstRequest is the cleaned owner words cut at 400 and firstAttachments holds only the PNG ref; an agent-started thread has neither field. Routed kinds also hide their state.db (a restricted agent's home is unreadable on a real box) and check a new thread's post is read through the agent runtime's history instead. tests/first-post.test.ts covers cleaning, truncation, images versus other files, transcripts, agent-started threads and the switch off. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/first-post.mjs",
+        "server/session-list-view.mjs",
+        "server/session-truth.mjs",
+        "server/agents-http.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/first-post.test.ts"
+      ],
+      "fixture": "chats-first-posts",
+      "policy_exemptions": []
+    },
+    {
       "id": "session-create",
       "description": "Create a hidden disposable thread",
       "layer": "server",

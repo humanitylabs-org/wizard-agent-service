@@ -119,7 +119,11 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
 
 // Chats channels (issue 440, WIZARD_CHANNEL_STORE=1): the row's channel id and its first owner request.
 export const FIRST_REQUEST_MAX = 400;
-export function listRow(item, q = '', channels = null) {
+// Channel posts (issue 446, WIZARD_CHANNEL_FIRST_POSTS=1): with `firstPosts`, firstRequest and firstAttachments come
+// only from the Service's read of the whole first owner message (`wizard_first_post`: { text, attachments }, or null
+// for a thread the agent started). Hermes' 60-character preview is never used for them; an unread row has neither.
+/** @param {any} item @param {string} [q] @param {any} [channels] @param {{ firstPosts?: boolean } | null} [opts] */
+export function listRow(item, q = '', channels = null, opts = null) {
   const s = normalizeFull(item);
   if (!s) return null;
   const { request, renames, source, runtime, ...row } = s;
@@ -133,15 +137,20 @@ export function listRow(item, q = '', channels = null) {
     // Hermes' own `preview` is the head of the thread's first user message; the main agent reads the whole one.
     // A main row carries wizard_first_request ('' when it has no visible owner message); routed rows fall back.
     const firstRequest = clean(text(Object.hasOwn(item, 'wizard_first_request') ? item.wizard_first_request : item.preview)).slice(0, FIRST_REQUEST_MAX);
-    channelFields = { ...(channel ? { channel } : {}), ...(firstRequest ? { firstRequest } : {}) };
+    channelFields = { ...(channel ? { channel } : {}), ...(firstRequest && !opts?.firstPosts ? { firstRequest } : {}) };
+  }
+  const post = opts?.firstPosts ? item.wizard_first_post : null;
+  if (post && typeof post === 'object' && typeof post.text === 'string' && Array.isArray(post.attachments)) {
+    channelFields = { ...channelFields, firstRequest: post.text.slice(0, FIRST_REQUEST_MAX), firstAttachments: post.attachments };
   }
   return { ...row, preview: s.preview.slice(0, 140), listVersion: 1, ...channelFields,
     ...(body ? { searchSnippet: (at ? '…' : '') + body.slice(at, at+140) } : {}) };
 
 }
-export function listPayload(payload, q = '', channels = null) {
+/** @param {any} payload @param {string | null} [q] @param {any} [channels] @param {{ firstPosts?: boolean } | null} [opts] */
+export function listPayload(payload, q = '', channels = null, opts = null) {
   if (payload.mode === 'body' || payload.mode === 'titles' || payload.fields === 'slim') { const {window_projected,...visible}=payload; return { ...visible, view:'list', list_version:1 }; }
-  for (const key of ['data', 'sessions', 'items']) if (Array.isArray(payload[key])) payload[key] = payload[key].map(row => listRow(row, q, channels)).filter(Boolean);
+  for (const key of ['data', 'sessions', 'items']) if (Array.isArray(payload[key])) payload[key] = payload[key].map(row => listRow(row, q, channels, opts)).filter(Boolean);
   const { window_projected, ...visible } = payload;
   return { ...visible, view: 'list', list_version: 1 };
 }

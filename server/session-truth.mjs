@@ -450,8 +450,10 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
 
 // Chats channels (issue 440): each thread's first visible owner request, for the channel feed's post text.
 // One ascending seek per thread on (session_id, timestamp); stops at the first visible request. Missing
-// threads are absent from the map; a thread with no visible request maps to ''.
+// threads are absent from the map; a thread with no visible request maps to ''. `options.max` caps the text
+// (4000 by default; the channel posts of issue 446 read the whole message to find its photos).
 export function readHermesFirstRequests(path, sessionIds, options = {}) {
+  const max = Number.isSafeInteger(options.max) && options.max > 0 ? options.max : 4000
   const ids = boundedIds(sessionIds)
   const out = new Map()
   if (!ids.length) return out
@@ -467,7 +469,7 @@ export function readHermesFirstRequests(path, sessionIds, options = {}) {
       if (!known.get(id)) continue
       let first = ''
       for (const row of rows.iterate(id)) if (visibleUserRequest(row.content, row.display_kind)) { first = String(row.content).trim(); break }
-      out.set(id, first.slice(0, 4000))
+      out.set(id, first.slice(0, max))
     }
     return out
   } finally { if (!Object.hasOwn(options, 'db')) try { db.close() } catch { /* read-only cleanup */ } }

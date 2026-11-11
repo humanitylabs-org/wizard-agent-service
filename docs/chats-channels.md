@@ -62,4 +62,5 @@ applied to the store. The Spaces tools (`spaces_*`) and the status line's `space
 ## Chats list
 
 See `docs/chats-list-protocol.md`: rows gain `channel` and `firstRequest`, and `view=list&channel=<id>` is the
-channel feed.
+channel feed. With `WIZARD_CHANNEL_FIRST_POSTS=1` (issue 446, off by default) every row of an owner-started thread
+also carries the post itself: `firstRequest` from the whole first owner message and `firstAttachments`, its photos.
