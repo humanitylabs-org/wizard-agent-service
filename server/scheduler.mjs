@@ -216,10 +216,11 @@ function scheduleBaseInput(job) {
   return `${SCHEDULE_INPUT}\n${skill}${job.prompt}\nIf there is nothing to report, respond exactly [SILENT].`
 }
 
-// Chats channels phase 3 (issue 441): the first occurrence of a job that opens its own chat is the one that files it
-// (into the job's channel, else the default), so an owner's later move or unfile of that chat stands.
-const opening = (db, job) => ({ ...(job.channel ? { channel: job.channel } : {}),
-  ...(db.prepare('SELECT 1 FROM schedule_occurrences WHERE job_id=? LIMIT 1').get(job.id) ? {} : { opensThread: true }) })
+// Chats channels phase 3 (issue 441): the first occurrence of a job that shows its own chat is the one that files it
+// (into the job's channel, else the default), so an owner's later move or unfile of that chat stands. A notification
+// occurrence keeps the chat hidden, so the first thread-visible one (a fallback included) opens it.
+const opening = (db, job, deliver) => ({ ...(job.channel ? { channel: job.channel } : {}),
+  ...(deliver === 'notification' || db.prepare("SELECT 1 FROM schedule_occurrences WHERE job_id=? AND COALESCE(json_extract(data,'$.deliver'),'')<>'notification' LIMIT 1").get(job.id) ? {} : { opensThread: true }) })
 export class Scheduler {
   constructor({ statePath, deliver, lookup = null, onWatchResult = null, notifier = null, agentId = agent => agent, channels = false, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
     if (!statePath) throw fail('scheduler state path required', 503)
@@ -529,7 +530,7 @@ export class Scheduler {
       try { if (this.notifier?.available(this.agentId(job.agent))) deliver = 'notification' } catch { /* fall back to the thread */ }
     }
     const occurrence = { key, jobId: job.id, scheduledAt: iso(instant), agent: job.agent, thread: job.thread,
-      createThread: Boolean(job.createThread), ...(this.channels && job.createThread ? opening(this.db, job) : {}), title: job.threadTitle || (job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`),
+      createThread: Boolean(job.createThread), ...(this.channels && job.createThread ? opening(this.db, job, deliver) : {}), title: job.threadTitle || (job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`),
       kind: job.kind ?? 'run', report: job.agentMessage ? 'message' : reportKind(job), window: job.window ?? null, ...(manual ? { manual: true } : {}), ...(deliver === 'notification' ? { deliver } : job.deliver === 'notification' ? { fallback: true } : {}),
       ...(job.kind === 'return' ? { target: job.target ?? { message: null, excerpt: '' }, note: job.prompt || '' }
         : { body: { session_id: job.thread, input: scheduleInput(job, deliver), ...(job.model ? { model: job.model } : {}) } }) }

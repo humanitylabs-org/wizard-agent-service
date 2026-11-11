@@ -3146,6 +3146,8 @@ function buildWizardServer(options, lifetime) {
   const channelAgentFiling = options.channelAgentFiling === true && !!channelStore
   const scheduledThread = (agent, thread) => {
     if (!channelAgentFiling) return false
+    // Chats only the scheduler mints (schedules, agent-opened chats, tips): known even after their job is deleted.
+    if (/^wizard_(?:schedule|agent|tips)_/.test(thread)) return true
     let jobs
     try { jobs = scheduler ? scheduler.list() : [] } catch { return false } // scheduler is declared below; unset before boot ends
     const want = agent === MAIN_AGENT_ID ? new Set(['main', MAIN_AGENT_ID]) : new Set([agent])

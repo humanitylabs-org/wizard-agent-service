@@ -699,6 +699,13 @@ export const serverChecks = {
       await s.server.scheduler.tick(false)
       assert.equal(await filed(plain.thread), null, 'a later occurrence never re-files the chat')
     }
+    // A deleted job's chat is still a scheduler chat: its status line never files it.
+    const plainJob = s.server.scheduler.list().find(j => j.thread === plain.thread)
+    assert.equal((await s.raw(`/wizard/v1/schedules/${plainJob.id}`, { method: 'DELETE' })).status, 200)
+    if (s.kind === 'main') assert.equal((await s.raw('/wizard/v1/channels/membership', json('PUT', { sessionId: plain.thread, channelId: null }))).status, 200)
+    const late = await s.request('/v1/runs', post({ session_id: plain.thread, input: 'Synthetic owner reply to the reminder' })); assert.equal(late.status, 202)
+    await finish((await late.json()).run_id, { channel: own.id })
+    assert.equal(await filed(plain.thread), null, 'a deleted job\u2019s chat is still never filed by its status line')
     // An alert the owner replied to stays the agent's post: no firstRequest from the owner's reply (scene has channelFirstPosts).
     const at = Date.now() / 1000 - 60
     for (const [id, msgs] of [['wizard_parity_alert', [{ role: 'assistant', timestamp: at, content: 'Synthetic alert words' }, { role: 'user', timestamp: at + 1, content: 'Synthetic owner reply' }]],

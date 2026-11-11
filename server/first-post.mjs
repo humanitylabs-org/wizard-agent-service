@@ -219,7 +219,8 @@ export function readHermesFirstPosts(path, sessionIds, { restore = null, memo = 
       let post = firstPostOfHistory(rows, false) ?? null
       if (post && firstReply) {
         const reply = firstReply.get(page.id), owner = rows.find(row => ownerMessage(row))
-        if (reply && owner && Number(reply.timestamp) < Number(owner.timestamp)) post = null
+        // Database order breaks a timestamp tie, as both reads order by (timestamp, id).
+        if (reply && owner && (Number(reply.timestamp) < Number(owner.timestamp) || (Number(reply.timestamp) === Number(owner.timestamp) && Number(reply.id) < Number(owner.id)))) post = null
       }
       out.set(page.id, post)
       if (memo) {

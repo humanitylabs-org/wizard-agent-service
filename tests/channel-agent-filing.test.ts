@@ -128,3 +128,33 @@ it('an alert the owner replied to stays the agent’s post (agentFirst), in a hi
   expect(on.get('alert')).toBeNull()
   expect(on.get('chat')).toEqual({ text: 'Synthetic question', attachments: [] })
 })
+
+it('a notification job files its chat on the first occurrence that shows it (the fallback), once', () => {
+  const d = home()
+  let up = true, clock = Date.parse('2026-11-11T00:00:00Z')
+  const s = new Scheduler({ statePath: join(d, 'n.sqlite3'), deliver: async () => ({ run_id: 'r' }), now: () => clock, channels: true,
+    notifier: { available: () => up, send: async () => ({}) } }); closers.push(s)
+  const job = s.create({ name: 'Synthetic', kind: 'run', prompt: 'Synthetic check.', when: { every: 60 }, enabled: false, deliver: 'notification' })
+  const hidden = s.runNow(job.id)
+  expect(hidden).toMatchObject({ deliver: 'notification', createThread: true }); expect(hidden).not.toHaveProperty('opensThread')
+  s.db.prepare('UPDATE schedule_occurrences SET admitted=1 WHERE key=?').run(hidden.key)
+  up = false; clock += 60_000
+  const fallback = s.runNow(job.id)
+  expect(fallback).toMatchObject({ fallback: true, opensThread: true })
+  s.db.prepare('UPDATE schedule_occurrences SET admitted=1 WHERE key=?').run(fallback.key)
+  clock += 60_000
+  expect(s.runNow(job.id)).not.toHaveProperty('opensThread')
+})
+
+it('a timestamp tie between the first reply and the first owner message is broken by database order', () => {
+  const d = home(), path = join(d, 'state.db'), db = new DatabaseSync(path)
+  db.exec('CREATE TABLE sessions(id TEXT PRIMARY KEY); CREATE TABLE messages(id INTEGER PRIMARY KEY, session_id TEXT, role TEXT, content TEXT, display_kind TEXT, timestamp REAL)')
+  const add = db.prepare('INSERT INTO messages(session_id, role, content, display_kind, timestamp) VALUES(?,?,?,?,?)')
+  for (const id of ['alert', 'chat']) db.prepare('INSERT INTO sessions(id) VALUES(?)').run(id)
+  add.run('alert', 'assistant', 'Synthetic alert', null, 5); add.run('alert', 'user', 'Synthetic thanks', null, 5)
+  add.run('chat', 'user', 'Synthetic question', null, 5); add.run('chat', 'assistant', 'Synthetic answer', 'final', 5)
+  db.close()
+  const on = readHermesFirstPosts(path, ['alert', 'chat'], { agentFirst: true })
+  expect(on.get('alert')).toBeNull()
+  expect(on.get('chat')).toEqual({ text: 'Synthetic question', attachments: [] })
+})
