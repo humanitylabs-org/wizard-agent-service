@@ -5,7 +5,7 @@ const realDate = v => { const [y, m, d] = v.slice(0, 10).split('-').map(Number),
 import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync, unlinkSync, statSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
-export const DEFAULT_UI_PREFERENCES = Object.freeze({ archiveAfterDays: 7, compact: false, chatAfterAction: 'stay', chatLayout: 'day', readyOrder: 'newest', subjectOrder: [], pinnedChats: [], spaces: [] })
+export const DEFAULT_UI_PREFERENCES = Object.freeze({ archiveAfterDays: 7, compact: false, chatAfterAction: 'stay', chatLayout: 'day', readyOrder: 'newest', subjectOrder: [], pinnedChats: [], spaces: [], savedWizards: [] })
 // 50 spaces × 500 thread ids (up to 180 chars), plus existing preferences.
 export const UI_PREFERENCES_MAX_BYTES = 5 * 1024 * 1024
 const THREAD_ID = /^[A-Za-z0-9._:-]{1,180}$/
@@ -28,6 +28,17 @@ const nativeLink = a => isPlainObject(a) && Object.keys(a).every(k => ['id', 'na
   && (!Object.hasOwn(a, 'desc') || text(a.desc, 240))
   && (!Object.hasOwn(a, 'phoneOnly') || typeof a.phoneOnly === 'boolean')
   && (!Object.hasOwn(a, 'colors') || (Array.isArray(a.colors) && a.colors.length >= 1 && a.colors.length <= 2 && a.colors.every(c => /^#[0-9a-f]{3}(?:[0-9a-f]{3})?(?![\s\S])/iu.test(c))))
+// The owner's other Wizards for the shell's switcher (wizard-ux issue 1237), kept on the box so every device
+// signed into it shows the same list. Name and address only: an entry never confers access to that Wizard.
+const WIZARD_ID = /^[A-Za-z0-9._:-]{1,120}(?![\s\S])/u
+const wizardAddress = v => {
+  if (typeof v !== 'string' || v.length > 2048 || /[\s\u0000-\u001f\u007f]/u.test(v)) return ''
+  try { const u = new URL(v); return ['http:', 'https:'].includes(u.protocol) && u.hostname && !u.username && !u.password && u.href === v ? u.origin : '' } catch { return '' }
+}
+const validSavedWizard = w => isPlainObject(w) && Object.keys(w).length === 3 && ['id', 'name', 'url'].every(k => Object.hasOwn(w, k))
+  && typeof w.id === 'string' && WIZARD_ID.test(w.id) && text(w.name, 120) && !!wizardAddress(w.url)
+const validSavedWizards = v => Array.isArray(v) && v.length <= 100 && v.every(validSavedWizard)
+  && new Set(v.map(w => w.id)).size === v.length && new Set(v.map(w => wizardAddress(w.url))).size === v.length
 const launcherValidators = {
   nativeLinks: v => Array.isArray(v) && v.length <= 50 && v.every(nativeLink) && new Set(v.map(a => a.id)).size === v.length,
   recents: ids, desktopQuick: ids, autoOpen: ids, hostedThreadApps: ids,
@@ -54,6 +65,7 @@ const validators = {
   replySummary: v => isPlainObject(v) && Object.keys(v).every(k => ['on', 'start', 'length'].includes(k)) && typeof v.on === 'boolean'
     && (!Object.hasOwn(v, 'start') || ['collapsed', 'expanded'].includes(v.start)) && (!Object.hasOwn(v, 'length') || ['line', 'sentences', 'paragraph'].includes(v.length)),
   // Pinned Chats threads, in pin order, shared by every device of the owner.
+  savedWizards: validSavedWizards,
   pinnedChats: v => Array.isArray(v) && v.length <= 300 && v.every(s => typeof s === 'string' && /^[A-Za-z0-9._:-]{1,180}$/.test(s)) && new Set(v).size === v.length,
 }
 const isPlainObject = v => !!v && typeof v === 'object' && !Array.isArray(v)
@@ -67,7 +79,7 @@ export function validateUiPreferences(value) {
 // Lenient: the stored file may have been written by a newer or older service or shell.
 // Keep each known key whose value is valid here and default everything else, per key.
 export function sanitizeUiPreferences(stored) {
-  const out = { ...DEFAULT_UI_PREFERENCES, subjectOrder: [], pinnedChats: [], spaces: [] }
+  const out = { ...DEFAULT_UI_PREFERENCES, subjectOrder: [], pinnedChats: [], spaces: [], savedWizards: [] }
   if (!isPlainObject(stored)) return out
   for (const key of Object.keys(validators)) if (Object.hasOwn(stored, key) && validators[key](stored[key])) out[key] = stored[key]
   return out
@@ -111,6 +123,11 @@ export function updateUiPreferences(path, patch) {
 // Adding it to a Space (or creating a Space with it) moves it there: the same write drops it from that agent's
 // other Spaces, so no device, agent tool or old client can leave it in two.
 //   {op:'set', key:'spaces/<id>/name', item:<name>}
+//   {op:'add', key:'savedWizards', item:{id,name,url}}  no-op when that id or that address's origin is already saved
+//   {op:'remove', key:'savedWizards', item:<id>}
+//   {op:'set', key:'savedWizards/<id>/name', item:<name>}  no-op when the entry is gone
+const WIZARD_KEY = /^savedWizards\/([A-Za-z0-9._:-]{1,120})\/name$/
+const opField = key => SPACE_KEY.test(key) ? 'spaces' : WIZARD_KEY.test(key) ? 'savedWizards' : key
 const SPACE_KEY = /^spaces\/([a-z0-9-]{1,48})\/(threads|name)$/
 // Operands are checked even when they change nothing (removing an absent item), so malformed ops are always a 400.
 const SUBJECT = v => typeof v === 'string' && v.length <= 120 && !/[\u0000-\u001f\u007f]/u.test(v)
@@ -164,6 +181,16 @@ export function applyUiPreferenceOps(prefs, ops) {
       if (op === 'add' && validSpace(item)) { if (!next.spaces.some(s => s.id === item.id)) next.spaces = fileInOneSpace(next.spaces.concat(item), item, item.threads) }
       else if (op === 'remove' && typeof item === 'string' && SPACE_ID.test(item)) next.spaces = next.spaces.filter(s => s.id !== item)
       else badOps()
+    } else if (key === 'savedWizards') {
+      if (op === 'add' && validSavedWizard(item)) {
+        const origin = wizardAddress(item.url)
+        if (!next.savedWizards.some(w => w.id === item.id || wizardAddress(w.url) === origin)) next.savedWizards = next.savedWizards.concat({ id: item.id, name: item.name.trim(), url: item.url })
+      } else if (op === 'remove' && typeof item === 'string' && WIZARD_ID.test(item)) next.savedWizards = next.savedWizards.filter(w => w.id !== item)
+      else badOps()
+    } else if (WIZARD_KEY.test(key)) {
+      if (op !== 'set' || !text(item, 120)) badOps()
+      const id = WIZARD_KEY.exec(key)[1]
+      next.savedWizards = next.savedWizards.map(w => w.id === id ? { ...w, name: item.trim() } : w)
     } else if (sub) {
       const [, id, field] = sub
       // Checked here too: a Space deleted meanwhile makes the operation a no-op, never a way past validation.
@@ -183,7 +210,7 @@ export function patchUiPreferences(path, body) {
   if (!isPlainObject(body) || Object.keys(body).some(k => k !== 'ops')) badOps()
   const stored = readStored(path) || {}
   const current = sanitizeUiPreferences(stored), next = applyUiPreferenceOps(current, body.ops)
-  const patch = Object.fromEntries([...new Set(body.ops.map(o => SPACE_KEY.test(o.key) ? 'spaces' : o.key))].map(k => [k, next[k]]))
+  const patch = Object.fromEntries([...new Set(body.ops.map(o => opField(o.key)))].map(k => [k, next[k]]))
   validateUiPreferences(patch)
   return writePreferences(path, stored, { ...stored, ...patch }, patch)
 }
