@@ -111,12 +111,16 @@ const FIRST_POST_MEMO_MAX = 5000, FIRST_POST_MEMO_MS = 10 * 60_000
  *  queue claims and puts back owner turns Hermes no longer holds, so a page whose first owner message comes before
  *  any internal_notification row is already decided. A page with no owner message at all still needs it. */
 export function needsOwnerTurnRestore(rows) {
+  return firstOwnerRow(rows) === null
+}
+// The first owner message of an unrestored page when no internal_notification row comes before it, else null.
+function firstOwnerRow(rows) {
   for (const row of Array.isArray(rows) ? rows : []) {
     if (!row || row.role !== 'user') continue
-    if (row.display_kind === 'internal_notification') return true
-    if (ownerMessage(row)) return false
+    if (row.display_kind === 'internal_notification') return null
+    if (ownerMessage(row)) return row
   }
-  return true
+  return null
 }
 
 /** A restore(raw, sessionId) over `queue` (a DurableRunQueue) whose prepare(ids) loads every listed thread's queued
@@ -127,6 +131,9 @@ export function batchedOwnerTurnRestore(queue, run) {
   let batch = null
   const view = { admittedForSession: (runtime, sessionId) => runtime === 'direct' && batch?.has(sessionId) ? batch.get(sessionId) : queue.admittedForSession(runtime, sessionId) }
   const restore = (raw, sessionId) => run(raw, view, sessionId)
+  // How many sends the queue holds for each thread up to a time (Map id -> count), from the session index alone. A
+  // thread whose first owner row has at most its own send before it has no earlier owner turn the restore could put back.
+  restore.sendsUpTo = (pairs) => typeof queue.sendsUpTo === 'function' ? queue.sendsUpTo(pairs) : null
   restore.prepare = (ids) => {
     batch = null
     if (typeof queue.admittedForSessions !== 'function' || !ids.length) return
@@ -170,10 +177,24 @@ export function readHermesFirstPosts(path, sessionIds, { restore = null, memo = 
       if (kept && kept.key === key && now - kept.at < FIRST_POST_MEMO_MS) { out.set(id, kept.post); continue }
       let rows = read.all(id).map(row => ({ id: Number(row.id), session_id: id, role: 'user', content: storedContent(row.content),
         timestamp: row.timestamp, ...(row.display_kind ? { display_kind: row.display_kind } : {}) }))
-      const restoring = typeof restore === 'function' && needsOwnerTurnRestore(rows)
+      const owner = typeof restore === 'function' ? firstOwnerRow(rows) : null
+      const restoring = typeof restore === 'function' && !owner
       if (restoring && other && rows.length < 50) rows = [...rows, { id: Number(other.id), session_id: id, role: String(other.role), content: '', timestamp: other.timestamp,
         ...(other.display_kind ? { display_kind: other.display_kind } : {}) }].sort((a, b) => Number(a.timestamp) - Number(b.timestamp) || a.id - b.id)
-      pages.push({ id, key, rows, restoring: restoring && rows.length > 0 })
+      pages.push({ id, key, rows, restoring: restoring && rows.length > 0, owner, other })
+    }
+    // A page whose first owner row is plain still needs the restore when the queue holds an earlier send that Hermes
+    // may have lost (compaction): the history page would put that turn back before this row. Unknown counts restore.
+    const plain = pages.filter(page => page.owner)
+    if (plain.length) {
+      let counts = null
+      try { counts = typeof restore.sendsUpTo === 'function' ? restore.sendsUpTo(plain.map(page => [page.id, Number(page.owner.timestamp) + 5])) : null } catch { counts = null }
+      for (const page of plain) {
+        if (counts instanceof Map && Number(counts.get(page.id) ?? Infinity) <= 1) continue
+        page.restoring = true
+        if (page.other && page.rows.length < 50) page.rows = [...page.rows, { id: Number(page.other.id), session_id: page.id, role: String(page.other.role), content: '', timestamp: page.other.timestamp,
+          ...(page.other.display_kind ? { display_kind: page.other.display_kind } : {}) }].sort((a, b) => Number(a.timestamp) - Number(b.timestamp) || a.id - b.id)
+      }
     }
     const restored = pages.filter(page => page.restoring)
     if (restored.length && typeof restore.prepare === 'function') { try { restore.prepare(restored.map(page => page.id)) } catch { /* per-thread reads */ } }

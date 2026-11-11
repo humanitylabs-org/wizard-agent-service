@@ -192,13 +192,17 @@ describe('first posts stay cheap per poll', () => {
     db.close()
     return path
   }
-  const records = (sid: string) => sid === 'stamped' || sid === 'lost'
-    ? [{ publicRunId: `wizardq_${sid}`, upstreamRunId: `run_${sid}`, status: 'completed', createdAt: 1000, body: listBody(sid, owner), payload: { created_at: 1000 } }] : []
+  const send = (sid: string, n: string, text: string, at: number) => ({ publicRunId: `wizardq_${sid}_${n}`, upstreamRunId: `run_${sid}_${n}`, status: 'completed', createdAt: at, body: listBody(sid, text), payload: { created_at: at } })
+  const records = (sid: string) => sid === 'stamped' || sid === 'lost' ? [send(sid, 'a', owner, 1000)]
+    : sid === 'plain' ? [send(sid, 'a', owner, 1000)]
+    // Codex review: Hermes compacted away the first owner turn and kept a later plain one.
+    : sid === 'compacted' ? [send(sid, 'a', owner, 1000), send(sid, 'b', 'A later synthetic owner message', 1010)] : []
   const counting = () => {
     const calls = { single: [] as string[], batches: [] as string[][] }
     const queue = {
       admittedForSession: (runtime: string, sid: string) => { calls.single.push(sid); return runtime === 'direct' ? records(sid) : [] },
       admittedForSessions: (runtime: string, ids: string[]) => { calls.batches.push(ids); return new Map(ids.map(id => [id, runtime === 'direct' ? records(id) : []])) },
+      sendsUpTo: (pairs: [string, number][]) => new Map(pairs.map(([id, at]) => [id, records(id).filter(r => r.createdAt <= at).length])),
     }
     return { calls, restore: batchedOwnerTurnRestore(queue, (raw: Buffer, view: any, sid: string) => restoreOwnerTurns(raw, view, sid, null)) as any }
   }
@@ -207,6 +211,7 @@ describe('first posts stay cheap per poll', () => {
     stamped: [['user', owner, 'internal_notification', 1001], ['assistant', 'Synthetic reply', 'final', 1002]],
     lost: [['assistant', 'Synthetic reply', 'final', 1005]],
     agent: [['user', '[reporter] Synthetic nudge.', null, 1001]],
+    compacted: [['user', 'A later synthetic owner message', null, 1011], ['assistant', 'Synthetic reply', 'final', 1012]],
   } as Record<string, [string, string, string | null, number][]>
   it('needsOwnerTurnRestore: only pages whose first owner message the restore can change', () => {
     expect(needsOwnerTurnRestore([{ role: 'user', content: owner }])).toBe(false)
@@ -218,7 +223,7 @@ describe('first posts stay cheap per poll', () => {
   it('one batched queue read per page, only for threads that need the restore; same posts as per-thread restores', () => {
     const path = stateDb(threads), ids = Object.keys(threads), { calls, restore } = counting()
     const posts = readHermesFirstPosts(path, ids, { restore })
-    expect(calls.batches).toEqual([['stamped', 'lost', 'agent']])
+    expect(calls.batches).toEqual([['stamped', 'lost', 'agent', 'compacted']])
     expect(calls.single).toEqual([])
     const perThread = (raw: Buffer, sid: string) => restoreOwnerTurns(raw, { admittedForSession: (_r: string, id: string) => records(id) }, sid, null)
     expect(Object.fromEntries(posts)).toEqual(Object.fromEntries(readHermesFirstPosts(path, ids, { restore: perThread })))
@@ -226,6 +231,8 @@ describe('first posts stay cheap per poll', () => {
     expect(posts.get('stamped')).toEqual({ text: owner, attachments: [] })
     expect(posts.get('lost')).toEqual({ text: owner, attachments: [] })
     expect(posts.get('agent')).toBeNull()
+    // The owner turn Hermes compacted away is still the post, as in the thread's view=wizard history.
+    expect(posts.get('compacted')).toEqual({ text: owner, attachments: [] })
   })
   it('a decided post is kept until the thread\'s first rows or newest reply change, or the memo ages out', () => {
     const path = stateDb(threads), ids = Object.keys(threads), memo = new Map(), { calls, restore } = counting()
@@ -246,7 +253,7 @@ describe('first posts stay cheap per poll', () => {
     expect(readHermesFirstPosts(path, ids, { restore, memo, now: 1_080_000 }).get('agent')).toEqual({ text: 'Synthetic owner answer', attachments: [] })
     // After ten minutes everything is decided again.
     readHermesFirstPosts(path, ids, { restore, memo, now: 1_080_000 + 10 * 60_000 })
-    expect(calls.batches.at(-1)).toEqual(['stamped', 'lost'])
+    expect(calls.batches.at(-1)).toEqual(['stamped', 'lost', 'compacted'])
   })
   it('DurableRunQueue.admittedForSessions equals admittedForSession per thread, with and without the owner-turn ledger', () => {
     for (const keepOwnerTurns of [false, true]) {
@@ -269,6 +276,12 @@ describe('first posts stay cheap per poll', () => {
       for (const id of ids) expect(batch.get(id)).toEqual(queue.admittedForSession('direct', id))
       expect(batch.get('s1').length).toBe(2)
       expect(queue.admittedForSessions('heavy', ids).size).toBe(0)
+      const counts = queue.sendsUpTo([['s1', old + 8.5], ['s2', old + 100], ['missing', old + 100], ['s3', Number.NaN]])
+      // Never fewer than the direct sends restoreOwnerTurns would read up to then (the operator send counts too).
+      expect(counts.get('s1')).toBeGreaterThanOrEqual(queue.admittedForSession('direct', 's1').filter((r: any) => r.createdAt <= old + 8.5).length)
+      if (!keepOwnerTurns) expect(counts.get('s1')).toBe(2)
+      expect(counts.get('missing')).toBe(0)
+      expect(counts.has('s3')).toBe(false)
       queue.close()
     }
   })

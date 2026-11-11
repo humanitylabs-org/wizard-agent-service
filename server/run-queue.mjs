@@ -530,6 +530,20 @@ export class DurableRunQueue {
     return out
   }
 
+  /** For each [sessionId, at]: how many sends (any runtime, also kept owner turns) the queue holds for that thread
+   *  created at or before `at`. Read from the session indexes alone, never a record body (issue 446). */
+  sendsUpTo(pairs) {
+    const out = new Map()
+    const live = this.database.prepare(`SELECT COUNT(*) AS n FROM wizard_run_queue INDEXED BY wizard_run_queue_session_latest
+      WHERE session_id = ? AND created_at <= ?`)
+    const kept = this.keepOwnerTurns ? this.database.prepare('SELECT COUNT(*) AS n FROM wizard_owner_turn_ledger WHERE runtime = ? AND session_id = ? AND created_at <= ?') : null
+    for (const [sessionId, at] of Array.isArray(pairs) ? pairs.slice(0, 500) : []) {
+      if (typeof sessionId !== 'string' || !sessionId || sessionId.length > 512 || !Number.isFinite(at)) continue
+      out.set(sessionId, Number(live.get(sessionId, at)?.n ?? 0) + (kept ? Number(kept.get('direct', sessionId, at)?.n ?? 0) : 0))
+    }
+    return out
+  }
+
   // Keeps only what owner-turn matching reads: the input's words and the kind of each image (never its bytes).
   _keepOwnerTurns(doomed) {
     const insert = this.database.prepare(`INSERT OR IGNORE INTO wizard_owner_turn_ledger (public_run_id, runtime, session_id, body,
