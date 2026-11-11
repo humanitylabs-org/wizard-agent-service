@@ -53,6 +53,11 @@ export function createRoutedQueues({ registry, queuedHistory, restoreOwnerTurns 
   return {
     ready,
     async mutationOwner(agent, sessionId) { const { queue } = await get(agent); return queue.mutationOwnerForSession(sessionId) },
+    // This agent's queue, only when it already has one (a read never creates a queue file).
+    async queueFor(agent) {
+      if (!entries.has(agent.id) && !existsSync(join(registry.agentsDir, agent.id, 'wizard-run-queue.sqlite3'))) return null
+      return (await get(agent)).queue
+    },
     async fetch(agent,path,init={}) {
       const method=init.method||'GET', parsed=new URL(path,'http://routed')
       const detail = method === 'GET' && (init.wizardDetail === true || parsed.searchParams.get('view') === 'detail') && parsed.pathname.match(/^\/api\/sessions\/([^/]+)$/)
