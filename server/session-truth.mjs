@@ -8,6 +8,7 @@ import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed,
 import { parseStatus, replyAppId } from './thread-status.mjs'
 import { hasAppToolCalls } from './thread-app-provenance.mjs'
 import { readNonHoldingFollowUps } from './owned-open-work-follow-through.mjs'
+import { allStopped, batchTaskStatuses } from './background-results.mjs'
 
 const USER_EVENT_KINDS = new Set(['async_delegation_complete', 'internal_notification', 'system'])
 const INTERNAL_ASSISTANT_KINDS = new Set([...USER_EVENT_KINDS, 'commentary', 'hidden'])
@@ -413,9 +414,14 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
     } catch { /* agents without background delegation */ }
     // Completion can precede the parent's handoff, and failed delivery leaves no message at all.
     // Read delivery receipts independently of the latest transcript row and execution state.
+    // A helper the agent stopped itself (every task interrupted or cancelled) whose result lands after the
+    // agent's own done reply is not work waiting on the agent: it must not hold the thread's earlier ask
+    // open or keep it in Working (issue 467).
+    const stoppedAfterDone = (current, statuses, at) => allStopped(statuses) && current.status?.state === 'done'
+      && current.lastAssistantAt >= current.lastUserAt && (at === undefined || Number(at) >= current.lastAssistantAt)
     for (const receipt of readUndeliveredHelperReceipts(path, { now: nowSeconds * 1000, db, sessionIds: ids })) {
       const current = truth.get(receipt.sessionId)
-      if (current && !isFollowUp(receipt.sessionId, receipt.delegationId)) current.helperResultUnanswered = true
+      if (current && !isFollowUp(receipt.sessionId, receipt.delegationId) && !stoppedAfterDone(current, receipt.statuses)) current.helperResultUnanswered = true
     }
     try {
       const newestRow = preparedRead(db, `
@@ -428,7 +434,8 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
         const delegationId = completionDelegationId(row?.content)
         if (row?.role === 'user' && typeof row.content === 'string' && row.content.startsWith('[ASYNC DELEGATION BATCH COMPLETE')
           && Number(row.timestamp) > nowSeconds - 6 * 3600 && !ownerGate(db, id)
-          && !(delegationId && (receiptConsumed(db, id, delegationId) || isFollowUp(id, delegationId)))) current.helperResultUnanswered = true
+          && !(delegationId && (receiptConsumed(db, id, delegationId) || isFollowUp(id, delegationId)))
+          && !stoppedAfterDone(current, batchTaskStatuses(row.content), row.timestamp)) current.helperResultUnanswered = true
       }
     } catch { /* unreadable newest row: no helper wait */ }
     const leaseRows = preparedRead(db, `
