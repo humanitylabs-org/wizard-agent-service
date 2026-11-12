@@ -1131,6 +1131,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "graceful-restart-hold",
+      "description": "A restart the product starts waits for running turns instead of cutting them: with WIZARD_GRACEFUL_RESTART on, POST /wizard/v1/restart holds new sends (saved in the durable queue as restart_pending, never refused), GET reports waiting / ready / overdue with the running turns, /wizard/health shows the wait without thread ids, and the next process (or DELETE) sends the held messages once.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile, container TCP, restricted Unix ingress) with gracefulRestart on: ask for a restart, send a message, check it is accepted but never reaches Hermes, that the gate counts it as held and health shows restart.holding, then lift the hold and check the message reaches Hermes exactly once. tests/restart-gate.test.ts covers waiting/ready/overdue, the lease lapse, the switch off and a held send launched by the next queue process. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/restart-gate.mjs",
+        "server/run-queue.mjs",
+        "server/routed-run-queue.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/restart-gate.test.ts"
+      ],
+      "fixture": "graceful-restart-hold",
+      "policy_exemptions": []
+    },
+    {
       "id": "stopped-helper-no-needs-you",
       "description": "A helper the agent itself stopped (every task interrupted or cancelled) that delivers after the agent's final done reply never turns the finished thread into Needs you; a helper that finished on its own still offers the saved-result Continue.",
       "layer": "server",

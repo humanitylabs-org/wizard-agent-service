@@ -85,6 +85,7 @@ import { AgentError, MAIN_AGENT_ID, agentModelSeesImages, agentVisionHelper, cre
 import { acquireServiceLeases } from './store-migration.mjs'
 import { SystemJobs, SystemdJobTimers, systemJobsSocket, handleSystemJobsApi } from './system-jobs.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
+import { createRestartGate } from './restart-gate.mjs'
 import { onboardingTools } from './onboarding.mjs'
 import { followUpThreadNote, followUpTool } from './follow-ups.mjs'
 import { agentReachOutTools, reachOutNote } from './agent-reach-out.mjs'
@@ -3222,7 +3223,16 @@ function buildWizardServer(options, lifetime) {
         return restoreOwnerTurns(raw, queue, sessionId, ownerTurnRowMetaAt(home ? join(home, 'state.db') : ''), { ownerText: true, screenshots: ownerScreenshotTurns })
       }
     : null
-  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ registry: agents, queuedHistory: queuedOwnerHistory, restoreOwnerTurns: routedOwnerTurns, keepOwnerTurns: ownerTurnLedger, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
+  // Graceful restart gate (issue 480, off unless gracefulRestart): a restarter holds new launches here, waits for
+  // running turns to finish, then restarts; the next process launches the held sends. Queues are read lazily.
+  const restartGate = options.gracefulRestart === true ? createRestartGate({
+    activeTurns: () => [...(runQueue ? runQueue.activeTurns() : []), ...(routedQueues ? routedQueues.loaded().flatMap(queue => queue.activeTurns()) : [])],
+    heldSends: () => (runQueue ? runQueue.heldSends() : 0) + (routedQueues ? routedQueues.loaded().reduce((sum, queue) => sum + queue.heldSends(), 0) : 0),
+    ...(options.gracefulRestartWaitMs !== undefined ? { defaultWaitMs: Number(options.gracefulRestartWaitMs) } : {}),
+    ...(options.gracefulRestartLeaseMs !== undefined ? { leaseMs: Number(options.gracefulRestartLeaseMs) } : {}),
+  }) : null
+  const launchHold = restartGate ? () => restartGate.holding() : null
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ launchHold, registry: agents, queuedHistory: queuedOwnerHistory, restoreOwnerTurns: routedOwnerTurns, keepOwnerTurns: ownerTurnLedger, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
     ...(options.runQueueLaunchWaitMs !== undefined ? { launchWaitMs: Number(options.runQueueLaunchWaitMs) } : {}),
     decorateDispatch: (agentId, sessionId, body) => {
       const note = heavyNotices(agentId, sessionId)
@@ -4240,6 +4250,7 @@ function buildWizardServer(options, lifetime) {
       ...(options.runQueueLaunchWaitMs !== undefined ? { launchWaitMs: Number(options.runQueueLaunchWaitMs) } : {}),
       activeSessionIds: activeSessionReader,
       canDispatch: dispatchHealthReader,
+      launchHold,
       launch: queueHermesAdmission,
       lookup: lookupQueuedRun,
       staleAfterSeconds: Number(options.staleRunAfterSeconds ?? 300),
@@ -6549,6 +6560,28 @@ function buildWizardServer(options, lifetime) {
           catch { throw Object.assign(new Error('invalid schedule body'), { status: 400 }) }
         } })) return
       }
+      if (url.pathname === '/wizard/v1/restart') {
+        if (!restartGate) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (request.method === 'GET') { sendJson(response, 200, restartGate.status(), { 'Cache-Control': 'no-store' }); return }
+        // Holding everyone's sends is the box owner's (or its App Manager's) call, never an app's or an agent's.
+        if (principalOf(request).kind !== 'owner') { sendJson(response, 403, { error: 'owner_required' }); return }
+        // Relabel held sends at once (POST) or launch them at once (DELETE) instead of on the next poll.
+        const tickQueues = () => { for (const queue of [runQueue, ...(routedQueues ? routedQueues.loaded() : [])]) if (queue) void queue.tick(true).catch(() => undefined) }
+        if (request.method === 'DELETE') { sendJson(response, 200, restartGate.release()); tickQueues(); return }
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        let value = {}
+        try {
+          const raw = (await readBoundedBody(request, 4 * 1024)).toString('utf8').trim()
+          if (raw) value = JSON.parse(raw)
+          if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('not an object')
+        } catch { sendJson(response, 400, { error: 'invalid_json' }); return }
+        try { sendJson(response, 200, restartGate.request(value)) } catch (error) { sendJson(response, error.status || 400, { error: error.code || 'invalid_request' }); return }
+        tickQueues()
+        return
+      }
       if (url.pathname === '/wizard/v1/main-providers') {
         if (!mainProviderAttach) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
@@ -6620,7 +6653,9 @@ function buildWizardServer(options, lifetime) {
         // hermes_state: the read-only session database (archive, other-surface turns). ok:false with
         // reason stale_mount means Hermes replaced a mounted file and the container needs a restart (issue 430).
         const hermesState = hermesStateHealth.report()
-        sendJson(response, 200, { status: 'ok', upstream_reachable: reachable, ...(queue ? { queue } : {}), ...(hermesState ? { hermes_state: hermesState } : {}) })
+        // restart: present only while a graceful restart holds sends, so the shell can show "Restarting when chats finish".
+        const restart = restartGate?.holding() ? restartGate.summary() : null
+        sendJson(response, 200, { status: 'ok', upstream_reachable: reachable, ...(queue ? { queue } : {}), ...(hermesState ? { hermes_state: hermesState } : {}), ...(restart ? { restart } : {}) })
         return
       }
 

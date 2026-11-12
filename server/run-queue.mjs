@@ -43,6 +43,7 @@ export const NOT_STARTED_REQUEUE_PREFIX = 'wizard-not-started-requeue-'
 // A reply Hermes accepts but never starts is resent this many times, then fails visibly with Retry.
 export const NOT_STARTED_MAX_RESENDS = 3
 const RESTART_REFUSED_ERROR = 'runtime_draining'
+const RESTART_PENDING = 'restart_pending'
 const RESTART_RESEND_WINDOW_SECONDS = 30 * 60 // a refusal older than this (Wizard itself was down) stays visible with Retry
 export const NOT_STARTED_SAFE_ERROR = 'Your agent took this message but never started on it, even after Wizard sent it again. Your message is saved. Tap Retry, or open Troubleshooter if it keeps happening.'
 export const INTERRUPT_RECOVERY_PREFIX = 'wizard-interrupt-recovery-'
@@ -195,6 +196,9 @@ export class DurableRunQueue {
     // while it is in flight. summary() waits at most summaryWaitMs for a tick so health always answers.
     launchWaitMs = 3_000,
     summaryWaitMs = 500,
+    // Graceful restart (issue 480): while launchHold() is true, queued sends stay saved and are not launched
+    // (waiting reason restart_pending). Running turns keep going; the next process launches the held sends.
+    launchHold = null,
     slowLaunchSeconds = 20,
     // 8 Nov 2026: new chats waited 13-20 min because every slot was held by runs Hermes had accepted but
     // whose turn nothing held (a stalled gateway, a dead agent). A run Hermes confirms has no turn held
@@ -264,6 +268,7 @@ export class DurableRunQueue {
     this.launches = new Map() // run id -> { promise, startedAt }: one in-flight Hermes admission per run
     this.launchWaitMs = Math.max(0, Number.isFinite(Number(launchWaitMs)) ? Number(launchWaitMs) : 3_000)
     this.summaryWaitMs = Math.max(0, Number.isFinite(Number(summaryWaitMs)) ? Number(summaryWaitMs) : 500)
+    this.launchHold = typeof launchHold === 'function' ? launchHold : () => false
     this.slowLaunchSeconds = Math.max(1, Number(slowLaunchSeconds) || 20)
     // Retain only preview text and the provider hint, never attachment-bearing requests.
     this.projectionInputs = new Map()
@@ -990,6 +995,22 @@ export class DurableRunQueue {
     return { launching: rows.length, launch_waiting_s: waiting, hermes_slow_to_accept: rows.length > 0 && oldest >= this.slowLaunchSeconds }
   }
 
+  _held() {
+    try { return Boolean(this.launchHold()) } catch { return false }
+  }
+
+  // Turns a restart would cut (issue 480): every admitted run that launched and has not finished.
+  activeTurns() {
+    return this._rows("public_run_id IN (SELECT public_run_id FROM wizard_run_queue INDEXED BY wizard_run_queue_fifo WHERE status IN ('launching','running','waiting_for_approval','stopping'))")
+      .map(record => ({ sessionId: record.sessionId, agentId: record.agent_id ?? this.agentId, status: record.status, since: Number(record.createdAt) * 1000 }))
+  }
+
+  // Sends saved while a restart holds launches; the next process launches them.
+  heldSends() {
+    return this._rows("public_run_id IN (SELECT public_run_id FROM wizard_run_queue INDEXED BY wizard_run_queue_fifo WHERE status = 'queued')")
+      .filter(record => record.waitingReason === RESTART_PENDING).length
+  }
+
   async summary({ waitMs = this.summaryWaitMs } = {}) {
     // Never wait on a whole tick: it may be waiting on Hermes. Answer from the saved queue instead.
     let timer
@@ -1413,6 +1434,9 @@ export class DurableRunQueue {
     const fresh = this.get(record.publicRunId)
     if (!fresh || !['queued', 'launching'].includes(fresh.status)) return fresh ?? record
     if (fresh.upstreamRunId) return this._refresh(fresh, true)
+    // A restart hold raised while this tick awaited liveness or dispatch health still wins: never start a new
+    // turn the restart would cut (issue 480). Checked synchronously right before the row turns `launching`.
+    if (fresh.status === 'queued' && this._held()) return this._update(fresh.publicRunId, { waitingReason: RESTART_PENDING })
     // Recovery admission and dispatch can be separated by capacity/health awaits.
     // Recheck the original request so a Dismiss in that gap still wins.
     if (fresh.providerRecoveryAttempted && fresh.retrySourceId
@@ -1676,6 +1700,12 @@ export class DurableRunQueue {
     this._resendRestartRefused()
     await this._recoverInterrupted()
     await this._replayPendingSteers()
+    if (this._held()) {
+      for (const record of this._rows("status = 'queued' AND waiting_reason <> 'provider_access'")) {
+        if (record.waitingReason !== RESTART_PENDING) this._update(record.publicRunId, { waitingReason: RESTART_PENDING })
+      }
+      return
+    }
 
     let external
     try { external = await this.activeSessionIds() }

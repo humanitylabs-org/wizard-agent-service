@@ -1001,6 +1001,30 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     const changed = await s.request('/api/sessions/wizard_parity/model', post(allowed))
     assert.ok(changed.status < 300, `attached provider still changes the model (${changed.status})`)
   },
+  'graceful-restart-hold': async s => {
+    // Issue 480: while a restart waits for running turns, a send is saved and held (never refused, never sent),
+    // health says so without thread ids, and lifting the hold (or the next process) sends it once.
+    const gate = (init = {}) => s.raw('/wizard/v1/restart', { ...init, headers: { ...s.ownerHeaders, ...(init.headers ?? {}) } })
+    assert.deepEqual(await (await gate()).json(), { phase: 'idle', holding: false })
+    const asked = await gate(post({ reason: 'parity', wait_s: 60 }))
+    assert.equal(asked.status, 200)
+    assert.ok(['waiting', 'ready'].includes((await asked.json()).phase))
+    const runs = () => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/runs') && JSON.stringify(r.body).includes('Held during a restart')).length
+    const sent = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Held during a restart' }))
+    assert.ok(sent.status < 300, `${s.kind}: a send during the wait is accepted (${sent.status}), not refused`)
+    await new Promise(r => setTimeout(r, 50))
+    assert.equal(runs(), 0, `${s.kind}: the held send never reaches Hermes during the wait`)
+    const status = await (await gate()).json()
+    assert.equal(status.holding, true); assert.ok(status.held >= 1, `${s.kind}: the held send is counted (${JSON.stringify(status)})`)
+    const health = await (await s.raw('/wizard/health')).json()
+    assert.equal(health.restart?.holding, true, 'health shows the restart wait for the shell')
+    assert.equal(health.restart.turns, undefined, 'health carries no thread ids')
+    const released = await gate({ method: 'DELETE' })
+    assert.equal((await released.json()).released, true)
+    for (let n = 0; n < 100 && !runs(); n++) await new Promise(r => setTimeout(r, 20))
+    assert.equal(runs(), 1, `${s.kind}: the held send goes out once the hold lifts`)
+    assert.equal((await (await s.raw('/wizard/health')).json()).restart, undefined)
+  },
   'stopped-helper-no-needs-you': async s => {
     // Issue 467: a helper the agent itself stopped, delivering after the agent's final done reply, never
     // raises the saved-result Needs you. A helper that finished on its own still offers Continue (main only:
