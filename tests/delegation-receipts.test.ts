@@ -106,3 +106,37 @@ test('automatic resumption is only for fresh results (2 h)',()=>{
  assert.equal(readUndeliveredHelperReceipts(fresh,{now}).length,1)
  assert.equal(readUndeliveredHelperReceipts(fixture({age:3*3600}),{now}).length,0)
 })
+
+// Issue 467 (kick-back): an earlier ask, then the agent's done, then a helper the agent stopped delivers its
+// interrupted result 55 s later. Inside the 6 h helper window the done must still clear the earlier ask.
+test('a stopped helper delivered after the done reply does not keep the earlier ask open', async () => {
+ const { resolveThreadSection, threadBackground } = await import('../server/open-ask.mjs')
+ const ask = 'Posts went to Philosopher.\n[WIZARD_STATUS_V1]{"state":"needs_you","ask":"Reply hermes or label"}[/WIZARD_STATUS_V1]'
+ const done = 'Routing is fixed.\n[WIZARD_STATUS_V1]{"state":"done","ask":"Routing fixed"}[/WIZARD_STATUS_V1]'
+ const batch = state => `[ASYNC DELEGATION BATCH COMPLETE — deleg_stop]\nA background fan-out unit you dispatched earlier has finished.\n\n--- ✗ TASK 1/1: Check the routing (status=${state}, 12s) ---\nPartial output:\nfixture partial`
+ for (const [state, minutes] of [['interrupted', 5], ['cancelled', 5], ['interrupted', 180], ['completed', 5]]) {
+  const path = fixture({ final: ask, delivery: 'delivered' }); const db = new DatabaseSync(path); const at = now / 1000 - minutes * 60
+  const add = db.prepare('INSERT INTO messages(session_id,role,content,timestamp,display_kind,finish_reason) VALUES(?,?,?,?,?,?)')
+  db.prepare('UPDATE messages SET timestamp=? WHERE role=?').run(at - 120, 'assistant'); db.prepare('UPDATE messages SET timestamp=? WHERE role=?').run(at - 200, 'user')
+  add.run('wizard_a', 'user', 'Owner relayed: use hermes', at - 90, 'internal_notification', '')
+  add.run('wizard_a', 'assistant', done, at - 55, null, 'stop')
+  add.run('wizard_a', 'user', batch(state), at, 'async_delegation_complete', '')
+  db.close()
+  const truth = readHermesSessionTruth(path, ['wizard_a'], now / 1000).get('wizard_a')
+  const view = resolveThreadSection({ replies: truth.replies, lastUserAt: truth.lastUserAt, background: threadBackground(truth) })
+  if (state === 'completed') { assert.equal(truth.helperResultUnanswered, true, 'a finished helper still waits for the agent'); continue }
+  assert.ok(!truth.helperResultUnanswered, `${state} ${minutes} min`)
+  assert.equal(view.section, 'Ready'); assert.notEqual(view.attention?.state, 'needs_you', `${state} ${minutes} min`)
+ }
+})
+// An undelivered stopped receipt is fenced by its completion time: one that completed before the done
+// reply was never seen by the agent and still waits for it; one that completed after the done does not.
+test('an undelivered stopped receipt only stops waiting when it completed after the done reply', () => {
+ const done = 'Routing is fixed.\n[WIZARD_STATUS_V1]{"state":"done","ask":"Routing fixed"}[/WIZARD_STATUS_V1]'
+ for (const [age, waits] of [[1, false], [30, true]]) {
+  const path = fixture({ final: done, age }); const db = new DatabaseSync(path)
+  db.prepare("UPDATE async_delegations SET result_json=?").run(JSON.stringify({ results: [{ task_index: 0, status: 'interrupted', summary: 'partial' }] }))
+  db.close()
+  assert.equal(Boolean(readHermesSessionTruth(path, ['wizard_a'], now / 1000).get('wizard_a').helperResultUnanswered), waits, `completed ${age}s ago`)
+ }
+})
