@@ -1,3 +1,4 @@
+import { envChoice } from './channels-switch.mjs'
 import { browserBoundaryFromEnv } from './browser-boundary.mjs'
 import { defaultKeeperSocket } from './run-stream-keeper.mjs'
 import { createCloudflareAccessVerifier, createTailnetIngress, createWizardServer } from './service.mjs'
@@ -196,18 +197,20 @@ server = createWizardServer({
   // process) and wait for running turns to finish before it restarts the service. Off by default.
   gracefulRestart: process.env.WIZARD_GRACEFUL_RESTART === '1',
   ...(process.env.WIZARD_GRACEFUL_RESTART_WAIT_S ? { gracefulRestartWaitMs: Number(process.env.WIZARD_GRACEFUL_RESTART_WAIT_S) * 1000 } : {}),
+  // The four Channels parts below follow the owner's Settings > Try new features > Channels in Chats switch at runtime
+  // (wizard-ux issue 1358, server/channels-switch.mjs). Each env setting still overrides it: 1 forces the part on, 0 off.
   // Chats channels phase 2 (issue 440): channels and thread membership in ~/.wizard-os/channels.sqlite, served at
-  // /wizard/v1/channels; ui-preferences `spaces` becomes a read-only projection. Off by default.
-  channelStore: process.env.WIZARD_CHANNEL_STORE === '1',
+  // /wizard/v1/channels; ui-preferences `spaces` becomes a read-only projection.
+  channelStore: envChoice(process.env.WIZARD_CHANNEL_STORE),
   // Chats channels phase 3 (issue 441): agents file chats with the status line's `channel`, titles become post names,
   // and chats the scheduler opens go to their job's channel or Alerts. Needs WIZARD_CHANNEL_STORE=1. Off by default.
-  channelAgentFiling: process.env.WIZARD_CHANNEL_AGENT_FILING === '1',
+  channelAgentFiling: envChoice(process.env.WIZARD_CHANNEL_AGENT_FILING),
   // Channel read watermarks (issue 471): /wizard/v1/channels/read keeps each channel's read point for the owner, so
   // reading a channel to the bottom on one device clears it on the others. Needs WIZARD_CHANNEL_STORE=1. Off by default.
-  channelReadSync: process.env.WIZARD_CHANNEL_READ_SYNC === '1',
+  channelReadSync: envChoice(process.env.WIZARD_CHANNEL_READ_SYNC),
   // Chats Channels posts (issue 446): view=list rows carry firstRequest (the first owner message, cleaned, at most
   // 400 code units) and firstAttachments (its photos as file refs). Off by default.
-  channelFirstPosts: process.env.WIZARD_CHANNEL_FIRST_POSTS === '1',
+  channelFirstPosts: envChoice(process.env.WIZARD_CHANNEL_FIRST_POSTS),
   // Routed agents' owner turns stamped internal_notification by Hermes 0.22.7 (issue 379). Off by default.
   routedOwnerTurns: process.env.WIZARD_ROUTED_OWNER_TURNS === '1',
   // Owner turns with an inline screenshot, which Hermes flattens to "[screenshot]" (issue 145). Off by default.

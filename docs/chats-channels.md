@@ -5,6 +5,15 @@ nothing here exists: the routes answer 404, no `channels.sqlite` is created, and
 `ui-preferences.json` exactly as before. Issue: humanitylabs-org/wizard-agent-service#440 (phase 1, the
 shell view: humanitylabs-org/wizard-ux#1254; phase 3, agent filing: issue 441).
 
+## One switch (wizard-ux issue 1358)
+
+Every Channels part here (the store, channel posts, agent filing, read marks) follows the owner's **Settings ›
+Try new features › Channels in Chats** switch (`wizard/chat-channels`) at runtime, with no restart: the Service
+reads it from the synced Look file `Pages/wizard-look/look.json` (`tweaks["wizard/chat-channels"].on`, at most every
+3 s; `server/channels-switch.mjs`). Turning it off goes back to Spaces with `channels.sqlite` kept, so turning it on
+again brings the same channels and memberships back. The `WIZARD_CHANNEL_*` env settings below still win when a box
+sets them: `1` forces that part on, `0` forces it off.
+
 ## Store
 
 `~/.wizard-os/channels.sqlite` (next to `ui-preferences.json`, mode 0600), owned by the Agent Service.
