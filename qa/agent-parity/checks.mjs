@@ -11,6 +11,7 @@ const featureScenes = {
   'thread-tracker': kind => scene(kind, { threadTracker: true }),
   'routed-owner-turns': kind => scene(kind, { routedOwnerTurns: true }),
   'main-provider-attach': kind => scene(kind, { mainProviderAttach: true }),
+  'graceful-restart-hold': kind => scene(kind, { gracefulRestart: true }),
   'chats-channels': kind => scene(kind, { channelStore: true, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true }),
   'chats-read-marks': kind => scene(kind, { channelStore: true, channelReadSync: true }),
   'chats-agent-filing': kind => scene(kind, ({ root }) => ({ channelStore: true, channelAgentFiling: true, channelFirstPosts: true, routedOwnerTurns: true, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true, schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),
