@@ -1562,6 +1562,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "private-tinfoil-search",
+      "description": "A private Tinfoil agent searches the web only through the pinned, attested Tinfoil websearch proxy (websearch.tinfoil.sh, repo tinfoilsh/confidential-websearch): the runtime adds a <agent>-search sidecar inside that agent's own attestation proxy namespace (no new uplink, ports, env or key copy) and the managed Hermes config points the tinfoil_search MCP server at it with the PII and injection check headers; ordinary web search stays disabled and standard agents and other providers get no search route.",
+      "layer": "runtime",
+      "how_to_test": "Only container agents can be private Tinfoil agents: main and host-profile have no attestation sidecar and restricted refuses the Tinfoil provider (restricted_provider_unsupported), so for those kinds verify no tinfoil_search route is rendered. For a private Tinfoil container agent, render compose (fresh recipe and installed legacy recipe through the Runtipi owner override, merged and read back) and its managed config.yaml; verify the sidecar shares the proxy network namespace and the MCP url is http://agent-<id>-tinfoil:3302/mcp with the safety headers. Synthetic fixture evidence, not live search proof.",
+      "source_refs": [
+        "server/agents.mjs",
+        "ops/agent-runtime/agent_runtime.py"
+      ],
+      "reference_tests": [
+        "tests/private-search.node.mjs",
+        "ops/agent-runtime/test_private_search.py",
+        "ops/agent-runtime/test_incognito_runtime.py"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "locked-selector-boundary",
       "description": "Explicit admitted locks survive later selector changes without an app/model-specific dispatch override",
       "layer": "server",
