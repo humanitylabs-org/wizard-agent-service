@@ -16,6 +16,26 @@ const REASON = /^[a-z0-9][a-z0-9_.:-]{0,63}$/u
 
 export const RESTART_PENDING = 'restart_pending'
 
+// Who may reach the route from a browser. Holding every chat's sends is the owner's call, so a page of another app
+// on this box (a sibling localhost port or *.ts.net host) must not start, renew or read the hold. A POST must be
+// JSON: a page cannot send that without a CORS preflight this service never grants, unlike an empty or text/plain
+// body. Same-site and cross-site fetches, and an Origin that is not this host, are refused on every method, so a
+// no-cors GET cannot renew the lease either. Server callers (the App Manager) send none of these headers.
+// Returns 0 (allowed), 403 (wrong origin) or 415 (POST without JSON).
+export function restartRequestRefusal(request, { publicHost } = {}) {
+  const headers = request.headers ?? {}
+  const site = headers['sec-fetch-site']
+  if (site !== undefined && !['same-origin', 'none'].includes(site)) return 403
+  if (headers.origin !== undefined) {
+    let originHost = ''
+    try { originHost = new URL(headers.origin).host } catch { return 403 }
+    const host = publicHost ?? (headers['x-forwarded-host'] || headers.host)
+    if (!originHost || originHost !== host) return 403
+  }
+  if (request.method === 'POST' && !/^application\/json(?:;|$)/iu.test(String(headers['content-type'] ?? '').trim())) return 415
+  return 0
+}
+
 export function createRestartGate({
   activeTurns = () => [],
   heldSends = () => 0,

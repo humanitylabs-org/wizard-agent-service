@@ -1044,6 +1044,19 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     // health says so without thread ids, and lifting the hold (or the next process) sends it once.
     const gate = (init = {}) => s.raw('/wizard/v1/restart', { ...init, headers: { ...s.ownerHeaders, ...(init.headers ?? {}) } })
     assert.deepEqual(await (await gate()).json(), { phase: 'idle', holding: false })
+    // Another app's page on this box (same-site) can't start, renew or read the hold; a POST must be JSON (an
+    // empty or text/plain body is a simple request a browser sends without a preflight).
+    for (const init of [{ method: 'POST', body: '' }, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: '{}' }]) {
+      const r = await gate(init)
+      assert.equal(r.status, 415, `${s.kind}: a non-JSON restart request is refused (${r.status})`)
+    }
+    for (const headers of [{ 'Sec-Fetch-Site': 'same-site' }, { Origin: 'http://127.0.0.1:1' }]) {
+      for (const init of [{ method: 'GET' }, { ...post({ wait_s: 60 }), method: 'POST' }, { method: 'DELETE' }]) {
+        const r = await gate({ ...init, headers: { ...(init.headers ?? {}), ...headers } })
+        assert.equal(r.status, 403, `${s.kind}: ${init.method} from another site is refused (${JSON.stringify(headers)}: ${r.status})`)
+      }
+    }
+    assert.equal((await (await s.raw('/wizard/health')).json()).restart, undefined, `${s.kind}: refused requests start no hold`)
     const asked = await gate(post({ reason: 'parity', wait_s: 60 }))
     assert.equal(asked.status, 200)
     assert.ok(['waiting', 'ready'].includes((await asked.json()).phase))
