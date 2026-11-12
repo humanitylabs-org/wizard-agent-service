@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer, request as httpRequest } from 'node:http'
-import { createBrowserBoundary, browserBoundaryFromEnv } from '../server/browser-boundary.mjs'
+import { createBrowserBoundary, browserBoundaryFromEnv, passiveMediaPath } from '../server/browser-boundary.mjs'
 import { createWizardServer, createTailnetIngress, listen } from '../server/service.mjs'
 
 const TOKEN = 'a1'.repeat(32)
@@ -38,6 +38,38 @@ describe('browser owner boundary', () => {
       expect(gate.allows(req(), { kind })).toBe(true)
       expect(gate.allows(req({ 'sec-fetch-mode': 'cors' }), { kind })).toBe(true)
       for (const headers of [{ origin: 'null' }, { 'sec-fetch-site': 'same-origin' }, { 'sec-fetch-dest': 'empty' }]) expect(gate.allows(req(headers), { kind })).toBe(false)
+    }
+  })
+
+  it('passive owner media (img/video/audio, a top-level download) of a known id needs no token; nothing else does', () => {
+    const gate = createBrowserBoundary({ enabled: true, token: TOKEN })
+    const media = (headers: Record<string, string>, who: any = owner) => gate.allows(req(headers), who, { mediaRequest: true })
+    const site = { 'sec-fetch-site': 'same-origin' }
+    for (const dest of ['image', 'video', 'audio', 'track']) expect(media({ ...site, 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': dest }), dest).toBe(true)
+    for (const dest of ['document', 'empty']) expect(media({ ...site, 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': dest }), dest).toBe(true)
+    for (const headers of [
+      {}, // no browser metadata: a script outside a browser or an old client still needs the token
+      { 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'image' },
+      { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'image' }, // a sandboxed app frame
+      { 'sec-fetch-site': 'same-site', 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'image' },
+      { 'sec-fetch-site': 'none', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' },
+      { ...site, 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' }, // fetch() from a page
+      { ...site, 'sec-fetch-mode': 'same-origin', 'sec-fetch-dest': 'empty' },
+      { ...site, 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'iframe' }, // a frame load
+      { ...site, 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'script' },
+      { ...site, 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'embed' },
+      { ...site, 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'image', origin: 'null' },
+    ]) expect(media(headers as any), JSON.stringify(headers)).toBe(false)
+    const img = { ...site, 'sec-fetch-mode': 'no-cors', 'sec-fetch-dest': 'image' }
+    expect(gate.allows(req(img), owner)).toBe(false) // only for the media routes
+    for (const who of [{ kind: 'anonymous' }, { kind: 'agent' }, { kind: 'service' }]) expect(media(img, who)).toBe(false)
+    expect(createBrowserBoundary().allows(req(img), owner, { mediaRequest: true })).toBe(true) // off is inert
+    const hex = 'ab'.repeat(16)
+    expect(passiveMediaPath('GET', `/wizard/attachments/${hex}`)).toBe(true)
+    expect(passiveMediaPath('HEAD', `/wizard/files/wf_${hex}/content`)).toBe(true)
+    for (const [method, path] of [['POST', `/wizard/attachments/${hex}`], ['GET', '/wizard/files'], ['GET', `/wizard/files/${hex}/content`],
+      ['GET', `/wizard/attachments/${hex}/x`], ['GET', '/wizard/v1/settings'], ['GET', `/wizard/files/wf_${hex}`], ['DELETE', `/wizard/files/wf_${hex}/content`]]) {
+      expect(passiveMediaPath(method, path), `${method} ${path}`).toBe(false)
     }
   })
 
@@ -79,6 +111,31 @@ describe('browser owner boundary', () => {
     // Main's earlier Origin gate also rejects opaque requests, before the boundary.
     expect((await fetch(base + '/wizard/v1/settings', { headers: { ...headers, Origin: 'null' } })).status).toBe(403)
     expect((await fetch(base + '/wizard-os-home/api/voice')).status).toBe(401)
+  })
+  it('HTTP: an owner <img>/<video> load of an attachment or saved file passes the gate on both listeners; fetch() and frames do not', async () => {
+    const { base, tailnet } = await service(true, true)
+    // node:http, not fetch: Node's fetch overwrites Sec-Fetch-Mode with 'cors'.
+    const get = (url: string, headers: Record<string, string>) => new Promise<number>((resolve, reject) => {
+      const request = httpRequest(url, { headers }, reply => { reply.resume(); reply.on('end', () => resolve(reply.statusCode ?? 0)) })
+      request.on('error', reject); request.end()
+    })
+    const hex = 'cd'.repeat(16)
+    const img = { 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Dest': 'image' }
+    for (const origin of [base, tailnet]) {
+      const owned = origin === base ? { 'X-Wizard-Owner-Proof': PROOF } : { 'Tailscale-User-Login': 'owner@example.test' }
+      for (const path of [`/wizard/attachments/${hex}`, `/wizard/files/wf_${hex}/content`]) {
+        const passed = await get(origin + path, { ...owned, ...img })
+        expect(passed, `${origin}${path}`).not.toBe(401) // reaches the route (unknown id: not found / unavailable)
+        for (const headers of [{ ...img, 'Sec-Fetch-Site': 'cross-site' }, { ...img, 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty' }, { ...img, 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'iframe' }]) {
+          const refused = await get(origin + path, { ...owned, ...headers })
+          expect(refused, `${origin}${path} ${JSON.stringify(headers)}`).toBe(401)
+        }
+      }
+      // A listing or another owner read is never passive media.
+      expect(await get(origin + '/wizard/files', { ...owned, ...img })).toBe(401)
+    }
+    // Without the owner's proof the media exemption does not apply.
+    expect(await get(base + `/wizard/attachments/${hex}`, img)).toBe(401)
   })
   it('tailnet static proxy preserves browser metadata and opener isolation, never owner credentials', async () => {
     const seen: any[] = []

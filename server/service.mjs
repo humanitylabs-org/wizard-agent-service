@@ -97,7 +97,7 @@ import { placeAgentFiles } from './agent-files.mjs'
 import { createIncognito, isIncognitoPath } from './incognito.mjs'
 import { AgentChatInputs } from './agent-chat-inputs.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
-import { createBrowserBoundary } from './browser-boundary.mjs'
+import { createBrowserBoundary, passiveMediaPath } from './browser-boundary.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf, sameSecret } from './principals.mjs'
 import { createAppBindings } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
@@ -5842,7 +5842,9 @@ function buildWizardServer(options, lifetime) {
           && sameSecret(String(request.headers.authorization || '').replace(/^Bearer /u, ''), options.heavyToken))
         || (['/wizard/mcp', '/wizard/standard-chats/mcp', '/wizard/v1/agent-context'].includes(url.pathname) && Boolean(bridge?.agentFor(request)))
       )
-      if (!browserBoundary.allows(request, principal, { staticRequest, machineRequest })) {
+      // Passive owner media (<img>/<video>/<audio>, a download link) of a known attachment or saved file id.
+      const mediaRequest = browserBoundary.enabled && passiveMediaPath(request.method, url.pathname)
+      if (!browserBoundary.allows(request, principal, { staticRequest, machineRequest, mediaRequest })) {
         sendJson(response, 401, { error: 'shell_token_required', check: 'browser_boundary' })
         return
       }
