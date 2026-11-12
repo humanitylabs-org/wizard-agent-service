@@ -145,7 +145,7 @@ export function readUndeliveredHelperReceipts(path, {now=Date.now(),maxAgeSecond
       if(!Array.isArray(results)) continue
       const text=results.filter(r=>typeof r?.summary==='string'&&r.summary.trim()).map(r=>`Helper ${Number(r.task_index)+1} (${String(r.status||'unknown')}):\n${r.summary.trim()}`).join('\n\n')
       if(!text||text.length>60000) continue
-      receipts.push({agent_id:'hermes',session_id:sessionId,sessionId,delegationId:id,at:Number(row.completed_at),key:receiptKey(id),
+      receipts.push({agent_id:'hermes',session_id:sessionId,sessionId,delegationId:id,at:Number(row.completed_at),key:receiptKey(id),statuses:results.map(r=>String(r?.status||'')),
         input:RECEIPT_PREFIX+id+'\nThese are saved helper findings, not verified completion. Check the receipt; do not blindly duplicate work. '+FOLLOWUP_FAILURE_GUIDANCE+' Preserve the latest user instructions, original release authority and explicit owner approval gates; new scope still needs authorization.\n\n'+text})
     }
     return receipts

@@ -18,6 +18,18 @@ const rowsOf = p => Array.isArray(p?.data) ? p.data : Array.isArray(p?.sessions)
 const textOf = row => typeof row?.content === 'string' ? row.content : Array.isArray(row?.content)
   ? row.content.filter(part => typeof part?.text === 'string').map(part => part.text).join('\n') : ''
 const human = row => row?.role === 'user' && textOf(row).trim() && !INTERNAL.test(textOf(row)) && !['async_delegation_complete', 'internal_notification', 'system', 'hidden'].includes(row.display_kind)
+// A helper the parent itself stopped (every task interrupted or cancelled) after the parent already
+// gave its final done reply is not unfinished work: its late result must not raise Needs you (issue 467).
+const STOPPED = new Set(['interrupted', 'cancelled'])
+export const batchTaskStatuses = text => [...String(text || '').matchAll(/^--- \S+ TASK \d+\/\d+.*?\(status=([a-z_]+)/gmu)].map(match => match[1])
+export const allStopped = statuses => Array.isArray(statuses) && statuses.length > 0 && statuses.every(state => STOPPED.has(String(state)))
+const finalAssistant = row => row.role === 'assistant' && textOf(row).trim() && !['commentary', 'hidden'].includes(row.display_kind) && !row.tool_calls?.length
+export function doneBefore(rows, at) {
+  const latest = rows.map((row, n) => ({ ...row, n })).filter(row => Number(row.timestamp) <= Number(at))
+    .sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0) || Number(b.id || b.n) - Number(a.id || a.n))
+    .find(row => human(row) || finalAssistant(row))
+  return Boolean(latest && latest.role === 'assistant' && parseStatus(textOf(latest))?.state === 'done')
+}
 const identity = (root, source) => `bg_${createHash('sha256').update(`${root}\0${source}`).digest('hex').slice(0, 32)}`
 const error = (message, status = 409) => Object.assign(new Error(message), { status })
 // Service-written queue identity of an owner-approved manual Continue. The run queue stores it in its
@@ -97,6 +109,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
   })
   const acceptable = (candidate, rows) => {
     const snap = snapshot(rows, candidate.at)
+    if (candidate.stopped && doneBefore(rows, candidate.at)) return null
     if (snap.moved || snap.gated || isBusy(candidate.sessionId) || isBusy(candidate.readId) || consumed(rows, candidate.delegationId, candidate.at, candidate.messageId, candidate.sourceKind)) return null
     return { ...candidate, boundary: snap.boundary }
   }
@@ -151,7 +164,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
           const source = delegationId || `message-${root}-${message.id}`
           const key = delegationId ? receiptKey(delegationId) : `wizard-follow-through-${root}-${message.id}`
           if (admitted(key)) continue
-          const candidate = acceptable({ id: identity(root, source), sourceKind: 'transcript', source, sessionId: root, readId: id, at, messageId: message.id, delegationId, key,
+          const candidate = acceptable({ id: identity(root, source), sourceKind: 'transcript', source, sessionId: root, readId: id, at, messageId: message.id, delegationId, key, stopped: allStopped(batchTaskStatuses(text)),
             input: delegationId ? `${RECEIPT_PREFIX}${delegationId}\nThe owner pressed Continue for these saved helper findings. Finish the original request, including any other saved results above, under its latest instructions and release authority; verify helper claims yourself.\n\n${text}`
               : `[Wizard follow-through] The owner pressed Continue for the saved result below. Finish the original request, including any other saved results above, under its latest instructions and release authority; verify the findings yourself.\n\n${text}` }, rows)
           if (candidate && !records.some(row => row.id === candidate.id)) records.push(candidate)
@@ -175,7 +188,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
         complete = false; failures.set(root, Number(failure?.status) || 503)
         continue
       }
-      const candidate = acceptable({ ...receipt, sourceKind: 'receipt', id: identity(root, receipt.delegationId), source: receipt.delegationId, sessionId: root, readId: receipt.sessionId,
+      const candidate = acceptable({ ...receipt, stopped: allStopped(receipt.statuses), sourceKind: 'receipt', id: identity(root, receipt.delegationId), source: receipt.delegationId, sessionId: root, readId: receipt.sessionId,
         input: receipt.input.replace('These are saved helper findings,', 'The owner pressed Continue. These are saved helper findings,') }, rows)
       if (candidate && !records.some(row => row.id === candidate.id)) records.push(candidate)
       yield

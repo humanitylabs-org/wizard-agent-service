@@ -83,7 +83,7 @@ async function fixture({ count = 205, access = false, history = false, loseAck =
   const close = async () => { server.closeAllConnections(); await new Promise<void>(r => server.close(() => r())) }
   owned.push(async () => { await close(); upstream.closeAllConnections(); await new Promise<void>(r => upstream.close(() => r())); db?.close(); rmSync(dir, { recursive: true, force: true }) })
   return { rows, calls, reads, wireAttempts, sessions, finished, at, held, badHistory, queuePath: join(dir, 'queue.db'), close, open,
-    receipt: (sessionId: string, id = 'deleg_saved_receipt') => db!.prepare('INSERT INTO async_delegations VALUES(?,?,?,?,?,?)').run(id, sessionId, 'completed', 'dropped', JSON.stringify({ results: [{ task_index: 0, status: 'completed', summary: 'Saved receipt fixture findings.' }] }), finished),
+    receipt: (sessionId: string, id = 'deleg_saved_receipt', state = 'completed') => db!.prepare('INSERT INTO async_delegations VALUES(?,?,?,?,?,?)').run(id, sessionId, state, 'dropped', JSON.stringify({ results: [{ task_index: 0, status: state, summary: 'Saved receipt fixture findings.' }] }), finished),
     advance: (ms: number) => { skew += ms },
     failHistory: (v: boolean) => { failHistory = v },
     deleted: () => { failHistory = true; historyStatus = 404 }, denyHistory: () => { failHistory = true; historyStatus = 403 }, failLease: (v: boolean) => { failLease = v }, slowHistory: (v: boolean) => { slowHistory = v },
@@ -196,6 +196,35 @@ describe('one-tap Continue for older finished results: actual HTTP + durable que
     f.rows.get('wizard_manual_1')!.push({ id: 13, role: 'user', content: '[Wizard follow-through] Recovered helper receipt deleg_manual_1\nThe results were consumed.', timestamp: f.at })
     expect((await f.list()).body.results).toHaveLength(0)
     expect(f.calls).toHaveLength(0)
+  })
+  it('a done reply followed by a stopped helper delivery raises no Needs you (issue 467)', async () => {
+    const f = await fixture({ count: 3 })
+    const batch = (n: number, state: string) => `[ASYNC DELEGATION BATCH COMPLETE — deleg_stopped_${n}]\nA background fan-out unit you dispatched earlier has finished.\n\n--- ✗ TASK 1/1: Check the routing (status=${state}, 12s) ---\nPartial output:\nfixture partial`
+    for (const [n, state] of [[0, 'interrupted'], [1, 'cancelled'], [2, 'completed']] as const) {
+      const list = f.rows.get(`wizard_manual_${n}`)!
+      list.splice(1, 0, { id: n * 10 + 5, role: 'assistant', content: status('done'), finish_reason: 'stop', timestamp: f.finished - 55 })
+      Object.assign(list[2], { id: n * 10 + 6, content: batch(n, state) })
+    }
+    const results = (await f.list()).body.results
+    // Only the helper that finished on its own still offers Continue; the stopped ones are quiet.
+    expect(results.map((r: any) => r.session_id)).toEqual(['wizard_manual_2'])
+    const rows = await (await fetch(`${f.base()}/api/sessions?limit=10`)).json()
+    const attention = Object.fromEntries((rows.data || rows.sessions || []).map((r: any) => [r.id, r.wizard_attention?.state]))
+    expect(attention.wizard_manual_0).not.toBe('needs_you')
+    expect(attention.wizard_manual_1).not.toBe('needs_you')
+    expect(f.calls).toHaveLength(0)
+  })
+  it('a stopped helper still offers Continue when the parent never said done', async () => {
+    const f = await fixture({ count: 1 })
+    f.rows.get('wizard_manual_0')![1].content = '[ASYNC DELEGATION BATCH COMPLETE — deleg_cut_0]\n\n--- ✗ TASK 1/1 (status=interrupted) ---\nPartial output:\nfixture partial'
+    expect((await f.list()).body.results).toHaveLength(1)
+  })
+  it('a dropped receipt from a stopped helper after a done reply raises no Needs you', async () => {
+    const f = await fixture({ count: 1, history: true })
+    const list = f.rows.get('wizard_manual_0')!
+    list.splice(1, 1, { id: 5, role: 'assistant', content: status('done'), finish_reason: 'stop', timestamp: f.finished - 55 })
+    f.receipt('wizard_manual_0', 'deleg_stopped_receipt', 'interrupted')
+    expect((await f.list()).body.results).toHaveLength(0)
   })
   it('a genuine final answer after a transcript completion consumes it even with a delegation id', async () => {
     const f = await fixture({ count: 1 })
