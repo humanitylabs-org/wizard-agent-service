@@ -1112,6 +1112,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "stopped-helper-no-needs-you",
+      "description": "A helper the agent itself stopped (every task interrupted or cancelled) that delivers after the agent's final done reply never turns the finished thread into Needs you; a helper that finished on its own still offers the saved-result Continue.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP list (main, host-profile, container TCP, restricted Unix ingress): seed a thread whose done reply is followed by an interrupted helper batch and a control thread followed by a completed batch, both three hours old. Main's /wizard/background-results lists only the control; no kind shows needs_you on the stopped thread in /api/sessions, and routed kinds show no saved-result needs_you at all (the saved-result scan reads the main Hermes only). Discovery starts no run. tests/background-results.test.ts covers cancelled, no-done and dropped-receipt cases. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/background-results.mjs",
+        "server/delegation-receipts.mjs"
+      ],
+      "reference_tests": [
+        "tests/background-results.test.ts"
+      ],
+      "fixture": "stopped-helper-no-needs-you",
+      "policy_exemptions": []
+    },
+    {
       "id": "file-store-retention",
       "description": "The built-in file store keeps every upload findable by id: after more than 5,000 later uploads the first attachment still opens, still resolves for the agent and is still found as a duplicate; opening it never rewrites the index.",
       "layer": "server",

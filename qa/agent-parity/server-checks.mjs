@@ -987,6 +987,32 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     const changed = await s.request('/api/sessions/wizard_parity/model', post(allowed))
     assert.ok(changed.status < 300, `attached provider still changes the model (${changed.status})`)
   },
+  'stopped-helper-no-needs-you': async s => {
+    // Issue 467: a helper the agent itself stopped, delivering after the agent's final done reply, never
+    // raises the saved-result Needs you. A helper that finished on its own still offers Continue (main only:
+    // the saved-result scan reads the main Hermes; routed kinds must stay without it).
+    const at = Date.now() / 1000 - 3 * 3600
+    const thread = (id, state) => s.sessions.set(id, { id, source: 'wizard-mobile', title: 'Synthetic helper', created_at: at - 200, messages: [
+      { id: 1, role: 'user', content: 'Check the synthetic routing.', timestamp: at - 200 },
+      { id: 2, role: 'assistant', finish_reason: 'stop', timestamp: at - 55, content: 'Routing checked.\n[WIZARD_STATUS_V1]{"state":"done","ask":"Routing is checked","subject":"Parity QA"}[/WIZARD_STATUS_V1]' },
+      { id: 3, role: 'user', display_kind: 'async_delegation_complete', timestamp: at,
+        content: `[ASYNC DELEGATION BATCH COMPLETE — deleg_${id}]\nA background fan-out unit you dispatched earlier has finished.\n\n--- ✗ TASK 1/1: Synthetic check (status=${state}, 9s) ---\nPartial output:\nsynthetic partial` }] })
+    thread('wizard_parity_stopped', 'interrupted'); thread('wizard_parity_owed', 'completed')
+    if (s.kind === 'main') {
+      let listed
+      for (let n = 0; n < 200; n++) {
+        listed = await (await s.raw('/wizard/background-results', { headers: s.ownerHeaders })).json()
+        if (!listed.scanning && listed.results?.length) break
+        await new Promise(r => setTimeout(r, 25))
+      }
+      assert.deepEqual(listed.results.map(r => r.session_id), ['wizard_parity_owed'], 'only the helper that finished on its own offers Continue')
+    }
+    const rows = (await (await s.request('/api/sessions?limit=100')).json()).data
+    const attention = id => rows.find(r => r.id === id)?.wizard_attention?.state
+    assert.notEqual(attention('wizard_parity_stopped'), 'needs_you', `${s.kind}: a stopped helper after done is not Needs you`)
+    if (s.kind !== 'main') assert.notEqual(attention('wizard_parity_owed'), 'needs_you', `${s.kind}: routed kinds keep no saved-result Needs you`)
+    assert.ok(!s.seen.some(r => r.path.endsWith('/runs') && r.method === 'POST' && /wizard_parity_(stopped|owed)/.test(JSON.stringify(r.body))), 'discovery never starts work')
+  },
   'new-chat-unreachable-agent': async s => {
     // Issue 448: one unreachable optional agent (no sealed catalog) must not stop new chats on this agent.
     // Registered after the scene's own session-create, as running, with an upstream that refuses connections.
