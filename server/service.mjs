@@ -6212,10 +6212,13 @@ function buildWizardServer(options, lifetime) {
       }
       if (url.pathname === '/wizard/v1/ui-preferences' || url.pathname === '/wizard/v1/ui-preferences/seed') {
         const seed = url.pathname.endsWith('/seed')
-        if (seed && !ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        // Owner settings (issue 488): the same gate as My skin and Pages writes, on every method. Agent credentials
+        // and, with an owner proof configured, anonymous local callers are refused; so are same-site and cross-site
+        // fetches and an Origin that is not this host (a sibling app's page), for reads as well as writes.
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
         if (!(seed ? ['POST'] : ['GET', 'PUT', 'PATCH']).includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: seed ? 'POST' : 'GET, PUT, PATCH' }); return }
-        if (request.method !== 'GET' && request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_site_write' }); return }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         const path = resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')
         let patch
         if (request.method !== 'GET') {
@@ -6238,9 +6241,10 @@ function buildWizardServer(options, lifetime) {
         if (!channelStore || (reads && !channelReadSyncOn())) { sendJson(response, 404, { error: 'not_found' }); return }
         const membership = reads ? 'read' : url.pathname.endsWith('/membership')
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
         const methods = membership ? ['GET', 'PUT'] : ['GET', 'POST', 'PATCH']
         if (!methods.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: methods.join(', ') }); return }
-        if (request.method !== 'GET' && request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_site_write' }); return }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         let body = null
         if (request.method !== 'GET') {
           if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
