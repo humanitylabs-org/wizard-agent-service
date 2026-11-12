@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../server/service.mjs'
@@ -109,6 +109,37 @@ describe('box-wide UI preferences HTTP contract', () => {
     expect((await fetch(open, { method: 'PUT', body: '{}' })).status).toBe(415)
     expect((await fetch(open, { method: 'DELETE' })).status).toBe(405)
     expect((await fetch(open, { method: 'PUT', headers: { 'content-type': 'application/json' }, body: '{' })).status).toBe(400)
+  })
+  it('issue 488: owner settings refuse anonymous callers, sibling pages and foreign Origins on every method', async () => {
+    const proof = 'ui-prefs-owner-proof-0123456789abcdef0123456789', owner = { 'x-wizard-owner-proof': proof }
+    const d = home(), file = join(d, 'ui-preferences.json')
+    const s = createWizardServer({ wizardOsHome: d, hermesKey: 'test', agentBridge: false, followThrough: false, requireAccess: false, ownerProof: proof, runQueueStatePath: join(d, 'q.db'), runQueuePollIntervalMs: 0, channelStore: true })
+    servers.push(s); const a: any = await listen(s), base = `http://127.0.0.1:${a.port}`, u = `${base}/wizard/v1/ui-preferences`
+    const body = (method: string, value: any, headers = {}) => fetch(u, { method, headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(value) })
+    // Anonymous and a wrong proof: nothing read, nothing written.
+    for (const h of [{}, { 'x-wizard-owner-proof': 'wrong-proof-0123456789abcdef0123456789' }]) {
+      expect((await fetch(u, { headers: h })).status).toBe(403)
+      expect((await body('PUT', { compact: true }, h)).status).toBe(403)
+      expect((await body('PATCH', { ops: [{ op: 'add', key: 'pinnedChats', item: 'wizard_x' }] }, h)).status).toBe(403)
+      expect((await fetch(`${base}/wizard/v1/channels`, { headers: h })).status).toBe(403)
+    }
+    expect(existsSync(file)).toBe(false)
+    // The owner, but from another site, a sibling app (same-site) or a foreign Origin: refused for reads too.
+    for (const h of [{ 'sec-fetch-site': 'cross-site' }, { 'sec-fetch-site': 'same-site' }, { origin: 'http://127.0.0.1:1' }, { origin: 'null' }]) {
+      expect((await fetch(u, { headers: { ...owner, ...h } })).status).toBe(403)
+      expect((await body('PUT', { compact: true }, { ...owner, ...h })).status).toBe(403)
+      expect((await fetch(`${base}/wizard/v1/channels`, { headers: { ...owner, ...h } })).status).toBe(403)
+    }
+    expect(existsSync(file)).toBe(false)
+    // Writes still need JSON.
+    expect((await fetch(u, { method: 'PUT', headers: owner, body: '{}' })).status).toBe(415)
+    // The shell's own reads and writes (same origin, own Origin, or a server caller with no browser headers) work.
+    expect((await body('PUT', { compact: true }, { ...owner, 'sec-fetch-site': 'same-origin', origin: base })).status).toBe(200)
+    expect((await body('PATCH', { ops: [{ op: 'add', key: 'pinnedChats', item: 'wizard_a' }] }, { ...owner, 'sec-fetch-site': 'same-origin', origin: base })).status).toBe(200)
+    const read = await fetch(u, { headers: { ...owner, 'sec-fetch-site': 'same-origin' } }); expect(read.status).toBe(200)
+    expect(await read.json()).toMatchObject({ compact: true, pinnedChats: ['wizard_a'] })
+    expect((await fetch(u, { headers: owner })).status).toBe(200)
+    expect((await fetch(`${base}/wizard/v1/channels`, { headers: { ...owner, 'sec-fetch-site': 'same-origin' } })).status).toBe(200)
   })
   it('reads leniently: an unknown stored key is dropped, valid keys kept, defaults filled', async () => {
     const d = home(), file = join(d, 'ui-preferences.json'), stored = '{"compact":true,"futureShellKey":{"x":1}}\n'
