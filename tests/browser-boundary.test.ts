@@ -67,8 +67,9 @@ describe('browser owner boundary', () => {
     const hex = 'ab'.repeat(16)
     expect(passiveMediaPath('GET', `/wizard/attachments/${hex}`)).toBe(true)
     expect(passiveMediaPath('HEAD', `/wizard/files/wf_${hex}/content`)).toBe(true)
+    expect(passiveMediaPath('GET', `/wizard/files/drop_${hex}/content`)).toBe(true) // inbox-backed saved files
     for (const [method, path] of [['POST', `/wizard/attachments/${hex}`], ['GET', '/wizard/files'], ['GET', `/wizard/files/${hex}/content`],
-      ['GET', `/wizard/attachments/${hex}/x`], ['GET', '/wizard/v1/settings'], ['GET', `/wizard/files/wf_${hex}`], ['DELETE', `/wizard/files/wf_${hex}/content`]]) {
+      ['GET', `/wizard/attachments/${hex}/x`], ['GET', '/wizard/v1/settings'], ['GET', `/wizard/files/wf_${hex}`], ['GET', `/wizard/files/drop_${hex}x/content`], ['DELETE', `/wizard/files/wf_${hex}/content`]]) {
       expect(passiveMediaPath(method, path), `${method} ${path}`).toBe(false)
     }
   })
@@ -123,7 +124,7 @@ describe('browser owner boundary', () => {
     const img = { 'Sec-Fetch-Site': 'same-origin', 'Sec-Fetch-Mode': 'no-cors', 'Sec-Fetch-Dest': 'image' }
     for (const origin of [base, tailnet]) {
       const owned = origin === base ? { 'X-Wizard-Owner-Proof': PROOF } : { 'Tailscale-User-Login': 'owner@example.test' }
-      for (const path of [`/wizard/attachments/${hex}`, `/wizard/files/wf_${hex}/content`]) {
+      for (const path of [`/wizard/attachments/${hex}`, `/wizard/files/wf_${hex}/content`, `/wizard/files/drop_${hex}/content`]) {
         const passed = await get(origin + path, { ...owned, ...img })
         expect(passed, `${origin}${path}`).not.toBe(401) // reaches the route (unknown id: not found / unavailable)
         for (const headers of [{ ...img, 'Sec-Fetch-Site': 'cross-site' }, { ...img, 'Sec-Fetch-Mode': 'cors', 'Sec-Fetch-Dest': 'empty' }, { ...img, 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'iframe' }]) {

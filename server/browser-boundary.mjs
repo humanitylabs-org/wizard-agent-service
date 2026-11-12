@@ -19,7 +19,7 @@ export function browserBoundaryFromEnv(env = process.env) {
 // when the browser itself says the load is passive media (or a navigation) started by a same-origin document.
 // Scripts cannot set Sec-Fetch-*; a sandboxed (opaque) frame's loads are cross-site; fetch() is dest 'empty' with
 // mode 'cors'/'same-origin' and still needs the token. Bytes only, never a listing: the id must be known.
-const PASSIVE_MEDIA_PATH = /^\/wizard\/(?:attachments\/[0-9a-f]{32}|files\/wf_[0-9a-f]{32}\/content)$/u
+const PASSIVE_MEDIA_PATH = /^\/wizard\/(?:attachments\/[0-9a-f]{32}|files\/(?:wf|drop)_[0-9a-f]{32}\/content)$/u
 const PASSIVE_MEDIA_DEST = new Set(['image', 'video', 'audio', 'track'])
 export function passiveMediaPath(method, pathname) {
   return (method === 'GET' || method === 'HEAD') && PASSIVE_MEDIA_PATH.test(String(pathname || ''))
