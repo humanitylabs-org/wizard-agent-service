@@ -19,6 +19,8 @@ function validRecord(value) {
   const assistantActivityAt = value.assistantActivityAt
   const seenAt = value.seenAt
   const unreadAt = value.unreadAt
+  // Mark done (wizard-ux issue 1317): the newest reply time the owner marked the thread handled through.
+  const handledThrough = value.handledThrough
   if (messageCount !== undefined && (!Number.isSafeInteger(messageCount) || messageCount < 0)) return null
   if (status !== undefined && !RUN_STATUSES.has(status)) return null
   if (typeof updatedAt !== 'string' || updatedAt.length > 100 || !Number.isFinite(Date.parse(updatedAt))) return null
@@ -26,6 +28,7 @@ function validRecord(value) {
   if (assistantActivityAt !== undefined && (typeof assistantActivityAt !== 'string' || assistantActivityAt.length > 100 || !Number.isFinite(Date.parse(assistantActivityAt)))) return null
   if (!validTimestamp(seenAt)) return null
   if (unreadAt !== undefined && !validTimestamp(unreadAt)) return null
+  if (handledThrough !== undefined && (typeof handledThrough !== 'string' || handledThrough.length > 100 || !Number.isFinite(Date.parse(handledThrough)))) return null
   return {
     ...(value.agent_id !== undefined ? { agent_id: value.agent_id, session_id: value.session_id } : {}),
     ...(messageCount !== undefined ? { messageCount } : {}),
@@ -35,6 +38,7 @@ function validRecord(value) {
     ...(assistantActivityAt !== undefined ? { assistantActivityAt } : {}),
     seenAt,
     ...(unreadAt !== undefined ? { unreadAt } : {}),
+    ...(handledThrough !== undefined ? { handledThrough } : {}),
   }
 }
 
@@ -93,9 +97,15 @@ function laterRecord(left, right) {
       : rightAssistantAt !== leftAssistantAt
         ? rightAssistantAt > leftAssistantAt ? right.assistantActivityAt : left.assistantActivityAt
         : (right.assistantActivityAt ?? '') > (left.assistantActivityAt ?? '') ? right.assistantActivityAt : left.assistantActivityAt
-  return selected.seenAt === seenAt && (selected.unreadAt ?? -1) === unreadAt && selected.assistantActivityAt === assistantActivityAt
+  // The newer "handled through" of the two is kept, whichever record wins (an older service drops the field).
+  const leftHandled = Date.parse(left.handledThrough ?? '')
+  const rightHandled = Date.parse(right.handledThrough ?? '')
+  const handledThrough = !Number.isFinite(leftHandled)
+    ? (Number.isFinite(rightHandled) ? right.handledThrough : undefined)
+    : !Number.isFinite(rightHandled) || leftHandled >= rightHandled ? left.handledThrough : right.handledThrough
+  return selected.seenAt === seenAt && (selected.unreadAt ?? -1) === unreadAt && selected.assistantActivityAt === assistantActivityAt && selected.handledThrough === handledThrough
     ? selected
-    : { ...selected, ...(assistantActivityAt ? { assistantActivityAt } : {}), seenAt, ...(unreadAt >= 0 ? { unreadAt } : {}) }
+    : { ...selected, ...(assistantActivityAt ? { assistantActivityAt } : {}), seenAt, ...(unreadAt >= 0 ? { unreadAt } : {}), ...(handledThrough ? { handledThrough } : {}) }
 }
 
 export function mergeThreadSeenStates(left, right, { protect = null, keepInitializedAt = false } = {}) {
