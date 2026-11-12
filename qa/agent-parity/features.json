@@ -564,7 +564,9 @@
         "wizard-ux/tests/channel-new-chat-entry-points.test.mjs",
         "wizard-ux/tests/qa-chat-channel-new-chat.cjs",
         "wizard-ux/tests/one-agent-spaces.test.mjs",
-        "wizard-ux/tests/qa-chat-channel-agent-tab.cjs"
+        "wizard-ux/tests/qa-chat-channel-agent-tab.cjs",
+        "wizard-ux/tests/needs-you-landing.test.mjs",
+        "wizard-ux/tests/qa-needs-you-landing.cjs"
       ],
       "fixture": null,
       "policy_exemptions": []
