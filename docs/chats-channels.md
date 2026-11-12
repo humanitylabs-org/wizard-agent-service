@@ -91,3 +91,22 @@ humanitylabs-org/wizard-agent-service#441.
   alert) carries no `firstRequest` even after the owner replies, so the shell keeps showing the agent's post.
 
 Not changed here: a recurring job keeps its one chat (each run is a reply in it), as before.
+
+## Read position (issue 471)
+
+Switch: `WIZARD_CHANNEL_READ_SYNC=1` (Agent Service env, option `channelReadSync`), on top of
+`WIZARD_CHANNEL_STORE=1`. Off by default; with it off the route is a 404 and the shell keeps its read position on
+each device only (wizard-ux issue 1316). Issue: humanitylabs-org/wizard-agent-service#471.
+
+- **What it holds.** One read watermark per shell key, in `channels.sqlite` table `read_marks`: the newest activity
+  time (ms since the epoch) the owner has scrolled past in that feed. Keys are the shell's own: `general` (All
+  General), `general|<agent>` (General focused on one agent) and `<agent>|<channel id>` (`hermes` = main).
+- **`GET /wizard/v1/channels/read`** returns `{ schema: 'wizard.channel-reads/1', at: { <key>: <ms> } }`, the
+  newest 1000 marks.
+- **`PUT /wizard/v1/channels/read`** with `{ at: { <key>: <ms> } }` (1 to 300 keys) moves each mark forward only: an
+  older or equal mark is ignored, so a device that read less never un-reads a channel. A mark later than the box's
+  clock plus one minute is kept as that, so a device clock running ahead cannot mark future posts read. It answers
+  with the same shape as GET. Beyond 1000 marks the oldest are dropped. An invalid key or value, or any other body
+  field, is a 400.
+- Same owner surface, access check, cross-site rule and `no-store` as the other channel routes. The shell writes at
+  most once per two seconds and reads it with the channel list (every 30 seconds and when a window comes back).

@@ -576,6 +576,20 @@ export const serverChecks = {
     assert.equal((await put([])).status, 200)
     assert.ok(s.sessions.has('wizard_parity'), 'removing a Space does not delete its threads')
   },
+  // Issue 471 (WIZARD_CHANNEL_READ_SYNC=1 with the store): each channel's read point, shared by the owner's devices.
+  'chats-read-marks': async s => {
+    const put = at => s.raw('/wizard/v1/channels/read', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ at }) })
+    const read = async () => (await (await s.raw('/wizard/v1/channels/read')).json()).at
+    const channel = await (await s.raw('/wizard/v1/channels', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'Synthetic read channel', agent: s.id }) })).json()
+    const own = `${s.id}|${channel.id}`, general = `general|${s.id}`, t = Date.now() - 60_000
+    assert.deepEqual(await read(), {}, 'nothing read yet')
+    assert.equal((await put({ [own]: t, [general]: t })).status, 200)
+    assert.equal((await put({ [own]: t - 30_000, general: t - 1 })).status, 200, 'a device that read less writes an older mark')
+    assert.deepEqual(await read(), { [own]: t, [general]: t, general: t - 1 }, 'an older mark never moves a channel back')
+    assert.equal((await put({ [`${s.id}|Not-A-Channel`]: t })).status, 400)
+    await s.restart()
+    assert.equal((await read())[own], t, 'durable across a restart')
+  },
   // Issue 440 (WIZARD_CHANNEL_STORE=1): channels.sqlite through each runtime's real Service route.
   'chats-channels': async s => {
     const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })

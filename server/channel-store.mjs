@@ -21,6 +21,13 @@ export const PROJECTION_SPACES = 50
 export const PROJECTION_THREADS = 500
 export const ALERTS_ID = 'alerts'
 const FILED_BY = new Set(['owner', 'agent', 'migration'])
+// Read watermarks (issue 471): the shell's keys are `general`, `general|<agent>` and `<agent>|<channel id>`.
+export const CHANNEL_READS_SCHEMA = 'wizard.channel-reads/1'
+export const READ_MARKS_MAX = 1000
+export const READ_MARKS_PER_WRITE = 300
+const READ_MARK_SKEW_MS = 60_000
+const READ_KEY = /^(?:general(?:\|[a-z0-9][a-z0-9-]{0,47})?|[a-z0-9][a-z0-9-]{0,47}\|[a-z0-9-]{1,48})$/
+export const validReadKey = v => typeof v === 'string' && READ_KEY.test(v)
 
 const fail = (status, code) => { throw Object.assign(new Error(code), { status, code }) }
 export const validChannelName = v => typeof v === 'string' && v.trim().length > 0 && v.length <= 60 && !/[\u0000-\u001f\u007f]/u.test(v)
@@ -38,7 +45,9 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     CREATE TABLE IF NOT EXISTS membership(agent TEXT NOT NULL, session_id TEXT NOT NULL, channel_id TEXT NOT NULL,
       filed_at TEXT NOT NULL, filed_by TEXT NOT NULL CHECK(filed_by IN ('owner','agent','migration')), PRIMARY KEY(agent, session_id));
     CREATE INDEX IF NOT EXISTS membership_channel ON membership(channel_id, filed_at);
-    CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);`)
+    CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS read_marks(key TEXT PRIMARY KEY, at INTEGER NOT NULL, updated_at TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS read_marks_at ON read_marks(at);`)
   const q = sql => db.prepare(sql)
   const st = {
     meta: q('SELECT value FROM meta WHERE key=?'), setMeta: q('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'),
@@ -59,6 +68,11 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
       ON CONFLICT(agent,session_id) DO UPDATE SET channel_id=excluded.channel_id, filed_at=excluded.filed_at, filed_by=excluded.filed_by`),
     fileNew: q('INSERT OR IGNORE INTO membership(agent,session_id,channel_id,filed_at,filed_by) VALUES(?,?,?,?,?)'),
     unfile: q('DELETE FROM membership WHERE agent=? AND session_id=?'),
+    reads: q('SELECT key, at FROM read_marks ORDER BY at DESC, key LIMIT ?'),
+    readMark: q(`INSERT INTO read_marks(key,at,updated_at) VALUES(?,?,?)
+      ON CONFLICT(key) DO UPDATE SET at=excluded.at, updated_at=excluded.updated_at WHERE excluded.at > read_marks.at`),
+    readCount: q('SELECT COUNT(*) AS n FROM read_marks'),
+    readPrune: q('DELETE FROM read_marks WHERE key IN (SELECT key FROM read_marks ORDER BY at ASC, key LIMIT ?)'),
   }
   const tx = fn => { db.exec('BEGIN IMMEDIATE'); try { const v = fn(); db.exec('COMMIT'); return v } catch (e) { try { db.exec('ROLLBACK') } catch {} throw e } }
   const view = r => ({ id: r.id, agent: r.agent, name: r.name, order: r.ord, createdAt: r.created_at, archived: !!r.archived,
@@ -203,6 +217,24 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
         return { id: r.id, name: r.name, ...(r.agent === 'hermes' ? {} : { agent: r.agent }), threads: threads.slice(-PROJECTION_THREADS), createdAt: r.created_at }
       })
     },
+    // Read watermarks (issue 471, WIZARD_CHANNEL_READ_SYNC=1): the newest activity time (ms) the owner has read a
+    // channel feed to, per shell key, so every device of the owner shares it. Forward only: an older mark never wins.
+    reads() { return { schema: CHANNEL_READS_SCHEMA, at: Object.fromEntries(st.reads.all(READ_MARKS_MAX).map(r => [r.key, Number(r.at)])) } },
+    markRead(marks, { clock = Date.now } = {}) {
+      if (!marks || typeof marks !== 'object' || Array.isArray(marks)) fail(400, 'invalid_marks')
+      const entries = Object.entries(marks)
+      if (!entries.length || entries.length > READ_MARKS_PER_WRITE) fail(400, 'invalid_marks')
+      // A device clock ahead of the box must not mark tomorrow's posts read: a mark is never later than the box's now.
+      const cap = clock() + READ_MARK_SKEW_MS
+      for (const [key, at] of entries) if (!validReadKey(key) || !Number.isFinite(at) || at < 0) fail(400, 'invalid_marks')
+      tx(() => {
+        const at = now()
+        for (const [key, t] of entries) st.readMark.run(key, Math.floor(Math.min(t, cap)), at)
+        const over = st.readCount.get().n - READ_MARKS_MAX
+        if (over > 0) st.readPrune.run(over)
+      })
+      return store.reads()
+    },
     close() { try { db.close() } catch { /* already closed */ } },
   }
   return store
@@ -210,9 +242,16 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
 
 // HTTP: /wizard/v1/channels (GET ?agent=, POST {name, agent?}, PATCH one of {id, name?, archived?, pinned?} |
 // {order:[ids]} | {pinOrder:[ids]} | {sort:'az'|'za'}) and /wizard/v1/channels/membership (GET ?channel= |
-// ?sessionId=&agent=, PUT {sessionId, channelId|null, agent?}). Unknown keys are a 400, like ui-preferences.
+// ?sessionId=&agent=, PUT {sessionId, channelId|null, agent?}) and, with the read sync on, /wizard/v1/channels/read
+// (membership === 'read'). Unknown keys are a 400, like ui-preferences.
 export function channelRequest(store, method, membership, params, body) {
   const only = (...keys) => { if (Object.keys(body).some(k => !keys.includes(k))) fail(400, 'invalid_request') }
+  // /wizard/v1/channels/read (issue 471): GET -> {schema, at}; PUT {at:{key: ms}} moves marks forward only.
+  if (membership === 'read') {
+    if (method === 'GET') return store.reads()
+    only('at')
+    return store.markRead(body.at)
+  }
   if (membership) {
     if (method === 'GET') {
       if (params.has('channel')) return { channel: params.get('channel'), members: store.members(params.get('channel')) }

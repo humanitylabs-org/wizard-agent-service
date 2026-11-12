@@ -472,6 +472,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "chats-read-marks",
+      "description": "Channel read watermarks (issue 471, WIZARD_CHANNEL_READ_SYNC=1 with WIZARD_CHANNEL_STORE=1): /wizard/v1/channels/read keeps the shell's read point per channel (and General per agent) in channels.sqlite, forward only, so reading a channel to the bottom on one device clears it on the owner's other devices.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile, container TCP, restricted Unix ingress) with channelStore and channelReadSync on: a fresh store has no marks; write this agent's channel and General marks, write older ones and see them kept, get 400 for an invalid key, restart and read the same marks. tests/channel-reads.test.ts covers the store rules (forward only, clock clamp, the 1000-mark cap) and the switch off. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/channel-store.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/channel-reads.test.ts"
+      ],
+      "fixture": "chats-read-marks",
+      "policy_exemptions": []
+    },
+    {
       "id": "chats-agent-filing",
       "description": "Chats channels phase 3 (issue 441, WIZARD_CHANNEL_AGENT_FILING=1 with WIZARD_CHANNEL_STORE=1): the status line's channel field (space as an alias) files an unfiled chat into one of the agent's own channels, the run note carries the channel catalogue and the post-name title rule, and a chat the scheduler opens is filed into its job's channel or, by default, the main agent's Alerts channel.",
       "layer": "server",
