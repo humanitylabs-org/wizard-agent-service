@@ -621,6 +621,12 @@ export const serverChecks = {
     assert.equal((await item(x => !x.channel))?.channel, undefined, 'list rows lose the channel while off')
     look(true)
     assert.equal((await item(x => x.channel === own.id))?.channel, own.id, 'on again: the same membership is back')
+    // A thread deleted while Channels are off leaves the store too, so turning them on never brings it back.
+    look(false)
+    assert.equal((await s.request('/api/sessions/wizard_parity', { method: 'DELETE' })).status, 200)
+    look(true)
+    const after = (await (await s.raw('/wizard/v1/channels')).json()).channels.find(c => c.id === own.id)
+    assert.equal(after?.count, 0, 'the deleted thread is no longer a member')
   },
   // Issue 440 (WIZARD_CHANNEL_STORE=1): channels.sqlite through each runtime's real Service route.
   'chats-channels': async s => {

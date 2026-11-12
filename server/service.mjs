@@ -3377,6 +3377,8 @@ function buildWizardServer(options, lifetime) {
     channelAgentFiling: { get: () => channelAgentFilingOn(), enumerable: true, configurable: true },
     channelFirstPosts: { get: () => channelFirstPostsOn(), enumerable: true, configurable: true },
   })
+  // Deletes clean the store even while Channels are off, so turning them on again never brings a deleted thread back.
+  if (agentCtx) agentCtx.channelStoreOpened = () => openedChannelStore
   // Issue 446: a routed agent's owner-turn restore (WIZARD_ROUTED_OWNER_TURNS), the one its view=wizard history uses.
   if (agentCtx) agentCtx.ownerTurnRestore = async agent => {
     if (!routedQueues || !routedOwnerTurns) return null

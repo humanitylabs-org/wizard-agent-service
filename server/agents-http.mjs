@@ -855,7 +855,8 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       } catch { /* nothing to pin */ }
     }
     if (deleting) ctx.forgetAgentInput?.(agent, decodeURIComponent(upstreamPath.split('/')[3]))
-    if (deleting) { try { ctx.channelStore?.forget(agent.id, decodeURIComponent(upstreamPath.split('/')[3])) } catch { /* pruned later */ } }
+    // Also while Channels are off (wizard-ux issue 1358): a store opened earlier keeps no membership for a deleted thread.
+    if (deleting) { try { (ctx.channelStore || ctx.channelStoreOpened?.())?.forget(agent.id, decodeURIComponent(upstreamPath.split('/')[3])) } catch { /* pruned later */ } }
     if (method === 'POST' && /^\/v1\/runs\/[^/]+\/steer$/u.test(upstreamPath)) {
       const runId = runIdFromPath(upstreamPath)
       const pair = registry.runThread?.(agent.id, runId)
