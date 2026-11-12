@@ -72,6 +72,27 @@ describe('restart gate', () => {
     expect(Date.parse(capped.wait_until) - time.now()).toBe(60_000)
     expect(capped.reason).toBe('restart')
   })
+
+  it('marks the owner\'s restart now on the waiting hold, never starts one, and a later wait clears it', () => {
+    const time = clock()
+    const gate = createRestartGate({ activeTurns: () => [{ sessionId: 'wizard_long', since: time.now() - 900_000 }], now: time.now, log: () => {} })
+    // No restart waiting: nothing to restart now, and no hold is started by it.
+    expect(() => gate.request({ now: true })).toThrow(/no restart/)
+    expect(gate.holding()).toBe(false)
+    expect(() => gate.request({ now: 'yes' })).toThrow(/now must be/)
+
+    const asked = gate.request({ reason: 'update', wait_s: 60 })
+    expect(asked.restart_now).toBeUndefined()
+    time.advance(61_000)
+    const chose = gate.request({ now: true })
+    expect(chose).toMatchObject({ phase: 'overdue', restart_now: true, reason: 'update' })
+    expect(chose.wait_until).toBe(asked.wait_until) // the limit is the restarter's, unchanged
+    expect(gate.summary().restart_now).toBe(true) // the shell's health view sees the choice too
+    expect(gate.status().restart_now).toBe(true)
+
+    // Changed their mind: wait longer clears it.
+    expect(gate.request({ wait_s: 600 }).restart_now).toBeUndefined()
+  })
 })
 
 describe('restart route refusal', () => {

@@ -6,7 +6,8 @@
 // shown as "Reply not sent". Turns already running keep going. The restarter polls GET /wizard/v1/restart until
 // `phase` is `ready` (nothing running), restarts, and the new process launches the held sends on its first tick.
 // Past the wait limit the phase is `overdue`: the restarter tells the owner and either waits longer (POST again)
-// or restarts now. DELETE lifts the hold (restart called off).
+// or restarts now. DELETE lifts the hold (restart called off). The owner's "restart now" from the shell is a POST with
+// `now: true`: the hold then reports `restart_now: true` and the restarter restarts without waiting for `ready`.
 //
 // The hold lives only in this process and is leased: each POST or GET renews it, and a restarter that stops
 // asking for `leaseMs` loses it, so a crashed restarter can never leave sends parked.
@@ -82,6 +83,7 @@ export function createRestartGate({
       active_unknown: active === null,
       oldest_active_s: Math.round(oldest / 1000),
       held,
+      ...(current.now ? { restart_now: true } : {}),
       ...(sessions && list ? { turns: list.map(turn => ({ session_id: String(turn.sessionId || ''), agent_id: String(turn.agentId || 'hermes'),
         running_s: Math.max(0, Math.round((at - Number(turn.since || at)) / 1000)) })) } : {}),
     }
@@ -100,9 +102,19 @@ export function createRestartGate({
       const reason = typeof input.reason === 'string' && REASON.test(input.reason) ? input.reason : 'restart'
       const raw = input.wait_s ?? input.waitS
       if (raw !== undefined && !(Number.isFinite(Number(raw)) && Number(raw) >= 0)) throw Object.assign(new Error('wait_s must be a number of seconds'), { status: 400, code: 'invalid_wait' })
-      const waitMs = raw === undefined ? defaultWaitMs : Math.min(maxWaitMs, Number(raw) * 1000)
+      if (input.now !== undefined && typeof input.now !== 'boolean') throw Object.assign(new Error('now must be true or false'), { status: 400, code: 'invalid_now' })
       const at = now()
       const current = expire()
+      // "Restart now" (the owner's choice when overdue) only marks a hold that exists: it never starts one, and it keeps
+      // the limit, so the restarter alone decides when to restart. A later "wait longer" clears it.
+      if (input.now === true) {
+        if (!current) throw Object.assign(new Error('no restart is waiting'), { status: 409, code: 'no_restart_waiting' })
+        current.now = true
+        current.leaseUntil = at + leaseMs
+        log(`[restart-gate] ${current.reason}: the owner chose to restart now`)
+        return report({ sessions: true })
+      }
+      const waitMs = raw === undefined ? defaultWaitMs : Math.min(maxWaitMs, Number(raw) * 1000)
       // A second request (the owner chose to wait longer) keeps the first request time and moves the limit.
       hold = { reason: current ? current.reason : reason, requestedAt: current ? current.requestedAt : at,
         waitUntil: at + waitMs, leaseUntil: at + leaseMs }

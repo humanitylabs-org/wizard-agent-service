@@ -27,6 +27,10 @@ box can't start or renew the hold), and a POST must be `Content-Type: applicatio
    - `ready`: nothing runs. Restart now.
    - `overdue`: turns still run past `wait_until`. Tell the owner and let them choose: wait longer
      (`POST` again with a new `wait_s`; the first request time stays) or restart now.
+   - `restart_now: true`: the owner chose **Restart now** in the shell (`POST` with `{"now": true}`, accepted only
+     while a hold exists; 409 `no_restart_waiting` otherwise). Restart without waiting for `ready`. A later wait
+     (`POST` with `wait_s`) clears it. The shell reads the phase from `/wizard/health` (which never renews the
+     lease) and sends the owner's choice here, so the restarter needs no prompt of its own.
    - `active_unknown: true` means a queue could not be read; it is never treated as ready.
 3. Restart the service. The new process starts without a hold and launches every held send on its first queue
    tick, in order, exactly once (same durable rows, same idempotency keys).

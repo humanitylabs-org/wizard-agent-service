@@ -1070,11 +1070,22 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     const health = await (await s.raw('/wizard/health')).json()
     assert.equal(health.restart?.holding, true, 'health shows the restart wait for the shell')
     assert.equal(health.restart.turns, undefined, 'health carries no thread ids')
+    // The owner's Restart now (wizard-ux issue 1362) reaches the restarter through the gate and health, and a later
+    // wait clears it; without a hold it starts nothing.
+    const now = await gate(post({ now: true }))
+    assert.equal(now.status, 200, `${s.kind}: restart now is accepted while a hold waits (${now.status})`)
+    assert.equal((await now.json()).restart_now, true)
+    assert.equal((await (await gate()).json()).restart_now, true, `${s.kind}: the restarter sees restart_now`)
+    assert.equal((await (await s.raw('/wizard/health')).json()).restart?.restart_now, true, `${s.kind}: the shell sees restart_now`)
+    assert.equal((await (await gate(post({ wait_s: 60 }))).json()).restart_now, undefined, `${s.kind}: wait longer clears restart now`)
     const released = await gate({ method: 'DELETE' })
     assert.equal((await released.json()).released, true)
     for (let n = 0; n < 100 && !runs(); n++) await new Promise(r => setTimeout(r, 20))
     assert.equal(runs(), 1, `${s.kind}: the held send goes out once the hold lifts`)
     assert.equal((await (await s.raw('/wizard/health')).json()).restart, undefined)
+    const idle = await gate(post({ now: true }))
+    assert.equal(idle.status, 409, `${s.kind}: restart now with no restart waiting is refused (${idle.status})`)
+    assert.equal((await (await s.raw('/wizard/health')).json()).restart, undefined, `${s.kind}: restart now starts no hold`)
   },
   'stopped-helper-no-needs-you': async s => {
     // Issue 467: a helper the agent itself stopped, delivering after the agent's final done reply, never
