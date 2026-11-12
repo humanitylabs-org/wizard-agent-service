@@ -74,7 +74,7 @@ import { createCanonicalChatPhotoResolver, photoAuthorityId, createPhotoRuntimeV
 import { USER_FILES_TARGET, createUserFiles, normalizeFolder, parseDestination } from './user-files.mjs'
 import { MY_SKIN_MAX_BYTES, MySkinError, createMySkin } from './my-skin.mjs'
 import { createSkins, SkinsError } from './skins.mjs'
-import { serveAppView } from './app-views.mjs'
+import { serveAppView, appViewFile } from './app-views.mjs'
 import { serveChatsView } from './chats-views.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { listPayload } from './session-list-view.mjs'
@@ -5869,7 +5869,9 @@ function buildWizardServer(options, lifetime) {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
       // A sandboxed page (/pages/, an opaque origin) or any other opaque-origin document never reaches the
       // owner's API, whatever credentials ride along (spec/PAGES.md, Security).
-      if ((url.pathname === '/wizard' || url.pathname.startsWith('/wizard/')) && String(request.headers.origin ?? '').trim().toLowerCase() === 'null') {
+      // One exception with the browser boundary on: an own screen's files (GET/HEAD, never its api/ redirect), read by
+      // its sandboxed window.
+      if ((url.pathname === '/wizard' || url.pathname.startsWith('/wizard/')) && String(request.headers.origin ?? '').trim().toLowerCase() === 'null' && !(browserBoundary.enabled && appViewFile(request.method, url.pathname))) {
         sendJson(response, 403, { error: 'opaque_origin', check: 'origin.null' }); return
       }
       // Release bytes are public on the tailnet origin: the Android updater has no session/auth headers.
@@ -5877,7 +5879,7 @@ function buildWizardServer(options, lifetime) {
       if (await servePhoneFeed(request, response, options.phoneFeedDir)) return
       const principal = await (tailnetIngress ? tailnetPrincipals : principals).attach(request)
       if (principal.kind === 'refused') { sendJson(response, url.pathname.startsWith('/wizard/v1/agent-heavy/') ? 403 : principal.status, { error: principal.error, check: principal.check }); return }
-      const staticRequest = ['GET', 'HEAD'].includes(request.method) && shellStaticPath(url.pathname, uxPrefix)
+      const staticRequest = ['GET', 'HEAD'].includes(request.method) && (shellStaticPath(url.pathname, uxPrefix) || (browserBoundary.enabled && appViewFile(request.method, url.pathname)))
       // Dedicated machine routes keep their own credentials and downstream route gates.
       // This exemption never grants an owner principal and is never available on Serve.
       const machineRequest = browserBoundary.enabled && !tailnetIngress && (

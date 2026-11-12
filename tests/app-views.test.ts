@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer } from 'node:http';
+import { createServer, request as httpRequest } from 'node:http';
 import { afterEach, expect, it } from 'vitest';
 import { appView, serveAppView } from '../server/app-views.mjs';
 import { readApps } from '../server/wizard-os-settings.mjs';
@@ -66,7 +66,7 @@ it('full Agent Service route reads the mounted projection and serves without a s
     activeSessionReader:async () => [], dispatchHealthReader:() => true });
   cleanup.push(() => new Promise(r => { server.closeAllConnections(); server.close(r); }));
   const address = await listenService(server), base = `http://127.0.0.1:${address.port}`;
-  expect((await (await fetch(base + '/wizard/v1/apps')).json()).apps[0].view).toEqual({ mode:'own', url:'/wizard/views/habits/' });
+  expect((await (await fetch(base + '/wizard/v1/apps')).json()).apps[0].view).toEqual({ mode:'own', url:'/wizard/views/habits/', api:'/habits/api/' });
   const r = await fetch(base + '/wizard/views/habits/'); expect(r.status).toBe(200); expect(await r.text()).toContain('Own screen');
 });
 it('missing build and escaping symlink fail closed without leaking a host path', async () => {
@@ -76,4 +76,59 @@ it('missing build and escaping symlink fail closed without leaking a host path',
   b.set({ ...b.state, serving:'../' });
   const r = await fetch(base + '/wizard/views/habits/'); expect(r.status).toBe(404);
   expect(await r.text()).not.toContain(b.dir);
+});
+
+// Browser boundary (wizard-os#133): a sandboxed window loads the own screen's files with no shell token, and its module
+// files with `Origin: null`; the page is never read by an opaque caller, the api/ redirect and owner routes stay closed.
+function raw(base: string, path: string, headers: Record<string, string> = {}, method = 'GET') {
+  return new Promise<{ status: number, headers: import('node:http').IncomingHttpHeaders, body: string }>((done, fail) => {
+    const r = httpRequest(base + path, { method, headers }, res => { let body = ''; res.on('data', c => { body += c; }); res.on('end', () => done({ status: res.statusCode || 0, headers: res.headers, body })); });
+    r.on('error', fail); r.end();
+  });
+}
+async function boundaryService(b: ReturnType<typeof box>, enabled: boolean) {
+  const server = createWizardServer({ appsJsonPath:b.appsJsonPath, wizardOsHome:b.dir, agentBridge:false,
+    requireJoinedDelegationCapability:false, upstreamOrigin:'http://127.0.0.1:9', hermesKey:'fixture-key',
+    requireAccess:false, followThrough:false, settingsPath:join(b.dir, 'settings.json'), browserBoundary:{ enabled, token:'a1'.repeat(32) },
+    mediaRoot:join(b.dir, 'media'), mediaIndexPath:join(b.dir, 'media-index.json'),
+    runQueueStatePath:join(b.dir, 'queue.sqlite3'), runQueuePollIntervalMs:0,
+    activeSessionReader:async () => [], dispatchHealthReader:() => true });
+  cleanup.push(() => new Promise(r => { server.closeAllConnections(); server.close(r); }));
+  const address = await listenService(server);
+  return `http://127.0.0.1:${address.port}`;
+}
+it('boundary on: a sandboxed window loads the own screen and its module files; api, page-as-data and owner routes stay closed', async () => {
+  const b = box(), base = await boundaryService(b, true);
+  const frame = { 'sec-fetch-site':'same-origin', 'sec-fetch-mode':'navigate', 'sec-fetch-dest':'iframe' };
+  const page = await raw(base, '/wizard/views/habits/', frame);
+  expect(page.status).toBe(200); expect(page.body).toContain('Own screen');
+  const opaque = { origin:'null', 'sec-fetch-site':'cross-site', 'sec-fetch-mode':'cors', 'sec-fetch-dest':'script' };
+  const script = await raw(base, '/wizard/views/habits/app.js', opaque);
+  expect(script.status).toBe(200); expect(script.headers['access-control-allow-origin']).toBe('*');
+  expect(script.headers['access-control-allow-credentials']).toBeUndefined();
+  const boot = await raw(base, '/wizard/views/_boot.js', { 'sec-fetch-site':'cross-site', 'sec-fetch-mode':'no-cors', 'sec-fetch-dest':'script' });
+  expect(boot.status).toBe(200); expect(boot.headers['access-control-allow-origin']).toBeUndefined();
+  expect((await raw(base, '/wizard/views/habits/', opaque)).status).toBe(403);
+  expect((await raw(base, '/wizard/views/habits/index.html', opaque)).status).toBe(403);
+  for (const path of ['/wizard/views/habits/api/items', '/wizard/views/habits/.ok', '/wizard/v1/apps', '/wizard/v1/settings']) {
+    expect((await raw(base, path, opaque)).status, path).toBe(403);
+    expect((await raw(base, path, { 'sec-fetch-site':'cross-site' })).status, path).toBe(401);
+  }
+  expect((await raw(base, '/wizard/views/habits/api/items', { 'sec-fetch-site':'same-origin' }, 'POST')).status).toBe(401);
+  expect((await raw(base, '/wizard/views/habits/app.js', { 'sec-fetch-site':'cross-site' }, 'POST')).status).toBe(401);
+});
+it('boundary off: an opaque caller of the own screen files is refused as before', async () => {
+  const b = box(), base = await boundaryService(b, false);
+  expect((await raw(base, '/wizard/views/habits/app.js', { origin:'null' })).status).toBe(403);
+  expect((await raw(base, '/wizard/views/habits/app.js', { 'sec-fetch-site':'cross-site' })).status).toBe(200);
+  expect((await raw(base, '/wizard/views/habits/api/items', { origin:'null' })).status).toBe(403);
+  expect((await raw(base, '/wizard/v1/apps', { origin:'null' })).status).toBe(403);
+});
+it('view api follows the declared api_path and is absent when there is no safe one', () => {
+  const b = box();
+  b.set({ ...b.state, api_path:'/v2/data/' });
+  expect(appView(b.appsJsonPath, 'habits', '/habits/index.html')).toEqual({ mode:'own', url:'/wizard/views/habits/', api:'/habits/v2/data/' });
+  for (const api_path of ['/mcp', '../x', '//x']) { b.set({ ...b.state, api_path }); expect(appView(b.appsJsonPath, 'habits', '/habits/')).toEqual({ mode:'own', url:'/wizard/views/habits/' }); }
+  b.set(b.state);
+  expect(appView(b.appsJsonPath, 'habits', 'https://other.example/')).toEqual({ mode:'own', url:'/wizard/views/habits/' });
 });
