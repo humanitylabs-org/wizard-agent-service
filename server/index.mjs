@@ -198,6 +198,9 @@ server = createWizardServer({
   // Chats channels phase 3 (issue 441): agents file chats with the status line's `channel`, titles become post names,
   // and chats the scheduler opens go to their job's channel or Alerts. Needs WIZARD_CHANNEL_STORE=1. Off by default.
   channelAgentFiling: process.env.WIZARD_CHANNEL_AGENT_FILING === '1',
+  // Channel read watermarks (issue 471): /wizard/v1/channels/read keeps each channel's read point for the owner, so
+  // reading a channel to the bottom on one device clears it on the others. Needs WIZARD_CHANNEL_STORE=1. Off by default.
+  channelReadSync: process.env.WIZARD_CHANNEL_READ_SYNC === '1',
   // Chats Channels posts (issue 446): view=list rows carry firstRequest (the first owner message, cleaned, at most
   // 400 code units) and firstAttachments (its photos as file refs). Off by default.
   channelFirstPosts: process.env.WIZARD_CHANNEL_FIRST_POSTS === '1',

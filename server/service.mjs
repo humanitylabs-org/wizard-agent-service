@@ -3152,6 +3152,9 @@ function buildWizardServer(options, lifetime) {
   // status line's `channel` files a chat, titles become post names, and a chat the scheduler opens (a reminder, a
   // report, an agent's new chat) is filed into its job's channel or, by default, the main agent's Alerts channel.
   const channelAgentFiling = options.channelAgentFiling === true && !!channelStore
+  // Channel read watermarks (issue 471, WIZARD_CHANNEL_READ_SYNC=1, needs the channel store; off by default): the
+  // shell's per-channel read point, shared by the owner's devices, forward only.
+  const channelReadSync = options.channelReadSync === true && !!channelStore
   const scheduledThread = (agent, thread) => {
     if (!channelAgentFiling) return false
     // Chats only the scheduler mints (schedules, agent-opened chats, tips): known even after their job is deleted.
@@ -6182,9 +6185,11 @@ function buildWizardServer(options, lifetime) {
         return
       }
       // Chats channels (issue 440): same owner surface, access and cross-site rules as ui-preferences.
-      if (url.pathname === '/wizard/v1/channels' || url.pathname === '/wizard/v1/channels/membership') {
-        if (!channelStore) { sendJson(response, 404, { error: 'not_found' }); return }
-        const membership = url.pathname.endsWith('/membership')
+      // Read watermarks (issue 471, WIZARD_CHANNEL_READ_SYNC=1 with the store): /wizard/v1/channels/read.
+      if (url.pathname === '/wizard/v1/channels' || url.pathname === '/wizard/v1/channels/membership' || url.pathname === '/wizard/v1/channels/read') {
+        const reads = url.pathname.endsWith('/read')
+        if (!channelStore || (reads && !channelReadSync)) { sendJson(response, 404, { error: 'not_found' }); return }
+        const membership = reads ? 'read' : url.pathname.endsWith('/membership')
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const methods = membership ? ['GET', 'PUT'] : ['GET', 'POST', 'PATCH']
         if (!methods.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: methods.join(', ') }); return }
