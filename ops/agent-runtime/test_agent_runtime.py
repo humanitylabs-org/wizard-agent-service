@@ -477,5 +477,18 @@ def _load_place_stream_tests():
 PlaceStreamTest = _load_place_stream_tests()
 
 
+def _load_private_search_tests():
+    # CI runs only this file: pull in the private Tinfoil search sidecar tests (issue 416).
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("test_private_search", Path(__file__).resolve().parent / "test_private_search.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.PrivateSearchTests
+
+
+PrivateSearchTests = _load_private_search_tests()
+
+
 if __name__ == "__main__":
     unittest.main()
