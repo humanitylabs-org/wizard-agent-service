@@ -104,3 +104,31 @@ describe('thread seen manual unread state', () => {
     }
   })
 })
+
+// Mark done (wizard-ux issue 1317): the shell keeps the reply a thread was handled through in its seen record.
+describe('thread seen Mark done (handledThrough)', () => {
+  it('keeps the newer handledThrough across merges, a restart and a record without it', () => {
+    const root = mkdtempSync(join(tmpdir(), 'wizard-thread-handled-'))
+    roots.push(root)
+    const statePath = join(root, 'thread-seen.json')
+    const store = new ThreadSeenStore(statePath)
+    const handled = '2026-10-23T12:00:00.000Z', later = '2026-10-23T13:00:00.000Z'
+    store.merge('owner', { initializedAt: 1, threads: { 'direct:ready-thread': { ...record(100), handledThrough: handled } } })
+    expect(Object.values(new ThreadSeenStore(statePath).get('owner').threads)[0]).toMatchObject({ seenAt: 100, handledThrough: handled })
+    // Another device's newer read, sent by a shell that never set the field: the mark stays.
+    const merged = store.merge('owner', { initializedAt: 1, threads: { 'direct:ready-thread': { ...record(200), updatedAt: later } } })
+    expect(Object.values(merged.threads)[0]).toMatchObject({ seenAt: 200, updatedAt: later, handledThrough: handled })
+    // A stale mark never moves it back; a newer one moves it forward.
+    const stale = store.merge('owner', { initializedAt: 1, threads: { 'direct:ready-thread': { ...record(150), handledThrough: '2026-10-23T11:00:00.000Z' } } })
+    expect(Object.values(stale.threads)[0]).toMatchObject({ handledThrough: handled })
+    const newer = store.merge('owner', { initializedAt: 1, threads: { 'direct:ready-thread': { ...record(300), updatedAt: later, handledThrough: later } } })
+    expect(Object.values(newer.threads)[0]).toMatchObject({ seenAt: 300, handledThrough: later })
+  })
+
+  it('rejects a handledThrough that is not a time', () => {
+    const store = new ThreadSeenStore()
+    for (const handledThrough of [12, 'soon', 'x'.repeat(101)]) {
+      expect(() => store.merge('owner', { initializedAt: 1, threads: { 'direct:ready-thread': { ...record(100), handledThrough } } })).toThrow('Invalid Wizard thread seen state')
+    }
+  })
+})

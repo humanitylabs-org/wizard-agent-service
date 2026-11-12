@@ -1093,6 +1093,13 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     const records = Object.values(state.state.threads)
     assert.equal(records.length, 1)
     assert.equal(records[0].agent_id, s.id); assert.equal(records[0].session_id, 'wizard_parity'); assert.equal(records[0].seenAt, now); assert.equal(records[0].unreadAt, unreadAt)
+    // Mark done (wizard-ux issue 1317): the reply the thread was handled through survives a later read without it and a restart.
+    const handledThrough = new Date(now).toISOString()
+    assert.equal((await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: { 'direct:wizard_parity': { ...record, seenAt: now + 2, handledThrough } } }), method: 'PUT' })).status, 200)
+    assert.equal((await s.raw('/wizard/thread-seen', { ...post({ initializedAt: now, threads: { 'direct:wizard_parity': { ...record, seenAt: now + 3 } } }), method: 'PUT' })).status, 200)
+    await s.restart()
+    const handled = Object.values((await (await s.raw('/wizard/thread-seen')).json()).state.threads)
+    assert.equal(handled.length, 1); assert.equal(handled[0].agent_id, s.id); assert.equal(handled[0].seenAt, now + 3); assert.equal(handled[0].handledThrough, handledThrough)
   },
   'session-slim-index': async s => {
     const now=Date.now()/1000;
