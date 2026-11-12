@@ -590,6 +590,44 @@ export const serverChecks = {
     await s.restart()
     assert.equal((await read())[own], t, 'durable across a restart')
   },
+  // wizard-ux issue 1358: one Channels switch. The owner's wizard/chat-channels switch in the synced Look file turns the
+  // channel store, read marks and list fields on and off at runtime through each runtime's real Service route.
+  'chats-channels-switch': async s => {
+    const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/chat-channels': { on, at: Date.now() } } })) }
+    const row = s.sessions.get('wizard_parity'); row.hidden = false
+    row.preview = 'Synthetic switch request'
+    row.messages.push({ role: 'user', timestamp: Date.now() / 1000 - 5, content: 'Synthetic switch request' })
+    const item = async want => {
+      let last
+      for (let attempt = 0; attempt < 40; attempt++) {
+        if (s.kind === 'main') await (await s.request('/api/sessions?limit=100')).json()
+        last = (await (await s.request('/api/sessions?view=list')).json()).data.find(x => x.id === 'wizard_parity')
+        if (last && want(last)) return last
+        await new Promise(r => setTimeout(r, 25))
+      }
+      return last
+    }
+    assert.equal((await s.raw('/wizard/v1/channels')).status, 404, 'Channels are off without the switch')
+    look(true)
+    const made = await s.raw('/wizard/v1/channels', json('POST', { name: 'Synthetic switch channel', agent: s.id })); assert.equal(made.status, 201, 'the switch opens the store with no restart')
+    const own = await made.json()
+    assert.equal((await s.raw('/wizard/v1/channels/membership', json('PUT', { sessionId: 'wizard_parity', channelId: own.id }))).status, 200)
+    assert.equal((await s.raw('/wizard/v1/channels/read')).status, 200, 'read marks come with the switch')
+    assert.equal((await item(x => x.channel === own.id))?.channel, own.id, 'list rows carry the channel while on')
+    look(false)
+    assert.equal((await s.raw('/wizard/v1/channels')).status, 404, 'off again: Spaces as before')
+    assert.equal((await s.raw('/wizard/v1/channels/read')).status, 404)
+    assert.equal((await item(x => !x.channel))?.channel, undefined, 'list rows lose the channel while off')
+    look(true)
+    assert.equal((await item(x => x.channel === own.id))?.channel, own.id, 'on again: the same membership is back')
+    // A thread deleted while Channels are off leaves the store too, so turning them on never brings it back.
+    look(false)
+    assert.equal((await s.request('/api/sessions/wizard_parity', { method: 'DELETE' })).status, 200)
+    look(true)
+    const after = (await (await s.raw('/wizard/v1/channels')).json()).channels.find(c => c.id === own.id)
+    assert.equal(after?.count, 0, 'the deleted thread is no longer a member')
+  },
   // Issue 440 (WIZARD_CHANNEL_STORE=1): channels.sqlite through each runtime's real Service route.
   'chats-channels': async s => {
     const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })

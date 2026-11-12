@@ -49,6 +49,7 @@ import { createSpacesTools } from './spaces-tools.mjs'
 import { createChannelStore, channelRequest } from './channel-store.mjs'
 import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigration } from './channel-spaces.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
+import { createChannelsSwitch, channelPart } from './channels-switch.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
@@ -3127,15 +3128,22 @@ function buildWizardServer(options, lifetime) {
     }
     return null
   }
-  // Chats channels, phase 2 (issue 440, WIZARD_CHANNEL_STORE=1, off by default): channels.sqlite replaces
-  // ui-preferences `spaces`. First boot copies the Spaces once, seeds Alerts, and drops main memberships
-  // whose thread is gone from state.db. ui-preferences.json itself is never rewritten here.
+  // Chats channels, phase 2 (issue 440): channels.sqlite replaces ui-preferences `spaces`. The first open copies the
+  // Spaces once, seeds Alerts, and drops main memberships whose thread is gone from state.db. ui-preferences.json
+  // itself is never rewritten here.
   // Chats Channels posts (issue 446): list rows carry firstRequest + firstAttachments read from the first owner message.
-  const channelFirstPosts = options.channelFirstPosts === true
-  const channelStore = options.channelStore === true ? (() => {
+  // One Channels switch (wizard-ux issue 1358, channels-switch.mjs): every Channels part follows the owner's
+  // `wizard/chat-channels` switch in the synced Look file at runtime, no restart; WIZARD_CHANNEL_* env choices (the
+  // options) still win. Off: Spaces as before, with channels.sqlite kept for the next time it is on.
+  const channelsSwitchOn = createChannelsSwitch({ readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.channelsSwitchTtlMs ?? 3000 })
+  const channelFirstPostsOn = () => channelPart(options.channelFirstPosts, channelsSwitchOn)
+  let openedChannelStore = null, channelStoreFailedAt = -Infinity
+  const openChannelStore = () => {
+    if (openedChannelStore) return openedChannelStore
+    if (Date.now() - channelStoreFailedAt < 60_000) return null
     let store
     try { store = createChannelStore(resolve(bridgeOsHome || wizardOsHome(), 'channels.sqlite')) }
-    catch (error) { console.error(`[channels] store unavailable, channels stay off: ${String(error?.message || error).slice(0, 200)}`); return null }
+    catch (error) { channelStoreFailedAt = Date.now(); console.error(`[channels] store unavailable, channels stay off: ${String(error?.message || error).slice(0, 200)}`); return null }
     // An unreadable or invalid preferences file is not migrated (nor marked done) until it reads cleanly.
     const spaces = spacesForMigration(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'))
     if (spaces) store.migrateSpaces(spaces)
@@ -3147,17 +3155,23 @@ function buildWizardServer(options, lifetime) {
         try { const known = db.prepare('SELECT 1 FROM sessions WHERE id=?'); store.prune(MAIN_AGENT_ID, id => !!known.get(id)) } finally { db.close() }
       } catch { /* unreadable: keep every membership */ }
     }
+    openedChannelStore = store
     return store
-  })() : null
-  // Chats channels phase 3 (issue 441, WIZARD_CHANNEL_AGENT_FILING=1, needs the channel store; off by default): the
-  // status line's `channel` files a chat, titles become post names, and a chat the scheduler opens (a reminder, a
-  // report, an agent's new chat) is filed into its job's channel or, by default, the main agent's Alerts channel.
-  const channelAgentFiling = options.channelAgentFiling === true && !!channelStore
-  // Channel read watermarks (issue 471, WIZARD_CHANNEL_READ_SYNC=1, needs the channel store; off by default): the
-  // shell's per-channel read point, shared by the owner's devices, forward only.
-  const channelReadSync = options.channelReadSync === true && !!channelStore
+  }
+  // The store while Channels are on (opened on first use), else null.
+  const channelStoreNow = () => channelPart(options.channelStore, channelsSwitchOn) ? openChannelStore() : null
+  // A store forced on by env opens at boot, as before.
+  if (options.channelStore === true) openChannelStore()
+  // Chats channels phase 3 (issue 441, needs the channel store): the status line's `channel` files a chat, titles
+  // become post names, and a chat the scheduler opens (a reminder, a report, an agent's new chat) is filed into its
+  // job's channel or, by default, the main agent's Alerts channel.
+  const channelAgentFilingOn = () => channelPart(options.channelAgentFiling, channelsSwitchOn) && !!channelStoreNow()
+  // Channel read watermarks (issue 471, needs the channel store): the shell's per-channel read point, shared by the
+  // owner's devices, forward only.
+  const channelReadSyncOn = () => channelPart(options.channelReadSync, channelsSwitchOn) && !!channelStoreNow()
+
   const scheduledThread = (agent, thread) => {
-    if (!channelAgentFiling) return false
+    if (!channelAgentFilingOn()) return false
     // Chats only the scheduler mints (schedules, agent-opened chats, tips): known even after their job is deleted.
     if (/^wizard_(?:schedule|agent|tips)_/.test(thread)) return true
     let jobs
@@ -3165,11 +3179,19 @@ function buildWizardServer(options, lifetime) {
     const want = agent === MAIN_AGENT_ID ? new Set(['main', MAIN_AGENT_ID]) : new Set([agent])
     return jobs.some(job => job.createThread && job.thread === thread && want.has(job.agent))
   }
-  const spaceFiling = createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), channelStore, { agentFiling: channelAgentFiling, scheduledThread })
+  // Filing follows the Channels switch at runtime: one filer per (store, agent filing) state, picked per call.
+  const spaceFilings = new Map()
+  const spaceFilingNow = () => {
+    const store = channelStoreNow(), agentFiling = !!store && channelAgentFilingOn(), key = `${store ? 1 : 0}${agentFiling ? 1 : 0}`
+    if (!spaceFilings.has(key)) spaceFilings.set(key, createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), store, { agentFiling, scheduledThread }))
+    return spaceFilings.get(key)
+  }
+  const spaceFiling = { runNote: (...args) => spaceFilingNow().runNote(...args), apply: (...args) => spaceFilingNow().apply(...args) }
   // Where a chat the scheduler (or the Supervisor) just opened goes: the job's channel when it names an open one of
   // that agent, else Alerts for the main agent; a routed agent's chat with no channel stays unfiled. Never a move.
   const fileOpenedThread = (agent, occurrence) => {
-    if (!channelAgentFiling) return ''
+    if (!channelAgentFilingOn()) return ''
+    const channelStore = channelStoreNow()
     try {
       if (occurrence.channel && channelStore.fileIfUnfiled(agent, occurrence.thread, occurrence.channel, 'agent')) return occurrence.channel
       if (agent !== MAIN_AGENT_ID) return ''
@@ -3349,17 +3371,23 @@ function buildWizardServer(options, lifetime) {
   if (agentCtx) agentCtx.mainHasSession = (sessionId) => agentCtx.sessionExists(MAIN_AGENT_ID, sessionId)
   if (agentCtx) agentCtx.askMax = askMaxNow
   if (agentCtx) agentCtx.archiveAfterDays = () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays
-  if (agentCtx) agentCtx.channelStore = channelStore
-  if (agentCtx) agentCtx.channelAgentFiling = channelAgentFiling
-  if (agentCtx) agentCtx.channelFirstPosts = channelFirstPosts
+  // Read on every use: the Channels switch can change while the service runs (wizard-ux issue 1358).
+  if (agentCtx) Object.defineProperties(agentCtx, {
+    channelStore: { get: () => channelStoreNow(), enumerable: true, configurable: true },
+    channelAgentFiling: { get: () => channelAgentFilingOn(), enumerable: true, configurable: true },
+    channelFirstPosts: { get: () => channelFirstPostsOn(), enumerable: true, configurable: true },
+  })
+  // Deletes clean the store even while Channels are off, so turning them on again never brings a deleted thread back.
+  if (agentCtx) agentCtx.channelStoreOpened = () => openedChannelStore
   // Issue 446: a routed agent's owner-turn restore (WIZARD_ROUTED_OWNER_TURNS), the one its view=wizard history uses.
   if (agentCtx) agentCtx.ownerTurnRestore = async agent => {
     if (!routedQueues || !routedOwnerTurns) return null
     const queue = await routedQueues.queueFor(agent)
     return queue ? batchedOwnerTurnRestore(queue, (raw, view, sessionId) => routedOwnerTurns(raw, view, sessionId, agent)) : null
   }
-  spacesTools = createSpacesTools({
-    path: resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), channels: channelStore,
+  // The Spaces tools read Spaces or channels by the Channels switch at the time of each call (wizard-ux issue 1358).
+  const spacesToolsFor = channels => createSpacesTools({
+    path: resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), channels,
     agentExists: id => Boolean(agents?.read(id)),
     threadExists: (id, thread) => agentCtx.sessionExists(id, thread, { strict: true }),
     loadThreads: async id => {
@@ -3378,6 +3406,9 @@ function buildWizardServer(options, lifetime) {
       return projectProfileSessions({ registry }, agent, rows, headers, secrets)
     },
   })
+  const spacesToolsBy = new Map()
+  const spacesToolsNow = () => { const store = channelStoreNow(); if (!spacesToolsBy.has(store)) spacesToolsBy.set(store, spacesToolsFor(store)); return spacesToolsBy.get(store) }
+  spacesTools = { list: (...args) => spacesToolsNow().list(...args), call: (...args) => spacesToolsNow().call(...args) }
   const settingsOptions = { canStartAgent: id => agents ? agents.canStartAgent(id) : id === MAIN_AGENT_ID }
   const uxDir = options.uxDir ? resolve(String(options.uxDir)) : ''
   // "Connect your phone" (phone-setup.mjs): the box's private-access helper, reached over its unix socket.
@@ -4397,13 +4428,13 @@ function buildWizardServer(options, lifetime) {
   const withFirstRequests = listed => {
     const rows = ['data', 'sessions', 'items'].flatMap(key => Array.isArray(listed?.[key]) ? listed[key] : [])
     if (!hermesStatePath || !rows.length || listed.mode === 'body' || listed.fields === 'slim') return
-    if (channelFirstPosts) {
+    if (channelFirstPostsOn()) {
       // Issue 446: the whole first owner message, for the post's words and photos.
       let posts
       // The owner's own turns Hermes stamped internal_notification are restored first, exactly as in view=wizard history.
       // One batched queue read per page, and only for threads whose post the restore can change; decided posts are kept.
       const restore = batchedOwnerTurnRestore(runQueue, (raw, queue, sessionId) => restoreOwnerTurns(raw, queue, sessionId, ownerTurnRowMeta, { screenshots: ownerScreenshotTurns }))
-      try { posts = hermesStateHealth.read('first-post', () => readHermesFirstPosts(hermesStatePath, rows.map(row => row?.id), { restore, memo: mainFirstPostMemo, agentFirst: channelAgentFiling })) } catch { return }
+      try { posts = hermesStateHealth.read('first-post', () => readHermesFirstPosts(hermesStatePath, rows.map(row => row?.id), { restore, memo: mainFirstPostMemo, agentFirst: channelAgentFilingOn() })) } catch { return }
       for (const row of rows) if (row && posts.has(row.id)) row.wizard_first_post = posts.get(row.id)
       return
     }
@@ -4412,6 +4443,7 @@ function buildWizardServer(options, lifetime) {
     for (const row of rows) if (row && firsts.has(row.id)) row.wizard_first_request = firsts.get(row.id)
   }
   const canonicalSessionPage = async (operator, searchParams, request) => {
+    const channelStore = searchParams.has('channel') ? channelStoreNow() : null
     if (searchParams.has('channel') && (!channelStore || operator)) throw Object.assign(new Error('channel not found'), { status: 404 })
     if (searchParams.has('channel') && !canonicalSessionReader) throw Object.assign(new Error('channel feed unavailable'), { status: 503 })
     if (!canonicalSessionReader) return null
@@ -5508,7 +5540,7 @@ function buildWizardServer(options, lifetime) {
     ...(options.schedulerMaxInflight !== undefined ? { maxInflight: options.schedulerMaxInflight } : {}),
     notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
     agentId: agent => (agent === 'main' ? MAIN_AGENT_ID : agent),
-    channels: channelAgentFiling,
+    channels: () => channelAgentFilingOn(),
     lookup: lookupBackgroundOccurrence,
     onWatchResult: async job => {
       // A visible watcher result is a real new turn: bring the same thread back from either Defer or Done.
@@ -6190,6 +6222,7 @@ function buildWizardServer(options, lifetime) {
           if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
           try { patch = JSON.parse((await readBoundedBody(request, UI_PREFERENCES_MAX_BYTES)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_preferences' }); return }
         }
+        const channelStore = seed ? null : channelStoreNow()
         try {
           sendJson(response, 200, seed ? seedUiPreferences(path, patch)
             : channelStore ? (request.method === 'GET' ? readWithChannels(path, channelStore) : request.method === 'PATCH' ? patchWithChannels(path, channelStore, patch) : putWithChannels(path, channelStore, patch))
@@ -6201,7 +6234,8 @@ function buildWizardServer(options, lifetime) {
       // Read watermarks (issue 471, WIZARD_CHANNEL_READ_SYNC=1 with the store): /wizard/v1/channels/read.
       if (url.pathname === '/wizard/v1/channels' || url.pathname === '/wizard/v1/channels/membership' || url.pathname === '/wizard/v1/channels/read') {
         const reads = url.pathname.endsWith('/read')
-        if (!channelStore || (reads && !channelReadSync)) { sendJson(response, 404, { error: 'not_found' }); return }
+        const channelStore = channelStoreNow()
+        if (!channelStore || (reads && !channelReadSyncOn())) { sendJson(response, 404, { error: 'not_found' }); return }
         const membership = reads ? 'read' : url.pathname.endsWith('/membership')
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const methods = membership ? ['GET', 'PUT'] : ['GET', 'POST', 'PATCH']
@@ -7692,6 +7726,7 @@ function buildWizardServer(options, lifetime) {
         }
         // Issue 440: hydrate the first owner request before the credential and private-path guards below,
         // so state.db text gets exactly the same redaction and fail-closed scan as every other list field.
+        const channelStore = operator ? null : channelStoreNow(), channelFirstPosts = !operator && channelFirstPostsOn()
         const channelListing = (channelStore || channelFirstPosts) && !operator && upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions'
           && url.searchParams.get('view') === 'list' && contentType.includes('application/json')
         if (channelListing) {
@@ -7713,8 +7748,9 @@ function buildWizardServer(options, lifetime) {
           result = Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), url.searchParams.get('q'), channelStore && !operator ? channelStore : null, { firstPosts: channelFirstPosts && !operator })))
         }
         // A deleted thread leaves its channel (issue 440).
-        if (channelStore && !operator && upstream.ok && request.method === 'DELETE' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {
-          try { channelStore.forget(MAIN_AGENT_ID, decodeURIComponent(upstreamPath.split('/')[3])) } catch { /* membership is pruned on next boot */ }
+        // Also while Channels are off: a store opened earlier keeps no membership for a deleted thread.
+        if ((channelStore || openedChannelStore) && !operator && upstream.ok && request.method === 'DELETE' && /^\/api\/sessions\/[^/]+$/.test(upstreamPath)) {
+          try { (channelStore || openedChannelStore).forget(MAIN_AGENT_ID, decodeURIComponent(upstreamPath.split('/')[3])) } catch { /* membership is pruned on next boot */ }
         }
         response.writeHead(responseStatus, { ...responseHeaders, 'Content-Length': result.length })
         response.end(result)

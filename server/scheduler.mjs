@@ -222,6 +222,7 @@ function scheduleBaseInput(job) {
 const opening = (db, job, deliver) => ({ ...(job.channel ? { channel: job.channel } : {}),
   ...(deliver === 'notification' || db.prepare("SELECT 1 FROM schedule_occurrences WHERE job_id=? AND COALESCE(json_extract(data,'$.deliver'),'')<>'notification' LIMIT 1").get(job.id) ? {} : { opensThread: true }) })
 export class Scheduler {
+  get channels() { try { return this.channelsOn() === true } catch { return false } }
   constructor({ statePath, deliver, lookup = null, onWatchResult = null, notifier = null, agentId = agent => agent, channels = false, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
     if (!statePath) throw fail('scheduler state path required', 503)
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
@@ -249,8 +250,9 @@ export class Scheduler {
     // unavailable at claim time means a notification job falls back to its thread for that occurrence.
     this.notifier = notifier
     this.agentId = agentId
-    // Chats channels phase 3 (issue 441): jobs may name the channel their new chats are filed into.
-    this.channels = channels === true
+    // Chats channels phase 3 (issue 441): jobs may name the channel their new chats are filed into. A function is
+    // read on every use (the owner's Channels switch, wizard-ux issue 1358).
+    this.channelsOn = typeof channels === 'function' ? channels : () => channels === true
     this.now = now
     this.timezone = timezone
     this.hermesHome = hermesHome

@@ -472,6 +472,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "chats-channels-switch",
+      "description": "One Channels switch (wizard-ux issue 1358): the owner's wizard/chat-channels switch in the synced Look file (Pages/wizard-look/look.json) turns the channel store, channel posts, agent filing and read marks on and off at runtime, with no restart. Off goes back to Spaces and keeps channels.sqlite, so on again brings the same channels and memberships back. WIZARD_CHANNEL_* env settings still win (1 on, 0 off).",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile, container TCP, restricted Unix ingress) with no channel options and a Pages root: /wizard/v1/channels is 404 with no Look file; write the switch on and create this agent's channel, file the parity thread, read /channels/read and see the list row carry the channel; write it off and get 404 and rows without a channel; write it on and see the same membership. tests/channels-switch.test.ts covers the Look file reader, the env overrides, the scheduler field and migration once. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/channels-switch.mjs",
+        "server/service.mjs",
+        "server/scheduler.mjs",
+        "server/index.mjs"
+      ],
+      "reference_tests": [
+        "tests/channels-switch.test.ts"
+      ],
+      "fixture": "chats-channels-switch",
+      "policy_exemptions": []
+    },
+    {
       "id": "chats-read-marks",
       "description": "Channel read watermarks (issue 471, WIZARD_CHANNEL_READ_SYNC=1 with WIZARD_CHANNEL_STORE=1): /wizard/v1/channels/read keeps the shell's read point per channel (and General per agent) in channels.sqlite, forward only, so reading a channel to the bottom on one device clears it on the owner's other devices.",
       "layer": "server",
