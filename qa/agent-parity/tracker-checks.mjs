@@ -104,6 +104,22 @@ export const trackerChecks = {
     let doneCounts
     for (let i = 0; i < 40; i++) { doneCounts = (await counts(s))[`${s.id || 'hermes'}/wizard_done`]; if (doneCounts) break; await new Promise(r => setTimeout(r, 25)) }
     assert.equal(doneCounts?.total, 1, 'a completed reply counts once without opening its thread')
+    // Issue 486: past the 40-ask cap, history re-reads must not bring evicted Seen asks back unseen.
+    assert.equal((await s.request('/api/sessions', post({ id: 'wizard_evict', source: 'wizard-mobile', hidden: true }))).status, 201)
+    const evictAt = Date.now() / 1000 - 1000
+    const reply = (id, n) => ({ id: `${id}-r`, role: 'assistant', timestamp: evictAt + n, content: `Answered.\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'done', ask: 'Answered', items: [{ id, title: `Question ${id}`, state: 'done' }] })}[/WIZARD_STATUS_V1]` })
+    const evictThread = s.sessions.get('wizard_evict')
+    for (let i = 0; i < 38; i++) evictThread.messages.push(reply(`ask-${i}`, i))
+    const reread = async () => {
+      assert.equal((await s.request('/api/sessions/wizard_evict/messages?view=wizard&order=oldest&limit=200')).status, 200)
+      return (await counts(s))[`${s.id || 'hermes'}/wizard_evict`]
+    }
+    assert.equal((await reread())?.done_unseen, 38)
+    const seen16 = await s.raw('/wizard/v1/thread-items/seen', post({ thread: 'wizard_evict', agent: s.id || 'hermes', ids: Array.from({ length: 16 }, (_, i) => `ask-${i}`) }))
+    assert.equal(seen16.status, 200)
+    for (let i = 0; i < 5; i++) evictThread.messages.push(reply(`new-${i}`, 100 + i))
+    assert.deepEqual(await reread(), { needs_you: 0, running: 0, done_unseen: 27, blocked: 0, acknowledged: 13, total: 40 })
+    assert.deepEqual(await reread(), { needs_you: 0, running: 0, done_unseen: 27, blocked: 0, acknowledged: 13, total: 40 }, `${s.kind}: evicted Seen asks never come back unseen on a history re-read`)
     for (const setting of [false, undefined]) {
       const off = await scene(s.kind, setting === undefined ? {} : { threadTracker: setting })
       try {
