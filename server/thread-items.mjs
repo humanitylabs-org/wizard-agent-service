@@ -17,6 +17,10 @@ export const TRACKER_TWEAK = 'wizard/thread-tracker'
 export const ITEM_STATES = new Set(['running', 'needs_you', 'done', 'blocked'])
 export const MAX_ITEMS_PER_REPLY = 16
 const MAX_ITEMS_PER_THREAD = 40
+// Evicted asks leave a small mark (id -> newest reply time, plus what it said), so a history re-read of an older
+// reply cannot bring an ask back as a new unseen item (issue 486). Over this many marks the oldest are folded into
+// one per-thread floor: an unknown ask from a reply at or before the floor is ignored the same way.
+const MAX_EVICTED_PER_THREAD = 400
 const MAX_THREADS = 3000
 const ITEM_ID = /^[a-z0-9][a-z0-9-]{0,39}$/u
 const THREAD_ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/u
@@ -60,6 +64,7 @@ const seconds = value => {
   return n > 1e12 ? n : n * 1000 // Hermes stores seconds; the ledger keeps milliseconds
 }
 const empty = () => ({ schema: 1, threads: {} })
+const signature = item => JSON.stringify([item.state, item.title, item.ask || ''])
 const keyOf = (agent, thread) => `${agent || 'hermes'}/${thread}`
 
 // Read projection only: custody stays per ask id. Unknown/malformed anchors never coalesce.
@@ -126,6 +131,12 @@ export class ThreadItemStore {
       const mid = messageId == null || messageId === '' ? null : String(messageId).slice(0, 128)
       const record = { id: item.id, title: item.title, state: item.state, ...(item.ask ? { ask: item.ask } : {}), ...(item.state === 'needs_you' && tryIt ? { try: true } : {}), message_id: mid, at: when }
       if (!old) {
+        // An evicted ask is not re-created by the reply it came from (or any older one), nor by a later
+        // restatement that changes nothing; only a real update brings it back.
+        const gone = current.evicted?.[item.id]
+        if (gone && (when <= gone.at || gone.sig === signature(item))) continue
+        if (!gone && when <= (current.evicted_floor || 0)) continue
+        if (gone) delete current.evicted[item.id]
         current.items[item.id] = { ...record, created_at: when, updated_at: when, seen_at: 0 }
         changed = true
       } else if (when > old.at) {
@@ -147,7 +158,19 @@ export class ThreadItemStore {
       const completed = ids.filter(id => current.items[id].state === 'done')
       const seen = id => current.items[id].seen_at >= current.items[id].updated_at
       completed.sort((a, b) => Number(seen(b)) - Number(seen(a)) || current.items[a].updated_at - current.items[b].updated_at)
-      for (const id of completed.slice(0, ids.length - MAX_ITEMS_PER_THREAD)) delete current.items[id]
+      const evicted = current.evicted ??= {}
+      for (const id of completed.slice(0, ids.length - MAX_ITEMS_PER_THREAD)) {
+        evicted[id] = { at: current.items[id].at, sig: signature(current.items[id]) }
+        delete current.items[id]
+      }
+      const marks = Object.keys(evicted)
+      if (marks.length > MAX_EVICTED_PER_THREAD) {
+        marks.sort((a, b) => evicted[a].at - evicted[b].at)
+        for (const id of marks.slice(0, marks.length - MAX_EVICTED_PER_THREAD)) {
+          current.evicted_floor = Math.max(current.evicted_floor || 0, evicted[id].at)
+          delete evicted[id]
+        }
+      }
     }
     current.updated_at = this.now()
     this.data.threads[key] = current

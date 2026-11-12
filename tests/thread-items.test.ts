@@ -87,6 +87,43 @@ describe('the ledger', () => {
     expect(ids).toEqual(expect.arrayContaining(['running', 'waiting', 'blocked', 'question-79']))
     expect(ids).not.toContain('question-0') // oldest unseen done is next to go
   })
+  it('never brings evicted asks back unseen when history is read again (issue 486)', () => {
+    const path = join(tmp(), 'evicted.json')
+    const store = new ThreadItemStore(path, { now: () => 1_700_001_000_000 })
+    const old = (i: number) => store.ingest('hermes', 't', { items: [item(`ask-${i}`, 'done')], at: 1_700_000_000 + i, messageId: `m${i}` })
+    for (let i = 0; i < 38; i++) old(i)
+    store.markSeen('hermes', 't', Array.from({ length: 16 }, (_, i) => `ask-${i}`))
+    expect(store.counts('hermes', 't')).toMatchObject({ acknowledged: 16, done_unseen: 22 })
+    for (let i = 0; i < 5; i++) store.ingest('hermes', 't', { items: [item(`new-${i}`, 'done')], at: 1_700_000_100 + i, messageId: `n${i}` })
+    expect(store.counts('hermes', 't')).toMatchObject({ acknowledged: 13, done_unseen: 27, total: 40 })
+    // A history re-read ingests every old reply again, oldest first; then again after a restart.
+    for (let i = 0; i < 38; i++) old(i)
+    expect(store.counts('hermes', 't')).toMatchObject({ acknowledged: 13, done_unseen: 27, total: 40 })
+    const reread = new ThreadItemStore(path, { now: () => 1_700_002_000_000 })
+    for (let i = 0; i < 38; i++) reread.ingest('hermes', 't', { items: [item(`ask-${i}`, 'done')], at: 1_700_000_000 + i, messageId: `m${i}` })
+    expect(reread.counts('hermes', 't')).toMatchObject({ acknowledged: 13, done_unseen: 27, total: 40 })
+    const kept = reread.list('hermes', 't').map(i => i.id)
+    for (const id of ['ask-0', 'ask-1', 'ask-2']) expect(kept).not.toContain(id)
+    // A later reply restating an evicted ask unchanged is not an update either...
+    reread.ingest('hermes', 't', { items: [item('ask-0', 'done')], at: 1_700_000_300 })
+    expect(reread.list('hermes', 't').map(i => i.id)).not.toContain('ask-0')
+    // ...but a real change does bring it back, as new work.
+    reread.ingest('hermes', 't', { items: [item('ask-0', 'needs_you')], at: 1_700_000_301 })
+    expect(reread.list('hermes', 't').find(i => i.id === 'ask-0')).toMatchObject({ state: 'needs_you', seen: false })
+  })
+  it('folds old eviction marks into a floor so the ledger stays small', () => {
+    const store: any = new ThreadItemStore('')
+    for (let i = 0; i < 500; i++) store.ingest('hermes', 't', { items: [item(`q-${i}`, 'done')], at: 1_000 + i })
+    const record = store.data.threads['hermes/t']
+    expect(Object.keys(record.items)).toHaveLength(40)
+    expect(Object.keys(record.evicted)).toHaveLength(400)
+    expect(record.evicted_floor).toBe(1_059_000)
+    store.ingest('hermes', 't', { items: [item('q-3', 'done')], at: 1_003 })
+    store.ingest('hermes', 't', { items: [item('never-seen-before', 'done')], at: 1_010 })
+    const kept = store.list('hermes', 't').map((i: any) => i.id)
+    expect(kept).not.toContain('q-3')
+    expect(kept).not.toContain('never-seen-before')
+  })
   it('treats the retention limit as soft when every ask is still open', () => {
     const store = new ThreadItemStore()
     for (let i = 0; i < 45; i++) store.ingest('hermes', 't', { items: [item(`open-${i}`, 'running')], at: 100 + i })
