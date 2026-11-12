@@ -33,7 +33,10 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
   // checked on each call so another writer's records are still seen. Reads never rewrite it.
   let cache = { stamp: '', files: [], byId: new Map() }
   const stampOf = () => {
-    try { const info = statSync(index, { bigint: true }); return `${info.ino}-${info.size}-${info.mtimeNs}` } catch { return 'missing' }
+    try { const info = statSync(index, { bigint: true }); return `${info.ino}-${info.size}-${info.mtimeNs}` } catch (error) {
+      if (error?.code === 'ENOENT') return 'missing'
+      throw error
+    }
   }
   const remember = (files, stamp) => {
     const byId = new Map()
@@ -44,12 +47,11 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
   const current = () => {
     const stamp = stampOf()
     if (stamp === cache.stamp) return cache
-    let files = []
-    try {
-      const value = JSON.parse(readFileSync(index, 'utf8'))
-      files = Array.isArray(value?.files) ? value.files : []
-    } catch { files = [] }
-    return remember(files, stamp)
+    if (stamp === 'missing') return remember([], stamp)
+    // Only successful reads are authoritative; failures must not poison the cache or permit saves.
+    const value = JSON.parse(readFileSync(index, 'utf8'))
+    if (!Array.isArray(value?.files)) throw new TypeError('media index files must be an array')
+    return remember(value.files, stamp)
   }
   const load = () => current().files
   const find = (id) => current().byId.get(id) ?? null
@@ -58,7 +60,8 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
     const tmp = `${index}.${process.pid}.tmp`
     writeFileSync(tmp, JSON.stringify({ schema: 1, files }))
     renameSync(tmp, index)
-    remember(files, stampOf())
+    // The save is committed; a failed stamp only drops the cache so the next call rereads the index.
+    try { remember(files, stampOf()) } catch { cache = { stamp: '', files: [], byId: new Map() } }
   }
   // Oldest record with these bytes whose file is still on disk.
   const firstCopy = (files, sha256) => files.find((item) => item.sha256 === sha256 && existsSync(resolve(root, relOf(item))))
