@@ -86,7 +86,7 @@ import { AgentError, MAIN_AGENT_ID, agentModelSeesImages, agentVisionHelper, cre
 import { acquireServiceLeases } from './store-migration.mjs'
 import { SystemJobs, SystemdJobTimers, systemJobsSocket, handleSystemJobsApi } from './system-jobs.mjs'
 import { serviceLifetime } from './service-lifetime.mjs'
-import { createRestartGate } from './restart-gate.mjs'
+import { createRestartGate, restartRequestRefusal } from './restart-gate.mjs'
 import { onboardingTools } from './onboarding.mjs'
 import { followUpThreadNote, followUpTool } from './follow-ups.mjs'
 import { agentReachOutTools, reachOutNote } from './agent-reach-out.mjs'
@@ -6598,7 +6598,9 @@ function buildWizardServer(options, lifetime) {
         if (!restartGate) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        // Same-site pages (other apps on this box) and non-JSON POSTs are refused too, as for setup writes.
+        const refusal = restartRequestRefusal(request, { publicHost: request[TAILNET_INGRESS] === true ? request.headers.host : undefined })
+        if (refusal) { sendJson(response, refusal, { error: refusal === 415 ? 'json_required' : 'cross_origin_request' }); return }
         if (request.method === 'GET') { sendJson(response, 200, restartGate.status(), { 'Cache-Control': 'no-store' }); return }
         // Holding everyone's sends is the box owner's (or its App Manager's) call, never an app's or an agent's.
         if (principalOf(request).kind !== 'owner') { sendJson(response, 403, { error: 'owner_required' }); return }

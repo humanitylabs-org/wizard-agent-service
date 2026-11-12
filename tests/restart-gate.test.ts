@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
-import { createRestartGate } from '../server/restart-gate.mjs'
+import { createRestartGate, restartRequestRefusal } from '../server/restart-gate.mjs'
 import { DurableRunQueue, queueRequestHash } from '../server/run-queue.mjs'
 
 // Issue 480: a restart the product starts waits for running turns, holds new sends (saved, never refused) and the
@@ -71,6 +71,32 @@ describe('restart gate', () => {
     const capped = gate.request({ wait_s: 99_999, reason: 'Not A Reason!' })
     expect(Date.parse(capped.wait_until) - time.now()).toBe(60_000)
     expect(capped.reason).toBe('restart')
+  })
+})
+
+describe('restart route refusal', () => {
+  const req = (method: string, headers: Record<string, string> = {}) => ({ method, headers: { host: '127.0.0.1:8080', ...headers } })
+  const json = { 'content-type': 'application/json' }
+
+  it('refuses a POST that is not JSON, so a page cannot send it without a preflight', () => {
+    expect(restartRequestRefusal(req('POST'))).toBe(415)
+    expect(restartRequestRefusal(req('POST', { 'content-type': 'text/plain' }))).toBe(415)
+    expect(restartRequestRefusal(req('POST', json))).toBe(0)
+    expect(restartRequestRefusal(req('POST', { 'content-type': 'application/json; charset=utf-8' }))).toBe(0)
+  })
+
+  it('refuses same-site, cross-site and foreign origins on every method, so a sibling page cannot renew the lease', () => {
+    for (const method of ['GET', 'POST', 'DELETE']) {
+      const body = method === 'POST' ? json : {}
+      expect(restartRequestRefusal(req(method, { ...body, 'sec-fetch-site': 'same-site' }))).toBe(403)
+      expect(restartRequestRefusal(req(method, { ...body, 'sec-fetch-site': 'cross-site' }))).toBe(403)
+      expect(restartRequestRefusal(req(method, { ...body, origin: 'http://127.0.0.1:9866' }))).toBe(403)
+      expect(restartRequestRefusal(req(method, { ...body, origin: 'not a url' }))).toBe(403)
+      expect(restartRequestRefusal(req(method, { ...body, 'sec-fetch-site': 'same-origin', origin: 'http://127.0.0.1:8080' }))).toBe(0)
+      expect(restartRequestRefusal(req(method, body))).toBe(0)
+    }
+    expect(restartRequestRefusal(req('GET', { origin: 'https://box.example.ts.net', 'x-forwarded-host': 'box.example.ts.net' }))).toBe(0)
+    expect(restartRequestRefusal(req('GET', { origin: 'https://box.example.ts.net', 'x-forwarded-host': 'box.example.ts.net' }), { publicHost: '127.0.0.1:8080' })).toBe(403)
   })
 })
 

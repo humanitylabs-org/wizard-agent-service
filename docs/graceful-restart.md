@@ -14,6 +14,9 @@ could fail with "Reply not sent". James's box avoided this with a local drain sc
 ## Protocol (for the restarter: the App Manager, or an operator script)
 
 All routes are owner-only (the box owner or the App Manager on the box's loopback); apps and agents get 403.
+A browser request must come from the shell's own origin: `Sec-Fetch-Site: same-site` or `cross-site`, or an
+`Origin` that is not this host, gets 403 `cross_origin_request` on GET, POST and DELETE (so another app's page on the
+box can't start or renew the hold), and a POST must be `Content-Type: application/json` (else 415 `json_required`).
 
 1. `POST /wizard/v1/restart` with `{"reason": "update", "wait_s": 600}` (both optional). From now on new sends are
    accepted and saved in the durable run queue but not launched (queue reason `restart_pending`). Turns already
