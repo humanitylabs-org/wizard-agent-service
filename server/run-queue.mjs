@@ -1434,6 +1434,9 @@ export class DurableRunQueue {
     const fresh = this.get(record.publicRunId)
     if (!fresh || !['queued', 'launching'].includes(fresh.status)) return fresh ?? record
     if (fresh.upstreamRunId) return this._refresh(fresh, true)
+    // A restart hold raised while this tick awaited liveness or dispatch health still wins: never start a new
+    // turn the restart would cut (issue 480). Checked synchronously right before the row turns `launching`.
+    if (fresh.status === 'queued' && this._held()) return this._update(fresh.publicRunId, { waitingReason: RESTART_PENDING })
     // Recovery admission and dispatch can be separated by capacity/health awaits.
     // Recheck the original request so a Dismiss in that gap still wins.
     if (fresh.providerRecoveryAttempted && fresh.retrySourceId

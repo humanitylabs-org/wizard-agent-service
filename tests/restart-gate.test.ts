@@ -124,6 +124,22 @@ describe('run queue under a restart hold', () => {
     expect(next.get(held.record.publicRunId)?.status).toBe('running')
   })
 
+  it('a hold raised while a tick awaits dispatch health still stops that tick from launching', async () => {
+    const launched: string[] = []
+    let hold = false, armed = false
+    const queue = new DurableRunQueue({ statePath: await statePath(), pollIntervalMs: 0, launchHold: () => hold,
+      // The restart request lands while the tick waits on this health read (after the tick's first hold check).
+      canDispatch: async () => { if (armed) hold = true; return true },
+      launch: async (record: { sessionId: string }) => { launched.push(record.sessionId); return { upstreamRunId: 'r', capacityStatus: 'running', payload: { status: 'running' } } },
+      lookup: async () => ({ payload: { status: 'running' } }) } as never)
+    queues.push(queue)
+    await queue.initialize()
+    armed = true
+    const admitted = await queue.admit(request('wizard_race', 'race-1'))
+    expect(launched).toEqual([])
+    expect(queue.get(admitted.record!.publicRunId)).toMatchObject({ status: 'queued', waitingReason: 'restart_pending' })
+  })
+
   it('without a hold (switch off) launches at once as before', async () => {
     const launched: string[] = []
     const queue = new DurableRunQueue({ statePath: await statePath(), pollIntervalMs: 0,
