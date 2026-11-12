@@ -1836,6 +1836,22 @@
       "policy_exemptions": []
     },
     {
+      "id": "chat-answer-postscript",
+      "description": "An agent reply written in the same message as a tool call (e.g. a notes patch) stays the visible answer when the turn ends with a short postscript (wizard-ux issue 1319): a finished turn whose final reply is under 500 characters, with an earlier non-commentary reply of 1,000+ characters and 3x longer, shows the long reply first and the postscript under it instead of folding the answer into the collapsed work log. Commentary, short interim lines, mid-run and failed turns are unchanged.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/chat-answer-postscript.test.mjs: the same history (user, assistant text + tool_calls, tool, short assistant text) for main, host-profile, container and restricted threads parses through the real WosChat.parseRows and renders through the real chats.js turnHtml to the same turn, with the answer outside the work log and the postscript under it; guard cases keep interim lines, commentary and mid-run turns in the log, and both messages' inline images stay placed. wizard-ux tests/qa-chat-answer-postscript.cjs is the synthetic browser run (phone 390x844 and desktop classic 1280x860; QA_EXPECT=broken against main). Synthetic source-executed and browser evidence, not live box proof.",
+      "source_refs": [
+        "wizard-ux/web/core/chat-kit.js",
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/chat-answer-postscript.test.mjs",
+        "wizard-ux/tests/qa-chat-answer-postscript.cjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "synced-list-ops",
       "description": "Shared Chats lists (Spaces and their members, subject order, pins) keep every device's and agent's change for main and routed threads: edits are item operations applied atomically by the service, never a device's whole cached list, so a stale or simultaneous device cannot drop another's edit.",
       "layer": "ux",
