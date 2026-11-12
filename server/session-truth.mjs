@@ -421,7 +421,7 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       && current.lastAssistantAt >= current.lastUserAt && (at === undefined || Number(at) >= current.lastAssistantAt)
     for (const receipt of readUndeliveredHelperReceipts(path, { now: nowSeconds * 1000, db, sessionIds: ids })) {
       const current = truth.get(receipt.sessionId)
-      if (current && !isFollowUp(receipt.sessionId, receipt.delegationId) && !stoppedAfterDone(current, receipt.statuses)) current.helperResultUnanswered = true
+      if (current && !isFollowUp(receipt.sessionId, receipt.delegationId) && !stoppedAfterDone(current, receipt.statuses, receipt.at)) current.helperResultUnanswered = true
     }
     try {
       const newestRow = preparedRead(db, `

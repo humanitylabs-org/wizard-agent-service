@@ -129,3 +129,14 @@ test('a stopped helper delivered after the done reply does not keep the earlier 
   assert.equal(view.section, 'Ready'); assert.notEqual(view.attention?.state, 'needs_you', `${state} ${minutes} min`)
  }
 })
+// An undelivered stopped receipt is fenced by its completion time: one that completed before the done
+// reply was never seen by the agent and still waits for it; one that completed after the done does not.
+test('an undelivered stopped receipt only stops waiting when it completed after the done reply', () => {
+ const done = 'Routing is fixed.\n[WIZARD_STATUS_V1]{"state":"done","ask":"Routing fixed"}[/WIZARD_STATUS_V1]'
+ for (const [age, waits] of [[1, false], [30, true]]) {
+  const path = fixture({ final: done, age }); const db = new DatabaseSync(path)
+  db.prepare("UPDATE async_delegations SET result_json=?").run(JSON.stringify({ results: [{ task_index: 0, status: 'interrupted', summary: 'partial' }] }))
+  db.close()
+  assert.equal(Boolean(readHermesSessionTruth(path, ['wizard_a'], now / 1000).get('wizard_a').helperResultUnanswered), waits, `completed ${age}s ago`)
+ }
+})
