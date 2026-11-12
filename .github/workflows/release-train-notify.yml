@@ -25,6 +25,7 @@ jobs:
       # 12 Nov 2026: the train's writer is the GitHub App WizardOS Builder (the wizardosbuilder user was suspended).
       - name: WizardOS Builder app token
         id: app
+        continue-on-error: true   # no key here: the empty-token guard below passes; the daily sweep still cuts
         uses: actions/create-github-app-token@v1
         with:
           app-id: 5723441
