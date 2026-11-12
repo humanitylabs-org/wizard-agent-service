@@ -120,6 +120,25 @@ for (const bad of ['{', '{"files":{}}', '{"files":null}', '{}']) {
   })
 }
 
+test('stat failure after the index is committed does not fail the save or duplicate on retry', (t) => {
+  const { indexPath, fresh, first } = fixture(t)
+  const store = fresh()
+  let calls = 0
+  fs.statSync = function (path, ...args) {
+    // Call 1 is save()'s load; call 2 is the stamp taken after the index rename.
+    if (String(path) === indexPath && ++calls === 2) throw Object.assign(new Error('synthetic EIO'), { code: 'EIO' })
+    return originalStat(path, ...args)
+  }
+  syncBuiltinESMExports()
+  const added = store.save(Buffer.from('committed synthetic attachment'), { ...meta, filename: 'committed.txt' })
+  fs.statSync = originalStat
+  syncBuiltinESMExports()
+  assert.equal(calls >= 2, true)
+  assert.equal(store.get(added.id)?.id, added.id, 'cache is dropped and the committed record is reread')
+  assert.equal(store.get(first.id)?.id, first.id)
+  assert.equal(JSON.parse(originalRead(indexPath, 'utf8')).files.length, 2)
+})
+
 test('ENOENT new store, restart and external sequential writer remain supported', (t) => {
   const { dir, indexPath, fresh, first } = fixture(t)
   const missing = join(dir, 'new-state', 'index.json')

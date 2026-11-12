@@ -60,7 +60,8 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
     const tmp = `${index}.${process.pid}.tmp`
     writeFileSync(tmp, JSON.stringify({ schema: 1, files }))
     renameSync(tmp, index)
-    remember(files, stampOf())
+    // The save is committed; a failed stamp only drops the cache so the next call rereads the index.
+    try { remember(files, stampOf()) } catch { cache = { stamp: '', files: [], byId: new Map() } }
   }
   // Oldest record with these bytes whose file is still on disk.
   const firstCopy = (files, sha256) => files.find((item) => item.sha256 === sha256 && existsSync(resolve(root, relOf(item))))
