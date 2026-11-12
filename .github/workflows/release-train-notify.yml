@@ -22,14 +22,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # 12 Nov 2026: the train's writer is the GitHub App WizardOS Builder (the wizardosbuilder user was suspended).
+      - name: WizardOS Builder app token
+        id: app
+        continue-on-error: true   # no key here: the empty-token guard below passes; the daily sweep still cuts
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: 5723441
+          private-key: ${{ secrets.BUILDER_APP_PRIVATE_KEY }}
+          owner: humanitylabs-org
+          repositories: wizard-os
       - name: Dispatch component-published to wizard-os
         env:
-          GH_TOKEN: ${{ secrets.RELEASE_TRAIN_TOKEN }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
           SHA: ${{ github.event.workflow_run.head_sha }}
           RUN: ${{ github.event.workflow_run.html_url }}
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "::notice::RELEASE_TRAIN_TOKEN is not shared with this repo; the release train's daily sweep will cut $SHA"
+            echo "::notice::No builder app token here; the release train's daily sweep will cut $SHA"
             exit 0
           fi
           gh api -X POST repos/humanitylabs-org/wizard-os/dispatches -f event_type=component-published \
