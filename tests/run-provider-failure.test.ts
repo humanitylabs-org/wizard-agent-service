@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, it } from 'vitest'
 import { DurableRunQueue, queueRequestHash } from '../server/run-queue.mjs'
-import { normalizeProviderPreflightFailure } from '../server/run-provider-failure.mjs'
+import { normalizeProviderPreflightFailure, CLAUDE_MODEL_LIMIT_SAFE_ERROR } from '../server/run-provider-failure.mjs'
 
 const dirs: string[] = [], queues: DurableRunQueue[] = []
 afterEach(async () => { for (const q of queues.splice(0)) q.close(); for (const d of dirs.splice(0)) await rm(d, { recursive: true, force: true }) })
@@ -22,6 +22,15 @@ it('converts only exact zero-token provider preflight failures', () => {
   expect(result).toMatchObject({ status: 'failed', completed: false, last_event: 'run.failed', error: { type: 'provider_preflight_failed' } })
   expect(result.safe_error).toContain('Your message is saved')
   for (const value of [null, { ...failure(), output: 'A normal answer' }, { ...failure(), status: 'running' }, { ...failure(), usage: { input_tokens: 10, output_tokens: 0, total_tokens: 10 } }, { ...failure(), usage: undefined }]) expect(normalizeProviderPreflightFailure(value)).toBe(value)
+})
+it('a Claude model cooldown says limit and Retry, never sign-in or generic access (issue 505)', () => {
+  const result = normalizeProviderPreflightFailure(failure())
+  expect(result.safe_error).toBe(CLAUDE_MODEL_LIMIT_SAFE_ERROR)
+  expect(result.error.type).toBe('provider_preflight_failed')
+  expect(result.wizard_reconnect).toBeUndefined()
+  expect(result.safe_error).not.toMatch(/sign in|signed out|unavailable/i)
+  const other = normalizeProviderPreflightFailure({ ...failure(), output: '⚠️ Provider authentication failed: Something else went wrong.' })
+  expect(other.safe_error).toContain('could not start this request')
 })
 it('admission failure is durable, projects failed, and does not relaunch a duplicate', async () => {
   let calls = 0

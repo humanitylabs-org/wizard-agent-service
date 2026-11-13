@@ -27,7 +27,11 @@ from openai import AsyncOpenAI
 from starlette.requests import Request
 
 sys.path.insert(0, str(Path(__file__).parent))
+import os
+os.environ['WIZARD_CLAUDE_COOLDOWN_RECOVERY'] = '0'   # no background pass against a real pool in tests
 import plugin_api as api
+# Issue 505 cases live in their own file; CI runs only this one.
+from test_claude_cooldown_recovery import RecoveryTests, StockHermesRehearsal  # noqa: F401,E402
 
 PREFIX = "/api/plugins/wizard-os"
 MODEL = "gpt-6-luna"

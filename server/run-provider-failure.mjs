@@ -10,6 +10,10 @@ const REAUTH = '(?: Run `hermes (?:-p [a-zA-Z0-9_-]+ )?model` to re-authenticate
 const CODEX_MISSING = new RegExp(`^(?:No Codex credentials stored\\. Run \`${COMMAND}\` to authenticate\\.|Codex auth (?:is missing (?:access_token|refresh_token)|state is missing tokens)\\. Run \`${COMMAND}\` to re-authenticate\\.)${REAUTH}$`)
 const CODEX_REFRESH = new RegExp(`^(?:Codex token refresh failed with status (?:401|403)\\.|Codex token refresh failed: [^\\r\\n]+|Codex refresh token was already consumed by another client \\(e\\.g\\. Codex CLI or VS Code extension\\)\\. Run \`codex\` in your terminal to generate fresh tokens, then run \`${COMMAND}\` to re-authenticate\\.) Run \`hermes (?:-p [a-zA-Z0-9_-]+ )?model\` to re-authenticate\\.$`)
 
+// hermes_cli/runtime_provider.py _anthropic_token_or_raise: the pool holds a model cooldown for every usable grant.
+const CLAUDE_MODEL_LIMIT = /^⚠️ Provider authentication failed: Anthropic credentials are rate-limited for claude-[a-zA-Z0-9._-]{1,100}; other Claude models remain available/u
+export const CLAUDE_MODEL_LIMIT_SAFE_ERROR = 'Claude has reached a usage limit for this model. Your message is saved; tap Retry after the limit resets, or a few minutes after extra usage is turned on and funded in your Claude account.'
+
 export function providerSignInEvents() {
   let pending = ''
   const decoder = new StringDecoder('utf8')
@@ -67,8 +71,12 @@ export function normalizeProviderPreflightFailure(payload) {
       || !payload.output.startsWith('⚠️ Provider authentication failed:')
       || !payload.usage || payload.usage.input_tokens !== 0 || payload.usage.output_tokens !== 0
       || payload.usage.total_tokens !== 0) return payload
+  // Hermes refused a Claude model it holds a usage cooldown for (issue 505). Not a sign-out, and extra usage is not
+  // known to be unavailable: say what happened and that Retry works once the limit lifts or extra usage is on.
+  const limited = CLAUDE_MODEL_LIMIT.test(payload.output)
   return { ...payload, status: 'failed', last_event: 'run.failed', completed: false,
-    safe_error: 'The selected AI provider could not start this request. Your message is saved; retry after access or usage is restored.',
+    safe_error: limited ? CLAUDE_MODEL_LIMIT_SAFE_ERROR
+      : 'The selected AI provider could not start this request. Your message is saved; retry after access or usage is restored.',
     error: { type: 'provider_preflight_failed', message: 'The selected AI provider could not start this request.' } }
 }
 
