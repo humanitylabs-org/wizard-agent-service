@@ -6188,7 +6188,7 @@ function buildWizardServer(options, lifetime) {
           const since = Number(url.searchParams.get('since') ?? -1), wait = Number(url.searchParams.get('wait') ?? 0)
           if (!Number.isFinite(since) || !Number.isFinite(wait)) { sendJson(response, 400, { error: 'invalid_query' }); return }
           const gone = new AbortController(); response.on('close', () => gone.abort())
-          const snap = await workspaceStore.wait(since, Math.max(0, Math.min(25, wait)), gone.signal)
+          const snap = await meterDone.idle(workspaceStore.wait(since, Math.max(0, Math.min(25, wait)), gone.signal))
           if (!response.writableEnded && !response.destroyed) sendJson(response, 200, snap)
           return
         }
