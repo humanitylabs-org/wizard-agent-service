@@ -1330,10 +1330,14 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.equal(target.path,s.kind==='host-profile'?'/p/parity-profile/v1/runs':'/v1/runs')
   },
   'app-job-routing': async s => {
-    // A synthetic app with a job and a shipped skill, installed the App Manager way (apps.json + skill under the OS home).
+    // A synthetic app with a job and a shipped skill, installed the App Manager way: apps.json + its skill beside it.
+    // The Service's own skills folder (the one the agent reads) is a different folder, as on a standard install where
+    // the Service runs as a container app, so the app's skill must be copied there for skill_view to find it.
     const osHome = join(s.root, 'os'), skills = join(osHome, 'skills')
-    mkdirSync(join(skills, 'parity-video'), { recursive: true })
-    writeFileSync(join(skills, 'parity-video', 'SKILL.md'), '---\nname: parity-video\ndescription: Synthetic app workflow.\n---\nCall make_short.\n')
+    const source = join(s.root, 'skills', 'parity-video')
+    mkdirSync(source, { recursive: true })
+    writeFileSync(join(source, 'SKILL.md'), '---\nname: parity-video\ndescription: Synthetic app workflow.\n---\nCall make_short.\n')
+    const appSkill = join(skills, 'parity-video', 'SKILL.md')
     const app = { id: 'parity-video', name: 'Synthetic Video', status: 'running', provides: ['short-form-video'], skill: 'skills/parity-video/SKILL.md', mcp: { url: 'http://127.0.0.1:9/mcp' } }
     const install = apps => writeFileSync(join(s.root, 'apps.json'), JSON.stringify({ schema: 1, apps }))
     const kernel = async () => {
@@ -1367,6 +1371,7 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
       if (value.includes('Jobs on this box:')) assert.ok(value.indexOf('Report tool errors.') < value.indexOf('Jobs on this box:'))
     }
     assertRules(text)
+    assert.match(readFileSync(appSkill, 'utf8'), /Call make_short\./u, `${s.kind}: the app's own skill sits beside the pointer skills`)
     if (s.kind === 'main') {
       assert.ok(existsSync(pointer), 'main agent gets the job pointer skill')
       assert.match(readFileSync(pointer, 'utf8'), /Synthetic Video: load its skill `parity-video` with skill_view first/u)
@@ -1380,6 +1385,7 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     const after = await kernel()
     assertRules(after)
     assert.ok(!existsSync(join(skills, 'wizard-job-short-form-video')), 'uninstall removes the pointer')
+    assert.ok(!existsSync(join(skills, 'parity-video')), `${s.kind}: uninstall removes the copied app skill`)
     assert.doesNotMatch(after, /Synthetic Video/u)
   },
   'agent-app-access': async s => {

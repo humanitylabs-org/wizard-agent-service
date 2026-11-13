@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { afterEach, describe, expect, it } from 'vitest'
-import { bridgeApps, createAgentBridge, createGatewayGrants, renderKernel, KERNEL_LIMIT, pointerSkills, writePointerSkills, appsDelta, renderDelta, ThreadAppSnapshots } from '../server/agent-bridge.mjs'
+import { bridgeApps, createAgentBridge, createGatewayGrants, renderKernel, KERNEL_LIMIT, pointerSkills, writePointerSkills, writeAppSkills, appsDelta, renderDelta, ThreadAppSnapshots } from '../server/agent-bridge.mjs'
 import { createWizardServer, listen } from '../server/service.mjs'
 
 const PLUGIN = resolve(__dirname, '../hermes-plugin/wizard-os')
@@ -258,6 +258,87 @@ describe('agent bridge: kernel', () => {
     const snaps = new ThreadAppSnapshots('')
     expect(snaps.take('s1', before)).toEqual(before)
     expect(snaps.take('s1', { other: 'running' })).toEqual(before)
+  })
+})
+
+describe('agent bridge: app skills for a containerised agent', () => {
+  // The service's own skills folder (mounted into the agent) is not the App Manager's (read-only beside apps.json).
+  const registry = (apps, skills = {}) => {
+    const dir = mkdtempSync(join(tmpdir(), 'wab-reg-'))
+    for (const [id, text] of Object.entries(skills)) { mkdirSync(join(dir, 'skills', id), { recursive: true }); writeFileSync(join(dir, 'skills', id, 'SKILL.md'), text) }
+    writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps }))
+    return dir
+  }
+  const shell = { id: 'wizard-ux', name: 'Wizard Shell', status: 'running', provides: ['shell'], mcp: null, skill: 'skills/wizard-ux/SKILL.md' }
+  const secret = app('money', 7, { privacy: 'private' })
+  const texts = { 'wizard-ux': '---\nname: wizard-interface\n---\nmanual', 'hello-wizard': '---\nname: hello-wizard\n---\nhello', money: '---\nname: money\n---\n' }
+  const listing = (state) => readdirSync(join(state, 'skills')).filter((n) => !n.startsWith('.')).sort()
+
+  it('copies every app skill the pointers name, skill-only apps included, and leaves private ones out unless allowed', () => {
+    const reg = registry([app('hello-wizard', 9), shell, secret], texts)
+    const state = mkdtempSync(join(tmpdir(), 'wab-state-'))
+    expect(writeAppSkills(state, reg, JSON.parse(readFileSync(join(reg, 'apps.json'), 'utf8')).apps, { allowed: new Set(['hello-wizard']) })).toEqual(['hello-wizard', 'wizard-ux'])
+    expect(readFileSync(join(state, 'skills', 'wizard-ux', 'SKILL.md'), 'utf8')).toBe(texts['wizard-ux'])
+    expect(existsSync(join(state, 'skills', 'money'))).toBe(false)
+    // every app (no per-agent list): the private one too
+    expect(writeAppSkills(state, reg, [app('hello-wizard', 9), shell, secret])).toEqual(['hello-wizard', 'money', 'wizard-ux'])
+  })
+
+  it('removes the skills it wrote for apps that are gone, never a folder it did not write, and skips a shared folder', () => {
+    const reg = registry([app('hello-wizard', 9), shell], texts)
+    const state = mkdtempSync(join(tmpdir(), 'wab-state-'))
+    mkdirSync(join(state, 'skills', 'wizard-job-diagnostics'), { recursive: true })
+    mkdirSync(join(state, 'skills', 'owner-notes'), { recursive: true })
+    writeAppSkills(state, reg, [app('hello-wizard', 9), shell])
+    expect(listing(state)).toEqual(['hello-wizard', 'owner-notes', 'wizard-job-diagnostics', 'wizard-ux'])
+    expect(writeAppSkills(state, reg, [shell])).toEqual(['wizard-ux'])
+    expect(listing(state)).toEqual(['owner-notes', 'wizard-job-diagnostics', 'wizard-ux'])
+    // a folder an owner made under an app's id is not overwritten
+    mkdirSync(join(state, 'skills', 'hello-wizard'), { recursive: true }); writeFileSync(join(state, 'skills', 'hello-wizard', 'SKILL.md'), 'mine')
+    expect(writeAppSkills(state, reg, [app('hello-wizard', 9), shell])).toEqual(['wizard-ux'])
+    expect(readFileSync(join(state, 'skills', 'hello-wizard', 'SKILL.md'), 'utf8')).toBe('mine')
+    // the App Manager's own folder (service on the host, WIZARD_OS_HOME = its home): nothing to copy
+    expect(writeAppSkills(reg, reg, [app('hello-wizard', 9), shell])).toBe(null)
+    // a path out of the registry is refused
+    expect(writeAppSkills(state, reg, [{ ...shell, id: 'escape', skill: '../outside/SKILL.md' }])).toEqual([])
+  })
+
+  it('the bridge copies them on start and after apps.json changes, beside its pointer skills', () => {
+    const reg = registry([app('hello-wizard', 9), shell], texts)
+    const state = mkdtempSync(join(tmpdir(), 'wab-state-'))
+    const bridge = createAgentBridge({ appsJsonPath: join(reg, 'apps.json'), osHome: state, watchIntervalMs: 0 })
+    expect(listing(state)).toEqual(['hello-wizard', 'wizard-job-diagnostics', 'wizard-ux'])
+    writeFileSync(join(reg, 'apps.json'), JSON.stringify({ schema: 1, apps: [shell] }))
+    bridge.appsChanged()
+    expect(listing(state)).toEqual(['wizard-ux'])
+  })
+
+  it('keeps an earlier copy while the App Manager has not written the skill yet, and reports it as pending', () => {
+    const reg = registry([app('hello-wizard', 9), shell], texts)
+    const state = mkdtempSync(join(tmpdir(), 'wab-state-'))
+    expect(writeAppSkills(state, reg, [app('hello-wizard', 9), shell])).toEqual(['hello-wizard', 'wizard-ux'])
+    rmSync(join(reg, 'skills', 'hello-wizard'), { recursive: true, force: true })
+    const pending = new Set()
+    expect(writeAppSkills(state, reg, [app('hello-wizard', 9), shell], { pending })).toEqual(['hello-wizard', 'wizard-ux'])
+    expect([...pending]).toEqual(['hello-wizard'])
+    expect(readdirSync(join(state, 'skills')).filter((n) => n.endsWith('.tmp'))).toEqual([]) // stamp written atomically
+    expect(readFileSync(join(state, 'skills', 'hello-wizard', 'SKILL.md'), 'utf8')).toBe(texts['hello-wizard'])
+    // once the app is gone from apps.json, its copy goes too
+    expect(writeAppSkills(state, reg, [shell])).toEqual(['wizard-ux'])
+    expect(listing(state)).toEqual(['wizard-ux'])
+  })
+
+  it('the bridge copies a skill that lands after apps.json named it', async () => {
+    const reg = registry([app('hello-wizard', 9), shell], { 'wizard-ux': texts['wizard-ux'] })
+    const state = mkdtempSync(join(tmpdir(), 'wab-state-'))
+    const bridge = createAgentBridge({ appsJsonPath: join(reg, 'apps.json'), osHome: state, watchIntervalMs: 0, skillRetryMs: 20 })
+    try {
+      expect(existsSync(join(state, 'skills', 'hello-wizard'))).toBe(false)
+      mkdirSync(join(reg, 'skills', 'hello-wizard'), { recursive: true })
+      writeFileSync(join(reg, 'skills', 'hello-wizard', 'SKILL.md'), texts['hello-wizard'])
+      for (let i = 0; i < 100 && !existsSync(join(state, 'skills', 'hello-wizard', 'SKILL.md')); i += 1) await new Promise((r) => setTimeout(r, 20))
+      expect(readFileSync(join(state, 'skills', 'hello-wizard', 'SKILL.md'), 'utf8')).toBe(texts['hello-wizard'])
+    } finally { bridge.close() }
   })
 })
 
