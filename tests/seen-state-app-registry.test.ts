@@ -5,10 +5,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-const reads = vi.hoisted(() => ({ files: [] as string[] }))
+const reads = vi.hoisted(() => ({ files: [] as string[], fail: '' }))
 vi.mock('node:fs', async (load) => {
   const fs = await load<typeof import('node:fs')>()
-  const readFileSync = ((path: any, ...rest: any[]) => { reads.files.push(String(path)); return (fs.readFileSync as any)(path, ...rest) }) as typeof fs.readFileSync
+  const readFileSync = ((path: any, ...rest: any[]) => {
+    reads.files.push(String(path))
+    if (reads.fail && String(path) === reads.fail) { reads.fail = ''; throw Object.assign(new Error('too many open files'), { code: 'EMFILE' }) }
+    return (fs.readFileSync as any)(path, ...rest) }) as typeof fs.readFileSync
   return { ...fs, default: { ...fs, readFileSync }, readFileSync }
 })
 
@@ -101,6 +104,11 @@ describe('seen-state saves and the app registry (issue 501)', () => {
     writeFileSync(join(dir, 'grants.next'), JSON.stringify({})); renameSync(join(dir, 'grants.next'), grantsPath)
     expect(appAgentRuntimes(apps, grantsPath)).toEqual([])
     writeFileSync(join(dir, 'grants.next'), JSON.stringify(grants)); renameSync(join(dir, 'grants.next'), grantsPath)
+    expect(appAgentRuntimes(apps, grantsPath).map((a: any) => a.id)).toEqual(['example'])
+    // A transient read error (EMFILE) is not cached: the next read sees the agent again without a rewrite.
+    writeFileSync(join(dir, 'grants.next'), JSON.stringify(grants)); renameSync(join(dir, 'grants.next'), grantsPath)
+    reads.fail = grantsPath
+    expect(appAgentRuntimes(apps, grantsPath)).toEqual([])
     expect(appAgentRuntimes(apps, grantsPath).map((a: any) => a.id)).toEqual(['example'])
     // App uninstalled.
     writeFileSync(join(dir, 'apps.next'), JSON.stringify({ schema: 1, apps: [] })); renameSync(join(dir, 'apps.next'), apps)
