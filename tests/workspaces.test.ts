@@ -99,6 +99,32 @@ describe('workspace store durability', () => {
     expect(st.snapshot()).toMatchObject({ rev: 1, state: { desks: [{ id: 'a' }] } })
     expect(st.put({ baseRev: 1, state: { desks: [{ id: 'b', wins: [files] }] } }).status).toBe(200)
   })
+  it('a parked long-poll is not counted as route time, and 10 immediate reads each stay under 50 ms (issue 503)', async () => {
+    const d = home(), u = await start(d), base = u.replace('/v1/workspaces', '')
+    await put(u, { baseRev: 0, state: { desks: Array.from({ length: 40 }, (_, i) => ({ id: `d${i}`, wins: [{ id: `w${i}`, app: 'chats', thread: `wizard_${i}` }] })) } })
+    for (let i = 0; i < 10; i++) {
+      const t0 = performance.now(); const r = await fetch(u + '?since=-1&wait=0'); await r.json()
+      expect(performance.now() - t0).toBeLessThan(50)
+    }
+    const parked = Array.from({ length: 5 }, () => fetch(u + '?since=1&wait=2').then(r => r.json()))
+    expect((await Promise.all(parked)).every(j => j.rev === 1)).toBe(true)
+    const speed = (await (await fetch(base + '/list-cache')).json()).speed
+    const row: any = Object.entries(speed.routes).find(([key]) => JSON.parse(key)[1] === '/wizard/v1/workspaces' && JSON.parse(key)[0] === 'GET')?.[1]
+    expect(row.count).toBe(15)
+    expect(row.total_ms).toBeLessThan(1500) // five 2-second waits would be 10,000 ms of wall time
+  })
+  it('many parked long-polls share one once-a-second file check', async () => {
+    const d = home(), file = join(d, 'workspaces.json'), one = createWorkspaceStore(file), two = createWorkspaceStore(file)
+    one.put({ baseRev: 0, state: { desks: [{ id: 'a', wins: [chats] }] } })
+    const realSet = globalThis.setInterval; let timers = 0
+    globalThis.setInterval = ((fn: any, ms: any) => { timers++; return realSet(fn, ms) }) as any
+    let waits: Promise<any>[]
+    try { waits = Array.from({ length: 50 }, () => one.wait(1, 5)) } finally { globalThis.setInterval = realSet }
+    expect(timers).toBe(1)
+    expect(two.put({ baseRev: 1, state: { desks: [{ id: 'b', wins: [files] }] } }).status).toBe(200)
+    expect((await Promise.all(waits)).every(j => j.rev === 2)).toBe(true)
+    const late = one.wait(2, 0.2); expect((await late).rev).toBe(2)
+  })
   it('two service processes sharing one home agree on rev (compare-and-swap through the file)', async () => {
     const d = home(), file = join(d, 'workspaces.json'), one = createWorkspaceStore(file), two = createWorkspaceStore(file)
     expect(one.put({ baseRev: 0, state: { desks: [{ id: 'a', wins: [chats] }] } }).status).toBe(200)

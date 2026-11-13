@@ -64,13 +64,13 @@ export const STALL_NAMES = 8
 // freeze names its own cause in the journal (issue 497) instead of needing a live CPU profile.
 export const LAG_LOG_DELAY_MS = 1000
 export const LAG_LOG_UTILIZATION = 0.9
-export function lagLine(window, windowRoutes, inFlight, { top = 5, stalls = [] } = {}) {
+export function lagLine(window, windowRoutes, inFlight, { top = 5, stalls = [], waiting = 0 } = {}) {
   if (!(window.delay_max_ms >= LAG_LOG_DELAY_MS || window.utilization >= LAG_LOG_UTILIZATION)) return ''
   const busiest = [...windowRoutes].sort((a, b) => b[1].total_ms - a[1].total_ms).slice(0, top)
     .map(([key, row]) => { const [method, route] = JSON.parse(key === '[overflow]' ? '["","[overflow]"]' : key); return { method, route, count: row.count, total_ms: Math.round(row.total_ms) } })
   const round = value => Math.round(value * 10) / 10
   return `[event-loop] ${JSON.stringify({ window_ms: window.window_ms, delay_p99_ms: round(window.delay_p99_ms),
-    delay_max_ms: round(window.delay_max_ms), utilization: Math.round(window.utilization * 100) / 100, in_flight: inFlight, busiest,
+    delay_max_ms: round(window.delay_max_ms), utilization: Math.round(window.utilization * 100) / 100, in_flight: inFlight, ...(waiting > 0 ? { waiting } : {}), busiest,
     ...(stalls.length ? { stalls: stalls.map(stall => ({ blocked_ms: Math.round(stall.blocked_ms), running: stall.running })) } : {}) })}`
 }
 
@@ -79,7 +79,7 @@ export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, stallChec
   const delay = monitorEventLoopDelay({ resolution: 20 })
   delay.enable()
   const routes = new Map()
-  let windowRoutes = new Map(), inFlight = 0, stalls = []
+  let windowRoutes = new Map(), inFlight = 0, waiting = 0, stalls = []
   // Requests running now plus those that ended recently, kept by route name only, for stall attribution.
   const requestsRunning = new Map(), requestsEnded = []
   let requestToken = 0, lastCheck = now()
@@ -111,7 +111,7 @@ export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, stallChec
   }
   const timer = setInterval(() => {
     completed = sample()
-    try { const line = lagLine(completed, windowRoutes, inFlight, { stalls }); if (line) log(line) } catch { /* observational only */ }
+    try { const line = lagLine(completed, windowRoutes, inFlight, { stalls, waiting }); if (line) log(line) } catch { /* observational only */ }
     previous = performance.eventLoopUtilization(); started = now(); delay.reset(); windowRoutes = new Map(); stalls = []
   }, windowMs)
   timer.unref?.()
@@ -126,24 +126,44 @@ export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, stallChec
       inFlight++
       const token = ++requestToken
       const [method, route] = JSON.parse(key)
-      const running = { name: `${method} ${route}`, at }
+      const name = `${method} ${route}`
+      let running = { name, at }, idleMs = 0, idleSince = null
       requestsRunning.set(token, running)
-      return () => {
-        if (finished) return
-        finished = true
-        inFlight--
+      const endSegment = () => {
         requestsRunning.delete(token)
         requestsEnded.push({ ...running, ended: now() })
         if (requestsEnded.length > WORK_ENDED_KEEP) requestsEnded.splice(0, requestsEnded.length - WORK_ENDED_KEEP)
+      }
+      const idleEnd = () => {
+        if (idleSince === null || finished) return
+        idleMs += now() - idleSince; idleSince = null; waiting--
+        running = { name, at: now() }; requestsRunning.set(token, running)
+      }
+      const done = () => {
+        if (finished) return
+        if (idleSince !== null) { idleMs += now() - idleSince; idleSince = null; waiting-- }
+        else endSegment()
+        finished = true
+        inFlight--
         // Choose at completion, not entry: concurrent requests must share the same bound.
         const bucket = routes.has(key) || routes.size < maxRoutes - 1 ? key : '[overflow]'
         const row = routes.get(bucket) || { count: 0, total_ms: 0, samples: [], next: 0 }
-        const elapsed = now() - at
+        const elapsed = Math.max(0, now() - at - idleMs)
         row.samples[row.next] = elapsed; row.next = (row.next + 1) % 256
         row.count++; row.total_ms += elapsed; routes.set(bucket, row)
         const windowRow = windowRoutes.get(bucket) || { count: 0, total_ms: 0 }
         windowRow.count++; windowRow.total_ms += elapsed; windowRoutes.set(bucket, windowRow)
       }
+      // A long-poll parked on a promise (workspace sync waits up to 25 s for another device) holds no event-loop
+      // time: that wait is left out of the route's total_ms and of stall attribution (issue 503), so the
+      // `[event-loop]` line names the routes that really used the loop.
+      done.idle = (promise) => {
+        if (finished || idleSince !== null) return promise
+        endSegment(); idleSince = now(); waiting++
+        Promise.resolve(promise).then(idleEnd, idleEnd)
+        return promise
+      }
+      return done
     },
     stats: () => ({ event_loop: completed || sample(), routes: Object.fromEntries([...routes].map(([key, row]) => {
       const sorted = [...row.samples].sort((a, b) => a - b)

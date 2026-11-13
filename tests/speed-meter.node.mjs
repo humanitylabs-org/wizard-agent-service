@@ -176,3 +176,31 @@ test('a block that starts just after a stall check and lasts about a second is s
     assert.equal(meter.checkStall(), null)
   } finally { meter.close() }
 })
+
+test('a long-poll parked with done.idle() is left out of route time, stall attribution and in_flight blame (issue 503)', async t => {
+  let time = 0
+  const meter = createSpeedMeter({ now: () => time, stallCheckMs: 0 })
+  t.after(() => meter.close())
+  let release
+  const done = meter.begin({ method: 'GET', url: '/wizard/v1/workspaces?since=3&wait=25', headers: {} })
+  time += 2
+  const parked = done.idle(new Promise(resolve => { release = resolve }))
+  time += 10; assert.equal(meter.checkStall(), null)
+  time += 1500
+  // While parked, a stall is not blamed on it.
+  const stall = meter.checkStall()
+  assert.ok(stall)
+  assert.doesNotMatch(JSON.stringify(stall.running), /workspaces/)
+  time += 23_000 - 10
+  release({ rev: 4 }); await parked; await Promise.resolve()
+  time += 3
+  done()
+  const row = Object.entries(meter.stats().routes).find(([key]) => JSON.parse(key)[1] === '/wizard/v1/workspaces')[1]
+  assert.equal(row.count, 1)
+  assert.equal(row.total_ms, 5)
+  // A request that ends while still parked (client went away) also counts only its active time.
+  const gone = meter.begin({ method: 'GET', url: '/wizard/v1/workspaces', headers: {} })
+  time += 1; gone.idle(new Promise(() => {})); time += 25_000; gone()
+  assert.equal(Object.entries(meter.stats().routes).find(([key]) => JSON.parse(key)[1] === '/wizard/v1/workspaces')[1].total_ms, 6)
+  assert.match(lagLine({ window_ms: 60000, delay_p99_ms: 1, delay_max_ms: 1200, utilization: 0.1 }, new Map(), 3, { waiting: 2 }), /"waiting":2/)
+})

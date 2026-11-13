@@ -106,6 +106,15 @@ export function createWorkspaceStore(path) {
   }
   const waiters = new Set()
   function wake() { for (const w of [...waiters]) w() }
+  // One shared once-a-second check for a save by another process, however many long-polls are parked (issue 503):
+  // one stat per second in total, never one timer per waiting client.
+  let poll = null
+  function startPoll() {
+    if (poll) return
+    poll = setInterval(() => { refresh(); for (const w of [...waiters]) if (db.rev > w.since) w() }, 1000)
+    poll.unref?.()
+  }
+  function stopPoll() { if (poll) { clearInterval(poll); poll = null } }
   const snapshot = () => ({ rev: db.rev, state: db.state, closed: db.closed, device: db.device, at: db.at })
   refresh()
   return {
@@ -115,10 +124,11 @@ export function createWorkspaceStore(path) {
       refresh()
       if (db.rev > since || wait <= 0) return Promise.resolve(snapshot())
       return new Promise(resolve => {
-        const done = () => { clearTimeout(t); clearInterval(poll); waiters.delete(done); signal?.removeEventListener?.('abort', done); resolve(snapshot()) }
+        const done = () => { if (!waiters.delete(done)) return; clearTimeout(t); signal?.removeEventListener?.('abort', done); if (!waiters.size) stopPoll(); resolve(snapshot()) }
+        done.since = since
         const t = setTimeout(done, Math.min(25, wait) * 1000)
-        const poll = setInterval(() => { refresh(); if (db.rev > since) done() }, 1000)
         waiters.add(done); signal?.addEventListener?.('abort', done)
+        startPoll()
       })
     },
     put({ baseRev, device, state }) {
