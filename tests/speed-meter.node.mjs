@@ -158,6 +158,21 @@ test('work that ended before a stall is not blamed for it, and async work stays 
   assert(!workDuring(time, time + 1).includes('broken'))
 })
 test('the startup line gives each startup step its own duration (issue 499)', () => {
-  const line = startupLine([['boot', 300.4], ['create', 2300], ['agent_sockets', 2310], ['listen', 2320], ['run_queue', 9820]])
-  assert.equal(line, '[startup] {"boot_ms":300,"create_ms":2000,"agent_sockets_ms":10,"listen_ms":10,"run_queue_ms":7500,"total_ms":9820}')
+  const line = startupLine([['boot', 300.4], ['create', 2300], ['agent_sockets', 2310], ['listen', 2320]], { run_queue: 8500.2 })
+  assert.equal(line, '[startup] {"boot_ms":300,"create_ms":2000,"agent_sockets_ms":10,"listen_ms":10,"total_ms":2320,"run_queue_ms":8500}')
+  assert.equal(startupLine([['boot', 10]], { run_queue: undefined }), '[startup] {"boot_ms":10,"total_ms":10}')
+})
+test('a block that starts just after a stall check and lasts about a second is still recorded (issue 499)', () => {
+  let time = 0
+  const meter = createSpeedMeter({ windowMs: 60_000, stallCheckMs: 0, now: () => time, log: () => {} })
+  try {
+    meter.checkStall()
+    const done = beginWork('scheduler tick', { now: () => time })
+    time = 1100; done()
+    const stall = meter.checkStall()
+    assert(stall, 'a 1.1 s gap since the last check is a stall')
+    assert(stall.running.includes('scheduler tick'))
+    time = 1500
+    assert.equal(meter.checkStall(), null)
+  } finally { meter.close() }
 })

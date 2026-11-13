@@ -4373,7 +4373,13 @@ function buildWizardServer(options, lifetime) {
     catch (error) { throw Object.assign(new Error('heavy origin read unavailable'), { status: error?.status === 404 ? 410 : 503 }) }
   } })
   if (heavyWork) lifetime.own(() => heavyWork.close(), () => heavyWork.queue.quiesce())
-  if (runQueue) runQueueReady = trackWork('run-queue startup', () => runQueue.initialize())
+  // Startup timing only (index.mjs `[startup]` line): the recovery tick's own duration, start to settle.
+  let runQueueStartupMs = Promise.resolve(undefined)
+  if (runQueue) {
+    const startedAt = performance.now()
+    runQueueReady = trackWork('run-queue startup', () => runQueue.initialize())
+    runQueueStartupMs = runQueueReady.then(() => performance.now() - startedAt, () => performance.now() - startedAt)
+  }
   if (heavyWork) void runQueueReady.then(() => { if (!lifetime.closing) heavyWork.start() }).catch(() => undefined)
 
   // What makes the cached Hermes listing stale before it expires: a new Wizard Inbox reply, or a
@@ -7876,7 +7882,7 @@ function buildWizardServer(options, lifetime) {
     supervisor?.start()
   })
   server.scheduler = scheduler
-  server.runQueueReady = runQueueReady // startup timing only (index.mjs `[startup]` line)
+  server.runQueueStartupMs = runQueueStartupMs
   server.supervisor = supervisor
   server.ownedWorkEvidence = ownedWorkEvidence // testable read-only memo stats, never an HTTP authority
   if (ownedOpenWork) {

@@ -302,10 +302,10 @@ startupMarks.push(['agent_sockets', performance.now()])
 server.listen(port, host, () => {
   process.stdout.write(`Wizard listening on ${host}:${port}\n`)
   startupMarks.push(['listen', performance.now()])
-  // The run queue's first tick recovers saved runs; on a big queue it can finish well after the listener.
-  void Promise.resolve(server.runQueueReady).catch(() => undefined).then(() => {
-    startupMarks.push(['run_queue', performance.now()])
-    process.stdout.write(`${startupLine(startupMarks)}\n`)
+  // The run queue's first tick recovers saved runs. It starts inside create and runs alongside the
+  // later steps, so it is reported with its own duration.
+  void Promise.resolve(server.runQueueStartupMs).catch(() => undefined).then(runQueueMs => {
+    process.stdout.write(`${startupLine(startupMarks, { run_queue: runQueueMs })}\n`)
   })
 })
 if (tailnetPort) {

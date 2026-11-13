@@ -86,10 +86,13 @@ export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, stallChec
   // A timer that fires late by a second or more means something held the event loop for that long:
   // remember what was running in that gap, so the window's `[event-loop]` line names it.
   const checkStall = () => {
-    const at = now(), blocked = at - lastCheck - stallCheckMs
+    // The block may have begun just after the previous check, so the gap since that check (not the
+    // lateness alone) is what decides; `blocked_ms` reports the lateness, the part known to be blocked.
+    const at = now(), gap = at - lastCheck, blocked = Math.max(0, gap - stallCheckMs)
+    const lastCheckBefore = lastCheck
     lastCheck = at
-    if (!(blocked >= LAG_LOG_DELAY_MS)) return null
-    const stall = { blocked_ms: blocked, running: workDuring(at - blocked - stallCheckMs, at, [...requestsRunning.values(), ...requestsEnded]).slice(0, STALL_NAMES) }
+    if (!(gap >= LAG_LOG_DELAY_MS)) return null
+    const stall = { blocked_ms: blocked, running: workDuring(lastCheckBefore, at, [...requestsRunning.values(), ...requestsEnded]).slice(0, STALL_NAMES) }
     stalls.push(stall)
     stalls.sort((a, b) => b.blocked_ms - a.blocked_ms)
     if (stalls.length > STALL_KEEP) stalls.length = STALL_KEEP
@@ -165,7 +168,9 @@ export function createSlowTickLogger(queue, { now = () => performance.now(), log
 
 // One `[startup]` line per process: how long each startup step took, in ms since the process began, so a
 // slow restart (one the health check reads as failed) says which step was slow (issue 499).
-export function startupLine(marks) {
+// `overlapping` holds steps that run alongside the others (the run queue's recovery starts inside
+// create), each with its own duration, so they never steal time from the sequential steps.
+export function startupLine(marks, overlapping = {}) {
   const out = {}
   let previous = 0
   for (const [step, at] of marks) {
@@ -174,5 +179,6 @@ export function startupLine(marks) {
     previous = at
   }
   out.total_ms = Math.round(previous)
+  for (const [step, ms] of Object.entries(overlapping)) if (Number.isFinite(ms)) out[`${step}_ms`] = Math.round(ms)
   return `[startup] ${JSON.stringify(out)}`
 }
