@@ -35,6 +35,16 @@ assert _lspec is not None and _lspec.loader is not None
 _lifecycle = module_from_spec(_lspec)
 _lspec.loader.exec_module(_lifecycle)
 
+_rspec = spec_from_file_location('wizard_claude_cooldown_recovery', Path(__file__).with_name('claude_cooldown_recovery.py'))
+assert _rspec is not None and _rspec.loader is not None
+_recovery = module_from_spec(_rspec)
+_rspec.loader.exec_module(_recovery)
+# Issue 505: a Claude model cooldown left from a capped subscription is cleared (stock `hermes auth reset`) once the
+# provider shows extra usage enabled and funded for that account. Always on; WIZARD_CLAUDE_COOLDOWN_RECOVERY=0 stops
+# the background pass (the offline tests do).
+if os.environ.get('WIZARD_CLAUDE_COOLDOWN_RECOVERY', '1').strip() != '0':
+    _recovery.start()
+
 router = APIRouter()
 # Importer app: the bring_data engine behind /bring-data/* (bring_data_api.py).
 _bspec = spec_from_file_location('wizard_bring_data_api', Path(__file__).with_name('bring_data_api.py'))

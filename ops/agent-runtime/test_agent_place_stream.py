@@ -99,6 +99,23 @@ class PlaceStreamTest(unittest.TestCase):
         self.assertEqual((cm.exception.code, cm.exception.status), ('file_placement_timeout', 504))
         self.assertLess(time.monotonic() - started, 20)
 
+    def test_never_uses_communicate_after_closing_stdin(self):
+        # Python 3.12.3 (the box's interpreter) raises "flush of closed file" from communicate()
+        # once stdin is closed (issue 507). Fail on any interpreter if docker_stream relies on it.
+        def refuse(*_a, **_k):
+            raise ValueError('flush of closed file')
+        with mock.patch.object(ar.subprocess.Popen, 'communicate', refuse):
+            result = self.place()
+        self.assertTrue(result['verified'])
+
+    def test_chatty_child_does_not_stall_the_upload(self):
+        # A child that writes more than a pipe buffer to stderr before reading stdin must not deadlock.
+        script = ('import sys; sys.stderr.write("x" * 300000); sys.stderr.flush(); '
+                  'n = len(sys.stdin.buffer.read()); print(n)')
+        with mock.patch.object(ar, 'docker_cmd', return_value=[sys.executable, '-c', script]):
+            code, out, err = ar.docker_stream(['exec'], b'{}\n', io.BytesIO(self.data), len(self.data), timeout=20)
+        self.assertEqual((code, out.strip(), len(err)), (0, str(len(self.data) + 3), 300000))
+
     def test_existing_conflicting_file_is_not_overwritten(self):
         result = self.place()
         path = self.root / result['path'].removeprefix('/opt/data/')
