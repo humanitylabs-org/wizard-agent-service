@@ -237,6 +237,65 @@ export function writePointerSkills(osHome, apps, opts = {}) {
   }
 }
 
+/**
+ * The apps' own skills where the agent's skills index reads them. A pointer skill says "load its skill `<id>`", and
+ * the App Manager writes those skills next to apps.json (<registry>/skills/<id>/SKILL.md). When this service shares
+ * that folder (WIZARD_OS_HOME = the App Manager's home) they are already there. When it runs as a container app its
+ * <osHome> is its own data folder, the one mounted into the agent at /opt/wizard-os/skills, and the App Manager's
+ * copy (read-only beside apps.json) never reached the agent: skill_view said "not found" for every app. So copy each
+ * app's skill there, for the apps the main agent may see (a private app only when it may use it, #58), and remove
+ * the ones this wrote for apps that are gone. Skill-only apps (the shell's interface manual) count too.
+ * Returns the app ids written, or null when nothing was to be done (same folder) or the folder is read-only.
+ */
+const APP_SKILLS_STAMP = '.wizard-app-skills'
+const APP_SKILL_MAX = 256 * 1024
+export function writeAppSkills(osHome, registryDir, apps, { allowed = null } = {}) {
+  if (!osHome || !registryDir) return null
+  const root = join(osHome, 'skills')
+  const sourceRoot = join(registryDir, 'skills')
+  try { if (realpathSync(root) === realpathSync(sourceRoot)) return null } catch { /* one of them is missing */ }
+  try {
+    mkdirSync(root, { recursive: true })
+    let before = []
+    try { before = JSON.parse(readFileSync(join(root, APP_SKILLS_STAMP), 'utf8')) } catch { before = [] }
+    if (!Array.isArray(before)) before = []
+    const want = new Map()
+    for (const app of Array.isArray(apps) ? apps : []) {
+      const id = clean(app?.id, 64)
+      if (!/^[a-z0-9][a-z0-9-]{0,63}$/u.test(id) || id.startsWith(JOB_SKILL_PREFIX) || want.has(id)) continue
+      if (isPrivateApp(app) && allowed && !allowed.has(id)) continue
+      const skill = typeof app.skill === 'string' ? app.skill : ''
+      if (!skill || skill.includes('..') || skill.startsWith('/')) continue
+      const file = resolve(registryDir, skill)
+      if (!file.startsWith(resolve(registryDir) + sep)) continue
+      try {
+        if (statSync(file).size > APP_SKILL_MAX) continue
+        want.set(id, readFileSync(file, 'utf8'))
+      } catch { /* the App Manager hasn't copied it yet */ }
+    }
+    for (const id of before) {
+      if (typeof id === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/u.test(id) && !id.startsWith(JOB_SKILL_PREFIX) && !want.has(id)) rmSync(join(root, id), { recursive: true, force: true })
+    }
+    const written = []
+    for (const [id, text] of want) {
+      const dir = join(root, id), file = join(dir, 'SKILL.md')
+      // A folder of that name this service didn't write (an owner's own skill) is left alone.
+      if (!before.includes(id) && existsSync(dir)) continue
+      written.push(id)
+      let current = null
+      try { current = readFileSync(file, 'utf8') } catch { /* new */ }
+      if (current === text) continue
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(`${file}.tmp`, text)
+      renameSync(`${file}.tmp`, file)
+    }
+    writeFileSync(join(root, APP_SKILLS_STAMP), `${JSON.stringify(written.sort())}\n`)
+    return written
+  } catch {
+    return null
+  }
+}
+
 // ---------- MCP client (to the apps) ----------
 
 function decodeMcpBody(contentType, text, wantId) {
@@ -415,6 +474,7 @@ export function createAgentBridge({
   const shared = sharedAgentTools(agents, log)
   let mtime = null
   let apps = []
+  let registryApps = [] // apps.json as the App Manager wrote it (bridgeApps keeps only the apps with tools)
   const toolCache = new Map() // app id -> { tools, at }
   const clients = new Map()
   const sessions = new Map() // session id -> { streams: Set<response> }
@@ -424,7 +484,9 @@ export function createAgentBridge({
     try { const st = statSync(appsJsonPath); m = `${st.mtimeMs}:${st.size}:${st.ino}` } catch { m = '' }
     if (m === mtime) return false
     mtime = m
-    apps = bridgeApps(readJson(appsJsonPath), { mcpAddress })
+    const doc = readJson(appsJsonPath)
+    registryApps = Array.isArray(doc?.apps) ? doc.apps : []
+    apps = bridgeApps(doc, { mcpAddress })
     toolCache.clear()
     for (const id of [...clients.keys()]) if (!apps.some((a) => a.id === id)) clients.delete(id)
     rewriteSkills()
@@ -437,6 +499,10 @@ export function createAgentBridge({
     const mine = visible(GATEWAY_MAIN_AGENT)
     const written = writePointerSkills(osHome, mine, { harness })
     log(written ? `pointer skills: ${written.length} job(s)` : 'pointer skills: skills folder not writable, skipped')
+    let allowed = null
+    try { allowed = appsFor(GATEWAY_MAIN_AGENT) } catch { allowed = new Set() }
+    const appSkills = writeAppSkills(osHome, appsJsonPath ? dirname(appsJsonPath) : '', registryApps, { allowed })
+    if (appSkills) log(`app skills: ${appSkills.length} copied for the agent`)
     // Second pass with real tool names once the apps answer (unchanged files are not rewritten).
     const snapshot = apps
     collectTools(mine).then((tools) => { if (apps === snapshot) writePointerSkills(osHome, mine, { harness, tools }) }).catch(() => {})
