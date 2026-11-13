@@ -1,6 +1,6 @@
 // One looping device must only slow itself (issue 513). On 13 Nov a phone sent PUT /wizard/thread-seen (117 KB)
 // up to ~8 times a second; 230 requests sat in flight and Chats froze on every device. This guard sits in
-// front of every owner state write (PUT and PATCH under /wizard/):
+// front of every owner state write (PUT and PATCH under /wizard/ with a JSON or empty body; upload chunks excluded):
 //   1. identical concurrent writes from one device to one route (same body hash) share one in-flight result;
 //   2. per device + route, writes in flight and writes per minute are capped; over the cap is a 429 with
 //      Retry-After, never queued;
@@ -16,13 +16,22 @@ export const CLIENT_STORM_PER_MINUTE = 60
 export const CLIENT_STORM_BODY_LIMIT = 1024 * 1024
 const WINDOW_MS = 60_000
 const SHOWN_MS = 2 * WINDOW_MS
-const MAX_LANES = 2000
+export const CLIENT_STORM_MAX_LANES = 2000
+const MAX_LANES = CLIENT_STORM_MAX_LANES
 const WRITES = new Set(['PUT', 'PATCH'])
 // Routes whose handler reads its body through readBoundedBody (which honours BUFFERED_BODY) and whose PUT replaces
 // state, so a repeat of the same body has the same result. Other writes are capped but never shared.
 export const COALESCED_ROUTES = new Set(['/wizard/thread-seen', '/wizard/thread-dispositions', '/wizard/v1/ui-preferences', '/wizard/v1/workspaces'])
 // Everything that decides who the caller is or what it may see is part of the shared-result key.
 const IDENTITY = ['authorization', 'cookie', 'tailscale-user-login', 'tailscale-user-name', 'cf-access-jwt-assertion', 'x-wizard-owner-proof', 'x-wizard-shell-token', 'origin', 'host', 'x-forwarded-host', 'content-type', 'sec-fetch-site']
+
+// State writes only: JSON (or empty) bodies. Resumable upload chunks and other byte streams are never capped here.
+function stateWrite(request, pathname) {
+  if (pathname.startsWith('/wizard/v1/uploads/')) return false
+  const length = request.headers['content-length']
+  const bodyless = length === undefined ? request.headers['transfer-encoding'] === undefined : Number(length) === 0
+  return bodyless || /^application\/(?:[\w.+-]*\+)?json\b/iu.test(String(request.headers['content-type'] ?? ''))
+}
 
 export function deviceOf(request) {
   const hash = createHash('sha256')
@@ -78,10 +87,12 @@ export function createClientStormGuard({ inFlight = CLIENT_STORM_IN_FLIGHT, perM
   function laneFor(device, path, at) {
     const id = `${device}\0${path}`
     let lane = lanes.get(id)
-    if (!lane) {
-      if (lanes.size >= MAX_LANES) {
-        for (const [key, old] of lanes) if (old.inFlight === 0 && at - old.windowAt >= WINDOW_MS && at - old.trippedAt >= SHOWN_MS) lanes.delete(key)
-      }
+    if (lane) { lanes.delete(id); lanes.set(id, lane) } // Map order = least recently used first
+    else {
+      // Bounded whatever a client sends (distinct, even unknown paths): stale lanes go first, then the least
+      // recently used idle ones. Lanes with writes in flight are bounded by open connections.
+      if (lanes.size >= MAX_LANES) for (const [key, old] of lanes) if (old.inFlight === 0 && at - old.windowAt >= WINDOW_MS && at - old.trippedAt >= SHOWN_MS) lanes.delete(key)
+      if (lanes.size >= MAX_LANES) for (const [key, old] of lanes) { if (lanes.size < MAX_LANES) break; if (old.inFlight === 0) lanes.delete(key) }
       lane = { device, route: COALESCED_ROUTES.has(path) ? path : routeTemplate(path), windowAt: at, count: 0, inFlight: 0, refused: 0, bodyBytes: 0, trippedAt: -Infinity, sinceAt: 0, loggedAt: -Infinity }
       lanes.set(id, lane)
     }
@@ -105,7 +116,7 @@ export function createClientStormGuard({ inFlight = CLIENT_STORM_IN_FLIGHT, perM
    * replay) or {status:'lead', release} (run the handler, then call release(); always, also on errors).
    */
   async function admit(request, pathname, search = '') {
-    if (!WRITES.has(request.method) || !pathname.startsWith('/wizard/')) return null
+    if (!WRITES.has(request.method) || !pathname.startsWith('/wizard/') || !stateWrite(request, pathname)) return null
     const device = deviceOf(request)
     const lane = laneFor(device, pathname, now())
     lane.count += 1
@@ -151,5 +162,5 @@ export function createClientStormGuard({ inFlight = CLIENT_STORM_IN_FLIGHT, perM
     return tripping.length ? { tripping, limits: { in_flight: inFlight, per_minute: perMinute } } : null
   }
 
-  return { admit, summary }
+  return { admit, summary, size: () => lanes.size }
 }

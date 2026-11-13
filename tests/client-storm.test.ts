@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { Readable } from 'node:stream'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
-import { BUFFERED_BODY, createClientStormGuard, deviceOf } from '../server/client-storm.mjs'
+import { BUFFERED_BODY, CLIENT_STORM_MAX_LANES, createClientStormGuard, deviceOf } from '../server/client-storm.mjs'
 
 const servers: import('node:http').Server[] = []
 const dirs: string[] = []
@@ -126,10 +126,10 @@ describe('client storm guard over HTTP (issue 513)', () => {
   })
 })
 
-function fakeRequest(body: string, { method = 'PUT', agent = PHONE } = {}) {
+function fakeRequest(body: string, { method = 'PUT', agent = PHONE, type = 'application/json' } = {}) {
   const request = Readable.from([Buffer.from(body)]) as any
   request.method = method
-  request.headers = { 'content-length': String(Buffer.byteLength(body)), 'content-type': 'application/json', 'user-agent': agent }
+  request.headers = { 'content-length': String(Buffer.byteLength(body)), 'content-type': type, 'user-agent': agent }
   request.socket = { remoteAddress: '127.0.0.1' }
   return request
 }
@@ -181,5 +181,21 @@ describe('createClientStormGuard (issue 513)', () => {
     expect((await guard.admit(fakeRequest('{"c":3}'), '/wizard/thread-seen') as any).status).toBe('lead')
     clock += 120_000
     expect(guard.summary()).toBeNull()
+  })
+
+  it('leaves upload chunks and byte bodies alone, and keeps its lanes bounded', async () => {
+    const guard = createClientStormGuard({ inFlight: 1, perMinute: 1 })
+    for (let i = 0; i < 5; i++) {
+      expect(await guard.admit(fakeRequest('chunk', { method: 'PATCH', type: 'application/offset+octet-stream' }), '/wizard/v1/uploads/u1')).toBeNull()
+      expect(await guard.admit(fakeRequest('{"a":1}', { method: 'PATCH' }), '/wizard/v1/uploads/u1')).toBeNull()
+      expect(await guard.admit(fakeRequest('bytes', { type: 'application/octet-stream' }), '/wizard/v1/my-skin')).toBeNull()
+    }
+    expect((await guard.admit(fakeRequest('{"a":1}', { type: 'application/merge-patch+json', method: 'PATCH' }), '/wizard/v1/ui-preferences') as any).status).toBe('lead')
+    // A client spraying distinct (even unknown) paths never grows the lane map past its cap.
+    const spray = createClientStormGuard({ perMinute: 1 })
+    for (let i = 0; i < CLIENT_STORM_MAX_LANES + 500; i++) (await spray.admit(fakeRequest('{}'), `/wizard/nope/${i}`) as any).release()
+    for (let i = 0; i < 3; i++) { const r = await spray.admit(fakeRequest('{}'), '/wizard/nope/again') as any; r.status === 'lead' && r.release() }
+    expect(spray.summary()?.tripping).toHaveLength(1)
+    expect(spray.size()).toBe(CLIENT_STORM_MAX_LANES)
   })
 })
