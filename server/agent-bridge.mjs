@@ -246,10 +246,13 @@ export function writePointerSkills(osHome, apps, opts = {}) {
  * app's skill there, for the apps the main agent may see (a private app only when it may use it, #58), and remove
  * the ones this wrote for apps that are gone. Skill-only apps (the shell's interface manual) count too.
  * Returns the app ids written, or null when nothing was to be done (same folder) or the folder is read-only.
+ * A listed app whose SKILL.md is not there yet (the App Manager publishes apps.json first) keeps any copy written
+ * earlier and is added to `pending`, so the caller can try again once the file lands.
  */
 const APP_SKILLS_STAMP = '.wizard-app-skills'
 const APP_SKILL_MAX = 256 * 1024
-export function writeAppSkills(osHome, registryDir, apps, { allowed = null } = {}) {
+const APP_SKILL_RETRIES = 150
+export function writeAppSkills(osHome, registryDir, apps, { allowed = null, pending = null } = {}) {
   if (!osHome || !registryDir) return null
   const root = join(osHome, 'skills')
   const sourceRoot = join(registryDir, 'skills')
@@ -260,6 +263,7 @@ export function writeAppSkills(osHome, registryDir, apps, { allowed = null } = {
     try { before = JSON.parse(readFileSync(join(root, APP_SKILLS_STAMP), 'utf8')) } catch { before = [] }
     if (!Array.isArray(before)) before = []
     const want = new Map()
+    const waiting = new Set()
     for (const app of Array.isArray(apps) ? apps : []) {
       const id = clean(app?.id, 64)
       if (!/^[a-z0-9][a-z0-9-]{0,63}$/u.test(id) || id.startsWith(JOB_SKILL_PREFIX) || want.has(id)) continue
@@ -271,12 +275,13 @@ export function writeAppSkills(osHome, registryDir, apps, { allowed = null } = {
       try {
         if (statSync(file).size > APP_SKILL_MAX) continue
         want.set(id, readFileSync(file, 'utf8'))
-      } catch { /* the App Manager hasn't copied it yet */ }
+      } catch { waiting.add(id) } // the App Manager hasn't copied it yet: keep an earlier copy, try again later
     }
     for (const id of before) {
-      if (typeof id === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/u.test(id) && !id.startsWith(JOB_SKILL_PREFIX) && !want.has(id)) rmSync(join(root, id), { recursive: true, force: true })
+      if (typeof id === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/u.test(id) && !id.startsWith(JOB_SKILL_PREFIX) && !want.has(id) && !waiting.has(id)) rmSync(join(root, id), { recursive: true, force: true })
     }
-    const written = []
+    if (pending) for (const id of waiting) pending.add(id)
+    const written = before.filter((id) => waiting.has(id))
     for (const [id, text] of want) {
       const dir = join(root, id), file = join(dir, 'SKILL.md')
       // A folder of that name this service didn't write (an owner's own skill) is left alone.
@@ -469,7 +474,7 @@ export function createAgentBridge({
   appsJsonPath, osHome = appsJsonPath ? dirname(appsJsonPath) : '', grantsHome = osHome, mcpAddress = 'url', token = '',
   fetchImpl = fetch, timeoutMs = 4000, callTimeoutMs = 120_000, log = () => {}, watchIntervalMs = 2000,
   writeSkills = true, harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false,
-  agentForToken = () => '', appsFor = () => null, builtins = null, agents = () => null,
+  agentForToken = () => '', appsFor = () => null, builtins = null, agents = () => null, skillRetryMs = 2000,
 }) {
   const shared = sharedAgentTools(agents, log)
   let mtime = null
@@ -493,16 +498,31 @@ export function createAgentBridge({
     return true
   }
 
+  // The apps' own skills, copied beside the pointer skills. apps.json can name a SKILL.md the App Manager has not
+  // written yet, and only apps.json is watched, so a missing one is retried for a while (about 5 minutes).
+  let skillRetry = null, skillTries = 0
+  function copyAppSkills(fresh) {
+    if (skillRetry) { clearTimeout(skillRetry); skillRetry = null }
+    if (fresh) skillTries = 0
+    let allowed = null
+    try { allowed = appsFor(GATEWAY_MAIN_AGENT) } catch { allowed = new Set() }
+    const pending = new Set()
+    const appSkills = writeAppSkills(osHome, appsJsonPath ? dirname(appsJsonPath) : '', registryApps, { allowed, pending })
+    if (appSkills && fresh) log(`app skills: ${appSkills.length} copied for the agent`)
+    if (appSkills && pending.size && skillTries < APP_SKILL_RETRIES) {
+      skillTries += 1
+      skillRetry = setTimeout(() => { skillRetry = null; copyAppSkills(false) }, skillRetryMs)
+      skillRetry.unref?.()
+    }
+  }
+
   // The pointer skills in <osHome>/skills are the main agent's skills index: only the apps it may use (#58).
   function rewriteSkills() {
     if (!writeSkills || !osHome) return
     const mine = visible(GATEWAY_MAIN_AGENT)
     const written = writePointerSkills(osHome, mine, { harness })
     log(written ? `pointer skills: ${written.length} job(s)` : 'pointer skills: skills folder not writable, skipped')
-    let allowed = null
-    try { allowed = appsFor(GATEWAY_MAIN_AGENT) } catch { allowed = new Set() }
-    const appSkills = writeAppSkills(osHome, appsJsonPath ? dirname(appsJsonPath) : '', registryApps, { allowed })
-    if (appSkills) log(`app skills: ${appSkills.length} copied for the agent`)
+    copyAppSkills(true)
     // Second pass with real tool names once the apps answer (unchanged files are not rewritten).
     const snapshot = apps
     collectTools(mine).then((tools) => { if (apps === snapshot) writePointerSkills(osHome, mine, { harness, tools }) }).catch(() => {})
@@ -810,7 +830,7 @@ export function createAgentBridge({
     // No argument: every installed app. With an agent id: only the apps that agent may use (#58), same as callTool.
     apps: (agentId) => { refresh(); return agentId === undefined ? apps : visible(agentId) },
     snapshot: () => { refresh(); return Object.fromEntries(apps.map((a) => [a.id, a.status])) },
-    close: () => { if (appsJsonPath) unwatchFile(appsJsonPath, onChange); for (const s of sessions.values()) for (const r of s.streams) r.end() },
+    close: () => { if (skillRetry) { clearTimeout(skillRetry); skillRetry = null } if (appsJsonPath) unwatchFile(appsJsonPath, onChange); for (const s of sessions.values()) for (const r of s.streams) r.end() },
   }
 }
 

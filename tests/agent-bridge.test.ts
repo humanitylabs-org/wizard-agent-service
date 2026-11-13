@@ -312,6 +312,33 @@ describe('agent bridge: app skills for a containerised agent', () => {
     bridge.appsChanged()
     expect(listing(state)).toEqual(['wizard-ux'])
   })
+
+  it('keeps an earlier copy while the App Manager has not written the skill yet, and reports it as pending', () => {
+    const reg = registry([app('hello-wizard', 9), shell], texts)
+    const state = mkdtempSync(join(tmpdir(), 'wab-state-'))
+    expect(writeAppSkills(state, reg, [app('hello-wizard', 9), shell])).toEqual(['hello-wizard', 'wizard-ux'])
+    rmSync(join(reg, 'skills', 'hello-wizard'), { recursive: true, force: true })
+    const pending = new Set()
+    expect(writeAppSkills(state, reg, [app('hello-wizard', 9), shell], { pending })).toEqual(['hello-wizard', 'wizard-ux'])
+    expect([...pending]).toEqual(['hello-wizard'])
+    expect(readFileSync(join(state, 'skills', 'hello-wizard', 'SKILL.md'), 'utf8')).toBe(texts['hello-wizard'])
+    // once the app is gone from apps.json, its copy goes too
+    expect(writeAppSkills(state, reg, [shell])).toEqual(['wizard-ux'])
+    expect(listing(state)).toEqual(['wizard-ux'])
+  })
+
+  it('the bridge copies a skill that lands after apps.json named it', async () => {
+    const reg = registry([app('hello-wizard', 9), shell], { 'wizard-ux': texts['wizard-ux'] })
+    const state = mkdtempSync(join(tmpdir(), 'wab-state-'))
+    const bridge = createAgentBridge({ appsJsonPath: join(reg, 'apps.json'), osHome: state, watchIntervalMs: 0, skillRetryMs: 20 })
+    try {
+      expect(existsSync(join(state, 'skills', 'hello-wizard'))).toBe(false)
+      mkdirSync(join(reg, 'skills', 'hello-wizard'), { recursive: true })
+      writeFileSync(join(reg, 'skills', 'hello-wizard', 'SKILL.md'), texts['hello-wizard'])
+      for (let i = 0; i < 100 && !existsSync(join(state, 'skills', 'hello-wizard', 'SKILL.md')); i += 1) await new Promise((r) => setTimeout(r, 20))
+      expect(readFileSync(join(state, 'skills', 'hello-wizard', 'SKILL.md'), 'utf8')).toBe(texts['hello-wizard'])
+    } finally { bridge.close() }
+  })
 })
 
 describe('agent bridge: MCP gateway', () => {
