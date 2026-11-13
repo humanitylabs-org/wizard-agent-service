@@ -5801,19 +5801,28 @@ function buildWizardServer(options, lifetime) {
   }
   const withoutHiddenSeen = (request, state) => !state || typeof state !== 'object' || !state.threads || typeof state.threads !== 'object'
     ? state : { ...state, threads: withoutHiddenSessions(request, state.threads) }
-  const sideAgent = (request, sessionId, explicit = '') => {
+  // `registry` defaults to the live registry; batch callers pass a per-call memo (batchAgentReads).
+  const sideAgent = (request, sessionId, explicit = '', registry = agents) => {
     if (typeof sessionId === 'string' && /(?:^|[:/])incog_/u.test(sessionId)) throw new AgentError(410, 'incognito_closed', 'incognito')
-    if (!agents) { if (explicit && explicit !== MAIN_AGENT_ID) throw new AgentError(404, 'not_found', 'agent.id'); return MAIN_AGENT_ID }
+    if (!registry) { if (explicit && explicit !== MAIN_AGENT_ID) throw new AgentError(404, 'not_found', 'agent.id'); return MAIN_AGENT_ID }
     if (explicit) {
-      const agent = agents?.read(explicit)
-      if (!agent || (isPrivateAgent(agents, explicit) && (agent.role === 'recovery' ? principalOf(request).kind !== 'owner' : !mayOpenAgent(request, explicit)))) throw new AgentError(404, 'not_found', 'agent.id')
+      const agent = registry.read(explicit)
+      if (!agent || (isPrivateAgent(registry, explicit) && (agent.role === 'recovery' ? principalOf(request).kind !== 'owner' : !mayOpenAgent(request, explicit)))) throw new AgentError(404, 'not_found', 'agent.id')
       return explicit
     }
-    const ids = agents?.pinnedAgents(sessionId) ?? []
-    const visible = ids.filter(id => !isPrivateAgent(agents, id) || mayOpenAgent(request, id))
+    const ids = registry.pinnedAgents(sessionId) ?? []
+    const visible = ids.filter(id => !isPrivateAgent(registry, id) || mayOpenAgent(request, id))
     if (visible.length > 1) throw new AgentError(409, 'ambiguous_thread', 'agent.ambiguous_thread')
     if (!visible.length && ids.length) throw new AgentError(404, 'not_found', 'agent.id')
-    return sideAgent(request, sessionId, visible[0] || MAIN_AGENT_ID)
+    return sideAgent(request, sessionId, visible[0] || MAIN_AGENT_ID, registry)
+  }
+  // One request's view of the registry: each agent is read once per batch instead of once per record
+  // (issue 501: a seen-state save of N threads re-read apps.json and grants.json several times per thread).
+  const batchAgentReads = (registry) => {
+    if (!registry) return registry
+    const reads = new Map()
+    return { read: (id) => { if (!reads.has(id)) reads.set(id, registry.read(id)); return reads.get(id) },
+      pinnedAgents: (sessionId) => registry.pinnedAgents(sessionId) }
   }
   // Main-only executors must never silently interpret an explicit secondary pair as Hermes.
   const mainHistoryPair = (request, sessionId = '', input = {}) => {
@@ -5844,10 +5853,11 @@ function buildWizardServer(options, lifetime) {
   // Client-authored side stores are projections, never pair-ownership evidence.
   const qualifySeenInput = (request, state) => {
     if (!state?.threads || typeof state.threads !== 'object' || Array.isArray(state.threads)) return state
+    const registry = batchAgentReads(agents)
     return { ...state, threads: Object.fromEntries(Object.entries(state.threads).flatMap(([key, record]) => {
       const pair = sideReference(key, record)
       let agent
-      try { agent = sideAgent(request, pair.session_id, record.agent_id || (key.startsWith('agent/') ? pair.agent_id : '')) }
+      try { agent = sideAgent(request, pair.session_id, record.agent_id || (key.startsWith('agent/') ? pair.agent_id : ''), registry) }
       catch (error) {
         // A stale device can retain retired agents or ambiguous legacy ids. One such mark must not
         // block the whole batch; invisible private agents take the identical drop-only path.
@@ -5855,7 +5865,7 @@ function buildWizardServer(options, lifetime) {
           || (error.status === 409 && error.check === 'agent.ambiguous_thread'))) return []
         throw error
       }
-      return [[sideKey(agent, pair.legacyKey), { ...record, ...(agents?.read(agent)?.privacy === 'private' ? {previewFingerprint:'private'} : {}), agent_id: agent, session_id: pair.session_id }]]
+      return [[sideKey(agent, pair.legacyKey), { ...record, ...(registry?.read(agent)?.privacy === 'private' ? {previewFingerprint:'private'} : {}), agent_id: agent, session_id: pair.session_id }]]
     })) }
   }
 

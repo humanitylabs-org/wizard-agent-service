@@ -1,9 +1,25 @@
 // App Manager's installed registry is the only source of app runtimes. No caller URLs,
 // filesystem provisioning, profile access, or Hermes runtime driver involvement.
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 const id = /^[a-z0-9][a-z0-9-]{1,40}$/u;
 const read = path => { try { const value = JSON.parse(readFileSync(path, 'utf8')); return value && typeof value === 'object' && !Array.isArray(value) ? value : {}; } catch { return {}; } };
+// apps.json grows with every app (hundreds of KB), and the registry asks for these rows on every agent read.
+// Parse once per file version: the signature is mtime+size+inode of both files (as agents.mjs syncApps uses),
+// so a read costs two stats until App Manager rewrites a file (issue 501).
+const cache = new Map();
+const signature = path => { try { const st = statSync(path); return `${st.mtimeMs}:${st.size}:${st.ino}`; } catch { return 'missing'; } };
 export function appAgentRuntimes(appsPath, grantsPath) {
+  const slot = `${appsPath}\0${grantsPath}`, sig = `${signature(appsPath)}|${signature(grantsPath)}`;
+  let hit = cache.get(slot);
+  if (!hit || hit.sig !== sig) {
+    hit = { sig, rows: compute(appsPath, grantsPath) };
+    cache.delete(slot); cache.set(slot, hit);
+    if (cache.size > 16) cache.delete(cache.keys().next().value);
+  }
+  // Callers get their own copy, so a caller that edits a row cannot change the next read.
+  return structuredClone(hit.rows);
+}
+function compute(appsPath, grantsPath) {
   const apps = read(appsPath).apps;
   if (!Array.isArray(apps)) return [];
   const grants = read(grantsPath);
