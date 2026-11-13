@@ -47,7 +47,8 @@ it('actual HTTP serves own build and boot first, GET/HEAD only, no source or hid
     expect((await fetch(base + '/wizard/views/habits/' + p)).status).toBeGreaterThanOrEqual(400);
   }
   expect((await fetch(base + '/wizard/views/habits/', { method:'POST', body:'{}' })).status).toBe(405);
-  expect((await fetch(base + '/wizard/views/_boot.js')).status).toBe(200);
+  const boot = await fetch(base + '/wizard/views/_boot.js'); expect(boot.status).toBe(200);
+  expect(await boot.text()).toContain('at: performance.timeOrigin');
 });
 it('API preserves the original app gate with 307; reversion makes the old own URL unavailable', async () => {
   const b = box(), base = await listen(b);

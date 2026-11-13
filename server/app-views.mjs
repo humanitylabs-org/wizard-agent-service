@@ -45,8 +45,10 @@ export function appViewFile(method, pathname) {
   return !!m && !/^api(?:\/|$)/.test(m[2]) && !m[2].split('/').some(p => p.startsWith('.'));
 }
 
+// \`at\` (this document's time origin) lets the shell tell this document's messages from an earlier one's in a
+// sandboxed window it cannot read (wizard-os#133).
 const BOOT = `(() => {
-  const send = (type, file) => { if (parent !== window) parent.postMessage({ type, file }, location.origin); };
+  const send = (type, file) => { if (parent !== window) parent.postMessage({ type, file, at: performance.timeOrigin }, location.origin); };
   addEventListener('error', e => {
     const file = e.target?.src || e.target?.href || e.filename || 'index.html';
     send('wizard:own-view:error', file);
