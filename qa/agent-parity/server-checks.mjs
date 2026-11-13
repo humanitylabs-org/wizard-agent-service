@@ -1065,8 +1065,21 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.ok(sent.status < 300, `${s.kind}: a send during the wait is accepted (${sent.status}), not refused`)
     await new Promise(r => setTimeout(r, 50))
     assert.equal(runs(), 0, `${s.kind}: the held send never reaches Hermes during the wait`)
+    // A new chat started during the wait (wizard-ux issue 1362): its session has no messages yet, and its first
+    // message is held. Every list (full, list view, archive-50 window) still names it, saved, with the owner's words.
+    const heldNew = 'wizard_parity_held_new'
+    assert.ok((await s.request('/api/sessions', post({ id: heldNew, source: 'wizard-mobile' }))).status < 300)
+    const first = await s.request('/v1/runs', post({ session_id: heldNew, input: 'Held first message' }))
+    assert.ok(first.status < 300, `${s.kind}: a new chat's first send during the wait is accepted (${first.status})`)
+    for (const path of ['/api/sessions?limit=100', '/api/sessions?view=list', '/api/sessions?view=list&window=archive-50&limit=100']) {
+      const listed = await (await s.request(path)).json()
+      const row = (listed.data || listed.sessions || []).find(r => r.id === heldNew)
+      assert.ok(row, `${s.kind}: ${path} lists the new chat whose first message is held`)
+      assert.equal(row.status, 'queued', `${s.kind}: ${path} shows it saved (queued), not running`)
+      assert.equal(row.title, 'Held first message', `${s.kind}: ${path} titles it with the owner's words`)
+    }
     const status = await (await gate()).json()
-    assert.equal(status.holding, true); assert.ok(status.held >= 1, `${s.kind}: the held send is counted (${JSON.stringify(status)})`)
+    assert.equal(status.holding, true); assert.ok(status.held >= 2, `${s.kind}: the held sends are counted (${JSON.stringify(status)})`)
     const health = await (await s.raw('/wizard/health')).json()
     assert.equal(health.restart?.holding, true, 'health shows the restart wait for the shell')
     assert.equal(health.restart.turns, undefined, 'health carries no thread ids')
@@ -1082,6 +1095,9 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.equal((await released.json()).released, true)
     for (let n = 0; n < 100 && !runs(); n++) await new Promise(r => setTimeout(r, 20))
     assert.equal(runs(), 1, `${s.kind}: the held send goes out once the hold lifts`)
+    const firstRuns = () => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/runs') && JSON.stringify(r.body).includes('Held first message')).length
+    for (let n = 0; n < 100 && !firstRuns(); n++) await new Promise(r => setTimeout(r, 20))
+    assert.equal(firstRuns(), 1, `${s.kind}: the new chat's held first message goes out once`)
     assert.equal((await (await s.raw('/wizard/health')).json()).restart, undefined)
     const idle = await gate(post({ now: true }))
     assert.equal(idle.status, 409, `${s.kind}: restart now with no restart waiting is refused (${idle.status})`)
