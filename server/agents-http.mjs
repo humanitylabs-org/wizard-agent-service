@@ -19,6 +19,7 @@ import { firstPostOfHistory, readHermesFirstPosts } from './first-post.mjs'
 import { fullRetryInput, ownerRetryRows, searchMessageText } from './session-detail.mjs'
 import { createListWindows, selectWindow } from './session-list-window.mjs'
 import { classifyRunError } from './run-error.mjs'
+import { markHeldFirstSends } from './held-first-send.mjs'
 const listWindows = new WeakMap()
 const agentListSnapshots = new WeakMap()
 const profileRunCache = new WeakMap()
@@ -26,6 +27,9 @@ const profileRunCache = new WeakMap()
 // Shared metadata census for the list window and scoped Spaces tools. Never discovers other agents.
 export async function loadAgentSessionRows(ctx, agent, { headers = {}, secrets = [], signal, archiveLimit = 100, requireComplete = false } = {}) {
   const all = []; let offset = 0
+  // A new chat whose first message a graceful restart holds has no messages yet: keep it (wizard-ux issue 1362).
+  let held = null
+  try { held = await ctx.heldFirstSendQueue?.(agent) ?? null } catch { held = null }
   while (true) {
     const q = new URLSearchParams({ limit: '100', offset: String(offset), include_children: 'false' })
     const page = await ctx.registry.fetchAgent(agent, `/api/sessions?${q}`, { headers, redirect: 'manual', signal })
@@ -34,7 +38,7 @@ export async function loadAgentSessionRows(ctx, agent, { headers = {}, secrets =
     if (secrets.some(secret => raw.includes(Buffer.from(secret)))) throw new AgentError(502, 'unsafe_upstream_response', 'agent.response')
     const value = JSON.parse(raw.toString('utf8')), rows = value.data || value.sessions || value.items || []
     if (!Array.isArray(rows)) throw new AgentError(502, 'upstream_unavailable', 'agent.runtime')
-    all.push(...rows.filter(row => !ctx.isThreadVisible || ctx.isThreadVisible(row)))
+    all.push(...markHeldFirstSends(rows, held).filter(row => !ctx.isThreadVisible || ctx.isThreadVisible(row)))
     if (value.has_more === false || (value.has_more !== true && rows.length < 100)) break
     if (!rows.length || offset >= 100000) throw new AgentError(502, 'incomplete_listing', 'agent.runtime')
     offset += rows.length
@@ -871,7 +875,9 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       // Chats channels (issue 440): a channel feed takes the windowed path below, scoped to this agent's channel.
       const channelFeed = searchParams.has('channel')
       if (searchParams.get('window') !== 'archive-50' && !searchParams.has('q') && !channelFeed) {
-        for (const key of ['data', 'sessions', 'items']) if (Array.isArray(listing[key])) listing[key] = await projectProfileSessions(ctx, agent, listing[key], headers, secrets)
+        let held = null
+        try { held = await ctx.heldFirstSendQueue?.(agent) ?? null } catch { held = null }
+        for (const key of ['data', 'sessions', 'items']) if (Array.isArray(listing[key])) listing[key] = await projectProfileSessions(ctx, agent, markHeldFirstSends(listing[key], held), headers, secrets)
         result = Buffer.from(JSON.stringify(listing))
       }
       registry.observeSessions?.(agent.id, (listing.data ?? listing.sessions ?? listing.items ?? []).map(row => row?.id))

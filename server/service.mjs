@@ -26,6 +26,7 @@ import { projectMemoryContent, visibleMemoryText } from './memory-context-projec
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
 import { resolveVoiceRecoveryReceipt } from './voice-recovery-receipt.mjs'
 import { DurableRunQueue, queueRequestHash, queuedInputTextOf } from './run-queue.mjs'
+import { markHeldFirstSends } from './held-first-send.mjs'
 import { createHeavyIntegration, HEAVY_KIND } from './heavy-integration.mjs'
 import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
@@ -544,6 +545,19 @@ export function readPendingFirstSendSessions(sessionDbPath, sessionIds) {
       wizard_pending_first_send: true,
     }))
   } catch { return [] } finally { database.close() }
+}
+
+function markHeldFirstSendList(result, queue) {
+  try {
+    const payload = JSON.parse(result.toString('utf8'))
+    let changed = false
+    for (const key of ['data', 'sessions']) {
+      if (!Array.isArray(payload?.[key])) continue
+      const marked = markHeldFirstSends(payload[key], queue)
+      if (marked.some((row, index) => row !== payload[key][index])) { payload[key] = marked; changed = true }
+    }
+    return changed ? Buffer.from(JSON.stringify(payload)) : result
+  } catch { return result }
 }
 
 function mergeArchivedSessions(result, archivedSessions) {
@@ -3296,6 +3310,9 @@ function buildWizardServer(options, lifetime) {
     },
     acknowledgeHeavyNotices,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
+    // A graceful restart's held first sends stay listed (wizard-ux issue 1362): this agent's own queue, only while the
+    // restart switch is on and the agent already has a queue (a list read never creates one).
+    heldFirstSendQueue: async agent => (restartGate && routedQueues ? routedQueues.queueFor(agent) : null),
     ownerTurnRetry,
     clientViewContext,
     noteAgentInput: (agent, sessionId, runId, value, createdAt) => {
@@ -4856,6 +4873,8 @@ function buildWizardServer(options, lifetime) {
               result = mergeArchivedSessions(result, pendingFirstSendReader(candidates))
             } catch { /* optional: never break ordinary Chats */ }
           }
+          // A new chat whose first message a graceful restart holds stays listed as saved (wizard-ux issue 1362).
+          if (!operator && runQueue && restartGate) result = markHeldFirstSendList(result, runQueue)
           const listedSessionIds = sessionIdsInList(result)
           const recentExternalReferences = canonicalPage
             // A Wizard run may legitimately remain active for hours. The run endpoint is

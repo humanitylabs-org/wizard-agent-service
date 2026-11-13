@@ -20,7 +20,9 @@ box can't start or renew the hold), and a POST must be `Content-Type: applicatio
 
 1. `POST /wizard/v1/restart` with `{"reason": "update", "wait_s": 600}` (both optional). From now on new sends are
    accepted and saved in the durable run queue but not launched (queue reason `restart_pending`). Turns already
-   running keep going. The answer is the status below.
+   running keep going. The answer is the status below. A new chat started now has no messages yet; every session
+   list (main and each routed agent) still lists it as `queued` with the owner's words as its title
+   (`server/held-first-send.mjs`), so it never drops out of the Chats list on any device.
 2. Poll `GET /wizard/v1/restart` (every few seconds). It answers
    `{ phase, holding, reason, requested_at, wait_until, active, active_unknown, oldest_active_s, held, turns: [{session_id, agent_id, running_s}] }`.
    - `waiting`: turns are still running, within the limit.
