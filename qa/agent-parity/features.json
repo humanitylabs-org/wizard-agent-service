@@ -1957,6 +1957,26 @@
         "policy_exemptions": []
     },
     {
+      "id": "graceful-restart-held-send",
+      "description": "Calm Agent Service restarts in the shell (wizard-ux issue 1362, switch wizard/graceful-restart, off by default; the Service side is docs/graceful-restart.md): while /wizard/health carries restart.holding, a message sent then is Saved, never Working. The run receipt 202 queued with queue_reason restart_pending marks the send held, the thread draws no Working timer but one quiet 'Saved · sends after Wizard restarts' line, the header and list rows show the saved clock, the Chats list and the AI apps sidebar put held sends under their own Saved heading (Working counts only real runs), and the restart note stays beside the message box through repaints. Identical for main, host-profile, container and restricted agents: each sends on its own ?agent= route and its own row carries the held state.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/graceful-restart.test.mjs: for main, host-profile, container and restricted, the real outbox sends on that agent's own ?agent= route, marks the 202 restart_pending receipt, the real web/live.js PEND carries it to that agent's own row, and the real WizReach.restartHeld and chats.js stiKind read it as Saved; it also runs the real turnHtml (no live Working line when held), the real Chats list renderer (Working vs Saved) and the list model's saved rows for the AI apps sidebar. wizard-ux tests/qa-graceful-restart-held-send.cjs is the synthetic browser run on a phone 412x915 (an existing chat, a new chat and the Chats list during a hold; QA_EXPECT=broken for the old behaviour). Synthetic source-executed and browser evidence, not a live restart on a box; the Service's own hold is covered by tests/restart-gate.test.ts.",
+      "source_refs": [
+        "wizard-ux/web/core/reach.js",
+        "wizard-ux/web/core/chats.js",
+        "wizard-ux/web/outbox.js",
+        "wizard-ux/web/live.js",
+        "server/restart-gate.mjs"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/graceful-restart.test.mjs",
+        "wizard-ux/tests/qa-graceful-restart-held-send.cjs",
+        "tests/restart-gate.test.ts"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "ai-lookup",
       "description": "Look up in the Chats selection menu explains selected words with a fast stateless model (claude-haiku-4-5, no tools, no history) in the context of their own message only, identically for main, host-profile, container and restricted agents; private agents, private threads and Incognito never reach a cloud model, decided from the session's pinned agent on the server, not the caller's agent field.",
       "layer": "ux",
