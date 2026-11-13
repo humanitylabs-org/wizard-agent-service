@@ -7,6 +7,8 @@ import { homedir } from 'node:os'
 import { dirname, resolve } from 'node:path'
 import { readSettings, initializeResponseStyle, wizardOsHome } from './wizard-os-settings.mjs'
 import { existsSync, readFileSync } from 'node:fs'
+import { performance } from 'node:perf_hooks'
+import { startupLine } from './speed-meter.mjs'
 
 const secretFile = (path) => {
   if (!path) return ''
@@ -101,6 +103,7 @@ const accessVerifier = authMode === 'tailscale' ? tailnetVerifier : authMode ===
   audience: process.env.WIZARD_ACCESS_AUDIENCE,
   jwksUrl: process.env.WIZARD_ACCESS_JWKS_URL,
 }) : undefined
+const startupMarks = [['boot', performance.now()]]
 server = createWizardServer({
   distDir: process.env.WIZARD_STATIC_DIR || '.ui-live',
   upstreamOrigin: process.env.HERMES_ORIGIN || 'http://127.0.0.1:8642',
@@ -293,8 +296,18 @@ server = createWizardServer({
   // New restricted agents reach the Service through their own Unix socket, never a TCP agent port.
   agentIsolation: process.env.WIZARD_AGENT_ISOLATION === 'restricted' ? 'restricted' : '',
 })
+startupMarks.push(['create', performance.now()])
 await server.agentSocketsReady
-server.listen(port, host, () => process.stdout.write(`Wizard listening on ${host}:${port}\n`))
+startupMarks.push(['agent_sockets', performance.now()])
+server.listen(port, host, () => {
+  process.stdout.write(`Wizard listening on ${host}:${port}\n`)
+  startupMarks.push(['listen', performance.now()])
+  // The run queue's first tick recovers saved runs; on a big queue it can finish well after the listener.
+  void Promise.resolve(server.runQueueReady).catch(() => undefined).then(() => {
+    startupMarks.push(['run_queue', performance.now()])
+    process.stdout.write(`${startupLine(startupMarks)}\n`)
+  })
+})
 if (tailnetPort) {
   createTailnetIngress(server).listen(tailnetPort, host, () => process.stdout.write(`Wizard tailnet listener on ${host}:${tailnetPort}\n`))
 }

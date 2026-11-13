@@ -3,6 +3,7 @@
 import { createHash } from 'node:crypto'
 import { readUndeliveredHelperReceipts, RECEIPT_PREFIX, receiptKey, completionDelegationId } from './delegation-receipts.mjs'
 import { parseStatus } from './thread-status.mjs'
+import { trackWork } from './speed-meter.mjs'
 
 const ID = /^[A-Za-z0-9._:-]{1,180}$/
 const WIZARD = /^(wizard_|wizard-assistant-)[A-Za-z0-9._:-]+$/
@@ -208,7 +209,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     if (!fresh && !discovery && cache.at && now() - cache.at < refreshMs) return cache
     if (!inflight) {
       discovery ??= scan()
-      inflight = discovery.next().then(({ done, value }) => {
+      inflight = trackWork('background-results scan', () => discovery.next()).then(({ done, value }) => {
         if (!done && value?.failure) return unavailable(value.failure)
         retryAt = 0
         if (done) { discovery = null; completedUnreported = true }

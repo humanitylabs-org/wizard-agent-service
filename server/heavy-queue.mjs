@@ -1,4 +1,4 @@
-import { createSlowTickLogger } from './speed-meter.mjs'
+import { createSlowTickLogger, trackWork } from './speed-meter.mjs'
 import { heavyHost, heavyHostConfigs } from './heavy-hosts.mjs'
 import { heavyCompletionDropped } from './heavy-wait.mjs'
 import { DatabaseSync } from 'node:sqlite'
@@ -262,7 +262,7 @@ export class DurableHeavyQueue {
     if (this.closed) return Promise.resolve()
     if (!this.busy) {
       const started = performance.now()
-      this.busy = this._tick().finally(() => { this.busy = null; this.logSlowTick(started) })
+      this.busy = trackWork('heavy-queue tick', () => this._tick()).finally(() => { this.busy = null; this.logSlowTick(started) })
     }
     return this.busy
   }

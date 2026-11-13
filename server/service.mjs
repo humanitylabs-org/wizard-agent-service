@@ -1,4 +1,4 @@
-import { createSpeedMeter } from './speed-meter.mjs'
+import { createSpeedMeter, trackWork } from './speed-meter.mjs'
 import { accessSync, appendFileSync, closeSync, constants as fsConstants, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
@@ -4373,7 +4373,7 @@ function buildWizardServer(options, lifetime) {
     catch (error) { throw Object.assign(new Error('heavy origin read unavailable'), { status: error?.status === 404 ? 410 : 503 }) }
   } })
   if (heavyWork) lifetime.own(() => heavyWork.close(), () => heavyWork.queue.quiesce())
-  if (runQueue) runQueueReady = runQueue.initialize()
+  if (runQueue) runQueueReady = trackWork('run-queue startup', () => runQueue.initialize())
   if (heavyWork) void runQueueReady.then(() => { if (!lifetime.closing) heavyWork.start() }).catch(() => undefined)
 
   // What makes the cached Hermes listing stale before it expires: a new Wizard Inbox reply, or a
@@ -5593,7 +5593,7 @@ function buildWizardServer(options, lifetime) {
       socket = systemJobsSocket(systemJobs, options.systemJobsSocketPath)
       socket.on('error', () => { console.error('[system-jobs] host trigger unavailable'); server.close() })
       systemJobs.reconcile()
-      alertTimer = setInterval(() => { void systemJobs.flushAlerts().catch(() => console.error('[system-jobs] notification pending')) }, 30_000)
+      alertTimer = setInterval(() => { void trackWork('system-jobs alerts', () => systemJobs.flushAlerts()).catch(() => console.error('[system-jobs] notification pending')) }, 30_000)
       alertTimer.unref()
     }
   }
@@ -7876,11 +7876,12 @@ function buildWizardServer(options, lifetime) {
     supervisor?.start()
   })
   server.scheduler = scheduler
+  server.runQueueReady = runQueueReady // startup timing only (index.mjs `[startup]` line)
   server.supervisor = supervisor
   server.ownedWorkEvidence = ownedWorkEvidence // testable read-only memo stats, never an HTTP authority
   if (ownedOpenWork) {
     server.ownedOpenWork = ownedOpenWork // testable private controller, never an HTTP authority
-    const tick = () => { if (!lifetime.closing) void lifetime.track(ownedOpenWork.tick()) }
+    const tick = () => { if (!lifetime.closing) void lifetime.track(trackWork('owned-open-work tick', () => ownedOpenWork.tick())) }
     let timer
     server.once('listening', () => {
       timer = setInterval(tick, options.ownedOpenWorkIntervalMs ?? 5_000)
@@ -7933,13 +7934,13 @@ function buildWizardServer(options, lifetime) {
     // Wait until the gateway is accepting connections before reapplying old
     // managed harnesses. No owner update or conversation is needed on upgrade.
     server.once('listening', () => {
-      server.agentHarnessesReady = server.agentSocketsReady.then(() => agents.migrateManagedHarnesses())
+      server.agentHarnessesReady = server.agentSocketsReady.then(() => trackWork('agent harness migration', () => agents.migrateManagedHarnesses()))
       void server.agentHarnessesReady.catch(() => undefined)
     })
     lifetime.own(() => agentSockets.close(), () => agentSockets.close())
   } else server.agentSocketsReady = Promise.resolve()
   if (canonicalSessionReader && listCache.mode() !== 'off') {
-    const listCacheTimer = setInterval(() => { if (!lifetime.closing) void listCache.check().catch((error) => console.log(`[list-cache] check failed: ${error?.message ?? error}`)) }, listCache.timerMs)
+    const listCacheTimer = setInterval(() => { if (!lifetime.closing) void trackWork('list-cache check', () => listCache.check()).catch((error) => console.log(`[list-cache] check failed: ${error?.message ?? error}`)) }, listCache.timerMs)
     listCacheTimer.unref?.()
     lifetime.own(() => clearInterval(listCacheTimer), () => clearInterval(listCacheTimer))
   }

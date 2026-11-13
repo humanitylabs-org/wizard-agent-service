@@ -17,25 +17,86 @@ export function routeTemplate(url) {
 }
 const header = value => String(value ?? '').replace(/[\x00-\x20\x7f]/g, '').slice(0, 160)
 
+// Background work (queue ticks, the scheduler, the list cache, the photo copier...) is not a request, so
+// a stall it causes would otherwise blame whichever routes happened to be waiting (issue 499). Each
+// piece registers under a fixed name; a stall then lists everything that ran during it.
+const workRunning = new Map()
+const workEnded = []
+let workToken = 0
+const WORK_ENDED_KEEP = 256
+export function beginWork(name, { now = () => performance.now() } = {}) {
+  const token = ++workToken
+  workRunning.set(token, { name: String(name), at: now() })
+  let finished = false
+  return () => {
+    if (finished) return
+    finished = true
+    const entry = workRunning.get(token)
+    workRunning.delete(token)
+    if (!entry) return
+    workEnded.push({ name: entry.name, at: entry.at, ended: now() })
+    if (workEnded.length > WORK_ENDED_KEEP) workEnded.splice(0, workEnded.length - WORK_ENDED_KEEP)
+  }
+}
+/** Runs `run()` as named background work; a returned promise keeps it registered until it settles. */
+export function trackWork(name, run, options) {
+  const done = beginWork(name, options)
+  let result
+  try { result = run() } catch (error) { done(); throw error }
+  if (result && typeof result.then === 'function') return Promise.resolve(result).finally(done)
+  done()
+  return result
+}
+// Names (work and request routes) that were running at any moment in (from, to].
+export function workDuring(from, to, requests = []) {
+  const names = new Map()
+  const add = (name, at, ended) => { if (at <= to && ended > from) names.set(name, (names.get(name) || 0) + 1) }
+  for (const entry of workRunning.values()) add(entry.name, entry.at, Infinity)
+  for (const entry of workEnded) add(entry.name, entry.at, entry.ended)
+  for (const entry of requests) add(entry.name, entry.at, entry.ended ?? Infinity)
+  return [...names].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)).map(([name]) => name)
+}
+export const STALL_CHECK_MS = 250
+export const STALL_KEEP = 5
+export const STALL_NAMES = 8
+
 // A window this slow or this busy logs one `[event-loop]` line naming the routes that used it, so a
 // freeze names its own cause in the journal (issue 497) instead of needing a live CPU profile.
 export const LAG_LOG_DELAY_MS = 1000
 export const LAG_LOG_UTILIZATION = 0.9
-export function lagLine(window, windowRoutes, inFlight, { top = 5 } = {}) {
+export function lagLine(window, windowRoutes, inFlight, { top = 5, stalls = [] } = {}) {
   if (!(window.delay_max_ms >= LAG_LOG_DELAY_MS || window.utilization >= LAG_LOG_UTILIZATION)) return ''
   const busiest = [...windowRoutes].sort((a, b) => b[1].total_ms - a[1].total_ms).slice(0, top)
     .map(([key, row]) => { const [method, route] = JSON.parse(key === '[overflow]' ? '["","[overflow]"]' : key); return { method, route, count: row.count, total_ms: Math.round(row.total_ms) } })
   const round = value => Math.round(value * 10) / 10
   return `[event-loop] ${JSON.stringify({ window_ms: window.window_ms, delay_p99_ms: round(window.delay_p99_ms),
-    delay_max_ms: round(window.delay_max_ms), utilization: Math.round(window.utilization * 100) / 100, in_flight: inFlight, busiest })}`
+    delay_max_ms: round(window.delay_max_ms), utilization: Math.round(window.utilization * 100) / 100, in_flight: inFlight, busiest,
+    ...(stalls.length ? { stalls: stalls.map(stall => ({ blocked_ms: Math.round(stall.blocked_ms), running: stall.running })) } : {}) })}`
 }
 
 /** Observational only; one bounded route map and one 60-second event-loop window per server. */
-export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, now = () => performance.now(), log = line => console.log(line) } = {}) {
+export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, stallCheckMs = STALL_CHECK_MS, now = () => performance.now(), log = line => console.log(line) } = {}) {
   const delay = monitorEventLoopDelay({ resolution: 20 })
   delay.enable()
   const routes = new Map()
-  let windowRoutes = new Map(), inFlight = 0
+  let windowRoutes = new Map(), inFlight = 0, stalls = []
+  // Requests running now plus those that ended recently, kept by route name only, for stall attribution.
+  const requestsRunning = new Map(), requestsEnded = []
+  let requestToken = 0, lastCheck = now()
+  // A timer that fires late by a second or more means something held the event loop for that long:
+  // remember what was running in that gap, so the window's `[event-loop]` line names it.
+  const checkStall = () => {
+    const at = now(), blocked = at - lastCheck - stallCheckMs
+    lastCheck = at
+    if (!(blocked >= LAG_LOG_DELAY_MS)) return null
+    const stall = { blocked_ms: blocked, running: workDuring(at - blocked - stallCheckMs, at, [...requestsRunning.values(), ...requestsEnded]).slice(0, STALL_NAMES) }
+    stalls.push(stall)
+    stalls.sort((a, b) => b.blocked_ms - a.blocked_ms)
+    if (stalls.length > STALL_KEEP) stalls.length = STALL_KEEP
+    return stall
+  }
+  const stallTimer = stallCheckMs > 0 ? setInterval(checkStall, stallCheckMs) : null
+  stallTimer?.unref?.()
   let started = now(), previous = performance.eventLoopUtilization(), completed = null
   const sample = () => {
     const current = performance.eventLoopUtilization()
@@ -47,8 +108,8 @@ export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, now = () 
   }
   const timer = setInterval(() => {
     completed = sample()
-    try { const line = lagLine(completed, windowRoutes, inFlight); if (line) log(line) } catch { /* observational only */ }
-    previous = performance.eventLoopUtilization(); started = now(); delay.reset(); windowRoutes = new Map()
+    try { const line = lagLine(completed, windowRoutes, inFlight, { stalls }); if (line) log(line) } catch { /* observational only */ }
+    previous = performance.eventLoopUtilization(); started = now(); delay.reset(); windowRoutes = new Map(); stalls = []
   }, windowMs)
   timer.unref?.()
   return {
@@ -60,10 +121,17 @@ export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, now = () 
         header(String(request.headers?.forwarded || '').match(/(?:^|[;,])\s*host="?([^";,\s]+)/i)?.[1])])
       let finished = false
       inFlight++
+      const token = ++requestToken
+      const [method, route] = JSON.parse(key)
+      const running = { name: `${method} ${route}`, at }
+      requestsRunning.set(token, running)
       return () => {
         if (finished) return
         finished = true
         inFlight--
+        requestsRunning.delete(token)
+        requestsEnded.push({ ...running, ended: now() })
+        if (requestsEnded.length > WORK_ENDED_KEEP) requestsEnded.splice(0, requestsEnded.length - WORK_ENDED_KEEP)
         // Choose at completion, not entry: concurrent requests must share the same bound.
         const bucket = routes.has(key) || routes.size < maxRoutes - 1 ? key : '[overflow]'
         const row = routes.get(bucket) || { count: 0, total_ms: 0, samples: [], next: 0 }
@@ -78,7 +146,8 @@ export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, now = () 
       const sorted = [...row.samples].sort((a, b) => a - b)
       return [key, { count: row.count, total_ms: row.total_ms, sample_count: sorted.length, p95_ms: sorted[Math.ceil(sorted.length * 0.95) - 1] ?? 0 }]
     })) }),
-    close() { clearInterval(timer); delay.disable() },
+    checkStall,
+    close() { clearInterval(timer); if (stallTimer) clearInterval(stallTimer); delay.disable() },
   }
 }
 
@@ -92,4 +161,18 @@ export function createSlowTickLogger(queue, { now = () => performance.now(), log
       log(`[queue-speed] ${JSON.stringify({ queue, duration_ms: Math.round(duration) })}`)
     }
   }
+}
+
+// One `[startup]` line per process: how long each startup step took, in ms since the process began, so a
+// slow restart (one the health check reads as failed) says which step was slow (issue 499).
+export function startupLine(marks) {
+  const out = {}
+  let previous = 0
+  for (const [step, at] of marks) {
+    if (!Number.isFinite(at)) continue
+    out[`${step}_ms`] = Math.round(at - previous)
+    previous = at
+  }
+  out.total_ms = Math.round(previous)
+  return `[startup] ${JSON.stringify(out)}`
 }

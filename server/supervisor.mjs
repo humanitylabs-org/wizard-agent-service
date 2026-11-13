@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { trackWork } from './speed-meter.mjs'
 
 export const SUPERVISOR_SPELL = `When the owner says "report this to supervisor", "tell the supervisor" or "send this to supervisor":
 Call supervisor_report: what happened (at most 400 words), the owner's feedback verbatim, evidence (paths, commands, excerpts, thread links), and a proposed_home (skill, standing rule or regression test).
@@ -237,7 +238,7 @@ export class Supervisor {
   async tick() {
     if (this.stopped) return
     if (this.inflight) return this.inflight
-    this.inflight = (async () => {
+    this.inflight = trackWork('supervisor tick', async () => {
       this.transaction(() => {
         for (const q of this.db.prepare("SELECT * FROM questions WHERE state='waiting' AND deadline<=?").all(this.now())) {
           this.db.prepare("UPDATE questions SET state='timeout' WHERE id=?").run(q.id)
@@ -268,7 +269,7 @@ export class Supervisor {
           console.error(`[supervisor] delivery pending ${row.key}: ${error?.status || ''} ${String(error?.message || error).slice(0, 200)}`)
         }
       }
-    })().finally(() => { this.inflight = null })
+    }).finally(() => { this.inflight = null })
     return this.inflight
   }
   start() {
