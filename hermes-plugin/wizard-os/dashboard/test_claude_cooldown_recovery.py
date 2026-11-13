@@ -123,10 +123,34 @@ class RecoveryTests(unittest.TestCase):
         self.run_pass([grant()], provider)
         self.assertEqual(provider.calls, ['usage', 'usage'])
 
+    def test_expired_token_is_renewed_the_stock_way_before_the_check(self):
+        fresh_token = TOKEN
+        stale = grant(token='sk-ant-oat01-' + 'z' * 20, expires_at_ms=(NOW - 1) * 1000)
+        rows = [stale]
+        renewed = []
+        def renew(cid):
+            renewed.append(cid)
+            rows[0] = grant(token=fresh_token)   # Hermes wrote the renewed row (cooldown kept)
+            return True
+        report = r.recover(read=lambda p: list(rows), reset=lambda cid: self.resets.append(cid) or True,
+                           get=Provider(usage()), renew=renew, now=lambda: NOW, clock=lambda: self.tick[0])
+        self.assertEqual(renewed, ['g1'])
+        self.assertEqual(report[0]['outcome'], 'released')
+        self.assertEqual(self.resets, ['g1'])
+
+    def test_short_cooldown_or_bench_makes_no_provider_call(self):
+        provider = Provider(usage())
+        for row, outcome in ((grant(until=NOW + 60), 'short_cooldown'), (grant(last_status='exhausted'), 'credential_benched')):
+            with self.subTest(outcome=outcome):
+                r._PROBED.clear()
+                self.assertEqual(self.run_pass([row], provider)[0]['outcome'], outcome)
+        self.assertEqual(provider.calls, [])
+
     def test_expired_token_and_unreadable_usage_change_nothing(self):
         self.assertEqual(self.run_pass([grant(expires_at_ms=(NOW - 1) * 1000)], Provider(usage()))[0]['outcome'], 'token_expired')
         def broken(path, token):
             raise OSError('HTTP 500 with a private body')
+        r._PROBED.clear()
         self.assertEqual(self.run_pass([grant()], broken)[0]['outcome'], 'usage_unreadable')
         self.assertEqual(self.resets, [])
 

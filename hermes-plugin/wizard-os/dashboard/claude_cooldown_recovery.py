@@ -165,29 +165,43 @@ def _stock_reset(cid):
     return load_pool('anthropic').reset_status(cid) is not None
 
 
-def recover(read=None, reset=None, get=None, now=time.time, clock=time.monotonic):
-    """One pass over the anthropic pool. Returns [{grant, outcome, models}] without ids, tokens or amounts."""
+def _stock_renew(cid):
+    """Renew one expired grant through stock Hermes (single-use refresh lock), as the account listing does."""
+    from agent.credential_pool import load_pool
+    return bool(load_pool('anthropic').try_refresh_matching(credential_id=cid))
+
+
+def _groups(rows):
+    by_token = {}
+    for r in rows:
+        if isinstance(r, dict) and isinstance(r.get('id'), str) and r['id'] and r.get('auth_type') == 'oauth' \
+                and isinstance(r.get('access_token'), str) and r['access_token']:
+            by_token.setdefault(r['access_token'], []).append(r)
+    return by_token
+
+
+def recover(read=None, reset=None, get=None, renew=None, now=time.time, clock=time.monotonic):
+    """One pass over the anthropic pool. Returns [{outcome, models}] without ids, tokens or amounts."""
     if read is None:
         from hermes_cli.auth import read_credential_pool
         read = read_credential_pool
     reset = reset or _stock_reset
+    renew = renew or _stock_renew
     get = get or oauth_get
     t = now()
-    rows = [r for r in (read('anthropic') or []) if isinstance(r, dict) and isinstance(r.get('id'), str) and r['id']]
     report = []
-    by_token = {}
-    for r in rows:
-        if r.get('auth_type') == 'oauth' and isinstance(r.get('access_token'), str) and r['access_token']:
-            by_token.setdefault(r['access_token'], []).append(r)
-    for token, group in by_token.items():
+    for token, group in _groups(read('anthropic') or []).items():
         cooled = [r for r in group if _active(r, t)]
         if not cooled:
             continue
-        lead = cooled[0]
-        cid = lead['id']
+        cid = cooled[0]['id']
         models = sorted({m for r in cooled for m in _active(r, t)})
-        if any(_expired(r, t) for r in group):
-            report.append({'outcome': 'token_expired', 'models': models})
+        # Short cooldowns and credential-wide benches are never released: decide that before any provider call.
+        if any(min(_active(r, t).values()) - t < MIN_LEFT for r in cooled):
+            report.append({'outcome': 'short_cooldown', 'models': models})
+            continue
+        if any(r.get('last_status') not in (None, 'ok') for r in cooled):
+            report.append({'outcome': 'credential_benched', 'models': models})
             continue
         with _LOCK:
             last = _PROBED.get(cid)
@@ -196,6 +210,26 @@ def recover(read=None, reset=None, get=None, now=time.time, clock=time.monotonic
             _PROBED[cid] = clock()
             if len(_PROBED) > 256:
                 _PROBED.clear()
+        if any(_expired(r, t) for r in group):
+            # The cooldown stops Hermes from using (and so renewing) this grant; a weekly cooldown can outlive
+            # its access token. Renew it the stock way, then read the renewed row.
+            try:
+                renewed = renew(cid)
+            except Exception:
+                renewed = False
+            fresh = None
+            if renewed:
+                fresh = next((g for g in _groups(read('anthropic') or []).values()
+                              if any(r['id'] == cid for r in g)), None)
+            if not fresh or any(_expired(r, t) for r in fresh):
+                report.append({'outcome': 'token_expired', 'models': models})
+                continue
+            group = fresh
+            token = group[0]['access_token']
+            cooled = [r for r in group if _active(r, t)]
+            if not cooled:
+                report.append({'outcome': 'no_cooldown', 'models': models})
+                continue
         try:
             payload = get('usage', token)
         except Exception:

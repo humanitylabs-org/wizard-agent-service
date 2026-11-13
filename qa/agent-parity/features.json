@@ -359,6 +359,25 @@
       "policy_exemptions": []
     },
     {
+      "id": "claude-model-limit-saved-turn",
+      "description": "A send Hermes refuses before any request because a Claude model is on a usage cooldown (issue 505) fails as a saved turn that says the usage limit was reached and that Retry works after the reset or once extra usage is on and funded; it never claims an expired sign-in.",
+      "layer": "server",
+      "fixture": "claude-model-limit-saved-turn",
+      "how_to_test": "Fail a real HTTP admission with the controlled zero-token 'rate-limited for <model>' preflight and assert failed status, the model-limit safe_error and no reconnect diagnosis on main, host-profile, container and restricted queues.",
+      "source_refs": [
+        "server/run-provider-failure.mjs",
+        "server/run-queue.mjs",
+        "server/routed-run-queue.mjs",
+        "hermes-plugin/wizard-os/dashboard/claude_cooldown_recovery.py"
+      ],
+      "reference_tests": [
+        "tests/run-provider-failure.test.ts",
+        "hermes-plugin/wizard-os/dashboard/test_claude_cooldown_recovery.py",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "policy_exemptions": []
+    },
+    {
       "id": "supervisor-reporter",
       "description": "Every runtime receives the Supervisor spell and six Hermes session-injected tools; standard agents can report through their authenticated transport. Scheduled replies share Reporter validation.",
       "layer": "server",
