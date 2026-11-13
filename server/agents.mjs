@@ -1321,9 +1321,18 @@ export function createAgentRegistry(options = {}) {
   })
   let catalogs = readJson(catalogPath)?.agents ?? {}
   const catalogEpochs = new Map()
+  // Catalog rows are replaced, never edited, so a Set per ids array stays valid for that row's
+  // lifetime. Chats polls observe every listed id per request (issue 497: rebuilding two Sets over
+  // every known session on every call kept the event loop saturated on large boxes).
+  const catalogIdSets = new WeakMap()
+  const catalogIds = ids => {
+    let set = catalogIdSets.get(ids)
+    if (!set) { set = new Set(ids); catalogIdSets.set(ids, set) }
+    return set
+  }
   async function catalogContains(agentId, sessionId) {
     const row = catalogs[agentId]
-    if (row?.ids.includes(sessionId)) return true
+    if (row && catalogIds(row.ids).has(sessionId)) return true
     if (!row?.complete || typeof row.seal !== 'string' || !row.seal || !runtime?.inspect) return undefined
     const epoch = catalogEpochs.get(agentId) ?? 0
     const seal = row.seal
@@ -1350,9 +1359,11 @@ export function createAgentRegistry(options = {}) {
   function saveCatalog(agentId, row) {
     const previous = catalogs[agentId]
     // `at` is schema-validated metadata only, never a freshness/authority signal.
-    const ids = previous && new Set(previous.ids)
-    if (previous && previous.complete === row.complete && previous.seal === row.seal
-        && ids.size === new Set(row.ids).size && row.ids.every(id => ids.has(id))) return
+    if (previous && previous.complete === row.complete && previous.seal === row.seal) {
+      if (row.ids === previous.ids) return
+      const ids = catalogIds(previous.ids)
+      if (ids.size === catalogIds(row.ids).size && row.ids.every(id => ids.has(id))) return
+    }
     const next = { ...catalogs, [agentId]: row }
     mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
     writeJsonAtomic(catalogPath, { schema: 1, agents: next }); catalogs = next
@@ -1366,8 +1377,29 @@ export function createAgentRegistry(options = {}) {
     if (!readRaw(agentId)) return
     const previous = catalogs[agentId]
     // Retain positive sightings even if a concurrent paginated census misses a newly created row.
-    saveCatalog(agentId, { at: now(), complete: previous?.complete === true && Boolean(previous?.seal), seal: previous?.seal ?? null, ids: [...new Set([...(previous?.ids ?? []), ...ids])] })
-    if (index) for (const id of ids) pin(id, agentId, 'runtime_verified')
+    // Only ids not yet known are appended; with none, the stored array is passed through as is so
+    // saveCatalog can see the no-op without touching every known id.
+    const known = previous ? catalogIds(previous.ids) : new Set()
+    const fresh = [...new Set(ids)].filter(id => !known.has(id))
+    const merged = previous && !fresh.length ? previous.ids : [...new Set([...(previous?.ids ?? []), ...fresh])]
+    saveCatalog(agentId, { at: now(), complete: previous?.complete === true && Boolean(previous?.seal), seal: previous?.seal ?? null, ids: merged })
+    if (index) pinSightings(agentId, ids)
+  }
+  // Same rule as pin(..., 'runtime_verified') per id, but one pin-table write per batch: a list
+  // page of new threads used to rewrite the whole table once per thread (issue 497).
+  function pinSightings(agentId, ids) {
+    const current = pins()
+    let next = null
+    for (const sessionId of ids) {
+      const key = threadKey(agentId, sessionId)
+      if (['runtime_verified', 'service_admission', 'migrated_pin'].includes((next ?? current)[key]?.provenance)) continue
+      next ??= { ...current }
+      next[key] = { ...threadReference(sessionId, agentId), provenance: 'runtime_verified' }
+    }
+    if (!next) return
+    mkdirSync(agentsDir, { recursive: true, mode: 0o700 })
+    writeJsonAtomic(threadsPath, { schema: 2, threads: next })
+    pinsCache = next
   }
   async function refreshCatalog(agentId) {
     const agent = readRaw(agentId)

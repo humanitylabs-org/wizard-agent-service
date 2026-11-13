@@ -17,21 +17,38 @@ export function routeTemplate(url) {
 }
 const header = value => String(value ?? '').replace(/[\x00-\x20\x7f]/g, '').slice(0, 160)
 
+// A window this slow or this busy logs one `[event-loop]` line naming the routes that used it, so a
+// freeze names its own cause in the journal (issue 497) instead of needing a live CPU profile.
+export const LAG_LOG_DELAY_MS = 1000
+export const LAG_LOG_UTILIZATION = 0.9
+export function lagLine(window, windowRoutes, inFlight, { top = 5 } = {}) {
+  if (!(window.delay_max_ms >= LAG_LOG_DELAY_MS || window.utilization >= LAG_LOG_UTILIZATION)) return ''
+  const busiest = [...windowRoutes].sort((a, b) => b[1].total_ms - a[1].total_ms).slice(0, top)
+    .map(([key, row]) => { const [method, route] = JSON.parse(key === '[overflow]' ? '["","[overflow]"]' : key); return { method, route, count: row.count, total_ms: Math.round(row.total_ms) } })
+  const round = value => Math.round(value * 10) / 10
+  return `[event-loop] ${JSON.stringify({ window_ms: window.window_ms, delay_p99_ms: round(window.delay_p99_ms),
+    delay_max_ms: round(window.delay_max_ms), utilization: Math.round(window.utilization * 100) / 100, in_flight: inFlight, busiest })}`
+}
+
 /** Observational only; one bounded route map and one 60-second event-loop window per server. */
-export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, now = () => performance.now() } = {}) {
+export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, now = () => performance.now(), log = line => console.log(line) } = {}) {
   const delay = monitorEventLoopDelay({ resolution: 20 })
   delay.enable()
   const routes = new Map()
+  let windowRoutes = new Map(), inFlight = 0
   let started = now(), previous = performance.eventLoopUtilization(), completed = null
   const sample = () => {
     const current = performance.eventLoopUtilization()
     const elapsed = now() - started
     return { window_ms: Math.round(elapsed), delay_p50_ms: delay.count ? delay.percentile(50) / 1e6 : 0,
       delay_p99_ms: delay.count ? delay.percentile(99) / 1e6 : 0,
+      delay_max_ms: delay.count ? delay.max / 1e6 : 0,
       utilization: performance.eventLoopUtilization(current, previous).utilization }
   }
   const timer = setInterval(() => {
-    completed = sample(); previous = performance.eventLoopUtilization(); started = now(); delay.reset()
+    completed = sample()
+    try { const line = lagLine(completed, windowRoutes, inFlight); if (line) log(line) } catch { /* observational only */ }
+    previous = performance.eventLoopUtilization(); started = now(); delay.reset(); windowRoutes = new Map()
   }, windowMs)
   timer.unref?.()
   return {
@@ -42,15 +59,19 @@ export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, now = () 
         header(request.headers?.host), header(request.headers?.['x-forwarded-host']),
         header(String(request.headers?.forwarded || '').match(/(?:^|[;,])\s*host="?([^";,\s]+)/i)?.[1])])
       let finished = false
+      inFlight++
       return () => {
         if (finished) return
         finished = true
+        inFlight--
         // Choose at completion, not entry: concurrent requests must share the same bound.
         const bucket = routes.has(key) || routes.size < maxRoutes - 1 ? key : '[overflow]'
         const row = routes.get(bucket) || { count: 0, total_ms: 0, samples: [], next: 0 }
         const elapsed = now() - at
         row.samples[row.next] = elapsed; row.next = (row.next + 1) % 256
         row.count++; row.total_ms += elapsed; routes.set(bucket, row)
+        const windowRow = windowRoutes.get(bucket) || { count: 0, total_ms: 0 }
+        windowRow.count++; windowRow.total_ms += elapsed; windowRoutes.set(bucket, windowRow)
       }
     },
     stats: () => ({ event_loop: completed || sample(), routes: Object.fromEntries([...routes].map(([key, row]) => {
