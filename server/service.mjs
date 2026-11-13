@@ -1,4 +1,5 @@
 import { createSpeedMeter, trackWork } from './speed-meter.mjs'
+import { BUFFERED_BODY, createClientStormGuard, replay as replayStormResult } from './client-storm.mjs'
 import { accessSync, appendFileSync, closeSync, constants as fsConstants, copyFileSync, createReadStream, existsSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { readFile, stat } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
@@ -2666,6 +2667,12 @@ function sendJson(response, status, value, headers = {}) {
 }
 
 async function readBoundedBody(request, limit = BODY_LIMIT) {
+  // The client-storm guard may already have read this body to compare identical writes (issue 513).
+  const buffered = request[BUFFERED_BODY]
+  if (buffered) {
+    if (buffered.length > limit) throw Object.assign(new Error('too large'), { status: 413 })
+    return buffered
+  }
   const declared = Number(request.headers['content-length'] ?? 0)
   if (declared > limit) throw Object.assign(new Error('too large'), { status: 413 })
   const parts = []
@@ -5885,6 +5892,8 @@ function buildWizardServer(options, lifetime) {
   const standardRetrievalRate = new Map()
   const speedMeter = createSpeedMeter()
   lifetime.own(() => speedMeter.close(), () => speedMeter.close())
+  // One looping device only slows itself (issue 513): identical writes share a result, the rest are capped per device + route.
+  const clientStorm = createClientStormGuard(options.clientStorm ?? {})
   const server = createServer(async (request, response) => {
     const meterDone = speedMeter.begin(request)
     if (lifetime.closing) { try { sendJson(response, 503, { error: 'service_unavailable' }) } finally { meterDone() }; return }
@@ -5899,6 +5908,7 @@ function buildWizardServer(options, lifetime) {
     // route until its outcome is known; real admissions still expire the snapshot.
     const deferredListTouch = request.method === 'POST' && request.url === '/wizard/hermes/v1/runs'
     let readOnlyRunReplay = false
+    let stormLead = null, stormRead = null
     if (request.method !== 'GET' && request.method !== 'HEAD' && !deferredListTouch) listCache.touch()
     try {
       const url = new URL(request.url ?? '/', 'http://wizard.local')
@@ -5937,6 +5947,13 @@ function buildWizardServer(options, lifetime) {
       }
       // An agent credential reaches only the agent surfaces; the rest is the owner's.
       if (principal.kind === 'agent' && !agentPathAllowed(url.pathname) && !(url.pathname === '/wizard/v1/settings' && request.method === 'PUT')) { sendJson(response, 403, { error: 'agent_scope', check: 'principal.agent_scope' }); return }
+      // Owner and app writes from one device: over the cap is a 429, never queued (agents and machine routes keep their own gates).
+      if (principal.kind !== 'agent' && !machineRequest) {
+        const storm = await clientStorm.admit(request, url.pathname, url.search)
+        if (storm?.status === 'refused') { sendJson(response, 429, { error: 'client_storm', check: 'client_storm' }, { 'Retry-After': String(storm.retryAfter) }); return }
+        if (storm?.status === 'joined') { replayStormResult(response, storm.result); return }
+        if (storm?.status === 'lead') { stormLead = storm; stormRead = storm.watch(response) }
+      }
       // Alongside boxes have no tailnet verifier: the owner's phone reaches this box-local listener through host
       // Tailscale Serve and the shell, so its visit is noticed here (phone-setup.mjs noteHostRequest; off by default).
       if (options.hostPhoneSeen === true && !tailnetIngress && !baseRequireAccess && principal.kind === 'owner') phoneSetup?.noteHostRequest?.(request)
@@ -6732,7 +6749,9 @@ function buildWizardServer(options, lifetime) {
         const hermesState = hermesStateHealth.report()
         // restart: present only while a graceful restart holds sends, so the shell can show "Restarting when chats finish".
         const restart = restartGate?.holding() ? restartGate.summary() : null
-        sendJson(response, 200, { status: 'ok', upstream_reachable: reachable, ...(queue ? { queue } : {}), ...(hermesState ? { hermes_state: hermesState } : {}), ...(restart ? { restart } : {}) })
+        // client_storm: present only while a device's writes are being refused or shared (issue 513).
+        const storm = clientStorm.summary()
+        sendJson(response, 200, { status: 'ok', upstream_reachable: reachable, ...(queue ? { queue } : {}), ...(hermesState ? { hermes_state: hermesState } : {}), ...(restart ? { restart } : {}), ...(storm ? { client_storm: storm } : {}) })
         return
       }
 
@@ -7875,6 +7894,7 @@ function buildWizardServer(options, lifetime) {
       else response.destroy()
     } finally {
       if (deferredListTouch && !readOnlyRunReplay) listCache.touch()
+      stormLead?.release(stormRead)
       meterDone(); requestDone()
     }
   })
