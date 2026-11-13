@@ -1261,9 +1261,24 @@ verified()
 def docker_stream(args: list[str], header: bytes, source, length: int, timeout: int) -> tuple[int, str, str]:
     """Run docker with `header` + exactly `length` bytes of `source` on stdin; always drain `source`.
 
-    A watchdog kills the process once `timeout` passes, also while stdin writes are blocked."""
+    A watchdog kills the process once `timeout` passes, also while stdin writes are blocked.
+    stdout/stderr are read by their own threads from the start and the process is reaped with
+    wait(), never communicate(): communicate() after closing stdin raises "flush of closed file"
+    on Python 3.12.3 (the box's interpreter, issue 507), and a chatty child can no longer fill a
+    pipe and stall the upload."""
     proc = subprocess.Popen(docker_cmd(args), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     expired = threading.Event()
+    output = {"out": b"", "err": b""}
+
+    def drain(key, pipe):
+        try:
+            output[key] = pipe.read()
+        except (OSError, ValueError):
+            pass
+    readers = [threading.Thread(target=drain, args=(key, pipe), daemon=True)
+               for key, pipe in (("out", proc.stdout), ("err", proc.stderr))]
+    for reader in readers:
+        reader.start()
 
     def kill():
         expired.set()
@@ -1294,17 +1309,24 @@ def docker_stream(args: list[str], header: bytes, source, length: int, timeout: 
             proc.stdin.close()
         except (BrokenPipeError, OSError):
             pass
-        out, err = proc.communicate()
+        proc.wait()
     finally:
         watchdog.cancel()
         if proc.poll() is None:
             proc.kill()
-            proc.communicate()
+            proc.wait()
+        for reader in readers:
+            reader.join(5)
+        for pipe in (proc.stdout, proc.stderr):
+            try:
+                pipe.close()
+            except OSError:
+                pass
     if expired.is_set():
         raise RuntimeFailure("file_placement_timeout", 504)
     if left:
         raise RuntimeFailure("invalid_file", 400)
-    return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+    return proc.returncode, output["out"].decode("utf-8", "replace"), output["err"].decode("utf-8", "replace")
 
 
 class BoundedReader:
