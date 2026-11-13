@@ -149,3 +149,40 @@ test('heavy head stamps include delivery/receipt changes and stay main-agent sco
   assert.deepEqual(heavyJobStamps([{ ...job, agent_id: 'synthetic-other-agent' }]), new Map())
   assert.deepEqual(heavyJobStamps([job, { ...job, job_id: 'second' }]), heavyJobStamps([{ ...job, job_id: 'second' }, job]))
 })
+test('observing already known sessions on a large catalog never rebuilds a Set over every known id (issue 497)', t => {
+  const agentsDir = join(root(t), 'agents')
+  mkdirSync(agentsDir)
+  const registry = createAgentRegistry({ agentsDir })
+  const ids = Array.from({ length: 20_000 }, (_, i) => `wizard_known_${i}`)
+  registry.observeSessions('hermes', ids)
+  registry.observeSessions('hermes', [ids[0]]) // builds the cached known-id set once
+  const Native = globalThis.Set
+  let large = 0
+  globalThis.Set = class extends Native {
+    constructor(items) { super(items); if (this.size >= 10_000) large++ }
+  }
+  try {
+    for (let n = 0; n < 50; n++) registry.observeSessions('hermes', [ids[n]], { index: false })
+    registry.observeSessions('hermes', ids.slice(0, 100))
+  } finally { globalThis.Set = Native }
+  assert.equal(large, 0, 'a per-request sighting of known ids must not rebuild the known-id set')
+  registry.observeSessions('hermes', ['wizard_fresh'])
+  const saved = JSON.parse(readFileSync(join(agentsDir, '.session-catalog.json'), 'utf8')).agents.hermes.ids
+  assert.equal(saved.length, 20_001)
+  assert.equal(saved.at(-1), 'wizard_fresh')
+  assert.equal(registry.pinnedAgent('wizard_fresh'), 'hermes')
+})
+test('a page of new sightings pins every thread with one pin-table write, not one per thread (issue 497)', t => {
+  const agentsDir = join(root(t), 'agents')
+  mkdirSync(agentsDir)
+  const registry = createAgentRegistry({ agentsDir })
+  registry.pin('wizard_admitted', 'hermes', 'service_admission')
+  const ids = Array.from({ length: 3000 }, (_, i) => `wizard_new_${i}`)
+  const started = performance.now()
+  registry.observeSessions('hermes', ['wizard_admitted', ...ids])
+  assert(performance.now() - started < 2000, 'one batch write, not 3000 rewrites of the pin table')
+  const pins = JSON.parse(readFileSync(join(agentsDir, '.threads.json'), 'utf8')).threads
+  assert.equal(Object.keys(pins).length, 3001)
+  assert.equal(Object.values(pins).find(row => row.session_id === 'wizard_admitted').provenance, 'service_admission')
+  for (const id of [ids[0], ids.at(-1)]) assert.equal(registry.pinnedAgent(id), 'hermes')
+})

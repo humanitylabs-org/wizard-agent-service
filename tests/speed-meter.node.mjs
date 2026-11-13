@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createSpeedMeter, createSlowTickLogger, routeTemplate } from '../server/speed-meter.mjs'
+import { createSpeedMeter, createSlowTickLogger, routeTemplate, lagLine } from '../server/speed-meter.mjs'
 import { createHybridProjector } from '../server/session-list-cache.mjs'
 
 test('voice transcribe and POST runs expose independent bounded rolling p95 rows', t => {
@@ -90,4 +90,36 @@ test('session list speed meter reports separate head and hot projection timings 
   assert.deepEqual(result.rows, sessions)
   assert(Number.isFinite(result.head_ms) && result.head_ms >= 0)
   assert(Number.isFinite(result.hot_ms) && result.hot_ms >= 0)
+})
+test('a calm event-loop window logs nothing; a slow or busy one names its busiest routes without ids (issue 497)', () => {
+  const routes = new Map([
+    [JSON.stringify(['GET', '/api/sessions', 'other', 'box', '', '']), { count: 40, total_ms: 9000.4 }],
+    [JSON.stringify(['GET', '/wizard/health', 'other', 'box', '', '']), { count: 4, total_ms: 60000 }],
+    ['[overflow]', { count: 2, total_ms: 10 }],
+  ])
+  assert.equal(lagLine({ window_ms: 60000, delay_p99_ms: 30, delay_max_ms: 120, utilization: 0.6 }, routes, 1), '')
+  const slow = lagLine({ window_ms: 60000, delay_p99_ms: 900, delay_max_ms: 4200, utilization: 0.5 }, routes, 7)
+  assert.match(slow, /^\[event-loop\] /)
+  const value = JSON.parse(slow.slice('[event-loop] '.length))
+  assert.equal(value.in_flight, 7)
+  assert.equal(value.delay_max_ms, 4200)
+  assert.deepEqual(value.busiest.map(row => row.route), ['/wizard/health', '/api/sessions', '[overflow]'])
+  assert.deepEqual(value.busiest[1], { method: 'GET', route: '/api/sessions', count: 40, total_ms: 9000 })
+  assert(lagLine({ window_ms: 60000, delay_p99_ms: 20, delay_max_ms: 40, utilization: 0.95 }, new Map(), 0))
+})
+test('a blocked event loop produces one [event-loop] line from the live meter (issue 497)', async t => {
+  const logs = []
+  const meter = createSpeedMeter({ windowMs: 200, log: line => logs.push(line) })
+  t.after(() => meter.close())
+  const done = meter.begin({ method: 'GET', url: '/api/sessions/secret-thread/messages', headers: {} })
+  await new Promise(resolve => setTimeout(resolve, 50))
+  const until = Date.now() + 1300
+  while (Date.now() < until) { /* hold the loop */ }
+  done()
+  await new Promise(resolve => setTimeout(resolve, 450))
+  const line = logs.find(entry => entry.startsWith('[event-loop] '))
+  assert(line, `expected an event-loop line, got ${JSON.stringify(logs)}`)
+  const value = JSON.parse(line.slice('[event-loop] '.length))
+  assert(value.delay_max_ms >= 1000)
+  assert.doesNotMatch(line, /secret-thread/)
 })
