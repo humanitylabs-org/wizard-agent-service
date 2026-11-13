@@ -14,6 +14,7 @@ import { existsSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { findIdleUndeliveredHelperReceipts, readUndeliveredHelperReceipts, completionDelegationId, receiptKey, ownerGate, receiptConsumed, continuationAllowed, RECEIPT_PREFIX } from './delegation-receipts.mjs'
 import { captureContinuation, continuationCurrent } from './helper-continuation.mjs'
+import { trackWork } from './speed-meter.mjs'
 
 export const FOLLOW_THROUGH_PREFIX = '[ASYNC DELEGATION BATCH COMPLETE'
 // Wizard app threads and phone-intake (Wizard Inbox) threads both show in Wizard, so both get the next turn.
@@ -157,7 +158,7 @@ export function startDelegationFollowThrough({ sessionDbPath = '', find = () => 
   }
   const tick = () => {
     if (stopped) return Promise.resolve()
-    if (!pending) pending = runTick().finally(() => { pending = null })
+    if (!pending) pending = trackWork('follow-through tick', runTick).finally(() => { pending = null })
     return pending
   }
   const timer = setInterval(tick, intervalMs)

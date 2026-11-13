@@ -9,6 +9,7 @@ import { CronExpressionParser } from 'cron-parser'
 import { parse as parseYaml } from 'yaml'
 import { lintReport, REPORTER_INSTRUCTIONS } from './reporter.mjs'
 import { parseStatus } from './thread-status.mjs'
+import { trackWork } from './speed-meter.mjs'
 // Jobs created before the Reporter (or without a choice) get a kind from what they are: a roundup, brief,
 // review or digest is the product itself and must keep its body (26 Oct 2026: a 2,000-word weekly process
 // review was rewritten down to 150 words). Everything else is a short status report.
@@ -569,7 +570,7 @@ export class Scheduler {
         const due = this.scheduleRequested
         this.drainRequested = false
         this.scheduleRequested = false
-        await this.work(due)
+        await trackWork('scheduler tick', () => this.work(due))
       }
     })().finally(() => { this.inflight = null })
     return this.inflight

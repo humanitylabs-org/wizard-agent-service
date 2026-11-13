@@ -1,4 +1,4 @@
-import { createSlowTickLogger } from './speed-meter.mjs'
+import { createSlowTickLogger, trackWork } from './speed-meter.mjs'
 import { chmodSync, existsSync, mkdirSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
@@ -1324,7 +1324,7 @@ export class DurableRunQueue {
     if (this.closed) return
     if (this.tickPromise) return this.tickPromise
     const started = performance.now()
-    this.tickPromise = this._tick(force).finally(() => { this.tickPromise = null; this.logSlowTick(started) })
+    this.tickPromise = trackWork('run-queue tick', () => this._tick(force)).finally(() => { this.tickPromise = null; this.logSlowTick(started) })
     return this.tickPromise
   }
 

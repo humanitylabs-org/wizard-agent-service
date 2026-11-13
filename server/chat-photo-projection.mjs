@@ -5,6 +5,7 @@ import { resolve, join, sep, dirname } from 'node:path'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
+import { trackWork } from './speed-meter.mjs'
 const exec = promisify(execFile)
 const MAX_INDEX = 16 * 1024 * 1024
 export const MAX_PHOTO = 20 * 1024 * 1024 // same as canonical history image route
@@ -147,7 +148,7 @@ export function createChatPhotoReconciler({ database, registryPath, statePath, o
     if (stopped) return Promise.resolve(null)
     if (!pending) {
       lastRunAt = now()
-      pending = runStep().then(result => {
+      pending = trackWork('chat-photos step', runStep).then(result => {
         if (result) { failures = 0; backoffUntil = 0; lastResult = result }
         return result
       }, error => {

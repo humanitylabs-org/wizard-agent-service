@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createSpeedMeter, createSlowTickLogger, routeTemplate, lagLine } from '../server/speed-meter.mjs'
+import { createSpeedMeter, createSlowTickLogger, routeTemplate, lagLine, beginWork, trackWork, workDuring, startupLine } from '../server/speed-meter.mjs'
 import { createHybridProjector } from '../server/session-list-cache.mjs'
 
 test('voice transcribe and POST runs expose independent bounded rolling p95 rows', t => {
@@ -122,4 +122,57 @@ test('a blocked event loop produces one [event-loop] line from the live meter (i
   const value = JSON.parse(line.slice('[event-loop] '.length))
   assert(value.delay_max_ms >= 1000)
   assert.doesNotMatch(line, /secret-thread/)
+})
+test('a stall names the background work that ran during it, not only the waiting routes (issue 499)', async t => {
+  const logs = []
+  const meter = createSpeedMeter({ windowMs: 400, stallCheckMs: 50, log: line => logs.push(line) })
+  t.after(() => meter.close())
+  await new Promise(resolve => setTimeout(resolve, 80))
+  const waiting = meter.begin({ method: 'GET', url: '/wizard/health', headers: {} })
+  // Synchronous work that starts and ends inside the stall must still be named.
+  trackWork('scheduler tick', () => { const until = Date.now() + 1200; while (Date.now() < until) { /* hold the loop */ } })
+  await new Promise(resolve => setTimeout(resolve, 600))
+  waiting()
+  const line = logs.find(entry => entry.includes('"stalls"'))
+  assert(line, `expected a stall in an event-loop line, got ${JSON.stringify(logs)}`)
+  const value = JSON.parse(line.slice('[event-loop] '.length))
+  assert(value.stalls[0].blocked_ms >= 1000)
+  assert(value.stalls[0].running.includes('scheduler tick'), JSON.stringify(value.stalls))
+  assert(value.stalls[0].running.includes('GET /wizard/health'), JSON.stringify(value.stalls))
+})
+test('work that ended before a stall is not blamed for it, and async work stays named until it settles (issue 499)', async () => {
+  let time = 0
+  const now = () => time
+  const before = beginWork('chat-photos step', { now })
+  time = 100; before()
+  let settle
+  const pending = trackWork('list-cache check', () => new Promise(resolve => { settle = resolve }), { now })
+  time = 5000
+  const running = workDuring(3000, 5000)
+  assert(running.includes('list-cache check'))
+  assert(!running.includes('chat-photos step'))
+  settle()
+  await pending
+  assert.deepEqual(workDuring(6000, 7000).filter(name => name === 'list-cache check'), [])
+  assert.throws(() => trackWork('broken', () => { throw new Error('boom') }), /boom/)
+  assert(!workDuring(time, time + 1).includes('broken'))
+})
+test('the startup line gives each startup step its own duration (issue 499)', () => {
+  const line = startupLine([['boot', 300.4], ['create', 2300], ['agent_sockets', 2310], ['listen', 2320]], { run_queue: 8500.2 })
+  assert.equal(line, '[startup] {"boot_ms":300,"create_ms":2000,"agent_sockets_ms":10,"listen_ms":10,"total_ms":2320,"run_queue_ms":8500}')
+  assert.equal(startupLine([['boot', 10]], { run_queue: undefined }), '[startup] {"boot_ms":10,"total_ms":10}')
+})
+test('a block that starts just after a stall check and lasts about a second is still recorded (issue 499)', () => {
+  let time = 0
+  const meter = createSpeedMeter({ windowMs: 60_000, stallCheckMs: 0, now: () => time, log: () => {} })
+  try {
+    meter.checkStall()
+    const done = beginWork('scheduler tick', { now: () => time })
+    time = 1100; done()
+    const stall = meter.checkStall()
+    assert(stall, 'a 1.1 s gap since the last check is a stall')
+    assert(stall.running.includes('scheduler tick'))
+    time = 1500
+    assert.equal(meter.checkStall(), null)
+  } finally { meter.close() }
 })
