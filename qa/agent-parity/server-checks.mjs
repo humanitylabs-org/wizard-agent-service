@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
 import { TITLE_INSTRUCTIONS } from '../../server/thread-titles.mjs'
+import { CLAUDE_MODEL_LIMIT_SAFE_ERROR } from '../../server/run-provider-failure.mjs'
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
@@ -446,6 +447,15 @@ export const serverChecks = {
     assert.equal(race.status, 412, `${s.kind}: mismatched recovered route must fail visibly`)
     if (s.kind === 'main') assert.equal((await race.json()).error.code, 'saved_retry_route_changed')
     assert.equal(s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path)).length, sends.length, 'race never dispatches a second request')
+  },
+  'claude-model-limit-saved-turn': async s => {
+    const first = await admit(s, { input: 'Synthetic saved owner words for a capped Claude model.', model: 'fixture-model', provider: 'anthropic' })
+    const upstream = [...s.runs.values()].at(-1)
+    Object.assign(upstream, { status: 'completed', output: '⚠️ Provider authentication failed: Anthropic credentials are rate-limited for claude-sonnet-5-5; other Claude models remain available (see `hermes auth list`).', usage: { input_tokens: 0, output_tokens: 0, total_tokens: 0 } })
+    const failed = await (await s.request('/v1/runs/' + first.run_id)).json()
+    assert.equal(failed.status, 'failed', `${s.kind}: a refused send is not a completed answer`)
+    assert.equal(failed.safe_error, CLAUDE_MODEL_LIMIT_SAFE_ERROR, `${s.kind}: says limit + Retry`)
+    assert.equal(failed.wizard_reconnect, undefined, `${s.kind}: never a sign-in diagnosis`)
   },
   'supervisor-reporter': async s => {
     const tools = JSON.parse(readFileSync(join(s.agentHome, 'plugins/wizard-supervisor-tools/tools.json'), 'utf8'))
