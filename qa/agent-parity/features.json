@@ -1235,6 +1235,20 @@
       "policy_exemptions": []
     },
     {
+      "id": "client-storm-guard",
+      "description": "One looping device only slows itself (issue 513): owner PUT/PATCH writes are capped per device and route (4 in flight, 60 a minute, then 429 with Retry-After, never queued), identical concurrent seen/disposition/preferences/workspaces PUTs share one result, and /wizard/health shows client_storm while it trips. Agent principals and machine routes keep their own gates.",
+      "layer": "server",
+      "how_to_test": "On every kind, send the same seen write for that kind's thread 61 times from one device: the first 60 answer 200 and save the kind's agent/session record, the 61st is 429 with Retry-After. Another device's seen write and a PATCH of that kind's own session still answer 200, and /wizard/health lists one tripping lane for /wizard/thread-seen at rate 61. tests/client-storm.test.ts runs 500 identical 120 KB PUTs and keeps a second device's health and sessions list under 500 ms, checks shared answers for identical concurrent writes, and unit-tests the guard (in-flight cap, rate window, one log line a minute, bounded lanes, uploads and non-JSON bodies left alone).",
+      "source_refs": [
+        "server/client-storm.mjs"
+      ],
+      "reference_tests": [
+        "tests/client-storm.test.ts"
+      ],
+      "fixture": "client-storm-guard",
+      "policy_exemptions": []
+    },
+    {
       "id": "session-slim-index",
       "description": "Slim title index pages beyond the archive window without crossing runtime or private boundaries",
       "layer": "server",

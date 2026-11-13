@@ -1213,6 +1213,27 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     const handled = Object.values((await (await s.raw('/wizard/thread-seen')).json()).state.threads)
     assert.equal(handled.length, 1); assert.equal(handled[0].agent_id, s.id); assert.equal(handled[0].seenAt, now + 3); assert.equal(handled[0].handledThrough, handledThrough)
   },
+  // Issue 513: one looping device only slows itself, on every kind. Its 61st identical seen write in a minute is a
+  // 429 with Retry-After (never queued), its first write is saved for this kind's thread, and another device's
+  // writes (seen state and this kind's own session) still go through. Health names the tripping lane.
+  'client-storm-guard': async s => {
+    const now = Date.now(), record = { agent_id: s.id, session_id: 'wizard_parity', updatedAt: new Date(now).toISOString(), previewFingerprint: 'synthetic', messageCount: 2, status: 'completed', seenAt: now }
+    const body = post({ initializedAt: now, threads: { 'direct:wizard_parity': record } })
+    const phone = { ...body, method: 'PUT', headers: { ...body.headers, 'User-Agent': 'SyntheticLoopingPhone/1' } }
+    const statuses = []
+    for (let i = 0; i < 61; i++) { const r = await s.raw('/wizard/thread-seen', phone); statuses.push(r.status); if (r.status === 429) assert.ok(Number(r.headers.get('retry-after')) >= 1); await r.arrayBuffer() }
+    assert.deepEqual(statuses.slice(0, 60), Array(60).fill(200)); assert.equal(statuses[60], 429)
+    const saved = Object.values((await (await s.raw('/wizard/thread-seen')).json()).state.threads)
+    assert.equal(saved.length, 1); assert.equal(saved[0].agent_id, s.id); assert.equal(saved[0].session_id, 'wizard_parity')
+    const mac = { 'User-Agent': 'SyntheticSecondDevice/1' }
+    const other = post({ initializedAt: now, threads: { 'direct:wizard_parity': { ...record, seenAt: now + 1 } } })
+    assert.equal((await s.raw('/wizard/thread-seen', { ...other, method: 'PUT', headers: { ...other.headers, ...mac } })).status, 200)
+    const rename = post({ hidden: false, title: 'Parity · storm' })
+    assert.equal((await s.request('/api/sessions/wizard_parity', { ...rename, method: 'PATCH', headers: { ...rename.headers, ...mac } })).status, 200)
+    const health = await (await s.raw('/wizard/health')).json()
+    assert.equal(health.client_storm.tripping.length, 1)
+    assert.equal(health.client_storm.tripping[0].route, '/wizard/thread-seen'); assert.equal(health.client_storm.tripping[0].rate, 61)
+  },
   'session-slim-index': async s => {
     const now=Date.now()/1000;
     for(let i=0;i<165;i++) s.sessions.set(`wizard_slim_${i}`,{id:`wizard_slim_${i}`,source:'wizard-mobile',title:`Slim archive ${i}`,created_at:now-20*86400-i,archived:true,hidden:false,messages:[{role:'user',content:'Slim visible preview',timestamp:now-20*86400-i}]});
