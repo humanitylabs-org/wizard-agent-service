@@ -321,6 +321,7 @@ describe('agent bridge: app skills for a containerised agent', () => {
     const pending = new Set()
     expect(writeAppSkills(state, reg, [app('hello-wizard', 9), shell], { pending })).toEqual(['hello-wizard', 'wizard-ux'])
     expect([...pending]).toEqual(['hello-wizard'])
+    expect(readdirSync(join(state, 'skills')).filter((n) => n.endsWith('.tmp'))).toEqual([]) // stamp written atomically
     expect(readFileSync(join(state, 'skills', 'hello-wizard', 'SKILL.md'), 'utf8')).toBe(texts['hello-wizard'])
     // once the app is gone from apps.json, its copy goes too
     expect(writeAppSkills(state, reg, [shell])).toEqual(['wizard-ux'])

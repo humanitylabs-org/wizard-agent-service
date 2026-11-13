@@ -294,7 +294,9 @@ export function writeAppSkills(osHome, registryDir, apps, { allowed = null, pend
       writeFileSync(`${file}.tmp`, text)
       renameSync(`${file}.tmp`, file)
     }
-    writeFileSync(join(root, APP_SKILLS_STAMP), `${JSON.stringify(written.sort())}\n`)
+    // Atomic, like each SKILL.md: a half-written stamp would make every earlier copy look like an owner's folder.
+    writeFileSync(join(root, `${APP_SKILLS_STAMP}.tmp`), `${JSON.stringify(written.sort())}\n`)
+    renameSync(join(root, `${APP_SKILLS_STAMP}.tmp`), join(root, APP_SKILLS_STAMP))
     return written
   } catch {
     return null
