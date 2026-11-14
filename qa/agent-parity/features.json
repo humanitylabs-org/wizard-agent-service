@@ -1845,6 +1845,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "steer-wait-backoff",
+      "description": "A reply sent while the current run has not started waits as a queued steer; refusals back off (3 s doubling to 60 s, never past the 15-minute limit) and after three say the agent hasn't started the current reply yet, on the same agent route.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/outbox-steer-boundary.test.mjs. The real outbox runs against a local HTTP boundary whose run stays queued and refuses every steer (409): main and routed (?agent=) threads, standing in for host-profile, container and restricted agents, must show the same back-off delays and labels, keep every call on the thread's own agent route, admit no new run, and never push the 15-minute limit later. Synthetic source-executed evidence; no browser or live runtime proof.",
+      "source_refs": [
+        "wizard-ux/web/outbox.js",
+        "wizard-ux/web/core/chats.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/outbox-steer-boundary.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "chat-pins-sync",
       "description": "Pinned Chats threads are the same on every device of the owner for main and routed threads; a stale or simultaneous device never drops or revives another device's pin.",
       "layer": "ux",
