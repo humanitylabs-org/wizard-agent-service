@@ -178,7 +178,24 @@ def kill_agent_container(job_id):
     raise RuntimeError('agent container cleanup unconfirmed')
 
 
-def launch_command(spec, job_id, worker_fd, log):
+def managed_spec(spec):
+    # Candidate module decides ownership; legacy roots remain unowned. Specs and
+    # hashes stay unchanged, and unsupported adoption never refuses execution.
+    return (sys.platform == 'linux' and os.environ.get('WIZARD_HEAVY_HOST') == 'forum'
+            and 'agent_id' not in spec)
+
+
+def run_trim_module():
+    # Keep historical/Thales jobs independent of this optional Forum module.
+    import importlib.util
+    loader = importlib.util.spec_from_file_location('heavy_run_trim', Path(__file__).with_name('heavy-run-trim.py'))
+    assert loader is not None and loader.loader is not None
+    module = importlib.util.module_from_spec(loader)
+    loader.loader.exec_module(module)
+    return module
+
+
+def launch_command(spec, job_id, worker_fd, log, run_fd=None):
     if 'agent_id' in spec:
         return subprocess.Popen(agent_command(spec, job_id), env=docker_environment(), stdout=log,
                                 stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
@@ -186,7 +203,8 @@ def launch_command(spec, job_id, worker_fd, log):
     env = {**os.environ, 'WIZARD_HEAVY_LOCK_FD': str(worker_fd),
            'WIZARD_WORKER_LANE': spec.get('lane', 'heavy')}
     return subprocess.Popen(spec['argv'], cwd=spec['cwd'], stdout=log, env=env,
-                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, pass_fds=(worker_fd,))
+                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                            pass_fds=(worker_fd,) + ((run_fd,) if run_fd is not None else ()))
 
 
 def validate(spec):
@@ -235,6 +253,7 @@ def execute(root, job_id, worker_fd, execution_fd):
     agent_started = False
     try:
         spec = validate(json.loads(row['spec']))
+        run_fd = run_trim_module().run_lease(heavy_root(), spec) if managed_spec(spec) else None
         if row['deadline'] is None:
             raise ValueError('missing durable deadline')
         deadline = time.monotonic() + max(0, min(spec['timeout_seconds'], row['deadline'] - time.time()))
@@ -249,7 +268,7 @@ def execute(root, job_id, worker_fd, execution_fd):
                 # Docker containers are not members of the executor's host PGID.
                 # Mark before launch, so even an ambiguous Docker client failure is cleaned.
                 agent_started = 'agent_id' in spec
-                process = launch_command(spec, job_id, worker_fd, log)
+                process = launch_command(spec, job_id, worker_fd, log, run_fd)
                 while True:
                     cancelled = db.execute('SELECT cancel FROM jobs WHERE id=?', (job_id,)).fetchone()[0]
                     if cancelled:
@@ -312,6 +331,19 @@ def finish(db, root, row, state, code=None, reason=''):
                'spec_sha256': hashlib.sha256(row['spec'].encode()).hexdigest()}
     db.execute('UPDATE jobs SET state=?,receipt=?,reason=?,updated=? WHERE id=?',
                (state, json.dumps(receipt), reason, time.time(), row['id']))
+    # Receipt is durable FIRST. Cleanup cannot change state, exit code, hashes,
+    # notification/admission semantics or the next job. No retry after a crash.
+    spec = json.loads(row['spec'])
+    if row['execution_result'] and state != 'interrupted' and managed_spec(spec):
+        try:
+            run_trim_module().trim(heavy_root(), spec, row['id'], evidence_paths=(log,))
+        except Exception as error:
+            # Independent diagnostic only. Existing receipts/logs are immutable.
+            try:
+                with (root / (row['id'] + '.trim-error.log')).open('a') as stream:
+                    stream.write(type(error).__name__ + ': ' + str(error) + '\n')
+            except Exception:
+                pass
 
 
 def dispatch(root, lock_path):
@@ -424,6 +456,8 @@ def rpc(root, lock_path, value):
     target = find(root, job_id)
     if action == 'submit':
         validated = validate(value['spec'])
+        if managed_spec(validated):
+            run_trim_module().admit(heavy_root(), validated, job_id, raw_cwd=value['spec']['cwd'])
         base = agent_spool(root) if 'agent_id' in validated else root
         wanted = light_root(base) if validated.get('lane') == 'light' else base
         if target is not None and target != wanted:
@@ -470,6 +504,9 @@ if __name__ == '__main__':
     parser.add_argument('--execute')
     parser.add_argument('--worker-fd', type=int)
     parser.add_argument('--execution-fd', type=int)
+    parser.add_argument('--prepare-run', action='store_true', help='create NEW Forum run; never adopt a directory')
+    parser.add_argument('--run-purpose', choices=('retained', 'ephemeral', 'weekly-launch'), default='ephemeral')
+    parser.add_argument('--disposable', action='append', choices=('build', 'cache', 'tmp', 'intermediates'), default=[])
     args = parser.parse_args()
     try:
         allowed_root = heavy_root()
@@ -477,7 +514,9 @@ if __name__ == '__main__':
         raise SystemExit(str(error)) from None
     if not args.root.resolve().is_relative_to(allowed_root) or not args.lock.resolve().is_relative_to(allowed_root):
         raise SystemExit('worker storage must be under the configured heavy root')
-    if args.execute:
+    if args.prepare_run:
+        print(json.dumps(run_trim_module().prepare(allowed_root, args.run_purpose, args.disposable)))
+    elif args.execute:
         if not re.fullmatch(r'heavy_[0-9a-f]{32}', args.execute):
             raise SystemExit('invalid job identity')
         execute(args.root, args.execute, args.worker_fd, args.execution_fd)
