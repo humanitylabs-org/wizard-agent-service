@@ -1382,7 +1382,7 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
       assert.equal(typeof value, 'string', `${s.kind}: gateway kernel instructions`)
       const lines = value.split('\n')
       for (const rule of [
-        'Never ask the owner what an installed app can answer: call its tools first; if missing, search tools again or retry once. Never guess from old chats or call app URLs.',
+        'Never ask the owner what an installed app can answer: call its tools first; if missing, list apps, retry once, never blame access. Never guess from old chats or call app URLs.',
         'Answer from the source of truth: owning app for data, live checks for box state, release records for what shipped. Say none found only after checking. Report tool errors.',
       ]) assert.ok(lines.includes(rule), `${s.kind}: gateway delivers exact app-first/source/error rule: ${rule}`)
       assert.ok(value.includes('Use registered exact names only.'), `${s.kind}: registered exact tool names, not invented names`)
@@ -1478,6 +1478,12 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
       assert.ok(partial.tools.some(t => t.name === 'parity_video__make_short'), `${s.kind}: answering app still listed`)
       assert.equal(partial.ttlMs, 0, `${s.kind}: an app that did not answer makes the list uncacheable`)
       assert.equal(partial.cacheScope, 'private')
+      // Issue 623: wizard_apps tells the agent plainly that the silent app's tools are temporarily unavailable.
+      const appsCall = await s.agentMcp('tools/call', { name: 'wizard_apps', arguments: {} })
+      assert.equal(appsCall.status, 200)
+      const appsText = (await appsCall.json()).result.content[0].text
+      assert.match(appsText, /Synthetic Down \(parity-down\), running: .*Tools: temporarily unavailable .*not an access setting/u, `${s.kind}: missing tools are named as temporary, not access`)
+      assert.match(appsText, /Synthetic Video \(parity-video\), running: .*Tools: [^\n]*parity_video__make_short\./u, `${s.kind}: answering app's tools listed`)
     } finally { await new Promise(resolve => app.close(resolve)) }
   },
   'finished-run-leaves-working': async s => {

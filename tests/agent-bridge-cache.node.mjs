@@ -13,7 +13,7 @@ const DAY = 24 * 60 * 60 * 1000
 const tool = { name: 'echo', description: 'Synthetic echo', inputSchema: { type: 'object', properties: {} } }
 const app = (id, status = 'running') => ({ id, name: id, status, provides: ['test'], mcp: { url: `https://${id}.invalid/mcp` } })
 
-function fixture(t, { apps = [app('hello')], appsFor = () => null } = {}) {
+function fixture(t, { apps = [app('hello')], appsFor = () => null, recheckMs } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'bridge-cache-'))
   const path = join(root, 'apps.json')
   let revision = 0
@@ -24,7 +24,7 @@ function fixture(t, { apps = [app('hello')], appsFor = () => null } = {}) {
   const failures = new Set(), empty = new Set(), malformed = new Set(), paginated = new Set(), invalidNames = new Set(), calls = []
   let beforeList = null
   const bridge = createAgentBridge({ appsJsonPath: path, osHome: root, token: 'synthetic-main', writeSkills: false, watchIntervalMs: 0,
-    agentForToken: token => token === 'synthetic-secondary' ? 'secondary' : '', appsFor,
+    agentForToken: token => token === 'synthetic-secondary' ? 'secondary' : '', appsFor, ...(recheckMs ? { recheckMs } : {}),
     fetchImpl: async (url, options) => {
       const message = JSON.parse(options.body), id = new URL(url).hostname.split('.')[0]
       calls.push([id, message.method])
@@ -46,7 +46,26 @@ function fixture(t, { apps = [app('hello')], appsFor = () => null } = {}) {
     const result = JSON.parse(text); assert.equal(result.error, undefined)
     return result.result
   }
-  return { bridge, rpc, failures, empty, malformed, paginated, invalidNames, calls, registry, advance: ms => { now += ms }, beforeList: fn => { beforeList = fn } }
+  // A real MCP session: initialize (Mcp-Session-Id), an open GET event stream, then calls on that session.
+  const session = async (token = 'synthetic-main') => {
+    const post = async (message, sid) => {
+      const body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 1, ...message }))
+      const request = { method: 'POST', headers: { authorization: `Bearer ${token}`, ...(sid ? { 'mcp-session-id': sid } : {}) }, async *[Symbol.asyncIterator]() { yield body } }
+      let text, headers = {}
+      await bridge.handle(request, { writeHead(code, h = {}) { headers = h }, end(value) { text = value } })
+      return { headers, result: JSON.parse(text).result }
+    }
+    const sid = (await post({ method: 'initialize', params: {} })).headers['Mcp-Session-Id']
+    const frames = []
+    const closers = []
+    bridge.handle({ method: 'GET', headers: { authorization: `Bearer ${token}`, 'mcp-session-id': sid }, on(event, fn) { if (event === 'close') closers.push(fn) } },
+      { writeHead() {}, write(frame) { frames.push(frame) }, end() {} })
+    t.after(() => { for (const fn of closers) fn() })
+    const changed = () => frames.filter(f => f.includes('notifications/tools/list_changed')).length
+    return { sid, changed, list: async () => (await post({ method: 'tools/list', params: {} }, sid)).result,
+      call: async (name, args = {}) => (await post({ method: 'tools/call', params: { name, arguments: args } }, sid)).result }
+  }
+  return { bridge, rpc, session, failures, empty, malformed, paginated, invalidNames, calls, registry, advance: ms => { now += ms }, beforeList: fn => { beforeList = fn } }
 }
 
 function healthy(value) {
@@ -121,4 +140,54 @@ test('registry replacement during discovery returns no old tools and does not wa
   const f = fixture(t); f.beforeList(() => { f.registry([app('replacement')]); f.bridge.refresh() })
   const result = await f.rpc(); assert.equal(result.ttlMs, 0); assert.ok(!result.tools.some(t => t.name.startsWith('hello__')))
   const next = await f.rpc(); healthy(next); assert.ok(next.tools.some(t => t.name === 'replacement__echo'))
+})
+
+// Issue 623: an app whose tools were missing from a session's tools/list (failing, slow or empty at that moment)
+// must reach that session again: tools/list_changed when its tools come back, and wizard_apps says what is going on.
+const waitFor = async (fn, ms = 2000) => { const end = performance.now() + ms; while (!fn()) { if (performance.now() > end) return false; await new Promise(r => setTimeout(r, 5)) } return true }
+
+test('a session served without a failing app is told tools/list_changed once the app answers again', async t => {
+  const f = fixture(t, { recheckMs: [5] }); f.failures.add('hello')
+  const s = await f.session()
+  const first = await s.list(); assert.ok(!first.tools.some(t => t.name === 'hello__echo')); assert.equal(first.ttlMs, 0)
+  assert.equal(s.changed(), 0)
+  f.failures.clear(); f.advance(10_001)
+  assert.ok(await waitFor(() => s.changed() === 1), 'the background recheck announces the returned tools')
+  const again = await s.list(); assert.ok(again.tools.some(t => t.name === 'hello__echo')); healthy(again)
+  await new Promise(r => setTimeout(r, 40)); assert.equal(s.changed(), 1, 'no repeat once the session re-listed')
+})
+
+test('another caller discovering the tools tells the stale session; an up-to-date session is not told', async t => {
+  const f = fixture(t, { recheckMs: [60_000] }); f.failures.add('hello')
+  const stale = await f.session(); await stale.list()
+  f.failures.clear(); f.advance(10_001)
+  const fresh = await f.session(); assert.ok((await fresh.list()).tools.some(t => t.name === 'hello__echo'))
+  assert.equal(stale.changed(), 1); assert.equal(fresh.changed(), 0)
+})
+
+test('an app answering with no tools first and its tools later reaches the session', async t => {
+  const f = fixture(t, { recheckMs: [5] }); f.empty.add('hello')
+  const s = await f.session(); assert.ok(!(await s.list()).tools.some(t => t.name === 'hello__echo'))
+  f.empty.clear(); f.advance(60_001)
+  assert.ok(await waitFor(() => s.changed() === 1), 'an empty answer from a running app is rechecked')
+})
+
+test('wizard_apps says plainly when tools are temporarily unavailable and when they are back but not listed yet', async t => {
+  const f = fixture(t, { recheckMs: [60_000] }); f.failures.add('hello')
+  const s = await f.session(); await s.list()
+  const down = (await s.call('wizard_apps')).content[0].text
+  assert.match(down, /hello \(hello\), running: .*Tools: temporarily unavailable .*not an access setting.*Retry in a minute\./u)
+  f.failures.clear(); f.advance(10_001)
+  const back = (await s.call('wizard_apps')).content[0].text
+  assert.match(back, /Tools: mcp__wizard__hello__echo\. They are not in your current tool list yet; it is being refreshed now: search tools again, then retry the call\./u)
+  assert.equal(s.changed(), 1, 'wizard_apps re-announces the list to this session')
+  await s.list()
+  assert.match((await s.call('wizard_apps')).content[0].text, /Tools: mcp__wizard__hello__echo\.$/mu)
+  assert.equal(s.changed(), 1)
+})
+
+test('a stopped app is reported as stopped, not as an access problem', async t => {
+  const f = fixture(t, { apps: [app('hello', 'stopped')] })
+  const s = await f.session(); await s.list()
+  assert.match((await s.call('wizard_apps')).content[0].text, /Tools: none while it is stopped\./u)
 })

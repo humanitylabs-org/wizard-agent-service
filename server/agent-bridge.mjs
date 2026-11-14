@@ -26,6 +26,10 @@ const APP_TOOLS_CACHE_MS = 60_000
 // How long a client may reuse a COMPLETE tools/list (SEP-2549 ttlMs, read by Hermes `lazy: true` from its schema
 // cache at chat start). apps.json changes still send list_changed; an incomplete list is sent with ttlMs 0.
 export const TOOLS_LIST_TTL_MS = 24 * 60 * 60 * 1000
+// Issue 623: a session that was served a tools/list without a running app's tools is rechecked on this backoff
+// (then every last step) until the app answers, and is sent tools/list_changed when its tools (re)appear.
+export const TOOLS_RECHECK_MS = [10_000, 30_000, 60_000, 120_000, 300_000]
+const TOOLS_RECHECK_TRIES = 12
 const SKIP_PROVIDES = new Set(['shell', 'agent-service', 'agent'])
 
 function clean(value, max) {
@@ -127,7 +131,7 @@ export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAUL
     `2. Call the app's tool on the \`${MCP_SERVER_NAME}\` MCP server, named \`${name}\`${idNote}. Use registered exact names only.${hermes ? ' Use tool_call if needed.' : ''}`,
     '3. For ordinary app use: Never search the disk, read apps.json, run wam or write a client to reach it.',
     'Use the installed app for its job.',
-    'Never ask the owner what an installed app can answer: call its tools first; if missing, search tools again or retry once. Never guess from old chats or call app URLs.',
+    'Never ask the owner what an installed app can answer: call its tools first; if missing, list apps, retry once, never blame access. Never guess from old chats or call app URLs.',
     'Answer from the source of truth: owning app for data, live checks for box state, release records for what shipped. Say none found only after checking. Report tool errors.',
     `"What apps do I have?": call \`${meta}\`. Report unreachable ones (\`wam doctor\`).`,
     'Prefer Wizard tools to installing software; never install speech models.',
@@ -477,6 +481,7 @@ export function createAgentBridge({
   fetchImpl = fetch, timeoutMs = 4000, callTimeoutMs = 120_000, log = () => {}, watchIntervalMs = 2000,
   writeSkills = true, harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false,
   agentForToken = () => '', appsFor = () => null, builtins = null, agents = () => null, skillRetryMs = 2000,
+  recheckMs = TOOLS_RECHECK_MS,
 }) {
   const shared = sharedAgentTools(agents, log)
   let mtime = null
@@ -530,11 +535,59 @@ export function createAgentBridge({
     collectTools(mine).then((tools) => { if (apps === snapshot) writePointerSkills(osHome, mine, { harness, tools }) }).catch(() => {})
   }
 
-  const notifyChanged = () => {
-    const frame = `event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' })}\n\n`
+  const CHANGED_FRAME = `event: message\ndata: ${JSON.stringify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' })}\n\n`
+  const writeChanged = (s) => {
     let sent = 0
-    for (const s of sessions.values()) for (const res of s.streams) { try { res.write(frame); sent += 1 } catch { /* closed */ } }
+    for (const res of s.streams) { try { res.write(CHANGED_FRAME); sent += 1 } catch { /* closed */ } }
+    return sent
+  }
+  const notifyChanged = () => {
+    let sent = 0
+    for (const s of sessions.values()) sent += writeChanged(s)
     log(`apps.json changed: tools/list_changed sent on ${sent} stream(s)`)
+  }
+
+  // ---------- what each session was last served (issue 623) ----------
+  // A session's `served` maps each app it could see at its last tools/list to the tool names it got ('' = none).
+  // When a later discovery finds tools for an app that session got without them (it was failing, slow or empty),
+  // the session is sent tools/list_changed so the agent re-lists instead of silently missing the app.
+  const toolSig = (tools) => tools.map((t) => t.name).sort().join('\n')
+  function toolsAppeared(appId, sig) {
+    if (!sig) return 0
+    let sent = 0, told = 0
+    for (const s of sessions.values()) {
+      if (!s.served?.has(appId) || s.served.get(appId) === sig || s.told?.get(appId) === sig) continue
+      ;(s.told ||= new Map()).set(appId, sig)
+      sent += writeChanged(s)
+      told += 1
+    }
+    if (told) log(`tools of ${appId} changed: tools/list_changed sent on ${sent} stream(s)`)
+    return told
+  }
+  /** True when this session's last tools/list lacked tools that `names` (app id -> tool names) now has. */
+  const servedStale = (s, appId, names) => Boolean(s?.served?.has(appId) && names?.length && s.served.get(appId) !== [...names].sort().join('\n'))
+
+  let recheckTimer = null, recheckTries = 0
+  const pendingApps = () => {
+    const out = new Set()
+    for (const s of sessions.values()) for (const [id, sig] of s.served || []) if (!sig || s.partial?.has(id)) out.add(id)
+    return apps.filter((app) => out.has(app.id) && app.status === 'running')
+  }
+  function scheduleRecheck(fresh) {
+    if (!recheckMs?.length) return
+    if (fresh) recheckTries = 0
+    if (recheckTimer || recheckTries >= TOOLS_RECHECK_TRIES) return
+    const delay = recheckMs[Math.min(recheckTries, recheckMs.length - 1)]
+    recheckTries += 1
+    recheckTimer = setTimeout(async () => {
+      recheckTimer = null
+      refresh()
+      const due = pendingApps()
+      if (!due.length) return
+      await Promise.all(due.map((app) => discoverTools(app).catch(() => null)))
+      if (pendingApps().length) scheduleRecheck(false)
+    }, delay)
+    recheckTimer.unref?.()
   }
   const onChange = () => { if (refresh()) notifyChanged() }
   if (appsJsonPath && watchIntervalMs > 0) watchFile(appsJsonPath, { interval: watchIntervalMs, persistent: false }, onChange)
@@ -562,7 +615,11 @@ export function createAgentBridge({
       // This gateway does not follow downstream pages, so page one alone is not complete.
       const entry = { tools, at: Date.now(), complete: tools.length === result.tools.length && result.nextCursor == null }
       // A discovery begun before apps.json was replaced must not warm the new registry's cache.
-      if (apps.includes(app)) toolCache.set(app.id, entry)
+      if (apps.includes(app)) {
+        toolCache.set(app.id, entry)
+        if (entry.complete) for (const s of sessions.values()) s.partial?.delete(app.id)
+        toolsAppeared(app.id, toolSig(tools))
+      }
       return entry
     } catch (error) {
       log(`tools/list ${app.id} failed: ${clean(error?.message, 120)}`)
@@ -627,9 +684,11 @@ export function createAgentBridge({
     const current = visible(agentId)
     let complete = apps === generation && current.length === mine.length && current.every((app, i) => app === mine[i])
     const out = [metaTool(), ...(builtins?.list?.(agentId) || []), ...shared.list()]
+    const served = new Map(), partial = new Set()
     for (const [app, entry] of lists) {
       if (!current.includes(app)) continue // never return a revoked or replaced app's tools
-      if (!entry.complete) complete = false
+      if (!entry.complete) { complete = false; partial.add(app.id) }
+      served.set(app.id, toolSig(entry.tools))
       const tag = `[${app.name} · ${(app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')}]`
       for (const t of entry.tools) {
         const name = `${app.prefix}__${t.name}`
@@ -637,22 +696,61 @@ export function createAgentBridge({
         out.push({ ...t, name, description: `${tag} ${clean(t.description, 1000)}`.trim(), inputSchema: t.inputSchema && typeof t.inputSchema === 'object' ? t.inputSchema : { type: 'object', properties: {} } })
       }
     }
-    return { tools: out, ttlMs: complete ? TOOLS_LIST_TTL_MS : 0, cacheScope: 'private' }
+    return { tools: out, ttlMs: complete ? TOOLS_LIST_TTL_MS : 0, cacheScope: 'private', served, partial }
+  }
+
+  /** The tools/list reply for one MCP session; remembers what that session got (issue 623). */
+  async function sessionToolsList(agentId, sid) {
+    const { served, partial, ...result } = await toolsSnapshot(agentId)
+    const s = sessions.get(sid)
+    if (s && s.agent === agentId) {
+      s.served = served
+      s.partial = partial
+      s.told = new Map()
+      if ([...served].some(([id, sig]) => (!sig || partial.has(id)) && apps.some((a) => a.id === id && a.status === 'running'))) scheduleRecheck(true)
+    }
+    return result
   }
 
   async function listTools(agentId = GATEWAY_MAIN_AGENT) {
     return (await toolsSnapshot(agentId)).tools
   }
 
-  async function wizardApps(agentId = GATEWAY_MAIN_AGENT) {
+  // Each app says whether its tools are in this session's tool list (issue 623): an app whose tools came back since
+  // the last tools/list is re-announced (tools/list_changed), and one that is not answering says so plainly.
+  function toolsLine(app, list, s) {
+    const shown = list.map((t) => agentToolName(app.prefix, t, harness)).join(', ')
+    if (!shown) {
+      return app.status === 'running'
+        ? 'Tools: temporarily unavailable (the app is not answering right now; this is not an access setting). Retry in a minute.'
+        : `Tools: none while it is ${app.status}.`
+    }
+    if (servedStale(s, app.id, list)) return `Tools: ${shown}. They are not in your current tool list yet; it is being refreshed now: search tools again, then retry the call.`
+    return `Tools: ${shown}.`
+  }
+
+  async function wizardApps(agentId = GATEWAY_MAIN_AGENT, sid = '') {
     const names = await toolNames(agentId)
-    const lines = visible(agentId).map((app) => `- ${app.name} (${app.id}), ${app.status}: ${(app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')}. ${app.summary} Tools: ${(names[app.id] || []).map((t) => agentToolName(app.prefix, t, harness)).join(', ') || 'none reachable right now'}.`)
+    const s = sessions.get(sid)
+    const session = s && s.agent === agentId ? s : null
+    if (session) {
+      let stale = false
+      for (const app of visible(agentId)) {
+        if (!servedStale(session, app.id, names[app.id])) continue
+        const sig = [...names[app.id]].sort().join('\n')
+        if (session.told?.get(app.id) === sig) continue // already announced by the discovery itself
+        ;(session.told ||= new Map()).set(app.id, sig)
+        stale = true
+      }
+      if (stale) writeChanged(session)
+    }
+    const lines = visible(agentId).map((app) => `- ${app.name} (${app.id}), ${app.status}: ${(app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')}. ${app.summary} ${toolsLine(app, names[app.id] || [], session)}`)
     return { content: [{ type: 'text', text: lines.length ? `Installed apps:\n${lines.join('\n')}` : 'No apps with tools are installed yet. The owner can add some with `wam search` and `wam install <id>`.' }] }
   }
 
   const failure = (text) => ({ content: [{ type: 'text', text }], isError: true })
 
-  async function callTool(name, args, agentId = GATEWAY_MAIN_AGENT) {
+  async function callTool(name, args, agentId = GATEWAY_MAIN_AGENT, sid = '') {
     refresh()
     const started = Date.now()
     const sharedResult = shared.call(name, args, agentId)
@@ -663,7 +761,7 @@ export function createAgentBridge({
       return builtin
     }
     if (name === META_TOOL) {
-      const r = await wizardApps(agentId)
+      const r = await wizardApps(agentId, sid)
       log(JSON.stringify({ event: 'call', app: 'wizard', tool: META_TOOL, agent: agentId, ms: Date.now() - started, ok: true }))
       return r
     }
@@ -726,7 +824,7 @@ export function createAgentBridge({
     response.end(body)
   }
 
-  async function rpc(message, agentId) {
+  async function rpc(message, agentId, sid = '') {
     const { id, method, params } = message || {}
     const reply = (result) => ({ jsonrpc: '2.0', id, result })
     const error = (code, msg) => ({ jsonrpc: '2.0', id: id ?? null, error: { code, message: msg } })
@@ -743,8 +841,8 @@ export function createAgentBridge({
         })
       }
       if (method === 'ping') return reply({})
-      if (method === 'tools/list') return reply(await toolsSnapshot(agentId))
-      if (method === 'tools/call') return reply(await callTool(params?.name, params?.arguments, agentId))
+      if (method === 'tools/list') return reply(await sessionToolsList(agentId, sid))
+      if (method === 'tools/call') return reply(await callTool(params?.name, params?.arguments, agentId, sid))
       if (method === 'resources/list') return reply({ resources: [] })
       if (method === 'prompts/list') return reply({ prompts: [] })
       return error(-32601, `method not found: ${clean(method, 60)}`)
@@ -805,7 +903,7 @@ export function createAgentBridge({
       send(response, 404, { jsonrpc: '2.0', id: null, error: { code: -32001, message: 'session not found; initialize again' } })
       return
     }
-    const replies = (await Promise.all(batch.map((m) => rpc(m, agentId)))).filter(Boolean)
+    const replies = (await Promise.all(batch.map((m) => rpc(m, agentId, session)))).filter(Boolean)
     const headers = session ? { 'Mcp-Session-Id': session } : {}
     if (!replies.length) { response.writeHead(202, headers); response.end(); return }
     send(response, 200, Array.isArray(body) ? replies : replies[0], headers)
@@ -832,7 +930,7 @@ export function createAgentBridge({
     // No argument: every installed app. With an agent id: only the apps that agent may use (#58), same as callTool.
     apps: (agentId) => { refresh(); return agentId === undefined ? apps : visible(agentId) },
     snapshot: () => { refresh(); return Object.fromEntries(apps.map((a) => [a.id, a.status])) },
-    close: () => { if (skillRetry) { clearTimeout(skillRetry); skillRetry = null } if (appsJsonPath) unwatchFile(appsJsonPath, onChange); for (const s of sessions.values()) for (const r of s.streams) r.end() },
+    close: () => { if (recheckTimer) { clearTimeout(recheckTimer); recheckTimer = null } if (skillRetry) { clearTimeout(skillRetry); skillRetry = null } if (appsJsonPath) unwatchFile(appsJsonPath, onChange); for (const s of sessions.values()) for (const r of s.streams) r.end() },
   }
 }
 

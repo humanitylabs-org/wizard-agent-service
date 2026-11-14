@@ -110,7 +110,7 @@ describe('agent bridge: kernel', () => {
     for (const opts of [{}, { harness: 'generic' }, { skillsIndex: false }, { jobMap: true }]) {
       const text = renderKernel(bridgeApps({ apps: [app('hello-wizard', 1)] }), opts)
       const lines = text.split('\n')
-      expect(lines).toContain('Never ask the owner what an installed app can answer: call its tools first; if missing, search tools again or retry once. Never guess from old chats or call app URLs.')
+      expect(lines).toContain('Never ask the owner what an installed app can answer: call its tools first; if missing, list apps, retry once, never blame access. Never guess from old chats or call app URLs.')
       expect(lines).toContain('Answer from the source of truth: owning app for data, live checks for box state, release records for what shipped. Say none found only after checking. Report tool errors.')
       expect(text).toContain('Use registered exact names only.')
       // The rules follow the routing steps and precede any job map.
