@@ -1382,7 +1382,7 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
       assert.equal(typeof value, 'string', `${s.kind}: gateway kernel instructions`)
       const lines = value.split('\n')
       for (const rule of [
-        'Never ask the owner what an installed app can answer: call its tools first; if missing, search tools again or retry once. Never guess from old chats or call app URLs.',
+        'Never ask the owner what an installed app can answer: call its tools first; if missing, list apps, retry once, never blame access. Never guess from old chats or call app URLs.',
         'Answer from the source of truth: owning app for data, live checks for box state, release records for what shipped. Say none found only after checking. Report tool errors.',
       ]) assert.ok(lines.includes(rule), `${s.kind}: gateway delivers exact app-first/source/error rule: ${rule}`)
       assert.ok(value.includes('Use registered exact names only.'), `${s.kind}: registered exact tool names, not invented names`)
@@ -1478,6 +1478,43 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
       assert.ok(partial.tools.some(t => t.name === 'parity_video__make_short'), `${s.kind}: answering app still listed`)
       assert.equal(partial.ttlMs, 0, `${s.kind}: an app that did not answer makes the list uncacheable`)
       assert.equal(partial.cacheScope, 'private')
+      // Issue 623: wizard_apps tells the agent plainly that the silent app's tools are temporarily unavailable.
+      const appsCall = await s.agentMcp('tools/call', { name: 'wizard_apps', arguments: {} })
+      assert.equal(appsCall.status, 200)
+      const appsText = (await appsCall.json()).result.content[0].text
+      assert.match(appsText, /Synthetic Down \(parity-down\), running: .*Tools: temporarily unavailable .*not an access setting/u, `${s.kind}: missing tools are named as temporary, not access`)
+      assert.match(appsText, /Synthetic Video \(parity-video\), running: .*Tools: [^\n]*parity_video__make_short\./u, `${s.kind}: answering app's tools listed`)
+      // Issue 623: a real MCP session (initialize + open GET event stream) served while an app is not answering is
+      // told tools/list_changed once that app answers again (background recheck), and its next list carries the tools.
+      let flaky = true
+      const late = createServer((req, res) => {
+        let body = ''; req.on('data', c => { body += c }); req.on('end', () => {
+          const msg = JSON.parse(body || '{}')
+          if (msg.id === undefined) { res.writeHead(202); return res.end() }
+          if (flaky && msg.method === 'tools/list') { res.writeHead(503); return res.end() }
+          const result = msg.method === 'tools/list' ? { tools: [{ name: 'late_tool', description: 'Synthetic', inputSchema: { type: 'object', properties: {} } }] } : { protocolVersion: '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'parity-late', version: '1' } }
+          res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }))
+        })
+      })
+      await new Promise(resolve => late.listen(0, '127.0.0.1', resolve))
+      let stream
+      try {
+        const lateApp = { id: 'parity-late', name: 'Synthetic Late', status: 'running', provides: ['notes'], mcp: { url: `http://127.0.0.1:${late.address().port}/mcp` } }
+        install([video, lateApp], ['parity-video', 'parity-late']); await s.restart()
+        const init = await s.agentMcp('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'parity' } })
+        assert.equal(init.status, 200)
+        const sid = init.headers.get('mcp-session-id')
+        assert.ok(sid, `${s.kind}: gateway opened an MCP session`)
+        stream = await s.agentMcpStream(sid)
+        assert.equal(stream.status, 200, `${s.kind}: session event stream opens on this kind's transport`)
+        const sessionList = async () => { const r = await s.agentMcp('tools/list', {}, { sid }); assert.equal(r.status, 200); return (await r.json()).result }
+        assert.ok(!(await sessionList()).tools.some(t => t.name === 'parity_late__late_tool'), `${s.kind}: app not answering yet`)
+        flaky = false
+        const changed = () => stream.frames.join('').includes('notifications/tools/list_changed')
+        for (let n = 0; n < 150 && !changed(); n++) await new Promise(resolve => setTimeout(resolve, 100))
+        assert.ok(changed(), `${s.kind}: tools/list_changed reaches the session once the app answers again`)
+        assert.ok((await sessionList()).tools.some(t => t.name === 'parity_late__late_tool'), `${s.kind}: re-list carries the returned tools`)
+      } finally { stream?.close(); await new Promise(resolve => late.close(resolve)) }
     } finally { await new Promise(resolve => app.close(resolve)) }
   },
   'finished-run-leaves-working': async s => {
