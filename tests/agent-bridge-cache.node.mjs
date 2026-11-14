@@ -47,7 +47,7 @@ function fixture(t, { apps = [app('hello')], appsFor = () => null, recheckMs } =
     return result.result
   }
   // A real MCP session: initialize (Mcp-Session-Id), an open GET event stream, then calls on that session.
-  const session = async (token = 'synthetic-main') => {
+  const session = async (token = 'synthetic-main', { stream = true } = {}) => {
     const post = async (message, sid) => {
       const body = Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 1, ...message }))
       const request = { method: 'POST', headers: { authorization: `Bearer ${token}`, ...(sid ? { 'mcp-session-id': sid } : {}) }, async *[Symbol.asyncIterator]() { yield body } }
@@ -58,11 +58,12 @@ function fixture(t, { apps = [app('hello')], appsFor = () => null, recheckMs } =
     const sid = (await post({ method: 'initialize', params: {} })).headers['Mcp-Session-Id']
     const frames = []
     const closers = []
-    bridge.handle({ method: 'GET', headers: { authorization: `Bearer ${token}`, 'mcp-session-id': sid }, on(event, fn) { if (event === 'close') closers.push(fn) } },
+    const attach = () => bridge.handle({ method: 'GET', headers: { authorization: `Bearer ${token}`, 'mcp-session-id': sid }, on(event, fn) { if (event === 'close') closers.push(fn) } },
       { writeHead() {}, write(frame) { frames.push(frame) }, end() {} })
+    if (stream) attach()
     t.after(() => { for (const fn of closers) fn() })
     const changed = () => frames.filter(f => f.includes('notifications/tools/list_changed')).length
-    return { sid, changed, list: async () => (await post({ method: 'tools/list', params: {} }, sid)).result,
+    return { sid, changed, attach, list: async () => (await post({ method: 'tools/list', params: {} }, sid)).result,
       call: async (name, args = {}) => (await post({ method: 'tools/call', params: { name, arguments: args } }, sid)).result }
   }
   return { bridge, rpc, session, failures, empty, malformed, paginated, invalidNames, calls, registry, advance: ms => { now += ms }, beforeList: fn => { beforeList = fn } }
@@ -190,4 +191,13 @@ test('a stopped app is reported as stopped, not as an access problem', async t =
   const f = fixture(t, { apps: [app('hello', 'stopped')] })
   const s = await f.session(); await s.list()
   assert.match((await s.call('wizard_apps')).content[0].text, /Tools: none while it is stopped\./u)
+})
+
+test('a notice that found no open stream is delivered when the session attaches one', async t => {
+  const f = fixture(t, { recheckMs: [60_000] }); f.failures.add('hello')
+  const s = await f.session('synthetic-main', { stream: false }); await s.list()
+  f.failures.clear(); f.advance(10_001)
+  await (await f.session()).list() // another caller discovers the tools while s has no stream
+  assert.equal(s.changed(), 0)
+  s.attach(); assert.equal(s.changed(), 1)
 })

@@ -558,7 +558,9 @@ export function createAgentBridge({
     for (const s of sessions.values()) {
       if (!s.served?.has(appId) || s.served.get(appId) === sig || s.told?.get(appId) === sig) continue
       ;(s.told ||= new Map()).set(appId, sig)
-      sent += writeChanged(s)
+      const n = writeChanged(s)
+      if (!n) s.missed = true // no stream open yet: sent when one attaches
+      sent += n
       told += 1
     }
     if (told) log(`tools of ${appId} changed: tools/list_changed sent on ${sent} stream(s)`)
@@ -584,7 +586,8 @@ export function createAgentBridge({
       refresh()
       const due = pendingApps()
       if (!due.length) return
-      await Promise.all(due.map((app) => discoverTools(app).catch(() => null)))
+      // Ask the apps themselves: the gateway's own short cache may still hold the failed or empty answer.
+      await Promise.all(due.map((app) => discoverTools(app, { fresh: true }).catch(() => null)))
       if (pendingApps().length) scheduleRecheck(false)
     }, delay)
     recheckTimer.unref?.()
@@ -604,10 +607,10 @@ export function createAgentBridge({
 
   // One app's tools plus whether that list can be trusted as complete: a stopped, failing, malformed, filtered or
   // paginated discovery is not (issue 435), so it must never be advertised to clients as cacheable.
-  async function discoverTools(app) {
+  async function discoverTools(app, { fresh = false } = {}) {
     const cached = toolCache.get(app.id)
     if (app.status !== 'running') return { tools: cached?.tools ?? [], at: 0, complete: false }
-    if (cached && Date.now() - cached.at < APP_TOOLS_CACHE_MS) return cached
+    if (cached && !fresh && Date.now() - cached.at < APP_TOOLS_CACHE_MS) return cached
     try {
       const result = await client(app).request('tools/list', {})
       if (!Array.isArray(result?.tools)) throw new Error('invalid tools/list response')
@@ -707,6 +710,7 @@ export function createAgentBridge({
       s.served = served
       s.partial = partial
       s.told = new Map()
+      s.missed = false
       if ([...served].some(([id, sig]) => (!sig || partial.has(id)) && apps.some((a) => a.id === id && a.status === 'running'))) scheduleRecheck(true)
     }
     return result
@@ -742,7 +746,7 @@ export function createAgentBridge({
         ;(session.told ||= new Map()).set(app.id, sig)
         stale = true
       }
-      if (stale) writeChanged(session)
+      if (stale && !writeChanged(session)) session.missed = true
     }
     const lines = visible(agentId).map((app) => `- ${app.name} (${app.id}), ${app.status}: ${(app.jobs.length ? app.jobs : ['other']).map(jobWords).join(', ')}. ${app.summary} ${toolsLine(app, names[app.id] || [], session)}`)
     return { content: [{ type: 'text', text: lines.length ? `Installed apps:\n${lines.join('\n')}` : 'No apps with tools are installed yet. The owner can add some with `wam search` and `wam install <id>`.' }] }
@@ -875,6 +879,8 @@ export function createAgentBridge({
       response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-store', Connection: 'keep-alive' })
       response.write(': wizard-os\n\n')
       s.streams.add(response)
+      // A tools/list_changed that found no open stream (issue 623) is delivered as soon as one attaches.
+      if (s.missed) { s.missed = false; writeChanged(s) }
       const keepAlive = setInterval(() => { try { response.write(': ping\n\n') } catch { /* closed */ } }, 25_000)
       keepAlive.unref?.()
       request.on('close', () => { clearInterval(keepAlive); s.streams.delete(response) })

@@ -297,9 +297,9 @@ export async function scene(kind, serverOptions = {}) {
         req.on('error', reject); req.end(JSON.stringify(rpc))
       })
     },
-    agentMcp: async (method, params = {}) => {
+    agentMcp: async (method, params = {}, { sid = '' } = {}) => {
       syncMessages()
-      const headers = { Authorization: `Bearer ${kind === 'main' ? (serverOptions.mcpToken ?? options.mcpToken) : agentGatewayToken}`, 'Content-Type': 'application/json' }
+      const headers = { Authorization: `Bearer ${kind === 'main' ? (serverOptions.mcpToken ?? options.mcpToken) : agentGatewayToken}`, 'Content-Type': 'application/json', ...(sid ? { 'Mcp-Session-Id': sid } : {}) }
       const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
       if (kind !== 'restricted') return fetch(`${base}/wizard/mcp`, { method: 'POST', headers, body })
       return new Promise((resolve, reject) => {
@@ -309,6 +309,18 @@ export async function scene(kind, serverOptions = {}) {
         req.on('error', reject); req.end(body)
       })
     },
+    // The MCP session's GET event stream on this kind's own gateway transport (restricted: Unix socket).
+    // Returns { frames, close } where frames collects every chunk the gateway pushes.
+    agentMcpStream: sid => new Promise((resolve, reject) => {
+      const headers = { Authorization: `Bearer ${kind === 'main' ? (serverOptions.mcpToken ?? options.mcpToken) : agentGatewayToken}`, 'Mcp-Session-Id': sid, Accept: 'text/event-stream' }
+      const target = kind === 'restricted' ? { socketPath: join(folder, 'gateway', 'gateway.sock') } : { host: new URL(base).hostname, port: new URL(base).port }
+      const frames = []
+      const req = httpRequest({ ...target, agent: false, path: '/wizard/mcp', method: 'GET', headers }, res => {
+        res.setEncoding('utf8'); res.on('data', chunk => frames.push(chunk)); res.on('error', () => {})
+        resolve({ status: res.statusCode, frames, close: () => { req.destroy(); res.destroy() } })
+      })
+      req.on('error', reject); req.end()
+    }),
     // Hold Hermes' answer to POST /v1/runs for one thread until the returned release() is called.
     holdAdmissions: sessionId => { let release; heldAdmissions.set(sessionId, new Promise(done => { release = done })); return () => { heldAdmissions.delete(sessionId); release() } },
     raw: (path, init = {}) => fetch(`${base}${path}`, { ...init, headers: { ...owner, Connection: 'close', ...init.headers } }),
