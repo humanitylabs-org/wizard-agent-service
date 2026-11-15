@@ -271,6 +271,11 @@ function homeScreen(raw) {
   return Object.keys(out).length ? out : null
 }
 
+const APP_ID = /^[a-z0-9][a-z0-9-]{0,63}$/
+function renamedFrom(raw, id) {
+  return Array.isArray(raw) ? [...new Set(raw.filter(v => typeof v === 'string' && APP_ID.test(v) && v !== id))].slice(0, 8) : []
+}
+
 /**
  * The launcher list: installed Wizard apps from the App Manager's apps.json, plus the owner's own
  * links from launcher.json. Only what a front end needs to draw and open a tile leaves the box.
@@ -311,6 +316,9 @@ export function readApps({ appsJsonPath, launcherPath }) {
       // Home-screen pin capabilities the app declared (wizard.md home_screen, normalized by the App Manager). Re-validated
       // here because apps.json is a file on disk; only well-formed values leave the box, and absence stays absent.
       ...(homeScreen(app.home_screen) ? { home_screen: homeScreen(app.home_screen) } : {}),
+      // Earlier ids the app declares (wizard.md renamed_from, written by the App Manager): the shell keeps a home-screen pin
+      // made under an old id opening the renamed app (wizard-ux issue 1471). Only valid ids, never the app's own.
+      ...(renamedFrom(app.renamed_from, id).length ? { renamed_from: renamedFrom(app.renamed_from, id) } : {}),
       provides: Array.isArray(app.provides) ? app.provides.filter(v => typeof v === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(v)) : [],
       // The app's declared kind (wizard.md type) and store shelf: shells sort Apps / Agent apps / Connectors by them.
       // Only known values leave the box; anything else is omitted so the shell falls back to its own heuristics.
