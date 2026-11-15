@@ -20,6 +20,7 @@ export const CHANNELS_PER_AGENT = 200
 export const PROJECTION_SPACES = 50
 export const PROJECTION_THREADS = 500
 export const ALERTS_ID = 'alerts'
+export const CHANNEL_SUBJECTS_MAX = 12
 const FILED_BY = new Set(['owner', 'agent', 'migration'])
 // Read watermarks (issue 471): the shell's keys are `general`, `general|<agent>` and `<agent>|<channel id>`.
 export const CHANNEL_READS_SCHEMA = 'wizard.channel-reads/1'
@@ -47,7 +48,9 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     CREATE INDEX IF NOT EXISTS membership_channel ON membership(channel_id, filed_at);
     CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS read_marks(key TEXT PRIMARY KEY, at INTEGER NOT NULL, updated_at TEXT NOT NULL);
-    CREATE INDEX IF NOT EXISTS read_marks_at ON read_marks(at);`)
+    CREATE INDEX IF NOT EXISTS read_marks_at ON read_marks(at);
+    CREATE TABLE IF NOT EXISTS owner_unfiled(agent TEXT NOT NULL, session_id TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(agent, session_id));
+    CREATE TABLE IF NOT EXISTS channel_subjects(channel_id TEXT NOT NULL, subject TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(channel_id, subject));`)
   const q = sql => db.prepare(sql)
   const st = {
     meta: q('SELECT value FROM meta WHERE key=?'), setMeta: q('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'),
@@ -64,10 +67,22 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     member: q('SELECT * FROM membership WHERE agent=? AND session_id=?'),
     members: q('SELECT session_id, filed_at, filed_by FROM membership WHERE channel_id=? ORDER BY filed_at, session_id'),
     agentMembers: q('SELECT session_id FROM membership WHERE agent=?'),
+    agentTombstones: q('SELECT session_id FROM owner_unfiled WHERE agent=?'),
     file: q(`INSERT INTO membership(agent,session_id,channel_id,filed_at,filed_by) VALUES(?,?,?,?,?)
       ON CONFLICT(agent,session_id) DO UPDATE SET channel_id=excluded.channel_id, filed_at=excluded.filed_at, filed_by=excluded.filed_by`),
     fileNew: q('INSERT OR IGNORE INTO membership(agent,session_id,channel_id,filed_at,filed_by) VALUES(?,?,?,?,?)'),
     unfile: q('DELETE FROM membership WHERE agent=? AND session_id=?'),
+    // Issue 520: a chat the owner took out of its channel stays out; agent and scheduler filing refuse it.
+    tombstone: q('INSERT INTO owner_unfiled(agent,session_id,at) VALUES(?,?,?) ON CONFLICT(agent,session_id) DO UPDATE SET at=excluded.at'),
+    untombstone: q('DELETE FROM owner_unfiled WHERE agent=? AND session_id=?'),
+    tombstoned: q('SELECT 1 AS y FROM owner_unfiled WHERE agent=? AND session_id=?'),
+    // Issue 520: subjects of chats the owner (or the Spaces migration) put in a channel: what belongs there.
+    subjects: q('SELECT subject FROM channel_subjects WHERE channel_id=? ORDER BY at DESC, subject LIMIT ?'),
+    hasSubject: q('SELECT 1 AS y FROM channel_subjects WHERE channel_id=? AND subject=?'),
+    learn: q('INSERT INTO channel_subjects(channel_id,subject,at) VALUES(?,?,?) ON CONFLICT(channel_id,subject) DO UPDATE SET at=excluded.at'),
+    subjectCount: q('SELECT COUNT(*) AS n FROM channel_subjects WHERE channel_id=?'),
+    subjectPrune: q('DELETE FROM channel_subjects WHERE channel_id=? AND subject IN (SELECT subject FROM channel_subjects WHERE channel_id=? ORDER BY at ASC, subject LIMIT ?)'),
+    removeSubjects: q('DELETE FROM channel_subjects WHERE channel_id=?'),
     reads: q('SELECT key, at FROM read_marks ORDER BY at DESC, key LIMIT ?'),
     readMark: q(`INSERT INTO read_marks(key,at,updated_at) VALUES(?,?,?)
       ON CONFLICT(key) DO UPDATE SET at=excluded.at, updated_at=excluded.updated_at WHERE excluded.at > read_marks.at`),
@@ -139,7 +154,23 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     },
     setSort(value) { if (value !== 'az' && value !== 'za') fail(400, 'invalid_sort'); st.setMeta.run('sort', value); return sort() },
     // Owner action only (an old shell's "remove Space", spaces_delete). Never deletes threads.
-    remove(id) { return tx(() => { mustChannel(id); st.removeMembers.run(id); st.remove.run(id); return { deleted: id } }) },
+    remove(id) { return tx(() => { mustChannel(id); st.removeMembers.run(id); st.removeSubjects.run(id); st.remove.run(id); return { deleted: id } }) },
+    // The membership row ({channel_id, filed_by}) or null.
+    memberOf(agent, sessionId) { return validThreadId(sessionId) ? st.member.get(agentOf(agent), sessionId) || null : null },
+    ownerUnfiled(agent, sessionId) { return validThreadId(sessionId) ? Boolean(st.tombstoned.get(agentOf(agent), sessionId)) : false },
+    // Subject keys (lowercase) known to belong in a channel, newest first.
+    channelSubjects(id, limit = CHANNEL_SUBJECTS_MAX) { return typeof id === 'string' && CHANNEL_ID.test(id) ? st.subjects.all(id, limit).map(r => r.subject) : [] },
+    hasChannelSubject(id, subject) { return typeof id === 'string' && typeof subject === 'string' && Boolean(st.hasSubject.get(id, subject)) },
+    learnSubject(id, subject) {
+      if (typeof id !== 'string' || !CHANNEL_ID.test(id) || typeof subject !== 'string' || !subject || subject.length > 40) return false
+      return tx(() => {
+        if (!st.channel.get(id)) return false
+        st.learn.run(id, subject, now())
+        const over = st.subjectCount.get(id).n - CHANNEL_SUBJECTS_MAX
+        if (over > 0) st.subjectPrune.run(id, id, over)
+        return true
+      })
+    },
     channelOf(agent, sessionId) { return validThreadId(sessionId) ? st.member.get(agentOf(agent), sessionId)?.channel_id || '' : '' },
     members(id) { mustChannel(id); return st.members.all(id).map(r => ({ sessionId: r.session_id, filedAt: r.filed_at, filedBy: r.filed_by })) },
     memberSet(id) { const r = typeof id === 'string' && CHANNEL_ID.test(id) ? st.channel.get(id) : null; return r ? { agent: r.agent, ids: new Set(st.members.all(id).map(m => m.session_id)) } : null },
@@ -148,9 +179,15 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
       if (!validThreadId(sessionId)) fail(400, 'invalid_session')
       if (!FILED_BY.has(filedBy)) fail(400, 'invalid_filed_by')
       return tx(() => {
-        if (channelId === null) { const owner = agentOf(agent); st.unfile.run(owner, sessionId); return { sessionId, agent: owner, channel: null } }
+        if (channelId === null) {
+          const owner = agentOf(agent)
+          // Only a chat that was in a channel leaves a tombstone: the owner took it out.
+          if (st.unfile.run(owner, sessionId).changes) st.tombstone.run(owner, sessionId, now())
+          return { sessionId, agent: owner, channel: null }
+        }
         const r = mustChannel(channelId)
         if (agent !== undefined && agent !== null && agent !== '' && agentOf(agent) !== r.agent) fail(409, 'agent_mismatch')
+        st.untombstone.run(r.agent, sessionId)
         const had = st.member.get(r.agent, sessionId)
         if (had?.channel_id !== r.id) st.file.run(r.agent, sessionId, r.id, now(), filedBy)
         return { sessionId, agent: r.agent, channel: r.id }
@@ -162,15 +199,18 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
       return tx(() => {
         const r = st.channel.get(channelId)
         if (!r || r.agent !== agentOf(agent) || r.archived) return false
+        if (st.tombstoned.get(r.agent, sessionId)) return false
         return st.fileNew.run(r.agent, sessionId, r.id, now(), filedBy).changes === 1
       })
     },
     // A deleted thread leaves its channel.
-    forget(agent, sessionId) { if (validThreadId(sessionId)) st.unfile.run(agentOf(agent), sessionId) },
+    forget(agent, sessionId) { if (validThreadId(sessionId)) { st.unfile.run(agentOf(agent), sessionId); st.untombstone.run(agentOf(agent), sessionId) } },
     // exists(id) -> true | false | null (unknown: kept). Returns how many memberships were dropped.
     prune(agent, exists) {
       const owner = agentOf(agent), gone = st.agentMembers.all(owner).map(r => r.session_id).filter(id => exists(id) === false)
-      if (gone.length) tx(() => { for (const id of gone) st.unfile.run(owner, id) })
+      if (gone.length) tx(() => { for (const id of gone) { st.unfile.run(owner, id); st.untombstone.run(owner, id) } })
+      const goneMarks = st.agentTombstones.all(owner).map(r => r.session_id).filter(id => exists(id) === false)
+      if (goneMarks.length) tx(() => { for (const id of goneMarks) st.untombstone.run(owner, id) })
       return gone.length
     },
     // First boot with the switch on: copy ui-preferences `spaces` once. Ids, names, agents, order and

@@ -287,10 +287,11 @@ describe('the Agent Service applies titles through Hermes', () => {
   })
   it("dates an owner's respelled title when another thread already holds the one-word spelling", async () => {
     const startedAgo = 5 * 86400
-    const { directory } = await fixture({ title: `${TWO} · Voice routing`, titleSource: 'user', startedAgo, others: [['wizard_old', 'WizardOS · Voice routing']], extra: { respellDelayMs: 5 } })
+    // A short base title: with a two-digit day, "Voice routing" plus the date passes the 32-character cap and is clipped.
+    const { directory } = await fixture({ title: `${TWO} · Voice`, titleSource: 'user', startedAgo, others: [['wizard_old', 'WizardOS · Voice']], extra: { respellDelayMs: 5 } })
     const done = await receipt(directory)
     const day = new Date(Date.now() - startedAgo * 1000)
-    const dated = `WizardOS · Voice routing (${day.getUTCDate()} ${day.toLocaleString('en-GB', { month: 'short', timeZone: 'UTC' })})`
+    const dated = `WizardOS · Voice (${day.getUTCDate()} ${day.toLocaleString('en-GB', { month: 'short', timeZone: 'UTC' })})`
     expect(done).toMatchObject({ failed: [] })
     expect(done.renamed).toEqual([expect.objectContaining({ id: 'wizard_t1', to: dated, locked: true })])
   })

@@ -1,11 +1,11 @@
 // Chats channels phase 3 (issue 441, WIZARD_CHANNEL_AGENT_FILING=1 with the channel store): the status line's
 // `channel` field (with `space` as an alias), its refusal rules, the run note, and the scheduler's per-job channel.
-import { afterEach, expect, it } from 'vitest'
+import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createChannelStore } from '../server/channel-store.mjs'
-import { createSpaceFiling, CHANNEL_INSTRUCTIONS } from '../server/thread-spaces.mjs'
+import { createSpaceFiling, CHANNEL_INSTRUCTIONS, subjectFitsChannel } from '../server/thread-spaces.mjs'
 import { parseStatus, normalizeStatus } from '../server/thread-status.mjs'
 import { Scheduler } from '../server/scheduler.mjs'
 import { firstPostOfHistory, readHermesFirstPosts } from '../server/first-post.mjs'
@@ -33,12 +33,12 @@ it('the parser keeps channel and space (the alias), and drops invalid ids', () =
 
 it('channel files an unfiled chat; space is an alias; channel wins over space', () => {
   const { store, project, other, filing } = setup()
-  expect(filing.apply('hermes', 't1', parseStatus(status({ channel: project.id })))).toBe(true)
+  expect(filing.apply('hermes', 't1', parseStatus(status({ channel: project.id, subject: 'Synthetic' })))).toBe(true)
   expect(store.channelOf('hermes', 't1')).toBe(project.id)
   expect(store.members(project.id)[0].filedBy).toBe('agent')
-  expect(filing.apply('hermes', 't2', { space: other.id })).toBe(true)
+  expect(filing.apply('hermes', 't2', { space: other.id, subject: 'Synthetic' })).toBe(true)
   expect(store.channelOf('hermes', 't2')).toBe(other.id)
-  expect(filing.apply('hermes', 't3', { channel: project.id, space: other.id })).toBe(true)
+  expect(filing.apply('hermes', 't3', { channel: project.id, space: other.id, subject: 'Synthetic' })).toBe(true)
   expect(store.channelOf('hermes', 't3')).toBe(project.id)
 })
 
@@ -56,7 +56,7 @@ it('refuses: an owner-filed chat, Alerts, another agent’s or an archived chann
   expect(filing.apply('hermes', 'wizard_schedule_x', { channel: other.id })).toBe(false)
   for (const id of ['a1', 'a2', 'a3', 'a4', 'wizard_schedule_x']) expect(store.channelOf('hermes', id)).toBe('')
   // Another agent's own channel is fine for that agent.
-  expect(filing.apply('philosopher', 'p1', { channel: foreign.id })).toBe(true)
+  expect(filing.apply('philosopher', 'p1', { channel: foreign.id, subject: 'Foreign' })).toBe(true)
 })
 
 it('the run note gives the channel and post-title rules and the catalogue without Alerts', () => {
@@ -157,4 +157,79 @@ it('a timestamp tie between the first reply and the first owner message is broke
   const on = readHermesFirstPosts(path, ['alert', 'chat'], { agentFirst: true })
   expect(on.get('alert')).toBeNull()
   expect(on.get('chat')).toEqual({ text: 'Synthetic question', attachments: [] })
+})
+
+// Issue 520: a chat with no clearly matching channel stays unfiled, and a chat the owner took out stays out.
+describe('issue 520: wrong-channel filing and owner unfile', () => {
+  const launch = (store: any) => {
+    const ids: any = {}
+    for (const name of ['WizardOS Launch', 'WizardOS Apps', 'WizardOS Chats', 'WizardOS Shell', 'Content']) ids[name] = store.create({ name }).id
+    return ids
+  }
+  it('(a) the 15 Nov status line (subject Hermes, channel Content) files nothing', () => {
+    const { store, filing } = setup(), ids = launch(store)
+    const line = status({ channel: ids.Content, subject: 'Hermes', title: 'Philosopher transcription' })
+    expect(filing.apply('hermes', 'wizard_1794715261676_96e5ef038e7d', parseStatus(line))).toBe(false)
+    expect(store.channelOf('hermes', 'wizard_1794715261676_96e5ef038e7d')).toBe('')
+    expect(filing.apply('hermes', 'novaire', { channel: ids.Content, subject: 'Music' })).toBe(false)
+    expect(filing.apply('hermes', 'reddit', { channel: ids['WizardOS Launch'], subject: 'Hermes' })).toBe(false)
+    // No subject: nothing to match, so nothing is filed.
+    expect(filing.apply('hermes', 'bare', { channel: ids.Content })).toBe(false)
+  })
+  it('(b) owner unfile, then an agent status with channel, leaves it unfiled; an owner move back clears that', () => {
+    const { store, filing } = setup(), ids = launch(store)
+    expect(filing.apply('hermes', 'bug', { channel: ids['WizardOS Apps'], subject: 'WizardOS' })).toBe(true)
+    store.move({ sessionId: 'bug', channelId: null })
+    expect(store.ownerUnfiled('hermes', 'bug')).toBe(true)
+    expect(filing.apply('hermes', 'bug', { channel: ids['WizardOS Apps'], subject: 'WizardOS' })).toBe(false)
+    expect(store.fileIfUnfiled('hermes', 'bug', ids['WizardOS Apps'], 'agent')).toBe(false)
+    expect(store.channelOf('hermes', 'bug')).toBe('')
+    // Unfiling a chat that was in no channel leaves no mark.
+    store.move({ sessionId: 'never', channelId: null })
+    expect(store.ownerUnfiled('hermes', 'never')).toBe(false)
+    store.move({ sessionId: 'bug', channelId: ids['WizardOS Shell'] })
+    expect(store.ownerUnfiled('hermes', 'bug')).toBe(false)
+    expect(store.channelOf('hermes', 'bug')).toBe(ids['WizardOS Shell'])
+    // A deleted chat drops its mark.
+    store.move({ sessionId: 'bug', channelId: null }); store.forget('hermes', 'bug')
+    expect(store.ownerUnfiled('hermes', 'bug')).toBe(false)
+  })
+  it('(c) a clear match (Messenger bug, subject WizardOS) still files into WizardOS Apps', () => {
+    const { store, filing } = setup(), ids = launch(store)
+    expect(filing.apply('hermes', 'messenger', parseStatus(status({ channel: ids['WizardOS Apps'], subject: 'WizardOS', title: 'Messenger sync bug' })))).toBe(true)
+    expect(store.channelOf('hermes', 'messenger')).toBe(ids['WizardOS Apps'])
+  })
+  it('short exact names match; a shared generic word (Google Apps vs WizardOS Apps) does not', () => {
+    const { store, filing } = setup(), ids = launch(store)
+    const ai = store.create({ name: 'AI' }).id
+    expect(subjectFitsChannel('AI', { id: ai, name: 'AI' })).toBe(true)
+    expect(filing.apply('hermes', 'ai', { channel: ai, subject: 'AI' })).toBe(true)
+    expect(filing.apply('hermes', 'google', { channel: ids['WizardOS Apps'], subject: 'Google Apps' })).toBe(false)
+    expect(subjectFitsChannel('Apps', { id: 'x', name: 'WizardOS Apps' })).toBe(false)
+    expect(subjectFitsChannel('WizardOS', { id: 'x', name: 'WizardOS Apps' })).toBe(true)
+  })
+  it('learns a channel’s subjects from owner-filed chats, lists them in the catalogue, and then files that subject', () => {
+    const { store, filing } = setup(), ids = launch(store)
+    expect(filing.apply('hermes', 'track2', { channel: ids.Content, subject: 'Music' })).toBe(false)
+    store.move({ sessionId: 'track1', channelId: ids.Content })
+    filing.apply('hermes', 'track1', { subject: 'Music' })
+    expect(store.channelSubjects(ids.Content)).toEqual(['music'])
+    expect(filing.runNote('hermes')).toContain(JSON.stringify({ id: ids.Content, name: 'Content', subjects: ['music'] }))
+    expect(filing.apply('hermes', 'track2', { channel: ids.Content, subject: 'Music' })).toBe(true)
+    // An agent-filed chat teaches nothing (no self-reinforcing mistakes).
+    filing.apply('hermes', 'track2', { subject: 'Hermes' })
+    expect(store.channelSubjects(ids.Content)).toEqual(['music'])
+    expect(filing.runNote('hermes')).toContain('never the closest-sounding one')
+  })
+  it('prune drops the marks of deleted chats; deleting a channel drops its subjects', () => {
+    const { store, filing } = setup(), ids = launch(store)
+    store.move({ sessionId: 'gone', channelId: ids.Content }); store.move({ sessionId: 'gone', channelId: null })
+    store.move({ sessionId: 'kept', channelId: ids.Content }); store.move({ sessionId: 'kept', channelId: null })
+    store.prune('hermes', (id: string) => id !== 'gone')
+    expect(store.ownerUnfiled('hermes', 'gone')).toBe(false)
+    expect(store.ownerUnfiled('hermes', 'kept')).toBe(true)
+    store.move({ sessionId: 'x', channelId: ids.Content }); filing.apply('hermes', 'x', { subject: 'Music' })
+    store.remove(ids.Content)
+    expect(store.channelSubjects(ids.Content)).toEqual([])
+  })
 })
