@@ -164,6 +164,11 @@ test('issue 525: an owner reply then a resolving done or a newer ask clears or r
   assert.deepEqual(resolveThreadSection({ replies: [reply(musicCheck, 20), reply(silent, 40)], lastUserAt: 30 }).attention, silent)
   assert.deepEqual(resolveThreadSection({ replies: [reply(qr, 20), reply(silent, 40)], lastUserAt: 30 }).attention, silent)
 })
+test('issue 525: a check or ask demoted by a background guard never reopens Ready through its items', () => {
+  assert.equal(resolveThreadSection({ replies: [reply(musicCheck, 20)], lastUserAt: 10, background: 'heavy' }).section, 'Working')
+  const future = { state: 'needs_you', ask: 'I will send the QR once the helper finishes', items: [musicItem('needs_you')] }
+  assert.equal(resolveThreadSection({ replies: [reply(future, 20)], lastUserAt: 10, background: 'helper' }).section, 'Working')
+})
 test('issue 525: check then done for a different item keeps the check ask', () => {
   const other = { state: 'done', ask: 'Search Back is fixed', items: [searchItem('done')] }
   assert.deepEqual(resolveThreadSection({ replies: [reply(musicCheck, 20), reply(other, 30)], lastUserAt: 10 }).attention, musicCheck)

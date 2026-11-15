@@ -75,16 +75,19 @@ export function resolveThreadSection({ replies = [], lastUserAt = 0, background 
       continue
     }
     if (carried) {
-      if (itemVerdict(carried, status) === 'open') ask = carried
+      // The same background guards as a fresh ask: a check waits for heavy work, a promise is not an action.
+      if (itemVerdict(carried, status) === 'open' && !(heavyPending && carried.state === 'check') && !(background && FUTURE_ASK.test(carried.ask))) ask = carried
       carried = null
     }
+    const original = status
     if (background && ASK_STATES.has(status.state) && FUTURE_ASK.test(status.ask)) status = { ...status, state: 'fyi' }
     if (['check', 'done'].includes(status.state) && heavyPending) status = { ...status, state: 'fyi', ask: 'Background work is still running or waiting to report back.' }
     attention = status
     if (ASK_STATES.has(status.state)) { ask = status; continue }
     const verdict = ask ? itemVerdict(ask, status) : ''
     if (verdict === 'resolved' || ask && !background && status.state === 'done' && doneAnswers(ask, status)) ask = null
-    if (!ask) {
+    // A status a background guard demoted never turns its own items back into an open ask.
+    if (!ask && status === original) {
       const listed = itemAsk(status)
       if (listed && !(background && FUTURE_ASK.test(listed.ask))) ask = listed
     }
