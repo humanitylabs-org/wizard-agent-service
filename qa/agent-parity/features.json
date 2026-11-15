@@ -2049,9 +2049,9 @@
     },
     {
       "id": "agent-audio-transcription",
-      "description": "A standard agent transcribes an audio file in its own home from a chat with the gateway tool wizard_transcribe (the box's Wizard Voice Service), instead of installing speech software; paths are confined to that agent's own home and private agents do not get the tool",
+      "description": "A standard agent transcribes an audio file in its own home from a chat with the gateway tool wizard_transcribe (the box's Wizard Voice Service), instead of installing speech software, including long recordings (up to 2 GB) that the Service splits with its own fixed ffmpeg command and joins with timestamps, so no agent writes an ffmpeg loop; paths are confined to that agent's own home and private agents do not get the tool",
       "layer": "runtime",
-      "how_to_test": "From a chat on each agent kind (main, host-profile, container, restricted), ask the agent to transcribe a short synthetic wav it holds in its home; verify wizard_transcribe is listed on that agent's gateway, the call reads that agent's own home (/opt/data) and returns the text, a path outside the home or another agent's home is refused, and a private agent is not offered the tool. tests/transcribe.test.ts runs the real agent registry for each kind with a fake voice service; synthetic fixture evidence, not live voice proof.",
+      "how_to_test": "From a chat on each agent kind (main, host-profile, container, restricted), ask the agent to transcribe a short synthetic wav it holds in its home; verify wizard_transcribe is listed on that agent's gateway, the call reads that agent's own home (/opt/data) and returns the text, a path outside the home or another agent's home is refused, and a private agent is not offered the tool. A recording over 32 MB or longer than 30 minutes comes back as one joined transcript with [h:mm:ss] part timestamps (or status working, then the transcript on a repeat call) with no terminal call. tests/transcribe.test.ts (including a real-ffmpeg 140-minute mp3) runs the real agent registry for each kind with a fake voice service; synthetic fixture evidence, not live voice proof.",
       "source_refs": [
         "server/transcribe.mjs",
         "server/service.mjs",
