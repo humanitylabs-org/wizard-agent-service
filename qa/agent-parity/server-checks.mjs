@@ -736,20 +736,28 @@ export const serverChecks = {
       assert.equal((await s.request(`/v1/runs/${id}`)).status, 200)
     }
     // A foreign or Alerts channel is refused; then `channel` files the unfiled chat.
-    await finish(run.run_id, { channel: foreign.id })
+    await finish(run.run_id, { channel: foreign.id, subject: 'Synthetic' })
     assert.equal(await filed('wizard_parity'), null, 'another agent\u2019s channel is refused')
-    const r2 = await admit(s, { input: 'Synthetic owner chat again' }); await finish(r2.run_id, { channel: alerts.id })
+    const r2 = await admit(s, { input: 'Synthetic owner chat again' }); await finish(r2.run_id, { channel: alerts.id, subject: 'Synthetic' })
     assert.equal(await filed('wizard_parity'), null, 'agents never file an owner chat into Alerts')
-    const r3 = await admit(s, { input: 'Synthetic owner chat once more' }); await finish(r3.run_id, { channel: own.id, title: 'Synthetic post name' })
+    // Issue 520: a channel that does not cover the status subject (Hermes vs Content) files nothing.
+    const content = await make('Content', s.id)
+    const r2b = await admit(s, { input: 'Synthetic owner chat about agents' }); await finish(r2b.run_id, { channel: content.id, subject: 'Hermes' })
+    assert.equal(await filed('wizard_parity'), null, 'a channel that does not match the status subject is refused')
+    const r3 = await admit(s, { input: 'Synthetic owner chat once more' }); await finish(r3.run_id, { channel: own.id, subject: 'Synthetic', title: 'Synthetic post name' })
     assert.equal(await filed('wizard_parity'), own.id, 'status-line channel files an unfiled chat')
+    // Issue 520: the owner takes it out; the next status repeating the channel leaves it out.
+    assert.equal((await s.raw('/wizard/v1/channels/membership', json('PUT', { sessionId: 'wizard_parity', channelId: null, agent: s.id }))).status, 200)
+    const r3b = await admit(s, { input: 'Synthetic owner chat taken out' }); await finish(r3b.run_id, { channel: own.id, subject: 'Synthetic' })
+    assert.equal(await filed('wizard_parity'), null, 'a chat the owner took out is never re-filed')
     // Never a move: the owner refiles it, and a later status naming another channel changes nothing.
     assert.equal((await s.raw('/wizard/v1/channels/membership', json('PUT', { sessionId: 'wizard_parity', channelId: second.id }))).status, 200)
-    const r4 = await admit(s, { input: 'Synthetic owner chat moved' }); await finish(r4.run_id, { channel: own.id })
+    const r4 = await admit(s, { input: 'Synthetic owner chat moved' }); await finish(r4.run_id, { channel: own.id, subject: 'Synthetic' })
     assert.equal(await filed('wizard_parity'), second.id, 'an owner-filed chat is never moved')
     // `space` stays an alias for one release.
     assert.equal((await s.request('/api/sessions', post({ id: 'wizard_parity_alias', source: 'wizard-mobile' }))).status, 201)
     const r5 = await s.request('/v1/runs', post({ session_id: 'wizard_parity_alias', input: 'Synthetic alias chat' })); assert.equal(r5.status, 202)
-    await finish((await r5.json()).run_id, { space: own.id })
+    await finish((await r5.json()).run_id, { space: own.id, subject: 'Synthetic' })
     assert.equal(await filed('wizard_parity_alias'), own.id, 'space is an alias of channel')
     // Scheduled chats: a new chat goes to its job's channel, else Alerts (main) or stays unfiled (routed agents);
     // a job posting into an existing thread never files it; the status line cannot file a scheduled chat.
@@ -762,7 +770,7 @@ export const serverChecks = {
     }
     const plain = await fire(await job())
     assert.equal(await filed(plain.thread), s.kind === 'main' ? alerts.id : null, 'a new scheduled chat lands in Alerts (main) or stays unfiled')
-    await finish(plain.runId, { channel: own.id })
+    await finish(plain.runId, { channel: own.id, subject: 'Synthetic' })
     assert.equal(await filed(plain.thread), s.kind === 'main' ? alerts.id : null, 'the status line never files a scheduled chat')
     const routed = await fire(await job({ channel: own.id }))
     assert.equal(await filed(routed.thread), own.id, 'a job with a channel files its new chat there')
@@ -782,7 +790,7 @@ export const serverChecks = {
     assert.equal((await s.raw(`/wizard/v1/schedules/${plainJob.id}`, { method: 'DELETE' })).status, 200)
     if (s.kind === 'main') assert.equal((await s.raw('/wizard/v1/channels/membership', json('PUT', { sessionId: plain.thread, channelId: null }))).status, 200)
     const late = await s.request('/v1/runs', post({ session_id: plain.thread, input: 'Synthetic owner reply to the reminder' })); assert.equal(late.status, 202)
-    await finish((await late.json()).run_id, { channel: own.id })
+    await finish((await late.json()).run_id, { channel: own.id, subject: 'Synthetic' })
     assert.equal(await filed(plain.thread), null, 'a deleted job\u2019s chat is still never filed by its status line')
     // An alert the owner replied to stays the agent's post: no firstRequest from the owner's reply (scene has channelFirstPosts).
     const at = Date.now() / 1000 - 60
