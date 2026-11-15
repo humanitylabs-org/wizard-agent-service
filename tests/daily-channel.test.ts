@@ -120,6 +120,12 @@ describe('scheduler', () => {
     expect(origin).toMatchObject({ thread: 'wizard_origin', createThread: false }); expect(origin).not.toHaveProperty('daily')
     expect(() => s.create({ ...base, kind: 'watch', thread: 'daily' })).toThrow(/watcher needs its thread/)
   })
+  it('an overdue occurrence goes to the thread of the day it is delivered on', () => {
+    const { s, claimed } = setup()
+    const job = s.create({ ...base, kind: 'run', thread: 'daily' })
+    s.reserve(s.get(job.id), Date.parse('2026-11-14T21:59:00Z'))
+    expect(claimed.at(-1)).toEqual(['main', Date.parse('2026-11-15T01:00:00Z')])
+  })
   it('with the switch off nothing changes', () => {
     const { s, claimed } = setup(false)
     const remind = s.runNow(s.create({ ...base, kind: 'remind' }).id)

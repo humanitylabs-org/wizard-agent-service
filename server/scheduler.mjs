@@ -533,7 +533,8 @@ export class Scheduler {
     let wants = job.thread === 'daily' || (job.kind === 'remind' && opensOwn)
     if (!wants && opensOwn && job.channel) { try { wants = this.daily.isDaily?.(this.agentId(job.agent), job.channel) === true } catch { wants = false } }
     if (!wants) return null
-    try { return this.daily.thread(this.agentId(job.agent), instant) || null } catch { return null }
+    // The day is the delivery's, not the missed slot's: a 04:59 brief admitted at 05:01 opens today's thread.
+    try { return this.daily.thread(this.agentId(job.agent), Math.max(instant, this.now())) || null } catch { return null }
   }
   reserve(job, instant, manual = false) {
     const daily = this.dailyTarget(job, instant)
