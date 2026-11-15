@@ -275,6 +275,7 @@ export function transcribeTool({ homeOf, allowed = () => true, sttOrigin, fetchI
 
   const answer = (job) => (job.result.error ? bad(job.result.error) : ok(job.result.value))
 
+  // Every call waits at most waitMs (probing included), so it answers before Hermes stops the MCP call at 300 s.
   async function waitFor(job) {
     let timer
     const finished = await Promise.race([job.promise.then(() => true), new Promise((r) => { timer = setTimeout(() => r(false), waitMs) })])
@@ -282,7 +283,7 @@ export function transcribeTool({ homeOf, allowed = () => true, sttOrigin, fetchI
     if (finished) return answer(job)
     return ok({
       status: 'working', parts_done: job.done, ...(job.total ? { parts_total: job.total } : {}),
-      message: 'Still transcribing this long recording. Call wizard_transcribe again with the same path and arguments to keep waiting for the transcript. Do not split or convert the file yourself.',
+      message: 'Still transcribing this recording. Call wizard_transcribe again with the same path and arguments to keep waiting for the transcript. Do not split or convert the file yourself.',
     })
   }
 
@@ -308,39 +309,32 @@ export function transcribeTool({ homeOf, allowed = () => true, sttOrigin, fetchI
         return bad('The file could not be read.')
       }
       const { fd, info } = opened
-      let handedOff = false
-      try {
-        const key = [agentId, info.dev, info.ino, info.size, info.mtimeMs, mode, language].join('\0')
-        const existing = jobs.get(key)
-        if (existing) return await waitFor(existing)
+      // One job per agent + file identity + options, reserved before any await, so concurrent or repeated calls join it.
+      const key = [agentId, info.dev, info.ino, info.size, info.mtimeMs, mode, language].join('\0')
+      const existing = jobs.get(key)
+      if (existing) { closeSync(fd); return waitFor(existing) }
+      if (inFlight >= MAX_IN_FLIGHT) { closeSync(fd); return bad('The transcriber is busy with other recordings. Try again in a minute.') }
+      inFlight += 1
+      const job = { done: 0, total: null, result: null, promise: null }
+      jobs.set(key, job)
+      job.promise = (async () => {
         const duration = await media.probe(fd)
-        const long = info.size > maxBytes || (duration !== null && duration > splitSeconds)
-        if (inFlight >= MAX_IN_FLIGHT) return bad('The transcriber is busy with other recordings. Try again in a minute.')
-        if (!long) {
-          inFlight += 1
-          try {
-            const started = Date.now()
-            const reply = await transcribeBytes(agentId, readAll(fd, info.size), opened.name, mode, language)
-            if (reply.error) return bad(reply.error)
-            return ok({ text: reply.text, ...(reply.no_speech ? { no_speech: true } : {}), mode, provider: reply.provider, model: reply.model, ms: Date.now() - started })
-          } finally { inFlight -= 1 }
-        }
-        inFlight += 1
-        handedOff = true
-        const job = { done: 0, total: null, result: null, promise: null }
-        job.promise = runLong(job, agentId, fd, duration, mode, language)
-          .catch(() => ({ error: 'The transcription failed. Tell the owner; do not split or convert the file yourself.' }))
-          .then((result) => {
-            job.result = result
-            inFlight -= 1
-            closeSync(fd)
-            setTimeout(() => { if (jobs.get(key) === job) jobs.delete(key) }, JOB_KEEP_MS).unref?.()
-          })
-        jobs.set(key, job)
-        return await waitFor(job)
-      } finally {
-        if (!handedOff) closeSync(fd)
-      }
+        if (info.size > maxBytes || (duration !== null && duration > splitSeconds)) return runLong(job, agentId, fd, duration, mode, language)
+        const started = Date.now()
+        const reply = await transcribeBytes(agentId, readAll(fd, info.size), opened.name, mode, language)
+        if (reply.error) return { error: reply.error }
+        return { value: { text: reply.text, ...(reply.no_speech ? { no_speech: true } : {}), mode, provider: reply.provider, model: reply.model, ms: Date.now() - started } }
+      })()
+        .catch(() => ({ error: 'The transcription failed. Tell the owner; do not split or convert the file yourself.' }))
+        .then((result) => {
+          job.result = result
+          inFlight -= 1
+          closeSync(fd)
+          // A transcript stays for a later "call again" (a call may have answered "working"); a failure is retried fresh.
+          if (result.error) jobs.delete(key)
+          else setTimeout(() => { if (jobs.get(key) === job) jobs.delete(key) }, JOB_KEEP_MS).unref?.()
+        })
+      return waitFor(job)
     },
   }
 }

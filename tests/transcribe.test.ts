@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { linkSync, mkdtempSync, mkdirSync, readFileSync, readSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
@@ -125,9 +125,10 @@ describe('wizard_transcribe', () => {
     let release: any
     const gate = new Promise((r) => { release = r })
     const busy = tool(() => gate.then(() => jsonReply({ text: 'x' })))
-    const first = [1, 2].map(() => busy.call(TRANSCRIBE_TOOL, { path: 'inbox/2026-11-11/note.wav' }, 'helper'))
+    for (const n of ['one', 'two', 'three']) writeFileSync(join(home, `${n}.wav`), Buffer.from(`RIFF${n}`))
+    const first = ['one', 'two'].map((n) => busy.call(TRANSCRIBE_TOOL, { path: `${n}.wav` }, 'helper'))
     await new Promise((r) => setTimeout(r, 10))
-    expect(text(await busy.call(TRANSCRIBE_TOOL, { path: 'inbox/2026-11-11/note.wav' }, 'helper'))).toContain('busy')
+    expect(text(await busy.call(TRANSCRIBE_TOOL, { path: 'three.wav' }, 'helper'))).toContain('busy')
     release(); await Promise.all(first)
   })
 
@@ -208,6 +209,35 @@ describe('per agent kind', () => {
     expect((await t.call(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/take.wav' }, priv.id)).isError).toBe(true)
     expect(t.list(priv.id)).toEqual([])
     expect(seen).toHaveLength(ids.length)
+
+    // Long recordings on every kind: split from that agent's own file, "working" first, then the joined transcript
+    // on a repeat call; the private agent is still refused and nothing of it is cut.
+    for (const id of [...ids, priv.id]) place(id, 'long.mp3', `long-${id}-`.padEnd(4096, 'x'))
+    let gate: Promise<unknown> = Promise.resolve()
+    const cutFrom: string[] = []
+    const longSeen: Seen[] = []
+    const media = {
+      probe: async () => 1200,
+      cut: async (fd: number, start: number) => {
+        const head = Buffer.alloc(24); readSync(fd, head, 0, 24, 0); cutFrom.push(head.toString().replace(/-x+$/u, ''))
+        await gate
+        return fakeWav(start < 1200 ? 1 : 0)
+      },
+    }
+    const long = transcribeTool({ media, maxBytes: 1024, waitMs: 20, homeOf: (id: string) => registry.stateHome(id), allowed: (id: string) => registry.read(id)?.privacy !== 'private', sttOrigin: 'http://x', fetchImpl: counting(longSeen) as any })
+    for (const id of ids) {
+      let release: any
+      gate = new Promise((r) => { release = r })
+      expect(json(await long.call(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/long.mp3' }, id)).status, id).toBe('working')
+      release()
+      let done: any
+      for (let i = 0; i < 50 && !done; i += 1) { const v = json(await long.call(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/long.mp3' }, id)); if (v.status !== 'working') done = v }
+      expect(done.text, id).toMatch(/^\[0:00:00\] words \d+\n\n\[0:10:00\] words \d+$/u)
+      expect(done.parts).toBe(2)
+    }
+    for (const id of ids) expect(cutFrom.filter((x) => x === `long-${id}`)).toHaveLength(3)
+    expect(cutFrom.some((x) => x.includes(priv.id))).toBe(false)
+    expect((await long.call(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/long.mp3' }, priv.id)).isError).toBe(true)
   })
 })
 
@@ -271,6 +301,32 @@ describe('long recordings', () => {
     // One job: the repeat calls never cut or upload the recording a second time.
     expect(seen).toHaveLength(2)
     expect(media.cuts).toEqual([0, 600, 1200])
+  })
+
+  it('two calls at once for the same recording share one job, even while the length is still being probed', async () => {
+    writeFileSync(join(home, 'inbox', 'long.mp3'), Buffer.alloc(4096, 1))
+    let release: any
+    const probing = new Promise((r) => { release = r })
+    const seen: Seen[] = []
+    const media = { ...partsMedia(1200, 2), probe: async () => { await probing; return 1200 } }
+    const cuts = media.cuts
+    const t = transcribeTool({ homeOf: () => home, sttOrigin: 'http://x', fetchImpl: counting(seen) as any, maxBytes: 1024, media })
+    const both = [t.call(TRANSCRIBE_TOOL, { path: 'inbox/long.mp3' }, 'helper'), t.call(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/long.mp3' }, 'helper')]
+    release()
+    const [a, b] = (await Promise.all(both)).map(json)
+    expect(a.text).toBe('[0:00:00] words 1\n\n[0:10:00] words 2')
+    expect(b.text).toBe(a.text)
+    expect(seen).toHaveLength(2)
+    expect(cuts).toEqual([0, 600, 1200])
+  })
+
+  it('a slow probe still answers "working" within the wait budget', async () => {
+    writeFileSync(join(home, 'inbox', 'long.mp3'), Buffer.alloc(4096, 1))
+    const media = { ...partsMedia(1200, 2), probe: () => new Promise<number>(() => {}) }
+    const t = transcribeTool({ homeOf: () => home, sttOrigin: 'http://x', fetchImpl: counting([]) as any, maxBytes: 1024, waitMs: 20, media })
+    const startedAt = Date.now()
+    expect(json(await t.call(TRANSCRIBE_TOOL, { path: 'inbox/long.mp3' }, 'helper')).status).toBe('working')
+    expect(Date.now() - startedAt).toBeLessThan(1000)
   })
 
   it('says plainly when ffmpeg is missing or a part fails, and never tells the agent to split it', async () => {
