@@ -1553,11 +1553,12 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
   'status-list-state': async s => {
     const row = s.sessions.get('wizard_parity'); row.hidden = false
     row.messages = [{ role: 'user', content: 'Synthetic request', timestamp: Date.now() / 1000 - 2 }]
-    for (const state of ['needs_you', 'done', 'check', 'fyi']) {
+    // An fyi never cancels an earlier ask (issue 525): after check, fyi keeps check; a later done clears it.
+    for (const [state, shown] of [['needs_you', 'needs_you'], ['done', 'done'], ['check', 'check'], ['fyi', 'check'], ['done', 'done'], ['fyi', 'fyi']]) {
       row.messages.push({ role: 'assistant', content: `Synthetic answer\n[WIZARD_STATUS_V1] ${JSON.stringify({ state, ask: state === 'needs_you' ? 'Choose a synthetic option' : 'Synthetic outcome', subject: 'Parity QA', title: 'Parity · Status' })}[/WIZARD_STATUS_V1]`, timestamp: Date.now() / 1000 + row.messages.length })
       const r = await s.request('/api/sessions?view=list'); assert.equal(r.status, 200)
       const item = (await r.json()).data.find(x => x.id === row.id)
-      assert.ok(item); assert.equal(item.attention.state, state)
+      assert.ok(item); assert.equal(item.attention.state, shown, `${s.kind}: ${state}`)
       assert.equal(item.attention.subject, 'Parity QA')
       if (state === 'needs_you') assert.equal(item.attention.ask, 'Choose a synthetic option')
       assert.ok(!JSON.stringify(item).includes('[WIZARD_STATUS_V1]'))
