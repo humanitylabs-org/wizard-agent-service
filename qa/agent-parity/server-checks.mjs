@@ -744,6 +744,19 @@ export const serverChecks = {
     const content = await make('Content', s.id)
     const r2b = await admit(s, { input: 'Synthetic owner chat about agents' }); await finish(r2b.run_id, { channel: content.id, subject: 'Hermes' })
     assert.equal(await filed('wizard_parity'), null, 'a channel that does not match the status subject is refused')
+    // Issue 520 review: a migration-filed chat (old Space filings, often the agent's own) teaches its channel nothing,
+    // so its Hermes subject never opens Content to the next Hermes chat.
+    const storePath = [join(s.root, 'os', 'channels.sqlite')].find(existsSync)
+    assert.ok(storePath, 'the channel store is on disk')
+    assert.equal((await s.request('/api/sessions', post({ id: 'wizard_parity_migrated', source: 'wizard-mobile' }))).status, 201)
+    const mdb = new DatabaseSync(storePath)
+    mdb.prepare("INSERT INTO membership(agent,session_id,channel_id,filed_at,filed_by) VALUES(?,?,?,?,'migration')").run(s.id, 'wizard_parity_migrated', content.id, new Date().toISOString())
+    mdb.close()
+    const rm = await s.request('/v1/runs', post({ session_id: 'wizard_parity_migrated', input: 'Synthetic migrated chat' })); assert.equal(rm.status, 202)
+    await finish((await rm.json()).run_id, { subject: 'Hermes' })
+    assert.equal(await filed('wizard_parity_migrated'), content.id, 'the migrated chat stays where it was')
+    const r2c = await admit(s, { input: 'Synthetic owner chat about agents again' }); await finish(r2c.run_id, { channel: content.id, subject: 'Hermes' })
+    assert.equal(await filed('wizard_parity'), null, 'a subject seen only on a migration-filed chat does not open the channel')
     const r3 = await admit(s, { input: 'Synthetic owner chat once more' }); await finish(r3.run_id, { channel: own.id, subject: 'Synthetic', title: 'Synthetic post name' })
     assert.equal(await filed('wizard_parity'), own.id, 'status-line channel files an unfiled chat')
     // Issue 520: the owner takes it out; the next status repeating the channel leaves it out.

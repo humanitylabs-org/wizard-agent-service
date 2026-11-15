@@ -52,6 +52,11 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     CREATE TABLE IF NOT EXISTS owner_unfiled(agent TEXT NOT NULL, session_id TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(agent, session_id));
     CREATE TABLE IF NOT EXISTS channel_subjects(channel_id TEXT NOT NULL, subject TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(channel_id, subject));`)
   const q = sql => db.prepare(sql)
+  // Issue 520 follow-up: the first build also learned subjects from migration-filed chats. Drop what it learned once;
+  // owner-filed chats teach their subjects again on their next status line.
+  if (!db.prepare("SELECT 1 AS y FROM meta WHERE key='subjects_owner_only'").get()) {
+    db.exec("DELETE FROM channel_subjects; INSERT INTO meta(key,value) VALUES('subjects_owner_only','1') ON CONFLICT(key) DO NOTHING")
+  }
   const st = {
     meta: q('SELECT value FROM meta WHERE key=?'), setMeta: q('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value'),
     channel: q('SELECT * FROM channels WHERE id=?'),

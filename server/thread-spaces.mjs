@@ -46,7 +46,9 @@ export function createSpaceFiling(path, channels = null, { agentFiling = false, 
   const learnFrom = (agent, thread, subject) => {
     try {
       const row = channels.memberOf?.(agent, thread)
-      if (!row || (row.filed_by !== 'owner' && row.filed_by !== 'migration')) return
+      // Owner-filed only: migrated rows came from old Space filings, many made by the agent, so they would teach a
+      // channel the very misfiles this guard exists to stop (Hermes chats in WizardOS Launch).
+      if (!row || row.filed_by !== 'owner') return
       const key = `${row.channel_id}\u0000${subject}`
       if (learned.has(key)) return
       if (learned.size > 5000) learned.clear()
@@ -66,7 +68,7 @@ export function createSpaceFiling(path, channels = null, { agentFiling = false, 
       if (phase3) {
         if (typeof thread !== 'string' || !THREAD_ID.test(thread)) return false
         const subject = subjectKey(status?.subject || '')
-        // Learn what belongs in a channel from the subjects of chats the owner (or the migration) put there.
+        // Learn what belongs in a channel from the subjects of chats the owner put there.
         if (subject) learnFrom(agent, thread, subject)
         const id = normalizeSpaceId(status?.channel) || normalizeSpaceId(status?.space)
         if (!id) return false
