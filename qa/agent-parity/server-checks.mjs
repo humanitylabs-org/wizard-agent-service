@@ -52,7 +52,74 @@ const finishedRunLeavesWorking = async (s, fresh = true) => {
 }
 const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/g)].flatMap(match => JSON.parse(match[1]).items || [])
 
+// Issue 527: the Daily channel's fake clock (the scene's dailyNow and schedulerNow read it).
+export const dailyClock = { at: null }
 export const serverChecks = {
+  // Issue 527 (Daily channel, with the channel store): one pinned channel per agent holding one real thread per day,
+  // through each runtime's real Service routes and scheduler.
+  'chats-daily-channel': async s => {
+    const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const channels = async () => (await (await s.raw('/wizard/v1/channels')).json()).channels
+    try {
+      let daily = (await channels()).find(c => c.kind === 'daily')
+      assert.ok(daily && daily.agent === 'hermes' && daily.pinned && daily.pinOrder === 0 && daily.dayStartsAt === '05:00', 'the main agent gets one Daily, pinned on top')
+      assert.equal((await channels()).filter(c => c.kind === 'daily').length, 1, 'the seed runs once')
+      if (s.id !== 'hermes') {
+        const made = await (await s.raw('/wizard/v1/channels', json('POST', { name: 'Synthetic daily', agent: s.id }))).json()
+        const patched = await s.raw('/wizard/v1/channels', json('PATCH', { id: made.id, kind: 'daily' }))
+        assert.equal(patched.status, 200, 'PATCH kind turns a channel into this agent\u2019s daily channel')
+        daily = await patched.json()
+        assert.equal((await channels()).filter(c => c.kind === 'daily').length, 2, 'one daily channel per agent')
+      }
+      const today = () => s.raw(`/wizard/v1/channels/${daily.id}/today`, json('POST', {}))
+      dailyClock.at = Date.parse('2026-11-15T04:59:00Z')
+      const raced = await Promise.all([today(), today()])
+      assert.deepEqual(raced.map(r => r.status).sort(), [200, 201], 'one of two racing first posts creates the thread')
+      const [first, second] = await Promise.all(raced.map(r => r.json()))
+      assert.equal(first.sessionId, second.sessionId, 'two racing first posts end up in the same thread')
+      assert.equal(first.day, '2026-11-14', 'a post at 04:59 lands in yesterday\u2019s thread')
+      assert.ok(s.sessions.has(first.sessionId), 'the day thread is a real session of this agent')
+      const filed = await (await s.raw(`/wizard/v1/channels/membership?sessionId=${first.sessionId}&agent=${s.id}`)).json()
+      assert.equal(filed.channel, daily.id, 'the day thread is filed into Daily')
+      dailyClock.at = Date.parse('2026-11-15T05:00:00Z')
+      assert.equal((await (await s.raw(`/wizard/v1/channels/${daily.id}/today`)).json()).sessionId, null, 'today is null until something is posted after the boundary')
+      const started = await today(); assert.equal(started.status, 201)
+      const now = await started.json()
+      assert.equal(now.day, '2026-11-15', 'a post at 05:00 starts today\u2019s thread'); assert.notEqual(now.sessionId, first.sessionId)
+      // A thread:'daily' job and an origin-less reminder post into today's thread.
+      const job = async extra => { const r = await s.raw('/wizard/v1/schedules', post({ name: 'Parity · Synthetic daily', prompt: 'Synthetic brief.', agent: s.id, enabled: false, when: { every: 3600 }, ...extra })); assert.equal(r.status, 201, await r.clone().text()); return r.json() }
+      const fire = async created => {
+        const r = await s.raw(`/wizard/v1/schedules/${created.id}/run`, post({})); assert.equal(r.status, 202)
+        const occurrence = await r.json(); await s.server.scheduler.tick(false)
+        const latest = s.server.scheduler.latest(created.id); assert.equal(latest.admitted, 1, latest.error || 'admitted')
+        return occurrence.thread ?? occurrence.session_id
+      }
+      assert.equal(await fire(await job({ kind: 'run', thread: 'daily' })), now.sessionId, 'a thread:daily job posts into today\u2019s Daily thread')
+      assert.equal(await fire(await job({ kind: 'remind' })), now.sessionId, 'an origin-less reminder goes to today\u2019s Daily thread')
+      // /days pages every day thread, newest first, with its opener and count.
+      // (The fixture's POST /api/sessions resets an existing session, so the day's messages are added after the jobs.)
+      s.sessions.get(now.sessionId).messages.push({ role: 'assistant', timestamp: Date.now() / 1000 - 2, content: 'Signal: synthetic daily update' })
+      s.sessions.get(first.sessionId).messages.push({ role: 'user', timestamp: Date.now() / 1000 - 9, content: 'Synthetic owner evening note' }, { role: 'assistant', timestamp: Date.now() / 1000 - 8, content: 'Synthetic reply' })
+      const days = async q => (await (await s.raw(`/wizard/v1/channels/${daily.id}/days${q}`)).json())
+      const page1 = await days('?limit=1')
+      assert.equal(page1.today, now.sessionId)
+      assert.deepEqual(page1.days.map(d => [d.day, d.sessionId]), [['2026-11-15', now.sessionId]])
+      assert.equal(page1.days[0].opener, 'Signal: synthetic daily update', 'the opener is the day\u2019s first shown message')
+      assert.ok(page1.days[0].count >= 1 && page1.next === '2026-11-15')
+      const page2 = await days(`?cursor=${page1.next}`)
+      assert.deepEqual(page2.days.map(d => [d.day, d.opener, d.count]), [['2026-11-14', 'Synthetic owner evening note', 2]])
+      assert.equal(page2.next, null)
+      assert.equal((await s.raw(`/wizard/v1/channels/${daily.id}/days?cursor=bad`)).status, 400)
+      // A run in today's thread carries yesterday's thread.
+      const run = await s.request('/v1/runs', post({ session_id: now.sessionId, input: 'Synthetic owner daily send' })); assert.equal(run.status, 202, await run.clone().text())
+      assert.ok(String(sent(s).instructions).includes(`The previous Daily thread is ${first.sessionId} (2026-11-14)`), 'the carry-over run note names yesterday\u2019s thread')
+      // An owner's archive sticks: no new day thread in an archived Daily.
+      assert.equal((await s.raw('/wizard/v1/channels', json('PATCH', { id: daily.id, archived: true }))).status, 200)
+      assert.equal((await today()).status, 409, 'an archived Daily starts no thread')
+      assert.equal((await channels()).filter(c => c.kind === 'daily' && !c.archived).length, s.id === 'hermes' ? 0 : 1, 'archiving never re-seeds')
+      assert.equal((await s.raw('/wizard/v1/channels/alerts/days')).status, 404, 'only a daily channel has days')
+    } finally { dailyClock.at = null }
+  },
   // Issue 379: Hermes 0.22.7 stamps every /v1/runs admission's user row internal_notification, the owner's own
   // messages included. Every kind restores the owner's turn from its own queue (routed kinds behind
   // WIZARD_ROUTED_OWNER_TURNS); a machine wake with the same kind stays hidden; raw upstream rows are untouched.

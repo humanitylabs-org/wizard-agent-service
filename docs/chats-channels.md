@@ -119,3 +119,42 @@ each device only (wizard-ux issue 1316). Issue: humanitylabs-org/wizard-agent-se
   field, is a 400.
 - Same owner surface, access check, cross-site rule and `no-store` as the other channel routes. The shell writes at
   most once per two seconds and reads it with the channel list (every 30 seconds and when a window comes back).
+
+## Daily channel (issue 527)
+
+Part of the Channels switch (`wizard/chat-channels`), like the parts above; `WIZARD_CHANNEL_DAILY=1` forces it on and
+`0` off (option `channelDaily`). Off: the routes below answer 404, nothing is seeded and `thread: 'daily'` is just a
+thread id, as before. Issue: humanitylabs-org/wizard-agent-service#527 (shell half: humanitylabs-org/wizard-ux#1469).
+
+One pinned channel per agent that holds **one real thread per day**, so the shell can show it as one continuous chat
+while each day stays its own Hermes session (a never-ending session re-sends its whole history every turn and gets
+compressed). No Hermes change.
+
+- **`kind: 'daily'`.** One Daily channel is seeded for the main agent once, pinned at rank 0 above Alerts. It can be
+  renamed or archived like Alerts and is never re-created after the owner archives or deletes it (meta
+  `daily_seeded`). Channel rows of this kind carry `dayStartsAt: "05:00"`. `PATCH /wizard/v1/channels {id,
+  kind:'daily'|null}` turns a channel into its agent's daily channel (an earlier one becomes a plain channel, its day
+  threads kept) or back; Alerts can't be turned into Daily (409 `alerts_channel`).
+- **Day boundary.** 05:00 in the owner's time zone (Settings clock, as the scheduler uses): a post at 04:59 belongs to
+  yesterday's thread, one at 05:00 starts today's.
+- **`GET /wizard/v1/channels/<id>/today`** → `{channel, agent, day, sessionId|null}`; null until something is posted
+  after today's boundary.
+- **`POST /wizard/v1/channels/<id>/today`** (JSON, empty body) creates today's thread lazily and answers `{channel,
+  agent, day, sessionId, created}` (201 when this call created it, else 200). Racing first posts get the same thread
+  (`daily_days` row per channel and day, one transaction). The thread is a real session of the channel's agent, titled
+  `<channel name> · <Sun 15 Nov>`, filed into Daily (`filed_by=agent`). The shell calls it before its first send of
+  the day and then sends into `sessionId` as usual. An archived Daily is 409.
+- **`GET /wizard/v1/channels/<id>/days[?cursor=<YYYY-MM-DD>&limit=<1-60>]`** → `{channel, agent, dayStartsAt, today,
+  days: [{day, sessionId, title, opener, count, lastAt}], next}`, newest first (14 per page). `next` is the cursor of
+  the next page (older days) or null. `opener` is the day's first shown message (normally the day's Signal post; the
+  scheduler's own brief is skipped) cut to 200 characters; `count` is the thread's message count.
+- **Scheduler.** `POST/PATCH /wizard/v1/schedules` accept `thread: 'daily'`: each run posts into today's Daily thread
+  of the job's agent (creating it if needed), so a morning brief becomes the day's first message. A reminder
+  (`kind: remind`) with no origin thread, and a job whose own chat would be filed into the daily channel (`channel:
+  <daily id>`), go to today's Daily thread instead of Alerts. With no open daily channel a `thread: 'daily'` job gets
+  its own chat, as a job with no thread does. A watcher or a return can't name `daily`.
+- **Carry-over run note.** A run in a Daily thread is told the day, the previous day's thread id and that thread's
+  still-open tracker items (`needs_you` or `running`), so the agent continues yesterday's plan and can look it up.
+
+Store: table `daily_days(channel_id, day, agent, session_id, created_at)` in `channels.sqlite`; deleting a day thread
+through the Service drops its row, deleting the channel drops all of them.

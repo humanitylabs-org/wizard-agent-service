@@ -20,6 +20,10 @@ export const CHANNELS_PER_AGENT = 200
 export const PROJECTION_SPACES = 50
 export const PROJECTION_THREADS = 500
 export const ALERTS_ID = 'alerts'
+// Daily channel (issue 527): one per agent, one real thread per day (daily-channel.mjs).
+export const DAILY_ID = 'daily'
+export const DAILY_DAY_STARTS_AT = '05:00'
+const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/
 export const CHANNEL_SUBJECTS_MAX = 12
 const FILED_BY = new Set(['owner', 'agent', 'migration'])
 // Read watermarks (issue 471): the shell's keys are `general`, `general|<agent>` and `<agent>|<channel id>`.
@@ -50,7 +54,9 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     CREATE TABLE IF NOT EXISTS read_marks(key TEXT PRIMARY KEY, at INTEGER NOT NULL, updated_at TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS read_marks_at ON read_marks(at);
     CREATE TABLE IF NOT EXISTS owner_unfiled(agent TEXT NOT NULL, session_id TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(agent, session_id));
-    CREATE TABLE IF NOT EXISTS channel_subjects(channel_id TEXT NOT NULL, subject TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(channel_id, subject));`)
+    CREATE TABLE IF NOT EXISTS channel_subjects(channel_id TEXT NOT NULL, subject TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(channel_id, subject));
+    CREATE TABLE IF NOT EXISTS daily_days(channel_id TEXT NOT NULL, day TEXT NOT NULL, agent TEXT NOT NULL, session_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(channel_id, day));
+    CREATE INDEX IF NOT EXISTS daily_days_session ON daily_days(agent, session_id);`)
   const q = sql => db.prepare(sql)
   // Issue 520 follow-up: the first build also learned subjects from migration-filed chats. Drop what it learned once;
   // owner-filed chats teach their subjects again on their next status line.
@@ -93,11 +99,20 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
       ON CONFLICT(key) DO UPDATE SET at=excluded.at, updated_at=excluded.updated_at WHERE excluded.at > read_marks.at`),
     readCount: q('SELECT COUNT(*) AS n FROM read_marks'),
     readPrune: q('DELETE FROM read_marks WHERE key IN (SELECT key FROM read_marks ORDER BY at ASC, key LIMIT ?)'),
+    // Daily channel (issue 527).
+    setKind: q('UPDATE channels SET kind=? WHERE id=?'),
+    dailyOf: q("SELECT * FROM channels WHERE agent=? AND kind='daily' ORDER BY ord, created_at, id"),
+    day: q('SELECT * FROM daily_days WHERE channel_id=? AND day=?'),
+    addDay: q('INSERT OR IGNORE INTO daily_days(channel_id,day,agent,session_id,created_at) VALUES(?,?,?,?,?)'),
+    daysBefore: q('SELECT day, session_id FROM daily_days WHERE channel_id=? AND day<? ORDER BY day DESC LIMIT ?'),
+    dayOfSession: q('SELECT * FROM daily_days WHERE agent=? AND session_id=? ORDER BY day DESC LIMIT 1'),
+    removeDays: q('DELETE FROM daily_days WHERE channel_id=?'),
+    forgetDay: q('DELETE FROM daily_days WHERE agent=? AND session_id=?'),
   }
   const tx = fn => { db.exec('BEGIN IMMEDIATE'); try { const v = fn(); db.exec('COMMIT'); return v } catch (e) { try { db.exec('ROLLBACK') } catch {} throw e } }
   const view = r => ({ id: r.id, agent: r.agent, name: r.name, order: r.ord, createdAt: r.created_at, archived: !!r.archived,
     ...(r.archived ? { archivedAt: r.archived } : {}), pinned: r.pinned !== null && r.pinned !== undefined, ...(r.pinned !== null && r.pinned !== undefined ? { pinOrder: r.pinned } : {}),
-    ...(r.kind ? { kind: r.kind } : {}), ...(r.count !== undefined ? { count: Number(r.count) } : {}) })
+    ...(r.kind ? { kind: r.kind } : {}), ...(r.kind === 'daily' ? { dayStartsAt: DAILY_DAY_STARTS_AT } : {}), ...(r.count !== undefined ? { count: Number(r.count) } : {}) })
   const mustChannel = id => { const r = typeof id === 'string' && CHANNEL_ID.test(id) ? st.channel.get(id) : null; return r || fail(404, 'channel_not_found') }
   const meta = key => st.meta.get(key)?.value ?? null
   const sort = () => meta('sort') === 'za' ? 'za' : 'az'
@@ -142,6 +157,17 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
           if (change.pinned && r.pinned === null) st.pin.run(st.maxPin.get(r.agent).n + 1, id)
           if (!change.pinned) st.pin.run(null, id)
         }
+        // Daily channel (issue 527): kind 'daily' makes this the agent's one daily channel (an earlier one becomes a
+        // plain channel, its day threads kept); null turns it back. Alerts stays Alerts.
+        if (Object.hasOwn(change, 'kind')) {
+          if (change.kind !== 'daily' && change.kind !== null) fail(400, 'invalid_kind')
+          if (r.kind === 'alerts') fail(409, 'alerts_channel')
+          if (change.kind === 'daily' && r.kind !== 'daily') {
+            for (const other of st.dailyOf.all(r.agent)) st.setKind.run(null, other.id)
+            st.setKind.run('daily', id)
+          }
+          if (change.kind === null && r.kind === 'daily') st.setKind.run(null, id)
+        }
         return store.get(id)
       })
     },
@@ -159,7 +185,7 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     },
     setSort(value) { if (value !== 'az' && value !== 'za') fail(400, 'invalid_sort'); st.setMeta.run('sort', value); return sort() },
     // Owner action only (an old shell's "remove Space", spaces_delete). Never deletes threads.
-    remove(id) { return tx(() => { mustChannel(id); st.removeMembers.run(id); st.removeSubjects.run(id); st.remove.run(id); return { deleted: id } }) },
+    remove(id) { return tx(() => { mustChannel(id); st.removeMembers.run(id); st.removeSubjects.run(id); st.removeDays.run(id); st.remove.run(id); return { deleted: id } }) },
     // The membership row ({channel_id, filed_by}) or null.
     memberOf(agent, sessionId) { return validThreadId(sessionId) ? st.member.get(agentOf(agent), sessionId) || null : null },
     ownerUnfiled(agent, sessionId) { return validThreadId(sessionId) ? Boolean(st.tombstoned.get(agentOf(agent), sessionId)) : false },
@@ -209,7 +235,7 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
       })
     },
     // A deleted thread leaves its channel.
-    forget(agent, sessionId) { if (validThreadId(sessionId)) { st.unfile.run(agentOf(agent), sessionId); st.untombstone.run(agentOf(agent), sessionId) } },
+    forget(agent, sessionId) { if (validThreadId(sessionId)) { st.unfile.run(agentOf(agent), sessionId); st.untombstone.run(agentOf(agent), sessionId); st.forgetDay.run(agentOf(agent), sessionId) } },
     // exists(id) -> true | false | null (unknown: kept). Returns how many memberships were dropped.
     prune(agent, exists) {
       const owner = agentOf(agent), gone = st.agentMembers.all(owner).map(r => r.session_id).filter(id => exists(id) === false)
@@ -254,6 +280,55 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
         return id
       })
     },
+    // Daily channel (issue 527): seeded once for the main agent, pinned at rank 0 above Alerts. Like Alerts it is
+    // renamable and archivable and never re-created once seeded, so an owner's archive or delete sticks.
+    seedDaily() {
+      if (meta('daily_seeded')) return null
+      return tx(() => {
+        if (meta('daily_seeded')) return null
+        const existing = st.dailyOf.all('hermes')[0]
+        if (existing) { st.setMeta.run('daily_seeded', existing.id); return null }
+        const id = freeId(DAILY_ID)
+        const minOrd = st.all.all().filter(r => r.agent === 'hermes').reduce((m, r) => Math.min(m, r.ord), 0)
+        for (const r of st.all.all().filter(r => r.agent === 'hermes' && r.pinned !== null)) st.pin.run(r.pinned + 1, r.id)
+        insertChannel({ id, agent: 'hermes', name: 'Daily', ord: minOrd - 1, createdAt: now(), pinned: 0, kind: 'daily' })
+        st.setMeta.run('daily_seeded', id)
+        return id
+      })
+    },
+    // The agent's open daily channel (the raw row), or null.
+    dailyChannel(agent) { try { return st.dailyOf.all(agentOf(agent)).find(r => !r.archived) || null } catch { return null } },
+    // A daily channel by id (archived ones included, so their days stay readable), or null.
+    dailyById(id) { const r = typeof id === 'string' && CHANNEL_ID.test(id) ? st.channel.get(id) : null; return r?.kind === 'daily' ? r : null },
+    dayThread(channelId, day) { return DAY_KEY.test(day) ? st.day.get(channelId, day)?.session_id || null : null },
+    // Today's thread, created once: concurrent first posts get the same id. The new thread is filed into the
+    // channel by the agent (never over an owner's own filing or unfile). -> {sessionId, day, created}
+    claimDay(channelId, day, mint) {
+      if (!DAY_KEY.test(day)) fail(400, 'invalid_day')
+      return tx(() => {
+        const r = st.channel.get(channelId)
+        if (r?.kind !== 'daily') fail(404, 'channel_not_found')
+        const had = st.day.get(channelId, day)
+        if (had) return { sessionId: had.session_id, day, created: false }
+        const sessionId = mint()
+        if (!validThreadId(sessionId)) fail(500, 'invalid_session')
+        st.addDay.run(channelId, day, r.agent, sessionId, now())
+        if (!st.tombstoned.get(r.agent, sessionId)) st.fileNew.run(r.agent, sessionId, channelId, now(), 'agent')
+        return { sessionId, day, created: true }
+      })
+    },
+    // Day threads newest first, `limit` of them before day `before` (exclusive; null: from the newest).
+    days(channelId, { before = null, limit = 14 } = {}) {
+      return st.daysBefore.all(channelId, before && DAY_KEY.test(before) ? before : '9999-99-99', limit).map(r => ({ day: r.day, sessionId: r.session_id }))
+    },
+    // {channelId, day} when this thread is a daily channel's day thread; plus the day before it, when there is one.
+    dayOfSession(agent, sessionId) {
+      if (!validThreadId(sessionId)) return null
+      const r = st.dayOfSession.get(agentOf(agent), sessionId)
+      if (!r || st.channel.get(r.channel_id)?.kind !== 'daily') return null
+      const prev = st.daysBefore.all(r.channel_id, r.day, 1)[0]
+      return { channelId: r.channel_id, day: r.day, ...(prev ? { previous: { day: prev.day, sessionId: prev.session_id } } : {}) }
+    },
     // What older shells read as `spaces` (read-only). Archived channels are left out; each keeps its
     // newest-filed 500 threads so the projection always passes the shell's Space validation.
     spacesProjection() {
@@ -289,7 +364,7 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
 // {order:[ids]} | {pinOrder:[ids]} | {sort:'az'|'za'}) and /wizard/v1/channels/membership (GET ?channel= |
 // ?sessionId=&agent=, PUT {sessionId, channelId|null, agent?}) and, with the read sync on, /wizard/v1/channels/read
 // (membership === 'read'). Unknown keys are a 400, like ui-preferences.
-export function channelRequest(store, method, membership, params, body) {
+export function channelRequest(store, method, membership, params, body, options = {}) {
   const only = (...keys) => { if (Object.keys(body).some(k => !keys.includes(k))) fail(400, 'invalid_request') }
   // /wizard/v1/channels/read (issue 471): GET -> {schema, at}; PUT {at:{key: ms}} moves marks forward only.
   if (membership === 'read') {
@@ -319,7 +394,7 @@ export function channelRequest(store, method, membership, params, body) {
   if (keys.length === 1 && keys[0] === 'sort') { store.setSort(body.sort); return store.list() }
   if (keys.length === 1 && keys[0] === 'order') return store.reorder(body.order, 'order')
   if (keys.length === 1 && keys[0] === 'pinOrder') return store.reorder(body.pinOrder, 'pin')
-  only('id', 'name', 'archived', 'pinned')
+  only('id', 'name', 'archived', 'pinned', ...(options.daily ? ['kind'] : []))
   if (keys.length < 2) fail(400, 'invalid_request')
   const { id, ...change } = body
   return store.update(id, change)

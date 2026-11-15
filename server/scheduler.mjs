@@ -224,7 +224,9 @@ const opening = (db, job, deliver) => ({ ...(job.channel ? { channel: job.channe
   ...(deliver === 'notification' || db.prepare("SELECT 1 FROM schedule_occurrences WHERE job_id=? AND COALESCE(json_extract(data,'$.deliver'),'')<>'notification' LIMIT 1").get(job.id) ? {} : { opensThread: true }) })
 export class Scheduler {
   get channels() { try { return this.channelsOn() === true } catch { return false } }
-  constructor({ statePath, deliver, lookup = null, onWatchResult = null, notifier = null, agentId = agent => agent, channels = false, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
+  // Daily channel (issue 527): `{on(), thread(agent, instant) -> {thread, title, channel} | null, isDaily(agent, channel)}`.
+  get dailyOn() { try { return this.daily?.on?.() === true } catch { return false } }
+  constructor({ statePath, deliver, lookup = null, onWatchResult = null, notifier = null, agentId = agent => agent, channels = false, daily = null, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
     if (!statePath) throw fail('scheduler state path required', 503)
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
     this.db = new DatabaseSync(statePath)
@@ -254,6 +256,7 @@ export class Scheduler {
     // Chats channels phase 3 (issue 441): jobs may name the channel their new chats are filed into. A function is
     // read on every use (the owner's Channels switch, wizard-ux issue 1358).
     this.channelsOn = typeof channels === 'function' ? channels : () => channels === true
+    this.daily = daily
     this.now = now
     this.timezone = timezone
     this.hermesHome = hermesHome
@@ -424,14 +427,14 @@ export class Scheduler {
       // Boomerang: hand an existing thread (or one message in it) back to the owner. Never a prompt or a run,
       // so it has no skill/model, an optional short note, and must name the thread it returns.
       if (!job.when.once) throw fail('a return happens once (use once or at)')
-      if (!job.thread || !id(job.thread)) throw fail('a return needs its thread')
+      if (!job.thread || !id(job.thread) || (job.thread === 'daily' && this.dailyOn)) throw fail('a return needs its thread')
       if (job.skill || (job.model !== undefined && job.model !== null)) throw fail('a return runs nothing (no skill or model)')
       job.prompt = typeof job.prompt === 'string' ? job.prompt.trim().slice(0, 500) : ''
       job.skill = ''
       delete job.model
       job.target = normalizeTarget(job.target)
     } else if (job.kind === 'watch') {
-      if (!job.thread || !id(job.thread)) throw fail('a watcher needs its thread')
+      if (!job.thread || !id(job.thread) || (job.thread === 'daily' && this.dailyOn)) throw fail('a watcher needs its thread')
       if (job.when.once) throw fail('a watcher must be repeating until its one visible result')
       if (Object.hasOwn(input, 'target')) throw fail('target is only for kind return')
       delete job.target
@@ -522,10 +525,24 @@ export class Scheduler {
     if (!row || !JSON.parse(row.data).enabled) return false
     return !this.db.prepare('SELECT 1 FROM schedule_occurrences WHERE job_id=? AND admitted=1 AND finished_at IS NULL LIMIT 1').get(jobId)
   }
+  // Daily channel (issue 527): does this occurrence post into today's Daily thread? A `thread: 'daily'` job does; so do
+  // a reminder with no origin thread of its own and a job whose own chat would be filed into the daily channel.
+  dailyTarget(job, instant) {
+    if (!this.daily || !this.dailyOn || job.kind === 'watch' || job.kind === 'return') return null
+    const opensOwn = !job.thread || (job.createThread && /^wizard_schedule_/.test(job.thread) && !job.threadTitle)
+    let wants = job.thread === 'daily' || (job.kind === 'remind' && opensOwn)
+    if (!wants && opensOwn && job.channel) { try { wants = this.daily.isDaily?.(this.agentId(job.agent), job.channel) === true } catch { wants = false } }
+    if (!wants) return null
+    try { return this.daily.thread(this.agentId(job.agent), instant) || null } catch { return null }
+  }
   reserve(job, instant, manual = false) {
+    const daily = this.dailyTarget(job, instant)
+    // `thread: 'daily'` with no open daily channel: the job's own chat, as a job without a thread would get.
+    if (!daily && job.thread === 'daily' && this.dailyOn) { job = { ...job, thread: `wizard_schedule_${job.id}`, createThread: true } }
     // This identity is persisted before any external session/run call. A crashed create
     // retries the same session id; a crashed admission retries the same frozen body/key.
-    if (!job.thread) { job.thread = `wizard_schedule_${randomUUID()}`; job.createThread = true; this.save(job) }
+    if (!daily && !job.thread) { job.thread = `wizard_schedule_${randomUUID()}`; job.createThread = true; this.save(job) }
+    if (daily) job = { ...job, thread: daily.thread, createThread: true, threadTitle: daily.title, ...(job.agentMessage ? { agentMessage: 'scheduled' } : {}), channel: null }
     const key = `schedule:${job.id}:${iso(instant)}`
     // Frozen per occurrence: an empty or stopped notifications slot sends this run to the thread instead.
     let deliver = 'thread'
@@ -533,7 +550,7 @@ export class Scheduler {
       try { if (this.notifier?.available(this.agentId(job.agent))) deliver = 'notification' } catch { /* fall back to the thread */ }
     }
     const occurrence = { key, jobId: job.id, scheduledAt: iso(instant), agent: job.agent, thread: job.thread,
-      createThread: Boolean(job.createThread), ...(this.channels && job.createThread ? opening(this.db, job, deliver) : {}), title: job.threadTitle || (job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`),
+      createThread: Boolean(job.createThread), ...(daily ? { daily: daily.channel } : this.channels && job.createThread ? opening(this.db, job, deliver) : {}), title: job.threadTitle || (job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`),
       kind: job.kind ?? 'run', report: job.agentMessage ? 'message' : reportKind(job), window: job.window ?? null, ...(manual ? { manual: true } : {}), ...(deliver === 'notification' ? { deliver } : job.deliver === 'notification' ? { fallback: true } : {}),
       ...(job.kind === 'return' ? { target: job.target ?? { message: null, excerpt: '' }, note: job.prompt || '' }
         : { body: { session_id: job.thread, input: scheduleInput(job, deliver), ...(job.model ? { model: job.model } : {}) } }) }
