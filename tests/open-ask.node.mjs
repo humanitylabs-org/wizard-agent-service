@@ -118,7 +118,56 @@ test('done and unmarked progress never erase a live ask; a new ask replaces it',
   for (const status of [null, { state: 'done', ask: 'Finished' }]) assert.deepEqual(solve([reply(qr), reply(status, 30)]).attention, qr)
   const newer = { state: 'needs_you', ask: 'Choose a layout' }
   assert.deepEqual(solve([reply(qr), reply(newer, 30)]).attention, newer)
-  for (const state of ['done', 'fyi']) assert.equal(solve([reply(qr), reply({ state, ask: 'Finished' }, 30)], '').attention.state, state)
+  assert.equal(solve([reply(qr), reply({ state: 'done', ask: 'Finished' }, 30)], '').attention.state, 'done')
+  // An fyi never cancels an earlier ask (the status contract), with or without background (issue 525).
+  assert.deepEqual(solve([reply(qr), reply({ state: 'fyi', ask: 'Finished' }, 30)], '').attention, qr)
+})
+
+// Issue 525: thread wizard_1794735180110_9d77c93bd0e5. A check ask lost from Ready by a later fyi or an
+// owner message on another topic, while the item tracker still listed the ask's item as needs_you.
+const musicItem = state => ({ id: 'music-back-search-bug', title: 'Music Back on search', state })
+const searchItem = state => ({ id: 'search-back-bug', title: 'Search Back button', state })
+const musicCheck = { state: 'check', ask: 'Back on Music search results should now clear the search and keep Music open. Try it on your phone.', items: [musicItem('needs_you')] }
+const searchFyi = (...items) => ({ state: 'fyi', ask: "Search's Back button still leaves the app. Filed it as a bug.", items })
+test('issue 525: check then fyi with no owner message keeps the check ask', () => {
+  for (const later of [{ state: 'fyi', ask: 'Filed the Search bug' }, searchFyi(searchItem('running')), searchFyi(musicItem('needs_you'), searchItem('running'))]) {
+    const decision = resolveThreadSection({ replies: [reply(musicCheck, 20), reply(later, 30)], lastUserAt: 10 })
+    assert.equal(decision.section, 'Ready')
+    assert.deepEqual(decision.attention, musicCheck, JSON.stringify(later))
+  }
+})
+test('issue 525: owner message on another topic then fyi re-listing the item keeps the check ask', () => {
+  const replies = [reply(musicCheck, 20), reply(searchFyi(musicItem('needs_you'), searchItem('running')), 40)]
+  assert.deepEqual(resolveThreadSection({ replies, lastUserAt: 30 }).attention, musicCheck)
+  const row = projectOpenAskSession({ id: 'music', status: 'completed' }, { replies, lastUserAt: 30 })
+  assert.deepEqual(row.wizard_attention, musicCheck)
+  // Session truth only reads replies after the owner's last message: the re-listed item is the pending ask.
+  const only = resolveThreadSection({ replies: [reply(searchFyi(musicItem('needs_you'), searchItem('running')), 40)], lastUserAt: 30 })
+  assert.equal(only.section, 'Ready')
+  assert.equal(only.attention.state, 'needs_you')
+  assert.equal(only.attention.ask, 'Music Back on search')
+  assert.deepEqual(only.attention.items, [musicItem('needs_you')])
+})
+test('issue 525: an owner reply then a resolving done or a newer ask clears or replaces the check ask', () => {
+  const done = { state: 'done', ask: 'Music Back works now', items: [musicItem('done')] }
+  assert.deepEqual(resolveThreadSection({ replies: [reply(musicCheck, 20), reply(done, 40)], lastUserAt: 30 }).attention, done)
+  assert.deepEqual(resolveThreadSection({ replies: [reply(musicCheck, 20), reply(done, 40)], lastUserAt: 10 }).attention, done)
+  const plainDone = { state: 'done', ask: 'All fixed' }
+  assert.deepEqual(resolveThreadSection({ replies: [reply(musicCheck, 20), reply(plainDone, 40)], lastUserAt: 30 }).attention, plainDone)
+  const newer = { state: 'needs_you', ask: 'Pick the Search layout. Reply A or B' }
+  assert.deepEqual(resolveThreadSection({ replies: [reply(musicCheck, 20), reply(newer, 40)], lastUserAt: 30 }).attention, newer)
+  // The tracker marking the ask's item running (the owner said it still fails) also resolves it.
+  const running = searchFyi(musicItem('running'))
+  assert.deepEqual(resolveThreadSection({ replies: [reply(musicCheck, 20), reply(running, 40)], lastUserAt: 10 }).attention, running)
+  // An owner message answered an ask the later reply no longer lists: the old behaviour.
+  const silent = { state: 'fyi', ask: 'Search fix is on its way' }
+  assert.deepEqual(resolveThreadSection({ replies: [reply(musicCheck, 20), reply(silent, 40)], lastUserAt: 30 }).attention, silent)
+  assert.deepEqual(resolveThreadSection({ replies: [reply(qr, 20), reply(silent, 40)], lastUserAt: 30 }).attention, silent)
+})
+test('issue 525: check then done for a different item keeps the check ask', () => {
+  const other = { state: 'done', ask: 'Search Back is fixed', items: [searchItem('done')] }
+  assert.deepEqual(resolveThreadSection({ replies: [reply(musicCheck, 20), reply(other, 30)], lastUserAt: 10 }).attention, musicCheck)
+  assert.deepEqual(resolveThreadSection({ replies: [reply(musicCheck, 20), reply(other, 40)], lastUserAt: 30 }).attention.state, 'done', 'an owner message answered it and the reply does not re-list it')
 })
 test('future-tense guards cover will, once, when the helper, after the helper and soon', () => {
   for (const ask of ['It will arrive', 'Scan once ready', 'Try when the helper returns', 'Try after the helper returns', 'Try soon']) {
@@ -243,4 +292,26 @@ for (const [name, status, helper, expected] of [
     const slim = listRow(row)
     assert.equal(slim.background, expected.background)
   } finally { if (server.listening) await new Promise(r => server.close(r)); db.close(); rmSync(root, { recursive: true, force: true }) }
+})
+
+for (const kind of kinds) test(`issue 525: a later fyi keeps the pending check ask on the Ready line through ${kind} HTTP`, async () => {
+  const s = await scene(kind, {})
+  const now = Date.now() / 1000
+  const marked = (status, at) => ({ role: 'assistant', timestamp: at, content: `Reply\n[WIZARD_STATUS_V1]${JSON.stringify({ ...status, subject: 'Music' })}[/WIZARD_STATUS_V1]` })
+  const threads = {
+    wizard_525_plain: [{ role: 'user', content: 'Fix Music search Back', timestamp: now - 300 }, marked(musicCheck, now - 200), marked({ state: 'fyi', ask: 'Filed the Search bug' }, now - 100)],
+    wizard_525_owner: [{ role: 'user', content: 'Fix Music search Back', timestamp: now - 300 }, marked(musicCheck, now - 200),
+      { role: 'user', content: 'Is the search app back button shipped too?', timestamp: now - 150 }, marked(searchFyi(musicItem('needs_you'), searchItem('running')), now - 100)],
+  }
+  for (const [id, messages] of Object.entries(threads)) s.sessions.set(id, { id, source: 'wizard-mobile', title: 'Music search', created_at: now - 400, messages })
+  try {
+    const response = await s.request('/api/sessions?limit=100')
+    assert.equal(response.status, 200)
+    const rows = (await response.json()).data
+    const plain = rows.find(r => r.id === 'wizard_525_plain'), owner = rows.find(r => r.id === 'wizard_525_owner')
+    assert.equal(plain.wizard_attention?.state, 'check', `${kind} plain`)
+    assert.equal(plain.wizard_attention?.ask, musicCheck.ask)
+    assert.ok(['check', 'needs_you'].includes(owner.wizard_attention?.state), `${kind} owner: ${JSON.stringify(owner.wizard_attention)}`)
+    assert.ok(owner.wizard_attention.items.some(item => item.id === 'music-back-search-bug' && item.state === 'needs_you'))
+  } finally { await s.close() }
 })

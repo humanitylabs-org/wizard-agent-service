@@ -21,24 +21,75 @@ export const liveWorker = truth => truth?.heavyPending ? 'heavy'
 // 7 Nov 2026: Ready only when everything has stopped). The status and its error card stay.
 export const ENDED_WITH_ERROR = new Set(['failed', 'interrupted', 'cancelled', 'expired'])
 
+// Item ids a pending ask is about: its needs_you items, else every item it lists (none: no tracker).
+const askItemIds = ask => {
+  const items = Array.isArray(ask?.items) ? ask.items : []
+  const waiting = items.filter(item => item.state === 'needs_you')
+  return new Set((waiting.length ? waiting : items).map(item => item.id))
+}
+// What a later status says about a pending ask's items: 'open' when it lists one of them as
+// needs_you again, 'resolved' when it lists one of them in any other state, '' when it is silent.
+function itemVerdict(ask, status) {
+  const ids = askItemIds(ask)
+  if (!ids.size || !Array.isArray(status?.items)) return ''
+  const mine = status.items.filter(item => ids.has(item.id))
+  if (mine.some(item => item.state === 'needs_you')) return 'open'
+  return mine.length ? 'resolved' : ''
+}
+// A done reply answers the pending ask unless its own items show it is about a different item.
+const doneAnswers = (ask, status) => {
+  const verdict = itemVerdict(ask, status)
+  return verdict ? verdict === 'resolved' : !(askItemIds(ask).size && status.items?.length)
+}
+// An fyi/done reply whose item tracker still lists an item as needs_you keeps that owner action
+// on the thread's Ready line, so the line and the tracker strip agree (issue 525).
+function itemAsk(status) {
+  const item = Array.isArray(status?.items) ? status.items.find(entry => entry.state === 'needs_you') : null
+  if (!item) return null
+  const text = String(item.ask || item.title || '').trim()
+  const ask = text.length > 140 ? `${text.slice(0, 139).trimEnd()}…` : text
+  return ask ? { state: 'needs_you', ask, items: [item], ...(status.subject ? { subject: status.subject } : {}) } : null
+}
+
 // Replies are visible final assistant replies only, in arrival order (oldest first).
 // A timestamp must use the same epoch-seconds clock as lastUserAt. Keep unmarked
 // replies: they establish whether the owner has a newer unanswered message.
+// A pending needs_you/check ask stays until it is resolved (issue 525): a newer ask replaces it, a
+// done reply clears it unless its items show it is about another item, and the item tracker
+// clears it by marking the ask's item done/running. An fyi never clears it (the status contract).
+// An owner message answers earlier asks, except one whose item a later reply lists as needs_you again.
 export function resolveThreadSection({ replies = [], lastUserAt = 0, background = '', heavyPending = background === 'heavy' } = {}) {
-  let ask = null, attention = null, lastAssistantAt = 0
+  let ask = null, attention = null, lastAssistantAt = 0, carried = null
+  const userAt = replyEpoch(lastUserAt)
   for (const reply of replies) {
     const at = replyEpoch(reply.timestamp)
     lastAssistantAt = Math.max(lastAssistantAt, at)
-    if (at < replyEpoch(lastUserAt) || at === replyEpoch(lastUserAt) && !reply.afterUser) continue
+    const before = at < userAt || at === userAt && !reply.afterUser
     let status = reply.status ?? parseStatus(reply.content)
     if (!status) continue
+    if (before) {
+      // Track the ask the owner's message may have answered; it only returns if a later reply re-lists its item.
+      if (ASK_STATES.has(status.state)) carried = status
+      else if (!carried && itemAsk(status)) carried = itemAsk(status)
+      else if (carried && (itemVerdict(carried, status) === 'resolved' || status.state === 'done' && doneAnswers(carried, status))) carried = null
+      continue
+    }
+    if (carried) {
+      if (itemVerdict(carried, status) === 'open') ask = carried
+      carried = null
+    }
     if (background && ASK_STATES.has(status.state) && FUTURE_ASK.test(status.ask)) status = { ...status, state: 'fyi' }
     if (['check', 'done'].includes(status.state) && heavyPending) status = { ...status, state: 'fyi', ask: 'Background work is still running or waiting to report back.' }
     attention = status
-    if (ASK_STATES.has(status.state)) ask = status
-    else if (!background && ['done', 'fyi'].includes(status.state)) ask = null
+    if (ASK_STATES.has(status.state)) { ask = status; continue }
+    const verdict = ask ? itemVerdict(ask, status) : ''
+    if (verdict === 'resolved' || ask && !background && status.state === 'done' && doneAnswers(ask, status)) ask = null
+    if (!ask) {
+      const listed = itemAsk(status)
+      if (listed && !(background && FUTURE_ASK.test(listed.ask))) ask = listed
+    }
   }
-  if (replyEpoch(lastUserAt) > lastAssistantAt) return { section: 'Working', attention: null, background: '' }
+  if (userAt > lastAssistantAt) return { section: 'Working', attention: null, background: '' }
   if (ask) return { section: 'Ready', attention: ask, background: background || '' }
   return { section: background ? 'Working' : 'Ready', attention, background: '' }
 }
