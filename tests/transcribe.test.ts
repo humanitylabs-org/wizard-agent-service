@@ -1,8 +1,9 @@
-import { linkSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { linkSync, mkdtempSync, mkdirSync, readFileSync, readSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { TRANSCRIBE_TOOL, readAgentAudio, resolveAgentAudioPath, transcribeTool } from '../server/transcribe.mjs'
+import { TRANSCRIBE_TOOL, ffmpegMedia, readAgentAudio, resolveAgentAudioPath, transcribeTool } from '../server/transcribe.mjs'
 import { createAgentBridge } from '../server/agent-bridge.mjs'
 import { createAgentRegistry } from '../server/agents.mjs'
 import { speechText } from '../server/service.mjs'
@@ -26,8 +27,10 @@ const json = (r: any) => JSON.parse(text(r))
 type Seen = { url: string; form: FormData }
 function tool(reply: any, seen: Seen[] = [], extra: any = {}) {
   const fetchImpl = async (url: string, init: any) => { seen.push({ url, form: init.body }); return typeof reply === 'function' ? reply() : reply }
-  return transcribeTool({ homeOf: (id: string) => (id === 'helper' ? home : ''), sttOrigin: 'http://127.0.0.1:8864', fetchImpl: fetchImpl as any, ...extra })
+  return transcribeTool({ homeOf: (id: string) => (id === 'helper' ? home : ''), sttOrigin: 'http://127.0.0.1:8864', fetchImpl: fetchImpl as any, media: noMedia, ...extra })
 }
+// No ffprobe/ffmpeg: every file reads as of unknown length and is never cut.
+const noMedia = { probe: async () => null, cut: async () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }) } }
 const jsonReply = (value: any, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'content-type': 'application/json' } })
 
 describe('path confinement', () => {
@@ -105,7 +108,7 @@ describe('wizard_transcribe', () => {
     expect(down.isError).toBe(true); expect(text(down)).toContain('502')
     const junk = await tool(new Response('<html>', { status: 200 })).call(TRANSCRIBE_TOOL, { path: 'inbox/2026-11-11/note.wav' }, 'helper')
     expect(junk.isError).toBe(true)
-    const slow = transcribeTool({ homeOf: () => home, sttOrigin: 'http://x', timeoutMs: 20, fetchImpl: ((_u: string, init: any) => new Promise((_r, reject) => init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))))) as any })
+    const slow = transcribeTool({ homeOf: () => home, sttOrigin: 'http://x', timeoutMs: 20, media: noMedia, fetchImpl: ((_u: string, init: any) => new Promise((_r, reject) => init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' }))))) as any })
     const r = await slow.call(TRANSCRIBE_TOOL, { path: 'inbox/2026-11-11/note.wav' }, 'helper')
     expect(r.isError).toBe(true); expect(text(r)).toContain('too long')
     for (const r2 of [down, junk, r]) expect(text(r2)).not.toContain(root)
@@ -114,7 +117,7 @@ describe('wizard_transcribe', () => {
   it('refuses empty and oversize files, an unknown agent, and a busy transcriber', async () => {
     writeFileSync(join(home, 'empty.wav'), '')
     writeFileSync(join(home, 'big.wav'), Buffer.alloc(2048))
-    const t = tool(jsonReply({ text: 'x' }), [], { maxBytes: 1024 })
+    const t = tool(jsonReply({ text: 'x' }), [], { maxBytes: 1024, longMaxBytes: 1024 })
     expect(text(await t.call(TRANSCRIBE_TOOL, { path: 'empty.wav' }, 'helper'))).toContain('empty')
     expect(text(await t.call(TRANSCRIBE_TOOL, { path: 'big.wav' }, 'helper'))).toContain('limit')
     expect((await t.call(TRANSCRIBE_TOOL, { path: 'inbox/2026-11-11/note.wav' }, 'nobody')).isError).toBe(true)
@@ -122,9 +125,10 @@ describe('wizard_transcribe', () => {
     let release: any
     const gate = new Promise((r) => { release = r })
     const busy = tool(() => gate.then(() => jsonReply({ text: 'x' })))
-    const first = [1, 2].map(() => busy.call(TRANSCRIBE_TOOL, { path: 'inbox/2026-11-11/note.wav' }, 'helper'))
+    for (const n of ['one', 'two', 'three']) writeFileSync(join(home, `${n}.wav`), Buffer.from(`RIFF${n}`))
+    const first = ['one', 'two'].map((n) => busy.call(TRANSCRIBE_TOOL, { path: `${n}.wav` }, 'helper'))
     await new Promise((r) => setTimeout(r, 10))
-    expect(text(await busy.call(TRANSCRIBE_TOOL, { path: 'inbox/2026-11-11/note.wav' }, 'helper'))).toContain('busy')
+    expect(text(await busy.call(TRANSCRIBE_TOOL, { path: 'three.wav' }, 'helper'))).toContain('busy')
     release(); await Promise.all(first)
   })
 
@@ -195,7 +199,7 @@ describe('per agent kind', () => {
     for (const id of ids) place(id, 'take.wav', `bytes-of-${id}`)
     place(priv.id, 'take.wav', 'private-bytes')
     const seen: Seen[] = []
-    const t = transcribeTool({ homeOf: (id: string) => registry.stateHome(id), allowed: (id: string) => registry.read(id)?.privacy !== 'private', sttOrigin: 'http://x', fetchImpl: (async (_u: string, init: any) => { seen.push({ url: _u, form: init.body }); return jsonReply({ text: 'ok' }) }) as any })
+    const t = transcribeTool({ media: noMedia, homeOf: (id: string) => registry.stateHome(id), allowed: (id: string) => registry.read(id)?.privacy !== 'private', sttOrigin: 'http://x', fetchImpl: (async (_u: string, init: any) => { seen.push({ url: _u, form: init.body }); return jsonReply({ text: 'ok' }) }) as any })
     for (const id of ids) {
       expect(json(await t.call(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/take.wav' }, id)).text).toBe('ok')
       expect(await (seen.at(-1)!.form.get('file') as File).text()).toBe(`bytes-of-${id}`)
@@ -205,5 +209,178 @@ describe('per agent kind', () => {
     expect((await t.call(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/take.wav' }, priv.id)).isError).toBe(true)
     expect(t.list(priv.id)).toEqual([])
     expect(seen).toHaveLength(ids.length)
+
+    // Long recordings on every kind: split from that agent's own file, "working" first, then the joined transcript
+    // on a repeat call; the private agent is still refused and nothing of it is cut.
+    for (const id of [...ids, priv.id]) place(id, 'long.mp3', `long-${id}-`.padEnd(4096, 'x'))
+    let gate: Promise<unknown> = Promise.resolve()
+    const cutFrom: string[] = []
+    const longSeen: Seen[] = []
+    const media = {
+      probe: async () => 1200,
+      cut: async (fd: number, start: number) => {
+        const head = Buffer.alloc(24); readSync(fd, head, 0, 24, 0); cutFrom.push(head.toString().replace(/-x+$/u, ''))
+        await gate
+        return fakeWav(start < 1200 ? 1 : 0)
+      },
+    }
+    const long = transcribeTool({ media, maxBytes: 1024, waitMs: 20, homeOf: (id: string) => registry.stateHome(id), allowed: (id: string) => registry.read(id)?.privacy !== 'private', sttOrigin: 'http://x', fetchImpl: counting(longSeen) as any })
+    for (const id of ids) {
+      let release: any
+      gate = new Promise((r) => { release = r })
+      expect(json(await long.call(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/long.mp3' }, id)).status, id).toBe('working')
+      release()
+      let done: any
+      for (let i = 0; i < 50 && !done; i += 1) { const v = json(await long.call(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/long.mp3' }, id)); if (v.status !== 'working') done = v }
+      expect(done.text, id).toMatch(/^\[0:00:00\] words \d+\n\n\[0:10:00\] words \d+$/u)
+      expect(done.parts).toBe(2)
+    }
+    for (const id of ids) expect(cutFrom.filter((x) => x === `long-${id}`)).toHaveLength(3)
+    expect(cutFrom.some((x) => x.includes(priv.id))).toBe(false)
+    expect((await long.call(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/long.mp3' }, priv.id)).isError).toBe(true)
   })
+})
+
+// Long recordings (issue 508): the Service cuts them itself with its own fixed ffmpeg command, transcribes the parts and
+// joins the text with timestamps, so an agent never writes an ffmpeg shell loop (which raises an approval card).
+const second = 32_000
+const fakeWav = (seconds: number) => Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(40), Buffer.alloc(Math.round(seconds * second))])
+function partsMedia(duration: number | null, partsWithAudio: number, gate?: Promise<unknown>) {
+  const cuts: number[] = []
+  return {
+    cuts,
+    probe: async () => duration,
+    cut: async (_fd: number, start: number) => { cuts.push(start); if (gate) await gate; return fakeWav(start / 600 < partsWithAudio ? 1 : 0) },
+  }
+}
+const counting = (seen: Seen[]) => async (url: string, init: any) => { seen.push({ url, form: init.body }); return jsonReply({ text: `words ${seen.length}`, provider: 'p', model: 'm' }) }
+
+describe('long recordings', () => {
+  it('splits a file over the upload cap, transcribes every part and joins the text with timestamps', async () => {
+    writeFileSync(join(home, 'inbox', 'long.mp3'), Buffer.alloc(4096, 1))
+    const seen: Seen[] = []
+    const media = partsMedia(1500, 3)
+    const t = transcribeTool({ homeOf: () => home, sttOrigin: 'http://x', fetchImpl: counting(seen) as any, maxBytes: 1024, media })
+    const r = await t.call(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/long.mp3' }, 'helper')
+    expect(r.isError).toBeUndefined()
+    const value = json(r)
+    expect(value.text).toBe('[0:00:00] words 1\n\n[0:10:00] words 2\n\n[0:20:00] words 3')
+    expect(value).toMatchObject({ parts: 3, duration_s: 1500, timestamps: true, mode: 'meeting', provider: 'p', model: 'm' })
+    expect(media.cuts).toEqual([0, 600, 1200, 1800])
+    expect(seen.map((x) => (x.form.get('file') as File).name)).toEqual(['part-0001.wav', 'part-0002.wav', 'part-0003.wav'])
+    expect(seen.every((x) => x.form.get('mode') === 'meeting')).toBe(true)
+  })
+
+  it('also splits a small file that runs longer than half an hour, and keeps cutting past a short duration estimate', async () => {
+    const seen: Seen[] = []
+    const media = partsMedia(3000, 6)
+    const t = transcribeTool({ homeOf: () => home, sttOrigin: 'http://x', fetchImpl: counting(seen) as any, media })
+    const value = json(await t.call(TRANSCRIBE_TOOL, { path: 'inbox/2026-11-11/note.wav' }, 'helper'))
+    expect(value.parts).toBe(6)
+    expect(value.text.split('\n\n').map((l: string) => l.slice(0, 9))).toEqual(['[0:00:00]', '[0:10:00]', '[0:20:00]', '[0:30:00]', '[0:40:00]', '[0:50:00]'])
+    // A 20-minute take stays one upload.
+    const short = transcribeTool({ homeOf: () => home, sttOrigin: 'http://x', fetchImpl: counting([]) as any, media: partsMedia(1200, 2) })
+    expect(json(await short.call(TRANSCRIBE_TOOL, { path: 'inbox/2026-11-11/note.wav' }, 'helper')).text).toBe('words 1')
+  })
+
+  it('answers "working" before Hermes would time out, and a repeat call joins the same job for the transcript', async () => {
+    writeFileSync(join(home, 'inbox', 'long.m4a'), Buffer.alloc(4096, 1))
+    let release: any
+    const gate = new Promise((r) => { release = r })
+    const seen: Seen[] = []
+    const media = partsMedia(1200, 2, gate)
+    const t = transcribeTool({ homeOf: () => home, sttOrigin: 'http://x', fetchImpl: counting(seen) as any, maxBytes: 1024, waitMs: 20, media })
+    const first = json(await t.call(TRANSCRIBE_TOOL, { path: 'inbox/long.m4a' }, 'helper'))
+    expect(first).toMatchObject({ status: 'working', parts_done: 0, parts_total: 2 })
+    expect(first.message).toMatch(/Call wizard_transcribe again with the same path/)
+    expect(first.message).toMatch(/Do not split or convert/)
+    release()
+    let done: any
+    for (let i = 0; i < 50 && !done; i += 1) { const r = json(await t.call(TRANSCRIBE_TOOL, { path: 'inbox/long.m4a' }, 'helper')); if (r.status !== 'working') done = r }
+    expect(done.text).toBe('[0:00:00] words 1\n\n[0:10:00] words 2')
+    // One job: the repeat calls never cut or upload the recording a second time.
+    expect(seen).toHaveLength(2)
+    expect(media.cuts).toEqual([0, 600, 1200])
+  })
+
+  it('two calls at once for the same recording share one job, even while the length is still being probed', async () => {
+    writeFileSync(join(home, 'inbox', 'long.mp3'), Buffer.alloc(4096, 1))
+    let release: any
+    const probing = new Promise((r) => { release = r })
+    const seen: Seen[] = []
+    const media = { ...partsMedia(1200, 2), probe: async () => { await probing; return 1200 } }
+    const cuts = media.cuts
+    const t = transcribeTool({ homeOf: () => home, sttOrigin: 'http://x', fetchImpl: counting(seen) as any, maxBytes: 1024, media })
+    const both = [t.call(TRANSCRIBE_TOOL, { path: 'inbox/long.mp3' }, 'helper'), t.call(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/long.mp3' }, 'helper')]
+    release()
+    const [a, b] = (await Promise.all(both)).map(json)
+    expect(a.text).toBe('[0:00:00] words 1\n\n[0:10:00] words 2')
+    expect(b.text).toBe(a.text)
+    expect(seen).toHaveLength(2)
+    expect(cuts).toEqual([0, 600, 1200])
+  })
+
+  it('a slow probe still answers "working" within the wait budget', async () => {
+    writeFileSync(join(home, 'inbox', 'long.mp3'), Buffer.alloc(4096, 1))
+    const media = { ...partsMedia(1200, 2), probe: () => new Promise<number>(() => {}) }
+    const t = transcribeTool({ homeOf: () => home, sttOrigin: 'http://x', fetchImpl: counting([]) as any, maxBytes: 1024, waitMs: 20, media })
+    const startedAt = Date.now()
+    expect(json(await t.call(TRANSCRIBE_TOOL, { path: 'inbox/long.mp3' }, 'helper')).status).toBe('working')
+    expect(Date.now() - startedAt).toBeLessThan(1000)
+  })
+
+  it('says plainly when ffmpeg is missing or a part fails, and never tells the agent to split it', async () => {
+    writeFileSync(join(home, 'inbox', 'long.mp3'), Buffer.alloc(4096, 1))
+    const missing = await transcribeTool({ homeOf: () => home, sttOrigin: 'http://x', fetchImpl: counting([]) as any, maxBytes: 1024, media: noMedia }).call(TRANSCRIBE_TOOL, { path: 'inbox/long.mp3' }, 'helper')
+    expect(missing.isError).toBe(true)
+    expect(text(missing)).toMatch(/do not split or convert the file yourself/)
+    let calls = 0
+    const flaky = async () => { calls += 1; return jsonReply({ error: 'x' }, 502) }
+    const failed = await transcribeTool({ homeOf: () => home, sttOrigin: 'http://x', fetchImpl: flaky as any, maxBytes: 1024, media: partsMedia(1200, 2) }).call(TRANSCRIBE_TOOL, { path: 'inbox/long.mp3' }, 'helper')
+    expect(failed.isError).toBe(true)
+    expect(text(failed)).toMatch(/HTTP 502.*stopped at 0:00:00/)
+    expect(calls).toBe(2) // one retry per part
+    expect(text(failed)).not.toContain(root)
+  })
+
+  it('the description no longer caps files at 32 MB and tells agents never to split audio themselves', () => {
+    const [definition] = tool(jsonReply({})).list('helper')
+    expect(definition.description).not.toMatch(/32 MB/)
+    expect(definition.description).toMatch(/any length/)
+    expect(definition.description).toMatch(/Never split, cut or convert audio yourself \(no ffmpeg/)
+  })
+
+  it('keeps private agents out of long transcription too', async () => {
+    const media = partsMedia(7200, 12)
+    const t = transcribeTool({ homeOf: () => home, allowed: () => false, sttOrigin: 'http://x', fetchImpl: counting([]) as any, media })
+    expect((await t.call(TRANSCRIBE_TOOL, { path: 'inbox/2026-11-11/note.wav' }, 'helper')).isError).toBe(true)
+    expect(media.cuts).toEqual([])
+  })
+})
+
+let hasFfmpeg = true
+try { execFileSync('ffmpeg', ['-version'], { stdio: 'ignore' }); execFileSync('ffprobe', ['-version'], { stdio: 'ignore' }) } catch { hasFfmpeg = false }
+
+describe.skipIf(!hasFfmpeg)('long recordings with the real ffmpeg', () => {
+  it('a synthetic 140-minute mp3 comes back as one joined transcript of 14 timestamped parts', async () => {
+    const file = join(home, 'inbox', 'retreat.mp3')
+    execFileSync('ffmpeg', ['-nostdin', '-loglevel', 'error', '-f', 'lavfi', '-i', 'sine=frequency=300:sample_rate=8000:duration=8400', '-ac', '1', '-c:a', 'libmp3lame', '-b:a', '8k', file])
+    const sizes: number[] = []
+    const fetchImpl = async (_u: string, init: any) => {
+      const wav = Buffer.from(await (init.body.get('file') as File).arrayBuffer())
+      expect(wav.toString('latin1', 0, 4)).toBe('RIFF')
+      expect(wav.readUInt32LE(40)).toBe(wav.length - 44) // sizes filled in
+      sizes.push(wav.length)
+      return jsonReply({ text: `part ${sizes.length}` })
+    }
+    const t = transcribeTool({ homeOf: () => home, sttOrigin: 'http://x', fetchImpl: fetchImpl as any, media: ffmpegMedia() })
+    const value = json(await t.call(TRANSCRIBE_TOOL, { path: '/opt/data/inbox/retreat.mp3' }, 'helper'))
+    expect(value.parts).toBe(14)
+    expect(value.duration_s).toBeGreaterThan(8390)
+    const lines = value.text.split('\n\n')
+    expect(lines[0]).toBe('[0:00:00] part 1')
+    expect(lines[13]).toBe('[2:10:00] part 14')
+    // Every part is ten minutes of 16 kHz mono audio (well under the single-upload cap).
+    for (const size of sizes) expect(Math.abs(size - 44 - 600 * 32_000)).toBeLessThan(32_000)
+  }, 120_000)
 })

@@ -2,7 +2,8 @@
 # No shell assets: the Wizard shell (wizard-ux) is its own container and app.
 # git keeps the history of the owner's Pages (server/pages.mjs).
 FROM node:22.23.5-alpine3.23@sha256:6868d4695b947ee120bffaa463fecd68cde370d7bfec92955e7c8ac576b4f475
-RUN apk add --no-cache python3 tini git && mkdir -p /app /state && chown 1000:1000 /state
+# ffmpeg: wizard_transcribe cuts long recordings itself with one fixed command (server/transcribe.mjs), so agents never script it.
+RUN apk add --no-cache python3 tini git ffmpeg && mkdir -p /app /state && chown 1000:1000 /state
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
