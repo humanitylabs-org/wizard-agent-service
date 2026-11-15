@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createChannelStore } from '../server/channel-store.mjs'
-import { createSpaceFiling, CHANNEL_INSTRUCTIONS } from '../server/thread-spaces.mjs'
+import { createSpaceFiling, CHANNEL_INSTRUCTIONS, subjectFitsChannel } from '../server/thread-spaces.mjs'
 import { parseStatus, normalizeStatus } from '../server/thread-status.mjs'
 import { Scheduler } from '../server/scheduler.mjs'
 import { firstPostOfHistory, readHermesFirstPosts } from '../server/first-post.mjs'
@@ -198,6 +198,15 @@ describe('issue 520: wrong-channel filing and owner unfile', () => {
     const { store, filing } = setup(), ids = launch(store)
     expect(filing.apply('hermes', 'messenger', parseStatus(status({ channel: ids['WizardOS Apps'], subject: 'WizardOS', title: 'Messenger sync bug' })))).toBe(true)
     expect(store.channelOf('hermes', 'messenger')).toBe(ids['WizardOS Apps'])
+  })
+  it('short exact names match; a shared generic word (Google Apps vs WizardOS Apps) does not', () => {
+    const { store, filing } = setup(), ids = launch(store)
+    const ai = store.create({ name: 'AI' }).id
+    expect(subjectFitsChannel('AI', { id: ai, name: 'AI' })).toBe(true)
+    expect(filing.apply('hermes', 'ai', { channel: ai, subject: 'AI' })).toBe(true)
+    expect(filing.apply('hermes', 'google', { channel: ids['WizardOS Apps'], subject: 'Google Apps' })).toBe(false)
+    expect(subjectFitsChannel('Apps', { id: 'x', name: 'WizardOS Apps' })).toBe(false)
+    expect(subjectFitsChannel('WizardOS', { id: 'x', name: 'WizardOS Apps' })).toBe(true)
   })
   it('learns a channel’s subjects from owner-filed chats, lists them in the catalogue, and then files that subject', () => {
     const { store, filing } = setup(), ids = launch(store)
