@@ -67,7 +67,8 @@ describe('channels switch over HTTP', () => {
     // On, no restart: the store opens, copies the Spaces once, and read marks answer.
     setLook(d, true)
     const listed = await (await fetch(`${u}/channels`)).json()
-    expect(listed.channels.map((c: any) => [c.id, c.count])).toEqual([['alerts', 0], ['space-one', 2]])
+    // The Daily channel (issue 527) is a part of the same switch: seeded on top, once.
+    expect(listed.channels.map((c: any) => [c.id, c.count])).toEqual([['daily', 0], ['alerts', 0], ['space-one', 2]])
     expect((await fetch(`${u}/channels/read`)).status).toBe(200)
     const voice = await (await fetch(`${u}/channels`, json('POST', { name: 'Voice' }))).json()
     expect((await fetch(`${u}/channels/membership`, json('PUT', { sessionId: 'wizard_a', channelId: voice.id }))).status).toBe(200)
@@ -80,7 +81,7 @@ describe('channels switch over HTTP', () => {
     // On again: the same channels and memberships, not migrated a second time.
     setLook(d, true)
     const after = (await (await fetch(`${u}/channels`)).json()).channels
-    expect(after.map((c: any) => [c.name, c.count])).toEqual([['Alerts', 0], ['One', 1], ['Voice', 1]])
+    expect(after.map((c: any) => [c.name, c.count])).toEqual([['Daily', 0], ['Alerts', 0], ['One', 1], ['Voice', 1]])
     expect((await (await fetch(`${u}/channels/membership?sessionId=wizard_a`)).json()).channel).toBe(voice.id)
   })
   it('env choices still win over the switch', async () => {

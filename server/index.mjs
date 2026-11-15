@@ -208,6 +208,9 @@ server = createWizardServer({
   // Chats channels phase 3 (issue 441): agents file chats with the status line's `channel`, titles become post names,
   // and chats the scheduler opens go to their job's channel or Alerts. Needs WIZARD_CHANNEL_STORE=1. Off by default.
   channelAgentFiling: envChoice(process.env.WIZARD_CHANNEL_AGENT_FILING),
+  // Daily channel (issue 527): one pinned channel per agent with one real thread per day (05:00 boundary), the
+  // /wizard/v1/channels/<id>/days and /today routes, and schedule thread 'daily'. Needs the channel store.
+  channelDaily: envChoice(process.env.WIZARD_CHANNEL_DAILY),
   // Channel read watermarks (issue 471): /wizard/v1/channels/read keeps each channel's read point for the owner, so
   // reading a channel to the bottom on one device clears it on the others. Needs WIZARD_CHANNEL_STORE=1. Off by default.
   channelReadSync: envChoice(process.env.WIZARD_CHANNEL_READ_SYNC),

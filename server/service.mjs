@@ -49,6 +49,7 @@ import { bootstrapPayload, readApps, readSettings, normalizeSettings, ownerLinks
 import { readUiPreferences, updateUiPreferences, patchUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
 import { createChannelStore, channelRequest } from './channel-store.mjs'
+import { dayOf, mintDailyThreadId, dailyTitle, openerOf, dailyRunNote, validDay, DAYS_PAGE, DAYS_PAGE_MAX } from './daily-channel.mjs'
 import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigration } from './channel-spaces.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
 import { createChannelsSwitch, channelPart } from './channels-switch.mjs'
@@ -3190,6 +3191,40 @@ function buildWizardServer(options, lifetime) {
   // Channel read watermarks (issue 471, needs the channel store): the shell's per-channel read point, shared by the
   // owner's devices, forward only.
   const channelReadSyncOn = () => channelPart(options.channelReadSync, channelsSwitchOn) && !!channelStoreNow()
+  // Daily channel (issue 527, needs the channel store): one pinned channel per agent holding one real thread per day
+  // (the day starts at 05:00 in the owner's time zone). Seeded once for the main agent the first time it is on.
+  let dailySeeded = false
+  const channelDailyOn = () => {
+    if (!channelPart(options.channelDaily, channelsSwitchOn)) return false
+    const store = channelStoreNow()
+    if (!store) return false
+    if (!dailySeeded) { try { store.seedDaily() } catch (error) { console.error(`[channels] Daily not seeded: ${String(error?.message || error).slice(0, 160)}`) } dailySeeded = true }
+    return true
+  }
+  const dailyClock = options.dailyNow ?? Date.now
+  const dailyTimeZone = () => { try { return options.dailyTimezone || options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok' } catch { return 'Asia/Bangkok' } }
+  // Today's thread of an open daily channel, created once (racing first posts share it). -> {sessionId, day, created, title}
+  const claimDailyThread = (channel, at = dailyClock()) => {
+    const day = dayOf(at, dailyTimeZone())
+    return { ...channelStoreNow().claimDay(channel.id, day, () => mintDailyThreadId(dailyClock())), title: dailyTitle(day, channel.name) }
+  }
+  // Scheduler hook: where a job's run goes when it posts into today's Daily thread, or null (no open daily channel).
+  const dailyScheduleThread = (agent, instant) => {
+    if (!channelDailyOn()) return null
+    const channel = channelStoreNow().dailyChannel(agent === 'main' ? MAIN_AGENT_ID : agent)
+    if (!channel) return null
+    try { const claim = claimDailyThread(channel, instant); return { thread: claim.sessionId, title: claim.title, channel: channel.id } } catch { return null }
+  }
+  // The carry-over run note for a run in a Daily thread: yesterday's thread and its still-open tracker items.
+  const dailyNote = (agent, sessionId) => {
+    if (!sessionId || !channelDailyOn()) return ''
+    try {
+      const at = channelStoreNow().dayOfSession(agent || MAIN_AGENT_ID, sessionId)
+      if (!at) return ''
+      const openItems = at.previous ? threadItems.list(agent || MAIN_AGENT_ID, at.previous.sessionId).filter(item => ['needs_you', 'running'].includes(item.state)).map(({ id, title, state }) => ({ id, title, state })) : []
+      return dailyRunNote({ day: at.day, previous: at.previous, openItems })
+    } catch { return '' }
+  }
 
   const scheduledThread = (agent, thread) => {
     if (!channelAgentFilingOn()) return false
@@ -3240,7 +3275,7 @@ function buildWizardServer(options, lifetime) {
   const heavyNotices = (agentId, sessionId) => heavyWork?.queue.noticeContext(agentId, sessionId) || ''
   const acknowledgeHeavyNotices = (agentId, sessionId, body) => heavyWork?.queue.acknowledgeNotices(agentId, sessionId, body)
   const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling,
-    heavyStatus, heavyNotices, trackerNote: (agentId, id) => trackerNote(agentId, id) }) : null
+    heavyStatus, heavyNotices, trackerNote: (agentId, id) => [trackerNote(agentId, id), dailyNote(agentId, id)].filter(Boolean).join('\n') }) : null
   const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   const providerFailureDismissed = record => dismissedFailureStore.isDismissedAfter(record.sessionId, record.createdAt * 1000, record.agent_id)
     || dismissedFailureStore.isDismissed(record.sessionId, record.publicRunId, record.agent_id)
@@ -4616,7 +4651,7 @@ function buildWizardServer(options, lifetime) {
   const runTitleNote = (sessionId) => {
     const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes')].filter(Boolean).join('\n')
     if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote, trackerNote('hermes', '')].filter(Boolean).join('\n')
-    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId)].filter(Boolean).join('\n')
+    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId), dailyNote('hermes', sessionId)].filter(Boolean).join('\n')
   }
   const patchHermesTitle = async (sessionId, title, { exact = false, datedAt = null } = {}) => {
     // A title another thread holds is dated, never numbered (James, 8 Nov: no #N). An exact patch never is.
@@ -5573,6 +5608,7 @@ function buildWizardServer(options, lifetime) {
     notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
     agentId: agent => (agent === 'main' ? MAIN_AGENT_ID : agent),
     channels: () => channelAgentFilingOn(),
+    daily: { on: () => channelDailyOn(), thread: dailyScheduleThread, isDaily: (agent, channel) => !!channel && channelDailyOn() && channelStoreNow().dailyChannel(agent === 'main' ? MAIN_AGENT_ID : agent)?.id === channel },
     lookup: lookupBackgroundOccurrence,
     onWatchResult: async job => {
       // A visible watcher result is a real new turn: bring the same thread back from either Defer or Done.
@@ -6287,6 +6323,51 @@ function buildWizardServer(options, lifetime) {
         } catch (error) { sendJson(response, error?.status === 400 ? 400 : 503, { error: error?.status === 400 ? 'invalid_preferences' : 'preferences_unavailable' }) }
         return
       }
+      // Daily channel (issue 527): GET /wizard/v1/channels/<id>/days[?cursor=<day>&limit=] lists the day threads newest
+      // first; GET /wizard/v1/channels/<id>/today reads today's thread (null before the first post after 05:00) and
+      // POST creates it once (the shell sends into it; racing first posts get the same thread).
+      const dailyRoute = /^\/wizard\/v1\/channels\/([a-z0-9-]{1,48})\/(days|today)$/u.exec(url.pathname)
+      if (dailyRoute) {
+        const channelStore = channelDailyOn() ? channelStoreNow() : null
+        const channel = channelStore?.dailyById(dailyRoute[1])
+        if (!channel) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        const methods = dailyRoute[2] === 'today' ? ['GET', 'POST'] : ['GET']
+        if (!methods.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: methods.join(', ') }); return }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        const agentQuery = agents ? `?agent=${encodeURIComponent(channel.agent)}` : ''
+        const today = dayOf(dailyClock(), dailyTimeZone())
+        try {
+          if (dailyRoute[2] === 'today') {
+            if (request.method === 'GET') { sendJson(response, 200, { channel: channel.id, agent: channel.agent, day: today, sessionId: channelStore.dayThread(channel.id, today) }, { 'Cache-Control': 'no-store' }); return }
+            if (channel.archived) { sendJson(response, 409, { error: 'channel_archived' }); return }
+            await readBoundedBody(request, 4096).catch(() => null)
+            const claim = claimDailyThread(channel)
+            // The Hermes session is (re)created on every call: a failed first create is retried by the next send.
+            const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${agentQuery}`, { id: claim.sessionId, title: claim.title })
+            if (!created.ok && created.status !== 409) { sendJson(response, 503, { error: 'daily_thread_unavailable', sessionId: claim.sessionId }); return }
+            sendJson(response, claim.created ? 201 : 200, { channel: channel.id, agent: channel.agent, day: claim.day, sessionId: claim.sessionId, created: claim.created }, { 'Cache-Control': 'no-store' })
+            return
+          }
+          const cursor = url.searchParams.get('cursor'), limitText = url.searchParams.get('limit')
+          if ((cursor !== null && !validDay(cursor)) || (limitText !== null && !/^\d{1,3}$/u.test(limitText))) { sendJson(response, 400, { error: 'invalid_request' }); return }
+          const limit = Math.min(DAYS_PAGE_MAX, Math.max(1, Number(limitText ?? DAYS_PAGE)))
+          const page = channelStore.days(channel.id, { before: cursor, limit: limit + 1 })
+          const days = await Promise.all(page.slice(0, limit).map(async ({ day, sessionId }) => {
+            const path = `${PROXY_PREFIX}/api/sessions/${encodeURIComponent(sessionId)}`
+            const [session, history] = await Promise.all([deliverySession(`${path}${agentQuery}`).catch(() => null),
+              deliverySession(`${path}/messages${agentQuery ? `${agentQuery}&` : '?'}order=oldest&limit=20`).catch(() => null)])
+            const row = session?.ok ? (session.payload?.session ?? session.payload?.data ?? session.payload) : null
+            const messages = history?.ok ? (history.payload?.data ?? history.payload?.messages ?? []) : []
+            const count = Number.isFinite(row?.message_count) ? row.message_count : Array.isArray(row?.messages) ? row.messages.length : messages.length
+            const last = Number(row?.last_active ?? row?.last_activity_at ?? (Array.isArray(row?.messages) ? row.messages.at(-1)?.timestamp : null) ?? row?.started_at ?? row?.created_at)
+            return { day, sessionId, title: typeof row?.title === 'string' ? row.title : '', opener: openerOf(messages), count, lastAt: Number.isFinite(last) && last > 0 ? new Date(last * 1000).toISOString() : null }
+          }))
+          sendJson(response, 200, { channel: channel.id, agent: channel.agent, dayStartsAt: '05:00', today: channelStore.dayThread(channel.id, today), days, next: page.length > limit ? days.at(-1).day : null }, { 'Cache-Control': 'no-store' })
+        } catch (error) { sendJson(response, [400, 404, 409].includes(error?.status) ? error.status : 503, { error: [400, 404, 409].includes(error?.status) ? error.code || 'invalid_request' : 'channels_unavailable' }) }
+        return
+      }
       // Chats channels (issue 440): same owner surface, access and cross-site rules as ui-preferences.
       // Read watermarks (issue 471, WIZARD_CHANNEL_READ_SYNC=1 with the store): /wizard/v1/channels/read.
       if (url.pathname === '/wizard/v1/channels' || url.pathname === '/wizard/v1/channels/membership' || url.pathname === '/wizard/v1/channels/read') {
@@ -6306,7 +6387,7 @@ function buildWizardServer(options, lifetime) {
           if (!body || typeof body !== 'object' || Array.isArray(body)) { sendJson(response, 400, { error: 'invalid_request' }); return }
         }
         try {
-          sendJson(response, request.method === 'POST' ? 201 : 200, channelRequest(channelStore, request.method, membership, url.searchParams, body), { 'Cache-Control': 'no-store' })
+          sendJson(response, request.method === 'POST' ? 201 : 200, channelRequest(channelStore, request.method, membership, url.searchParams, body, { daily: channelDailyOn() }), { 'Cache-Control': 'no-store' })
         } catch (error) { sendJson(response, [400, 404, 409].includes(error?.status) ? error.status : 503, { error: [400, 404, 409].includes(error?.status) ? error.code || 'invalid_request' : 'channels_unavailable' }) }
         return
       }
