@@ -527,9 +527,11 @@ export class Scheduler {
   }
   // Daily channel (issue 527): does this occurrence post into today's Daily thread? A `thread: 'daily'` job does; so do
   // a reminder with no origin thread of its own and a job whose own chat would be filed into the daily channel.
-  dailyTarget(job, instant) {
+  // A job without a thread of its own whose occurrence goes to Notifications keeps its hidden schedule chat (issue 529).
+  dailyTarget(job, instant, deliver = 'thread') {
     if (!this.daily || !this.dailyOn || job.kind === 'watch' || job.kind === 'return') return null
     const opensOwn = !job.thread || (job.createThread && /^wizard_schedule_/.test(job.thread) && !job.threadTitle)
+    if (opensOwn && deliver === 'notification') return null
     let wants = job.thread === 'daily' || (job.kind === 'remind' && opensOwn)
     if (!wants && opensOwn && job.channel) { try { wants = this.daily.isDaily?.(this.agentId(job.agent), job.channel) === true } catch { wants = false } }
     if (!wants) return null
@@ -537,7 +539,12 @@ export class Scheduler {
     try { return this.daily.thread(this.agentId(job.agent), Math.max(instant, this.now())) || null } catch { return null }
   }
   reserve(job, instant, manual = false) {
-    const daily = this.dailyTarget(job, instant)
+    // Frozen per occurrence: an empty or stopped notifications slot sends this run to the thread instead.
+    let deliver = 'thread'
+    if (job.deliver === 'notification' && job.kind !== 'return') {
+      try { if (this.notifier?.available(this.agentId(job.agent))) deliver = 'notification' } catch { /* fall back to the thread */ }
+    }
+    const daily = this.dailyTarget(job, instant, deliver)
     // `thread: 'daily'` with no open daily channel: the job's own chat, as a job without a thread would get.
     if (!daily && job.thread === 'daily' && this.dailyOn) { job = { ...job, thread: `wizard_schedule_${job.id}`, createThread: true } }
     // This identity is persisted before any external session/run call. A crashed create
@@ -545,11 +552,6 @@ export class Scheduler {
     if (!daily && !job.thread) { job.thread = `wizard_schedule_${randomUUID()}`; job.createThread = true; this.save(job) }
     if (daily) job = { ...job, thread: daily.thread, createThread: true, threadTitle: daily.title, ...(job.agentMessage ? { agentMessage: 'scheduled' } : {}), channel: null }
     const key = `schedule:${job.id}:${iso(instant)}`
-    // Frozen per occurrence: an empty or stopped notifications slot sends this run to the thread instead.
-    let deliver = 'thread'
-    if (job.deliver === 'notification' && job.kind !== 'return') {
-      try { if (this.notifier?.available(this.agentId(job.agent))) deliver = 'notification' } catch { /* fall back to the thread */ }
-    }
     const occurrence = { key, jobId: job.id, scheduledAt: iso(instant), agent: job.agent, thread: job.thread,
       createThread: Boolean(job.createThread), ...(daily ? { daily: daily.channel } : this.channels && job.createThread ? opening(this.db, job, deliver) : {}), title: job.threadTitle || (job.name.includes(' · ') ? job.name : `Schedules · ${job.name}`),
       kind: job.kind ?? 'run', report: job.agentMessage ? 'message' : reportKind(job), window: job.window ?? null, ...(manual ? { manual: true } : {}), ...(deliver === 'notification' ? { deliver } : job.deliver === 'notification' ? { fallback: true } : {}),
