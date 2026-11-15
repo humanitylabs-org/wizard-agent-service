@@ -90,6 +90,11 @@ describe('store', () => {
     expect(a.days('daily', { before: '2026-11-14', limit: 5 }).map((r: any) => r.day)).toEqual(['2026-11-13', '2026-11-12'])
     expect(a.dayOfSession('hermes', first.sessionId)).toEqual({ channelId: 'daily', day: '2026-11-15', previous: { day: '2026-11-14', sessionId: a.dayThread('daily', '2026-11-14') } })
     expect(() => a.claimDay('alerts', '2026-11-15', mint)).toThrow(/channel_not_found/)
+    // An archived Daily's old thread gets no carry-over note (issue 529); unarchived, it does again.
+    a.update('daily', { archived: true })
+    expect(a.dayOfSession('hermes', first.sessionId)).toBeNull()
+    a.update('daily', { archived: false })
+    expect(a.dayOfSession('hermes', first.sessionId)).toMatchObject({ channelId: 'daily', day: '2026-11-15' })
     a.forget('hermes', first.sessionId)
     expect(a.dayThread('daily', '2026-11-15')).toBeNull()
   })
@@ -119,6 +124,23 @@ describe('scheduler', () => {
     const origin = s.runNow(s.create({ ...base, kind: 'remind', thread: 'wizard_origin' }).id)
     expect(origin).toMatchObject({ thread: 'wizard_origin', createThread: false }); expect(origin).not.toHaveProperty('daily')
     expect(() => s.create({ ...base, kind: 'watch', thread: 'daily' })).toThrow(/watcher needs its thread/)
+  })
+  it('a notification-only reminder with no thread keeps its hidden schedule chat (issue 529)', () => {
+    const d = home(), claimed: any[] = []
+    let available = true
+    const daily = { on: () => true, isDaily: (_a: string, ch: string) => ch === 'daily',
+      thread: (agent: string, instant: number) => { claimed.push([agent, instant]); return { thread: 'wizard_1763182800000_aaaaaaaaaaaa', title: 'Daily · Sun 15 Nov', channel: 'daily' } } }
+    const notifier = { available: () => available }
+    const s = new Scheduler({ statePath: join(d, 's.sqlite3'), deliver: async () => ({ run_id: 'r' }), now: () => Date.parse('2026-11-15T01:00:00Z'), channels: true, daily, notifier }); closers.push(s)
+    const quiet = s.runNow(s.create({ ...base, kind: 'remind', deliver: 'notification' }).id)
+    expect(quiet.thread).toMatch(/^wizard_schedule_/u); expect(quiet).toMatchObject({ deliver: 'notification' })
+    expect(quiet).not.toHaveProperty('daily')
+    expect(s.runNow(s.create({ ...base, kind: 'remind', deliver: 'notification', channel: 'daily' }).id)).not.toHaveProperty('daily')
+    expect(claimed).toEqual([])
+    // With no notifications slot the reminder falls back to chat, and a chat reminder with no thread goes to Daily.
+    available = false
+    const fallback = s.runNow(s.create({ ...base, kind: 'remind', deliver: 'notification' }).id)
+    expect(fallback).toMatchObject({ thread: 'wizard_1763182800000_aaaaaaaaaaaa', daily: 'daily', fallback: true })
   })
   it('an overdue occurrence goes to the thread of the day it is delivered on', () => {
     const { s, claimed } = setup()

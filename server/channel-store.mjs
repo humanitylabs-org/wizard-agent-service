@@ -325,7 +325,9 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     dayOfSession(agent, sessionId) {
       if (!validThreadId(sessionId)) return null
       const r = st.dayOfSession.get(agentOf(agent), sessionId)
-      if (!r || st.channel.get(r.channel_id)?.kind !== 'daily') return null
+      // An archived Daily's old threads get no carry-over (issue 529): the channel no longer runs a day plan.
+      const channel = r ? st.channel.get(r.channel_id) : null
+      if (channel?.kind !== 'daily' || channel.archived) return null
       const prev = st.daysBefore.all(r.channel_id, r.day, 1)[0]
       return { channelId: r.channel_id, day: r.day, ...(prev ? { previous: { day: prev.day, sessionId: prev.session_id } } : {}) }
     },

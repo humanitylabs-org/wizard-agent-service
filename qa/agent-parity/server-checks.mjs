@@ -96,6 +96,14 @@ export const serverChecks = {
       }
       assert.equal(await fire(await job({ kind: 'run', thread: 'daily' })), now.sessionId, 'a thread:daily job posts into today\u2019s Daily thread')
       assert.equal(await fire(await job({ kind: 'remind' })), now.sessionId, 'an origin-less reminder goes to today\u2019s Daily thread')
+      // Issue 529: a notification-only reminder with no thread keeps its hidden schedule chat, out of Daily.
+      const sentTo = id => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === id).at(-1)?.body
+      const notifier = s.server.scheduler.notifier
+      s.server.scheduler.notifier = { available: () => true }
+      try {
+        const quiet = await fire(await job({ kind: 'remind', deliver: 'notification' }))
+        assert.match(String(quiet), /^wizard_schedule_/u, 'a notification-only reminder stays out of the Daily thread')
+      } finally { s.server.scheduler.notifier = notifier }
       // /days pages every day thread, newest first, with its opener and count.
       // (The fixture's POST /api/sessions resets an existing session, so the day's messages are added after the jobs.)
       s.sessions.get(now.sessionId).messages.push({ role: 'assistant', timestamp: Date.now() / 1000 - 2, content: 'Signal: synthetic daily update' })
@@ -112,10 +120,15 @@ export const serverChecks = {
       assert.equal((await s.raw(`/wizard/v1/channels/${daily.id}/days?cursor=bad`)).status, 400)
       // A run in today's thread carries yesterday's thread.
       const run = await s.request('/v1/runs', post({ session_id: now.sessionId, input: 'Synthetic owner daily send' })); assert.equal(run.status, 202, await run.clone().text())
-      assert.ok(String(sent(s).instructions).includes(`The previous Daily thread is ${first.sessionId} (2026-11-14)`), 'the carry-over run note names yesterday\u2019s thread')
+      assert.ok(String(sentTo(now.sessionId)?.instructions).includes(`The previous Daily thread is ${first.sessionId} (2026-11-14)`), 'the carry-over run note names yesterday\u2019s thread')
       // An owner's archive sticks: no new day thread in an archived Daily.
       assert.equal((await s.raw('/wizard/v1/channels', json('PATCH', { id: daily.id, archived: true }))).status, 200)
       assert.equal((await today()).status, 409, 'an archived Daily starts no thread')
+      const late = await s.request('/v1/runs', post({ session_id: first.sessionId, input: 'Synthetic owner late send' })); assert.equal(late.status, 202, await late.clone().text())
+      let lateRun
+      for (let i = 0; i < 80 && !(lateRun = sentTo(first.sessionId)); i++) await new Promise(r => setTimeout(r, 25))
+      assert.ok(lateRun, 'the run in the archived Daily\u2019s old thread reached the runtime')
+      assert.ok(!String(lateRun.instructions).includes('Daily channel:'), 'a run in an archived Daily\u2019s old thread gets no carry-over note')
       assert.equal((await channels()).filter(c => c.kind === 'daily' && !c.archived).length, s.id === 'hermes' ? 0 : 1, 'archiving never re-seeds')
       assert.equal((await s.raw('/wizard/v1/channels/alerts/days')).status, 404, 'only a daily channel has days')
     } finally { dailyClock.at = null }
