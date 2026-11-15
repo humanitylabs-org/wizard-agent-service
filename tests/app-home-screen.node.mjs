@@ -31,3 +31,14 @@ test('installed home-screen capabilities survive the projection, validated', () 
   assert.deepEqual(by('loose').home_screen, { position_keys: ['ok-key:*'] })
   assert.equal(by('many').home_screen.position_keys.length, 8)
 })
+
+test('an app\'s declared earlier ids (renamed_from) reach the shell, validated', () => {
+  const apps = read([
+    { id: 'wizard-search', name: 'Search', view: { url: '/wizard-search/' }, renamed_from: ['search-preview', 'wizard-search', 'Bad Id', 5, 'search-preview'] },
+    { id: 'plain', name: 'Plain', view: { url: '/plain/' } },
+    { id: 'odd', name: 'Odd', view: { url: '/odd/' }, renamed_from: 'search-preview' },
+  ])
+  const by = id => apps.find(a => a.id === id)
+  assert.deepEqual(by('wizard-search').renamed_from, ['search-preview'])
+  for (const id of ['plain', 'odd']) assert.equal(Object.hasOwn(by(id), 'renamed_from'), false, id)
+})
