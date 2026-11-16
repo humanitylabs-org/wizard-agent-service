@@ -158,6 +158,38 @@ describe('scheduler', () => {
 })
 
 describe('HTTP', () => {
+  // Issue 532: the main agent's own schedule tool (loopback route of Hermes plugin wizard-schedule) may name 'daily'.
+  const agentRoute = async (channelDaily: boolean) => {
+    const d = home(), token = 'fixture-heavy-token-with-more-than-32-chars', clock = () => Date.parse('2026-11-15T01:00:00Z')
+    const s: any = createWizardServer({ wizardOsHome: d, requireAccess: false, hermesKey: 'test', agentBridge: false, followThrough: false, runQueueStatePath: join(d, 'q.db'), runQueuePollIntervalMs: 0,
+      upstreamOrigin: 'http://127.0.0.1:9', heavyToken: token, schedulerStatePath: join(d, 'schedules.sqlite3'), schedulerNow: clock, dailyNow: clock, schedulerTimezone: 'Asia/Bangkok', channelStore: true, channelDaily })
+    closers.push(s); const a: any = await listen(s)
+    const create = async (extra: any) => {
+      const r = await fetch(`http://127.0.0.1:${a.port}/wizard/internal/schedules/create`, { method: 'POST', headers: { Authorization: ['Bearer', token].join(' '), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: 'wizard_caller', name: 'Synthetic · Brief', when: { every: 1440 }, text: 'Synthetic brief.', ...extra }) })
+      return { status: r.status, body: await r.json() }
+    }
+    return { s, create }
+  }
+  it("the main agent's schedule tool can post into today's Daily thread (issue 532)", async () => {
+    const { s, create } = await agentRoute(true)
+    const made = await create({ kind: 'run', thread: 'daily' })
+    expect(made.status).toBe(201); expect(made.body.thread).toBe('daily')
+    const occurrence = s.scheduler.runNow(made.body.id)
+    expect(occurrence).toMatchObject({ createThread: true, daily: 'daily' })
+    expect(occurrence.thread).toMatch(FRESH_CLIENT_THREAD_ID); expect(occurrence.body.session_id).toBe(occurrence.thread)
+    expect(occurrence.title).toMatch(/^Daily · /u)
+    // Any other thread stays the calling session; a watcher still can't name 'daily'.
+    expect((await create({ kind: 'run', thread: 'wizard_someone_else' })).body.thread).toBe('wizard_caller')
+    expect((await create({ kind: 'remind' })).body.thread).toBe('wizard_caller')
+    expect((await create({ kind: 'watch', thread: 'daily' })).status).toBe(400)
+  })
+  it("switch off: the agent's thread:'daily' stays in its own chat (issue 532)", async () => {
+    const { s, create } = await agentRoute(false)
+    const made = await create({ kind: 'run', thread: 'daily' })
+    expect(made.status).toBe(201); expect(made.body.thread).toBe('wizard_caller')
+    expect(s.scheduler.runNow(made.body.id)).toMatchObject({ thread: 'wizard_caller', createThread: false })
+  })
   it('switch off: the routes are 404 and no Daily is seeded', async () => {
     const d = home()
     const s = createWizardServer({ wizardOsHome: d, requireAccess: false, hermesKey: 'test', agentBridge: false, followThrough: false, runQueueStatePath: join(d, 'q.db'), runQueuePollIntervalMs: 0, channelStore: true, channelDaily: false })

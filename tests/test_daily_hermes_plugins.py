@@ -88,6 +88,12 @@ class ClientContracts(unittest.TestCase):
         with patch.object(schedule, 'call', return_value='ok') as call:
             schedule.schedule({'name': 'Fixture', 'when': 'morning', 'kind': 'remind', 'text': 'Synthetic reminder', 'session_id': 'forged'}, session_id='actual')
             call.assert_called_once_with('create', {'name': 'Fixture', 'when': {'at': 'morning'}, 'kind': 'remind', 'text': 'Synthetic reminder'}, 'actual')
+        with patch.object(schedule, 'call', return_value='ok') as call:
+            schedule.schedule({'name': 'Fixture', 'when': 'morning', 'kind': 'run', 'text': 'Synthetic brief', 'thread': 'daily'}, session_id='actual')
+            call.assert_called_once_with('create', {'name': 'Fixture', 'when': {'at': 'morning'}, 'kind': 'run', 'text': 'Synthetic brief', 'thread': 'daily'}, 'actual')
+        with patch.object(schedule, 'call', return_value='ok') as call:
+            schedule.schedule({'name': 'Fixture', 'when': 'morning', 'kind': 'run', 'text': 'Synthetic brief', 'thread': 'wizard_other'}, session_id='actual')
+            call.assert_called_once_with('create', {'name': 'Fixture', 'when': {'at': 'morning'}, 'kind': 'run', 'text': 'Synthetic brief'}, 'actual')
         with patch.object(schedule, 'call') as call:
             self.assertIn('error', json.loads(schedule.schedule({'when': 'soon'}, session_id='actual')))
             call.assert_not_called()
