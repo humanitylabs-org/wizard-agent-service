@@ -152,7 +152,9 @@ describe('scheduler', () => {
     const { s, claimed } = setup(false)
     const remind = s.runNow(s.create({ ...base, kind: 'remind' }).id)
     expect(remind.thread).toMatch(/^wizard_schedule_/u); expect(remind).not.toHaveProperty('daily')
-    expect(s.runNow(s.create({ ...base, kind: 'run', thread: 'daily' }).id).thread).toBe('daily')
+    // A 'daily' job made while it was on (or named while off) gets its own chat, never a session named 'daily'.
+    const brief = s.runNow(s.create({ ...base, kind: 'run', thread: 'daily' }).id)
+    expect(brief).toMatchObject({ createThread: true }); expect(brief.thread).toMatch(/^wizard_schedule_/u)
     expect(claimed).toEqual([])
   })
 })

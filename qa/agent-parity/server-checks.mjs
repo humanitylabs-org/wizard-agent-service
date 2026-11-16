@@ -54,6 +54,8 @@ const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)
 
 // Issue 527: the Daily channel's fake clock (the scene's dailyNow and schedulerNow read it).
 export const dailyClock = { at: null }
+// Issue 532: the synthetic loopback capability of the main agent's schedule tool in the Daily scene.
+export const dailyScheduleToken = crypto.randomUUID() + crypto.randomUUID() // generated per run, never a fixed value
 export const serverChecks = {
   // Issue 527 (Daily channel, with the channel store): one pinned channel per agent holding one real thread per day,
   // through each runtime's real Service routes and scheduler.
@@ -96,6 +98,17 @@ export const serverChecks = {
       }
       assert.equal(await fire(await job({ kind: 'run', thread: 'daily' })), now.sessionId, 'a thread:daily job posts into today\u2019s Daily thread')
       assert.equal(await fire(await job({ kind: 'remind' })), now.sessionId, 'an origin-less reminder goes to today\u2019s Daily thread')
+      // Issue 532: the main agent's own schedule tool (loopback route, heavy token) may name thread 'daily'; it stays main's.
+      const agentCreate = (extra, token = dailyScheduleToken) => s.raw('/wizard/internal/schedules/create', { method: 'POST', headers: { Authorization: ['Bearer', token].join(' '), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: 'wizard_parity_caller', name: 'Parity · Synthetic agent brief', when: { every: 1440 }, text: 'Synthetic brief.', ...extra }) })
+      assert.equal((await agentCreate({ kind: 'run', thread: 'daily' }, crypto.randomUUID() + crypto.randomUUID())).status, 403, 'the loopback schedule route needs the main agent\u2019s token')
+      const agentJob = await agentCreate({ kind: 'run', thread: 'daily' }); assert.equal(agentJob.status, 201, await agentJob.clone().text())
+      const agentMade = await agentJob.json()
+      assert.equal(agentMade.thread, 'daily', 'the main agent\u2019s schedule tool can name the Daily thread'); assert.equal(agentMade.agent, 'main', 'a loopback schedule is always the main agent\u2019s')
+      assert.equal((await (await agentCreate({ kind: 'run', thread: 'wizard_parity_other' })).json()).thread, 'wizard_parity_caller', 'any other thread stays the calling session')
+      assert.equal((await agentCreate({ kind: 'watch', thread: 'daily' })).status, 400, 'a watcher still can\u2019t name the Daily thread')
+      if (s.id === 'hermes') assert.equal(await fire(agentMade), now.sessionId, 'the agent\u2019s thread:daily job posts into today\u2019s Daily thread')
+      else assert.equal(s.server.scheduler.get(agentMade.id).agent, 'main', 'a routed agent\u2019s schedules are unchanged: the loopback job is main\u2019s')
       // Issue 529: a notification-only reminder with no thread keeps its hidden schedule chat, out of Daily.
       const sentTo = id => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === id).at(-1)?.body
       const notifier = s.server.scheduler.notifier
