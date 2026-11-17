@@ -346,7 +346,7 @@
       "description": "Dismiss on a failed thread's Needs retry card is accepted for every agent's thread (wizard-ux issue 1488: it was main-only, so a routed agent's card stayed and the shell said Couldn't dismiss). A routed dismissal is saved under that agent's own fence, keyed by the run its list shows, and its list rows stop showing that failure until a newer run.",
       "layer": "server",
       "fixture": "failure-dismiss",
-      "how_to_test": "Fail a real HTTP admission, list the thread as failed, POST /wizard/session-failure/<id>/dismiss (main '{}', routed {agent}) on main, host-profile, container and restricted, then list the full and ?view=list shapes: the thread stays listed without the failed status or failure reason. For routed kinds an old client's '{}' body reaches the thread's own agent. Synthetic HTTP fixture evidence, not live provider proof.",
+      "how_to_test": "Fail a real HTTP admission, list the thread as failed, POST /wizard/session-failure/<id>/dismiss (main '{}', routed {agent}) on main, host-profile, container and restricted, then list the full and ?view=list shapes: the thread stays listed without the failed status or failure reason. For routed kinds an old client's '{}' body reaches the thread's own agent. Shell side: wizard-ux node --test tests/failure-dismiss-instant.test.mjs runs the real WosErrors and chat-power Dismiss lines for main, host-profile, container and restricted rows (hidden on the same frame, kept after a reload until a newer request or run, a refused save retried quietly with no toast, a routed row posts its own agent, a main row sharing the id is never hidden), and wizard-ux tests/qa-failure-dismiss-routed.cjs is the synthetic browser run (phone 412x915, Nebula and Grove, a routed thread whose save is refused; QA_EXPECT=broken for main). Synthetic HTTP fixture and browser evidence, not live provider proof.",
       "source_refs": [
         "server/service.mjs",
         "server/agents-http.mjs",
@@ -354,7 +354,9 @@
       ],
       "reference_tests": [
         "tests/session-failure-dismiss.test.ts",
-        "qa/agent-parity/server-checks.mjs"
+        "qa/agent-parity/server-checks.mjs",
+        "wizard-ux/tests/failure-dismiss-instant.test.mjs",
+        "wizard-ux/tests/qa-failure-dismiss-routed.cjs"
       ],
       "policy_exemptions": []
     },
