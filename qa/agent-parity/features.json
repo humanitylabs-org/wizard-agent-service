@@ -2087,6 +2087,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "chat-daily-channel",
+      "description": "The Daily channel in Chats (wizard-ux issue 1469, part of the Channels switch wizard/chat-channels; the service half is chats-daily-channel): a tap on the channel of kind daily opens its newest day thread in the ordinary thread view (an empty Today line under it before today's first post), each earlier day folded above it with its opener and message count, unfolding in place through the normal history read and paging older days from /days?cursor; a send from that view asks POST /wizard/v1/channels/<id>/today first and goes into the thread the box names (a send at 04:59 continues yesterday's, the first send after 05:00 moves the view to today's thread with the draft), for the channel's own agent: a routed agent's day threads are pinned to that agent so the history read and the send use its route.",
+      "layer": "ux",
+      "how_to_test": "wizard-ux tests/daily-channel.test.mjs runs the real live.js days store and the real chats.js Daily block for main, host-profile, container and restricted daily channels (open, folds, unfold through the history read, 04:59 vs 05:00 send, draft carried, offline, switch off); tests/qa-chat-daily-channel.cjs proves it in a real browser on phone, Classic and AI apps desktop, Nebula and Grove, against a synthetic box (QA_EXPECT=broken for main: a plain feed). Synthetic fixture evidence, not live box proof.",
+      "source_refs": [
+        "wizard-ux/web/core/chats.js",
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/tweaks/wizard/chat-channels/tweak.css"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/daily-channel.test.mjs",
+        "wizard-ux/tests/qa-chat-daily-channel.cjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "ai-lookup",
       "description": "Look up in the Chats selection menu explains selected words with a fast stateless model (claude-haiku-4-5, no tools, no history) in the context of their own message only, identically for main, host-profile, container and restricted agents; private agents, private threads and Incognito never reach a cloud model, decided from the session's pinned agent on the server, not the caller's agent field.",
       "layer": "ux",
