@@ -1,0 +1,10 @@
+{
+  "about": "Plain hand copies of the Service's Hermes plugins that boxes got before the plugin entered this repo (issue 532). Each blob is the git blob id of a file at that path inside hermes-plugin/<name>/. Add a blob only after rebuilding its exact bytes from a shipped version and saying how in the note.",
+  "plugins": {
+    "wizard-schedule": {
+      "__init__.py": {
+        "f96456523ec4b74af8e225a9d785ea55e4bcf89a": "22 Oct 2026 hand copy: ee86ac2's file with the earlier one-line loopback check in _endpoint (`if parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost', '::1'):`)"
+      }
+    }
+  }
+}
