@@ -17,7 +17,9 @@ from `live` (kept pointing at the serving sha in the source checkout).
 Uses a remotely prepared/tested immutable release under
 ~/.local/share/wizard-mobile-server/releases/was-<sha>, switches `current`, restarts wizard-mobile.service
 (its unit name is kept for compatibility) and verifies /wizard/health. On failure the prior
-release is restored. Legacy Wizard Mobile UI releases no longer touch the backend.
+release is restored. Legacy Wizard Mobile UI releases no longer touch the backend. After a verified switch
+(and after a rollback) the host Hermes' plain copies of the release's own plugins are refreshed and the gateway
+reloads them (ops/sync-hermes-plugins.py; owner-edited, linked or Hermes-installed plugins are left alone).
 """
 from __future__ import annotations
 
@@ -145,6 +147,20 @@ def activate_bridge(target: Path, helper_release: Path) -> None:
     run(sys.executable, str(helper), str(target), "--check-only")
 
 
+def sync_hermes_plugins(release: Path) -> dict:
+    """Refresh the host Hermes' copies of this release's own plugins (ops/sync-hermes-plugins.py), so a plugin
+    change ships with the Service (issue 532). Never fails the deploy: the Service is already healthy."""
+    helper = release / "ops/sync-hermes-plugins.py"
+    if not helper.is_file():
+        return {"skipped": "release has no plugin sync step"}
+    home = os.environ.get("HERMES_HOME") or str(HOME / ".hermes")
+    try:
+        return json.loads(run(sys.executable, str(helper), str(release), "--hermes-home", home,
+                              "--source-git", str(SRC)).splitlines()[-1])
+    except Exception as exc:  # noqa: BLE001
+        return {"error": str(exc)[-300:]}
+
+
 def deploy(ref: str, allow_rewind: bool = False) -> dict:
     if not (SRC / ".git").is_dir():
         run("git", "clone", "-q", REPO_URL, str(SRC))
@@ -200,6 +216,7 @@ def deploy(ref: str, allow_rewind: bool = False) -> dict:
         path.write_text(json.dumps(receipt, indent=2) + "\n")
         raise
     receipt["status"] = "verified"
+    receipt["hermes_plugins"] = sync_hermes_plugins(release)
     path.write_text(json.dumps(receipt, indent=2) + "\n")
     (receipts() / "latest.json").write_text(json.dumps(receipt, indent=2) + "\n")
     mark_live(sha)
@@ -217,7 +234,7 @@ def rollback() -> dict:
     switch(Path(prior))
     run("systemctl", "--user", "restart", SERVICE)
     healthy()
-    return {"status": "rolled_back", "restored": prior}
+    return {"status": "rolled_back", "restored": prior, "hermes_plugins": sync_hermes_plugins(Path(prior))}
 
 
 if __name__ == "__main__":
