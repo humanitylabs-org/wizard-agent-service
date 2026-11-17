@@ -107,6 +107,28 @@ class SyncTests(unittest.TestCase):
         self.assertFalse((self.plugins / 'wizard-agents').exists())
         self.assertEqual((hermes / '__init__.py').read_text(), 'anything')
 
+    def test_unreadable_hermes_metadata_touches_nothing(self):
+        target = self.install()
+        (self.plugins / '.install-metadata.json').write_text('{not json')
+        result = sync.sync(self.release, self.home, self.src)
+        self.assertEqual(result['changed'], [])
+        self.assertIn('unreadable', result['skipped'])
+        self.assertEqual((target / '__init__.py').read_text(), OLD)
+
+    def test_code_from_a_branch_that_never_shipped_is_not_trusted(self):
+        git(self.src, 'switch', '-qc', 'side')
+        (self.src / 'hermes-plugin/wizard-schedule/__init__.py').write_text(OLD + '# unshipped\n')
+        git(self.src, 'commit', '-qam', 'side')
+        git(self.src, 'switch', '-q', '-')
+        target = self.install(text=OLD + '# unshipped\n')
+        result = sync.sync(self.release, self.home, self.src)
+        self.assertEqual(result['plugins']['wizard-schedule'], 'owner-modified')
+        self.assertIn('# unshipped', (target / '__init__.py').read_text())
+        # A release pinned to its own commit trusts only that commit's ancestry.
+        (self.src / 'RELEASE_SHA').write_text(subprocess.run(['git', 'rev-parse', 'HEAD'], cwd=self.src, text=True,
+                                                             capture_output=True).stdout)
+        self.assertEqual(sync.release_ref(self.src), (self.src / 'RELEASE_SHA').read_text().strip())
+
     def fake_hermes(self, answer):
         script = Path(self.temp.name) / 'fake-python'
         script.write_text('#!/bin/sh\necho \'%s\'\n' % json.dumps(answer))

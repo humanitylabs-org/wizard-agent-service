@@ -53,12 +53,13 @@ def plugin_files(folder: Path) -> dict[str, str]:
     return out
 
 
-def shipped_blobs(source_git: Path | None, name: str) -> set[tuple[str, str]]:
-    """Every (relative path, blob id) this repository ever had under hermes-plugin/<name>/."""
+def shipped_blobs(source_git: Path | None, name: str, ref: str = 'HEAD') -> set[tuple[str, str]]:
+    """Every (relative path, blob id) the release's own history had under hermes-plugin/<name>/ (only commits
+    that are ancestors of `ref`, never other branches: their code never shipped)."""
     if not source_git or not (source_git / '.git').exists():
         return set()
     prefix = f'hermes-plugin/{name}/'
-    result = subprocess.run(['git', 'log', '--all', '--no-renames', '--format=', '--raw', '--no-abbrev', '--', prefix],
+    result = subprocess.run(['git', 'log', ref, '--no-renames', '--format=', '--raw', '--no-abbrev', '--', prefix],
                             cwd=source_git, text=True, capture_output=True)
     if result.returncode:
         return set()
@@ -76,12 +77,17 @@ def shipped_blobs(source_git: Path | None, name: str) -> set[tuple[str, str]]:
     return seen
 
 
-def hermes_managed(plugins: Path) -> set[str]:
-    try:
-        data = json.loads((plugins / '.install-metadata.json').read_text(encoding='utf-8-sig'))
-    except (OSError, ValueError):
+def hermes_managed(plugins: Path) -> set[str] | None:
+    """Names Hermes installed (its install metadata). None when that file exists but can't be read: then
+    nobody can tell which copies are Hermes's, so nothing is touched."""
+    path = plugins / '.install-metadata.json'
+    if not path.exists() and not path.is_symlink():
         return set()
-    return set(data) if isinstance(data, dict) else set()
+    try:
+        data = json.loads(path.read_text(encoding='utf-8-sig'))
+    except (OSError, ValueError):
+        return None
+    return set(data) if isinstance(data, dict) else None
 
 
 def replace(source: Path, target: Path, stage: Path) -> None:
@@ -101,9 +107,22 @@ def replace(source: Path, target: Path, stage: Path) -> None:
     shutil.rmtree(old, ignore_errors=True)
 
 
+def release_ref(release: Path) -> str:
+    """The commit the release was built from (its RELEASE_SHA), else the checkout's HEAD."""
+    try:
+        sha = (release / 'RELEASE_SHA').read_text().strip()
+    except OSError:
+        return 'HEAD'
+    return sha if len(sha) == 40 and all(c in '0123456789abcdef' for c in sha) else 'HEAD'
+
+
 def sync(release: Path, hermes_home: Path, source_git: Path | None) -> dict:
     plugins = hermes_home / 'plugins'
     managed = hermes_managed(plugins)
+    if managed is None:
+        return {'hermes_home': str(hermes_home), 'plugins': {}, 'changed': [],
+                'skipped': 'plugins/.install-metadata.json is unreadable; nothing changed'}
+    ref = release_ref(release)
     states, changed = {}, []
     for source in sorted(p for p in (release / 'hermes-plugin').iterdir() if (p / 'plugin.yaml').is_file()):
         name, target = source.name, plugins / source.name
@@ -121,7 +140,7 @@ def sync(release: Path, hermes_home: Path, source_git: Path | None) -> dict:
             if want == have:
                 states[name] = 'current'
                 continue
-            known = shipped_blobs(source_git, name) | set(want.items())
+            known = shipped_blobs(source_git, name, ref) | set(want.items())
             if any(item not in known for item in have.items()):
                 states[name] = 'owner-modified'
                 continue
