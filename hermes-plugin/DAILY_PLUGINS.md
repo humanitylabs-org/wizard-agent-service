@@ -22,7 +22,16 @@ Install only into the intended Hermes profile using its supported plugin
 lifecycle, or link each selected plugin directory from this checkout under
 `$HERMES_HOME/plugins/` (default `~/.hermes/plugins/`). Follow the installation's
 normal new-session/reload procedure; merely adding these sources to the service
-repository does not activate them or change an existing home.
+repository does not activate them or add them to an existing home.
+
+Once installed as a plain copy, a plugin follows the Service: every verified deploy
+(and rollback) runs `ops/sync-hermes-plugins.py`, which replaces
+`$HERMES_HOME/plugins/<name>/` with the release's copy and asks the running gateway
+to reload its plugins (tools apply from the next chat). It leaves alone any plugin
+that is not installed, is a symlink, was installed by `hermes plugins install`, or
+holds a file this repository never shipped (an owner's own edit). The deploy
+receipt's `hermes_plugins` field says what it did; `restart-needed` means the
+gateway has to be restarted by hand.
 
 The scheduler and agent-reader use the existing profile-scoped secret names
 `WIZARD_HEAVY_ORIGIN` and `WIZARD_HEAVY_TOKEN`, resolved through Hermes
