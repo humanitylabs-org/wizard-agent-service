@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { createChannelStore, channelRequest } from '../server/channel-store.mjs'
 import { dayOf, mintDailyThreadId, dailyTitle, openerOf, dailyRunNote } from '../server/daily-channel.mjs'
 import { Scheduler } from '../server/scheduler.mjs'
@@ -162,7 +163,8 @@ describe('scheduler', () => {
 describe('HTTP', () => {
   // Issue 532: the main agent's own schedule tool (loopback route of Hermes plugin wizard-schedule) may name 'daily'.
   const agentRoute = async (channelDaily: boolean) => {
-    const d = home(), token = 'fixture-heavy-token-with-more-than-32-chars', clock = () => Date.parse('2026-11-15T01:00:00Z')
+    const d = home(), token = randomUUID() + randomUUID(), // generated per run, never a fixed value
+      clock = () => Date.parse('2026-11-15T01:00:00Z')
     const s: any = createWizardServer({ wizardOsHome: d, requireAccess: false, hermesKey: 'test', agentBridge: false, followThrough: false, runQueueStatePath: join(d, 'q.db'), runQueuePollIntervalMs: 0,
       upstreamOrigin: 'http://127.0.0.1:9', heavyToken: token, schedulerStatePath: join(d, 'schedules.sqlite3'), schedulerNow: clock, dailyNow: clock, schedulerTimezone: 'Asia/Bangkok', channelStore: true, channelDaily })
     closers.push(s); const a: any = await listen(s)
