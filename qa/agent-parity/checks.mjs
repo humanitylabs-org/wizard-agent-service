@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { scene, image, png, post } from './fixture.mjs'
-import { serverChecks, dailyClock } from './server-checks.mjs'
+import { serverChecks, dailyClock, dailyScheduleToken } from './server-checks.mjs'
 import { queueChecks } from './queue-checks.mjs'
 import { trackerChecks } from './tracker-checks.mjs'
 import { STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
@@ -14,7 +14,7 @@ const featureScenes = {
   'graceful-restart-hold': kind => scene(kind, { gracefulRestart: true }),
   'chats-channels': kind => scene(kind, { channelStore: true, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true }),
   'chats-read-marks': kind => scene(kind, { channelStore: true, channelReadSync: true }),
-  'chats-daily-channel': kind => scene(kind, ({ root }) => ({ channelStore: true, channelDaily: true, dailyTimezone: 'UTC', dailyNow: () => dailyClock.at ?? Date.now(), schedulerNow: () => dailyClock.at ?? Date.now(), schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),
+  'chats-daily-channel': kind => scene(kind, ({ root }) => ({ channelStore: true, channelDaily: true, dailyTimezone: 'UTC', dailyNow: () => dailyClock.at ?? Date.now(), schedulerNow: () => dailyClock.at ?? Date.now(), schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false, heavyToken: dailyScheduleToken })),
   'chats-channels-switch': kind => scene(kind, ({ root }) => ({ pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, channelsSwitchTtlMs: 0, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true })),
   'chats-agent-filing': kind => scene(kind, ({ root }) => ({ channelStore: true, channelAgentFiling: true, channelFirstPosts: true, routedOwnerTurns: true, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true, schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),
   'chats-first-posts': kind => scene(kind, { channelFirstPosts: true, routedOwnerTurns: true, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true }),

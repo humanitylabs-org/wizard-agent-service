@@ -84,6 +84,8 @@ def schedule(args, session_id=None, **kwargs):
     if when is None:
         return json.dumps({'error': "when must be 'morning', 'overnight', an ISO time with offset, 'cron: <5 fields>' or 'every: <minutes>'"})
     value = {'name': args.get('name'), 'when': when, 'kind': args.get('kind', 'run'), 'text': args.get('text')}
+    if args.get('thread') == 'daily':
+        value['thread'] = 'daily'
     return call('create', value, session_id)
 
 
@@ -101,7 +103,8 @@ GUIDE = (
     '"Run this overnight" -> kind=run, when=overnight (03:30-03:50, trickled with other overnight work). '
     'Exact times use an ISO timestamp with offset. Put everything the future run needs in text (it runs '
     'in this thread with its history). Name it "Project · Thing". Confirm the returned nextRun to the '
-    'owner. wizard_schedule_list shows what this thread (or all=true, every thread) has pending; '
+    'owner. thread="daily" posts each run into that day\'s Daily thread instead (e.g. a morning brief). '
+    'wizard_schedule_list shows what this thread (or all=true, every thread) has pending; '
     'wizard_schedule_cancel removes one. Use cronjob only for recurring script/system jobs.'
 )
 
@@ -118,7 +121,8 @@ def register(ctx):
          {'name': {'type': 'string', 'description': 'Short label, "Project · Thing"'},
           'when': {'type': 'string'},
           'kind': {'type': 'string', 'enum': ['remind', 'run']},
-          'text': {'type': 'string', 'description': 'Reminder text, or the full self-contained task for the future run'}},
+          'text': {'type': 'string', 'description': 'Reminder text, or the full self-contained task for the future run'},
+          'thread': {'type': 'string', 'enum': ['daily'], 'description': 'Optional. "daily": post each run into that day\'s Daily thread instead of this one'}},
          ['name', 'when', 'kind', 'text']),
         ('wizard_schedule_list', schedule_list,
          'List pending schedules for this thread (all=true: every thread). include_done adds finished ones.',

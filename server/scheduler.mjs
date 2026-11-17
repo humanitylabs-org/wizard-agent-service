@@ -545,8 +545,9 @@ export class Scheduler {
       try { if (this.notifier?.available(this.agentId(job.agent))) deliver = 'notification' } catch { /* fall back to the thread */ }
     }
     const daily = this.dailyTarget(job, instant, deliver)
-    // `thread: 'daily'` with no open daily channel: the job's own chat, as a job without a thread would get.
-    if (!daily && job.thread === 'daily' && this.dailyOn) { job = { ...job, thread: `wizard_schedule_${job.id}`, createThread: true } }
+    // `thread: 'daily'` with no open daily channel, or with the Daily part turned off after the job was made: the
+    // job's own chat, as a job without a thread would get (never a literal Hermes session named 'daily').
+    if (!daily && job.thread === 'daily') { job = { ...job, thread: `wizard_schedule_${job.id}`, createThread: true } }
     // This identity is persisted before any external session/run call. A crashed create
     // retries the same session id; a crashed admission retries the same frozen body/key.
     if (!daily && !job.thread) { job.thread = `wizard_schedule_${randomUUID()}`; job.createThread = true; this.save(job) }

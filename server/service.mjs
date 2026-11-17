@@ -6627,7 +6627,7 @@ function buildWizardServer(options, lifetime) {
       }
       if (url.pathname.startsWith('/wizard/internal/schedules/')) {
         // The main agent's schedule tools (Hermes plugin wizard-schedule). Same loopback token and
-        // refusal rules as heavy work; the thread is the calling session, injected by the plugin.
+        // refusal rules as heavy work; the thread is the calling session, injected by the plugin (or today's Daily).
         if (!scheduler || !options.heavyToken) { sendJson(response, 404, { error: 'not_found' }); return }
         if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
         const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
@@ -6641,8 +6641,11 @@ function buildWizardServer(options, lifetime) {
         try {
           const action = url.pathname.slice('/wizard/internal/schedules/'.length)
           if (action === 'create') {
+            // The one thread a main-agent tool may name besides its own is 'daily' (today's Daily thread, issue 532),
+            // and only while the Daily part is on; any other value, or 'daily' with it off, stays the calling session.
+            const thread = value.thread === 'daily' && scheduler.dailyOn ? 'daily' : sessionId
             const job = scheduler.create({ name: value.name, when: value.when, kind: value.kind ?? 'run', prompt: value.text,
-              thread: sessionId, ...(value.model ? { model: value.model } : {}) })
+              thread, ...(value.model ? { model: value.model } : {}) })
             sendJson(response, 201, scheduler.project(job))
           } else if (action === 'list') {
             await scheduler.refreshRuns()
