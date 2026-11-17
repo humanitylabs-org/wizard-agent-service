@@ -162,6 +162,49 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(result['plugins']['wizard-schedule'], 'refreshed')
         self.assertIn("'thread'", (target / '__init__.py').read_text())
 
+    def test_the_box_hand_copy_from_before_the_repo_is_refreshed_without_history(self):
+        # The exact 22 Oct bytes on the filer's box (blob f964565): ee86ac2's file with the older one-line
+        # loopback check. No source checkout: the release's own seeds list is what makes it known.
+        seed = (ROOT / 'tests/fixtures/hermes-plugin-seeds/wizard-schedule-__init__.py.txt').read_bytes()
+        self.assertEqual(sync.blob_sha(seed), 'f96456523ec4b74af8e225a9d785ea55e4bcf89a')
+        target = self.install()
+        (target / '__init__.py').write_bytes(seed)
+        (target / 'plugin.yaml').write_bytes((ROOT / 'hermes-plugin/wizard-schedule/plugin.yaml').read_bytes())
+        result = sync.sync(ROOT, self.home, None)
+        self.assertEqual(result['plugins']['wizard-schedule'], 'refreshed')
+        self.assertIn("'thread'", (target / '__init__.py').read_text())
+        # The same bytes with one more owner line are still an owner's edit, and the receipt names the file.
+        (target / '__init__.py').write_bytes(seed + b'# mine\n')
+        again = sync.sync(ROOT, self.home, None)
+        self.assertEqual(again['plugins']['wizard-schedule'], 'owner-modified')
+        self.assertEqual(again['unknown'], {'wizard-schedule': ['__init__.py']})
+
+    def test_a_broken_seeds_list_trusts_no_seed(self):
+        (self.release / 'ops').mkdir()
+        (self.release / 'ops/hermes-plugin-seeds.json').write_text('{"plugins": [')
+        self.assertEqual(sync.seed_blobs(self.release, 'wizard-schedule'), set())
+        (self.release / 'ops/hermes-plugin-seeds.json').write_text(json.dumps(
+            {'plugins': {'wizard-schedule': {'__init__.py': {sync.blob_sha(b'seed'): 'note'}}}}))
+        self.assertEqual(sync.seed_blobs(self.release, 'wizard-schedule'), {('__init__.py', sync.blob_sha(b'seed'))})
+        target = self.install(text='seed')
+        self.assertEqual(sync.sync(self.release, self.home, None)['plugins']['wizard-schedule'], 'refreshed')
+        self.assertEqual((target / '__init__.py').read_text(), NEW)
+
+    def test_a_git_checkout_is_left_to_its_owner(self):
+        target = self.install()
+        (target / '.git').mkdir()
+        (target / '.git/HEAD').write_text('ref: refs/heads/main\n')
+        result = sync.sync(self.release, self.home, self.src)
+        self.assertEqual(result['plugins']['wizard-schedule'], 'git-checkout')
+        self.assertEqual(result['changed'], [])
+        self.assertEqual((target / '__init__.py').read_text(), OLD)
+
+    def test_a_hand_run_finds_the_deploy_source_checkout(self):
+        with patch.dict(os.environ, {'WAS_SOURCE': str(self.src)}):
+            self.assertEqual(sync.default_source(), self.src)
+        with patch.dict(os.environ, {'WAS_SOURCE': str(self.home)}):
+            self.assertIsNone(sync.default_source())
+
 
 class DeployWiringTests(unittest.TestCase):
     def test_deploy_runs_the_release_sync_step_and_never_fails_on_it(self):

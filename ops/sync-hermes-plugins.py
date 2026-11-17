@@ -13,8 +13,10 @@ For every plugin the release ships, the installed copy is replaced by the releas
   - it is a plain folder, not a symlink (a link already follows its target);
   - Hermes did not install it (`plugins/.install-metadata.json` has no record for it, so `hermes plugins
     update` owns those);
+  - it is not a git checkout (a `.git` inside means the owner keeps it with git: `git-checkout`, left alone);
   - every file in it is a version this repository once shipped at that path (checked against the git history
-    of the source checkout), so an owner's own edit is never overwritten.
+    of the source checkout, plus the pre-repo hand copies listed in ops/hermes-plugin-seeds.json), so an
+    owner's own edit is never overwritten (`owner-modified`, with the unknown files under `unknown`).
 
 Then the running Hermes gateway is asked to re-discover its plugins (stock `reload_running_gateway`); the
 plugin's tools apply from the next chat session. Prints one JSON line. Exit 0 unless the arguments are wrong.
@@ -32,6 +34,24 @@ from pathlib import Path
 USAGE = 'Usage: sync-hermes-plugins.py <release dir> [--hermes-home <dir>] [--source-git <checkout>] [--no-reload]'
 SKIP_PARTS = ('__pycache__',)
 STAGE = '.wizard-plugin-sync'
+SEEDS = 'ops/hermes-plugin-seeds.json'
+
+
+def seed_blobs(release: Path, name: str) -> set[tuple[str, str]]:
+    """(relative path, blob id) of the known pre-repo hand copies of this plugin (ops/hermes-plugin-seeds.json in
+    the release). A missing or broken list means none are known."""
+    try:
+        data = json.loads((release / SEEDS).read_text(encoding='utf-8'))
+        files = data['plugins'].get(name) or {}
+        return {(path, sha) for path, blobs in files.items() for sha in blobs}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return set()
+
+
+def default_source() -> Path | None:
+    """The deploy helper's source checkout (WAS_SOURCE, else ~/apps/wizard-agent-service), for a run by hand."""
+    path = Path(os.environ.get('WAS_SOURCE') or Path.home() / 'apps/wizard-agent-service')
+    return path if (path / '.git').exists() else None
 
 
 def blob_sha(data: bytes) -> str:
@@ -123,7 +143,7 @@ def sync(release: Path, hermes_home: Path, source_git: Path | None) -> dict:
         return {'hermes_home': str(hermes_home), 'plugins': {}, 'changed': [],
                 'skipped': 'plugins/.install-metadata.json is unreadable; nothing changed'}
     ref = release_ref(release)
-    states, changed = {}, []
+    states, changed, unknown = {}, [], {}
     for source in sorted(p for p in (release / 'hermes-plugin').iterdir() if (p / 'plugin.yaml').is_file()):
         name, target = source.name, plugins / source.name
         try:
@@ -136,20 +156,28 @@ def sync(release: Path, hermes_home: Path, source_git: Path | None) -> dict:
             if name in managed:
                 states[name] = 'hermes-managed'
                 continue
+            if (target / '.git').exists() or (target / '.git').is_symlink():
+                states[name] = 'git-checkout'
+                continue
             want, have = plugin_files(source), plugin_files(target)
             if want == have:
                 states[name] = 'current'
                 continue
-            known = shipped_blobs(source_git, name, ref) | set(want.items())
-            if any(item not in known for item in have.items()):
+            known = shipped_blobs(source_git, name, ref) | seed_blobs(release, name) | set(want.items())
+            strange = sorted(path for path, sha in have.items() if (path, sha) not in known)
+            if strange:
                 states[name] = 'owner-modified'
+                unknown[name] = strange[:20]
                 continue
             replace(source, target, hermes_home / STAGE)
             states[name] = 'refreshed'
             changed.append(name)
         except OSError as exc:
             states[name] = f'error: {exc}'[:200]
-    return {'hermes_home': str(hermes_home), 'plugins': states, 'changed': changed}
+    result = {'hermes_home': str(hermes_home), 'plugins': states, 'changed': changed}
+    if unknown:
+        result['unknown'] = unknown
+    return result
 
 
 RELOAD = (
@@ -221,7 +249,7 @@ def main(argv: list[str]) -> int:
     if len(args) != 1 or not (Path(args[0]) / 'hermes-plugin').is_dir():
         print(USAGE, file=sys.stderr)
         return 2
-    result = sync(Path(args[0]), Path(home), Path(source) if source else None)
+    result = sync(Path(args[0]), Path(home), Path(source) if source else default_source())
     if result['changed'] and not no_reload:
         result['reload'] = reload_gateway(Path(home))
     print(json.dumps(result))
