@@ -23,6 +23,7 @@ plugin's tools apply from the next chat session. Prints one JSON line. Exit 0 un
 """
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -34,6 +35,7 @@ from pathlib import Path
 USAGE = 'Usage: sync-hermes-plugins.py <release dir> [--hermes-home <dir>] [--source-git <checkout>] [--no-reload]'
 SKIP_PARTS = ('__pycache__',)
 STAGE = '.wizard-plugin-sync'
+LOCK = '.wizard-plugin-sync.lock'
 SEEDS = 'ops/hermes-plugin-seeds.json'
 
 
@@ -137,6 +139,20 @@ def release_ref(release: Path) -> str:
 
 
 def sync(release: Path, hermes_home: Path, source_git: Path | None) -> dict:
+    """One run at a time per Hermes home: the deploy helper and the Service's own startup run (issue 532) can
+    overlap, and both swap folders through the same staging dir."""
+    if not (hermes_home / 'plugins').is_dir():
+        return _sync(release, hermes_home, source_git)  # nothing installed, so nothing is written
+    try:
+        lock = open(hermes_home / LOCK, 'a')
+    except OSError as exc:
+        return {'hermes_home': str(hermes_home), 'plugins': {}, 'changed': [], 'error': f'lock: {exc}'[:200]}
+    with lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _sync(release, hermes_home, source_git)
+
+
+def _sync(release: Path, hermes_home: Path, source_git: Path | None) -> dict:
     plugins = hermes_home / 'plugins'
     managed = hermes_managed(plugins)
     if managed is None:

@@ -179,6 +179,27 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(again['plugins']['wizard-schedule'], 'owner-modified')
         self.assertEqual(again['unknown'], {'wizard-schedule': ['__init__.py']})
 
+    def test_overlapping_runs_take_turns(self):
+        # The deploy helper and the Service's startup run can overlap; they share the staging dir.
+        import fcntl
+        import threading
+        self.install()
+        done = []
+        with open(self.home / sync.LOCK, 'a') as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            worker = threading.Thread(target=lambda: done.append(sync.sync(self.release, self.home, self.src)))
+            worker.start()
+            worker.join(0.5)
+            self.assertEqual(done, [])
+        worker.join(10)
+        self.assertEqual(done[0]['plugins']['wizard-schedule'], 'refreshed')
+
+    def test_no_plugins_folder_writes_nothing(self):
+        self.plugins.rmdir()
+        result = sync.sync(self.release, self.home, self.src)
+        self.assertEqual(result['changed'], [])
+        self.assertFalse((self.home / sync.LOCK).exists())
+
     def test_a_broken_seeds_list_trusts_no_seed(self):
         (self.release / 'ops').mkdir()
         (self.release / 'ops/hermes-plugin-seeds.json').write_text('{"plugins": [')

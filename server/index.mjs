@@ -9,6 +9,7 @@ import { readSettings, initializeResponseStyle, wizardOsHome } from './wizard-os
 import { existsSync, readFileSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 import { startupLine } from './speed-meter.mjs'
+import { startHermesPluginSync } from './hermes-plugin-sync.mjs'
 
 const secretFile = (path) => {
   if (!path) return ''
@@ -310,6 +311,8 @@ server.listen(port, host, () => {
   void Promise.resolve(server.runQueueStartupMs).catch(() => undefined).then(runQueueMs => {
     process.stdout.write(`${startupLine(startupMarks, { run_queue: runQueueMs })}\n`)
   })
+  // Refresh the host Hermes' copies of this release's own plugins, whatever deployed it (issue 532).
+  void startHermesPluginSync({ hermesHome })
 })
 if (tailnetPort) {
   createTailnetIngress(server).listen(tailnetPort, host, () => process.stdout.write(`Wizard tailnet listener on ${host}:${tailnetPort}\n`))
