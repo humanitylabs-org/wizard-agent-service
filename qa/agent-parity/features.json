@@ -361,6 +361,25 @@
       "policy_exemptions": []
     },
     {
+      "id": "signed-out-send-reconnect",
+      "description": "A failed or interrupted send on a Claude, ChatGPT or Tinfoil subscription whose AI usage reading is signed out (wizard-ux issue 1487) shows why it didn't send with Reconnect as the primary button and no Retry, for every agent's thread; once the reading is signed in again the card offers Retry. Home's AI zone and Resources › AI accounts show the same Reconnect button. A failure the Agent Service already diagnosed (wizard_reconnect, or a run_error other than provider_auth) keeps its own card.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/signed-out-reconnect.test.mjs: the real usage.js, resources.js and chat-models.js run main, host-profile, container and restricted rows (a routed id equal to a main id) against a signed-out /wizard/ai-usage reading. Browser: wizard-ux tests/qa-signed-out-reconnect.cjs (phone Nebula and Grove plus desktop on a routed Philosopher thread, and a main-agent thread; QA_EXPECT=broken for main). Synthetic usage and session fixtures, not live provider proof.",
+      "source_refs": [
+        "wizard-ux/web/core/chat-models.js",
+        "wizard-ux/web/core/chat-power.js",
+        "wizard-ux/web/core/usage.js",
+        "wizard-ux/web/core/resources.js",
+        "server/ai-usage.mjs"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/signed-out-reconnect.test.mjs",
+        "wizard-ux/tests/qa-signed-out-reconnect.cjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "restart-refused-resend",
       "description": "A reply Hermes accepted but refused with runtime_draining because the gateway began a restart is sent again by itself once (same words, same thread), with no Retry; reading it again never sends a duplicate.",
       "layer": "server",
