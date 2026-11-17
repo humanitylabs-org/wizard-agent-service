@@ -493,6 +493,34 @@ export const serverChecks = {
     assert.deepEqual({ code: list.runError?.code, provider: list.runError?.provider }, want, `${s.kind}: compact row`)
     assert.match(list.runError.message, /subscription has ended/)
   },
+  // wizard-ux issue 1488: Dismiss on a failed thread's Needs retry card works for every agent's thread (it was
+  // main-only, so a routed agent's card stayed with "Couldn't dismiss"), and the list stops showing that failure.
+  'failure-dismiss': async s => {
+    const first = await admit(s, { input: 'Synthetic request whose run fails', model: 'fixture-model' })
+    s.sessions.get('wizard_parity').hidden = false
+    Object.assign([...s.runs.values()].at(-1), { status: 'failed', updated_at: Date.now() / 1000, output: '',
+      error: 'HTTP 401: synthetic signed-out subscription', runtime: { provider: 'anthropic', model: 'fixture-model' } })
+    assert.equal((await (await s.request('/v1/runs/' + first.run_id)).json()).status, 'failed')
+    const row = async (view) => (await (await s.request('/api/sessions' + view)).json()).data.find(x => x.id === 'wizard_parity')
+    for (let n = 0; n < 40 && (await row(''))?.status !== 'failed'; n++) await new Promise(r => setTimeout(r, 25))
+    assert.equal((await row(''))?.status, 'failed', `${s.kind}: the failed run lists as failed before Dismiss`)
+    const body = s.kind === 'main' ? '{}' : JSON.stringify({ agent: s.id })
+    const dismissed = await s.raw('/wizard/session-failure/wizard_parity/dismiss', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })
+    assert.equal(dismissed.status, 200, `${s.kind}: Dismiss is accepted`)
+    assert.equal((await dismissed.json()).dismissed, true)
+    for (const view of ['', '?view=list']) {
+      const item = await row(view)
+      assert.ok(item, `${s.kind}: the thread stays listed after Dismiss (${view || 'full'})`)
+      assert.notEqual(item.status, 'failed', `${s.kind}: the dismissed failure no longer shows (${view || 'full'})`)
+      assert.equal(view ? item.runError : item.wizard_last_run_error, undefined, `${s.kind}: no failure reason after Dismiss`)
+    }
+    if (s.kind !== 'main') {
+      // An old client posts '{}': the thread's own pin decides, never the main agent.
+      const old = await s.raw('/wizard/session-failure/wizard_parity/dismiss', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      assert.equal(old.status, 200, `${s.kind}: an old client's Dismiss reaches the thread's own agent`)
+      assert.equal((await old.json()).agent_id, s.id)
+    }
+  },
   // 8-9 Nov 2026: a gateway restart drain failed every accepted-but-unstarted reply with runtime_draining and
   // each thread showed "Reply not sent" until James tapped Retry. The queue now sends it again by itself, once.
   'restart-refused-resend': async s => {
