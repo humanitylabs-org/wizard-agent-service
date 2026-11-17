@@ -3337,6 +3337,8 @@ function buildWizardServer(options, lifetime) {
   const agentCtx = agents ? {
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
+    // An owner-dismissed failure of this agent's thread stops showing until a newer run (wizard-ux issue 1488).
+    failureDismissed: (agentId, sessionId, runId) => dismissedFailureStore.isDismissed(sessionId, runId, agentId),
     // One read of the agent's state.db per 100 listed threads, not three opens per row:
     // projectProfileSessions prepares this once per list and passes it to projectOpenAsk.
     prepareOpenAsk: (agent, ids) => routedOpenAskEvidence(agent, ids),
@@ -7294,7 +7296,20 @@ function buildWizardServer(options, lifetime) {
         const dismissBytes = await readBoundedBody(request, 512)
         const dismissBody = dismissBytes.toString('utf8').trim() ? parseJsonBody(dismissBytes) : {}
         if (Object.keys(dismissBody).some(key => !['agent', 'agent_id'].includes(key))) { sendJson(response, 400, { error: 'invalid_request' }); return }
-        mainHistoryPair(request, sessionId, { ...Object.fromEntries(url.searchParams), ...dismissBody })
+        const dismissInput = { ...Object.fromEntries(url.searchParams), ...dismissBody }
+        // Another agent's thread (wizard-ux issue 1488): its own agent-scoped fence, keyed by the run its list shows.
+        const dismissAgent = dismissInput.agent && dismissInput.agent_id && dismissInput.agent !== dismissInput.agent_id
+          ? mainHistoryPair(request, sessionId, dismissInput) : sideAgent(request, sessionId, dismissInput.agent_id || dismissInput.agent || '')
+        if (dismissAgent !== MAIN_AGENT_ID && agents?.read(dismissAgent)?.role !== 'recovery') {
+          const failureKey = String(agents.latestThreadRun?.(dismissAgent, sessionId)?.run_id || '') || `revision:${Date.now()}`
+          try { dismissedFailureStore.dismiss(sessionId, failureKey, dismissAgent) }
+          catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+          const routedAgent = agents.read(dismissAgent)
+          try { if (routedAgent) (await routedQueues?.queueFor(routedAgent))?.dismissProviderAccess(sessionId) } catch { /* the fence is saved; the queue reads it */ }
+          sendJson(response, 200, { ok: true, dismissed: true, session_id: sessionId, agent_id: dismissAgent })
+          return
+        }
+        mainHistoryPair(request, sessionId, dismissInput)
         // Resolve the failure identity the way the session list projects it:
         // the newest bound external run, the newest Helm activity, else the
         // canonical session revision.

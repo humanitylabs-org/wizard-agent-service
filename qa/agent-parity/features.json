@@ -342,6 +342,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "failure-dismiss",
+      "description": "Dismiss on a failed thread's Needs retry card is accepted for every agent's thread (wizard-ux issue 1488: it was main-only, so a routed agent's card stayed and the shell said Couldn't dismiss). A routed dismissal is saved under that agent's own fence, keyed by the run its list shows, and its list rows stop showing that failure until a newer run.",
+      "layer": "server",
+      "fixture": "failure-dismiss",
+      "how_to_test": "Fail a real HTTP admission, list the thread as failed, POST /wizard/session-failure/<id>/dismiss (main '{}', routed {agent}) on main, host-profile, container and restricted, then list the full and ?view=list shapes: the thread stays listed without the failed status or failure reason. For routed kinds an old client's '{}' body reaches the thread's own agent. Synthetic HTTP fixture evidence, not live provider proof.",
+      "source_refs": [
+        "server/service.mjs",
+        "server/agents-http.mjs",
+        "server/thread-seen.mjs"
+      ],
+      "reference_tests": [
+        "tests/session-failure-dismiss.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "policy_exemptions": []
+    },
+    {
       "id": "restart-refused-resend",
       "description": "A reply Hermes accepted but refused with runtime_draining because the gateway began a restart is sent again by itself once (same words, same thread), with no Retry; reading it again never sends a duplicate.",
       "layer": "server",
@@ -809,7 +826,7 @@
       "id": "retry-input",
       "description": "Admit a user turn, reload thread detail and assert the full retry input comes from that same agent/session",
       "layer": "server",
-      "how_to_test": "Admit a user turn, reload thread detail and assert the full retry input comes from that same agent/session. Fail before any answer, clear runtime user history, restart, hydrate the durable saved reference and tap Retry twice; require exact saved words, one new receipt and one dispatch through each authorized runtime transport. Run tests/provider-access-dismiss-startup.node.mjs to prove dismissed provider-access waits never resend through main, host-profile, container or restricted queues, old failures stay failed when recovery is enabled, and already-authorized waits survive restart. The owner Dismiss HTTP action remains main-only; routed queues enforce their own agent-scoped dismissal fence.",
+      "how_to_test": "Admit a user turn, reload thread detail and assert the full retry input comes from that same agent/session. Fail before any answer, clear runtime user history, restart, hydrate the durable saved reference and tap Retry twice; require exact saved words, one new receipt and one dispatch through each authorized runtime transport. Run tests/provider-access-dismiss-startup.node.mjs to prove dismissed provider-access waits never resend through main, host-profile, container or restricted queues, old failures stay failed when recovery is enabled, and already-authorized waits survive restart. The owner Dismiss HTTP action reaches each thread's own agent (cell failure-dismiss); routed queues enforce their own agent-scoped dismissal fence.",
       "source_refs": [
         "server/session-detail.mjs",
         "server/run-queue.mjs",

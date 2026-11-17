@@ -103,7 +103,6 @@ describe('persisted default and recovery contract', () => {
     const actions: [string, string, any][] = [
       ['/wizard/filings', 'POST', { session_id: 'wizard_old', client_command_id: 'review-file', runtime: 'direct' }],
       ['/wizard/filings/wizard_old/status', 'POST', { runtime: 'direct' }],
-      ['/wizard/session-failure/wizard_old/dismiss', 'POST', {}],
     ]
     for (const [path, method, body] of actions) {
       const offset = s.calls.length
@@ -111,6 +110,11 @@ describe('persisted default and recovery contract', () => {
       expect([r.status, (await r.json()).check]).toEqual([409, 'agent.unsupported_action'])
       expect(s.calls.slice(offset)).toEqual([])
     }
+    // wizard-ux issue 1488: Dismiss on a secondary pair is that agent's own fence, never the main agent's.
+    const offset = s.calls.length
+    const dismissed = await s.call('/wizard/session-failure/wizard_old/dismiss', 'POST', { agent_id: managed.id })
+    expect([dismissed.status, (await dismissed.json()).agent_id]).toEqual([200, managed.id])
+    expect(s.calls.slice(offset).some(row => row.agent === 'hermes')).toBe(false)
     await s.call('/wizard/v1/settings', 'PUT', { agents: { default_agent_id: managed.id } })
     await s.call('/wizard/v1/agents/hermes', 'PATCH', { role: 'recovery' })
     for (const [path, method, body] of actions) {
@@ -120,6 +124,11 @@ describe('persisted default and recovery contract', () => {
       expect(hidden.status).toBe(404); expect(await hidden.json()).toEqual(await missing.json())
       expect(s.calls.slice(offset)).toEqual([])
       expect((await s.call(path, method, body)).status).toBe(409)
+    }
+    for (const agent_id of ['hermes', 'missing']) {
+      const offset = s.calls.length
+      expect((await s.call('/wizard/session-failure/wizard_old/dismiss', 'POST', { agent_id }, {})).status).toBe(404)
+      expect(s.calls.slice(offset)).toEqual([])
     }
     for (const [path, method, body] of [
       ['/wizard/hermes/api/sessions/wizard_old?agent=hermes', 'PATCH', { archived: true, title: 'changed' }],

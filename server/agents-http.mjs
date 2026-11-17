@@ -163,6 +163,13 @@ export async function projectProfileSessions(ctx, agent, rows, headers, secrets)
           ...(!active && run.output ? { wizard_last_assistant_at: run.updated_at,
             latest_message: { role: 'assistant', content: stripStatus(run.output), timestamp: run.updated_at } } : {}),
         } : row
+        // The owner dismissed this run's failure (wizard-ux issue 1488): same projection as main's list.
+        if (run && ['failed', 'interrupted'].includes(run.status) && ctx.failureDismissed?.(agent.id, row.id, ref.run_id)) {
+          projected = { ...projected }
+          delete projected.status
+          delete projected.wizard_reconnect
+          delete projected.wizard_last_run_error
+        }
         let attention = !active && run?.output ? parseStatus(run.output) : null
         let assistantAt = run?.updated_at || null
         let askReplies = run?.output ? [{ timestamp: run.updated_at, status: parseStatus(run.output) }] : []
