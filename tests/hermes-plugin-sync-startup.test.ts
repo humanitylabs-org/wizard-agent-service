@@ -27,7 +27,7 @@ function installHandCopy(home: string) {
   // The exact 22 Oct hand copy on the reporting box (blob f964565, listed in ops/hermes-plugin-seeds.json).
   const target = join(home, 'plugins/wizard-schedule')
   mkdirSync(target, { recursive: true })
-  writeFileSync(join(target, 'plugin.yaml'), execFileSync('git', ['show', 'ee86ac2:hermes-plugin/wizard-schedule/plugin.yaml'], { cwd: root }))
+  writeFileSync(join(target, 'plugin.yaml'), readFileSync(join(root, 'hermes-plugin/wizard-schedule/plugin.yaml')))
   writeFileSync(join(target, '__init__.py'), readFileSync(join(root, 'tests/fixtures/hermes-plugin-seeds/wizard-schedule-__init__.py.txt')))
   return { target }
 }
