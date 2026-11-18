@@ -36,7 +36,8 @@ const THREAD_ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/u
 const RECORD_ID = /^inbox_[a-f0-9]{24}$/u
 const TOKEN = /^[a-z][a-z0-9-]{0,19}$/u
 const SEVERITIES = new Set(['low', 'normal', 'high', 'urgent'])
-const ACTIVE = new Set(['queued', 'accepted', 'running', 'waiting', 'waiting_for_approval', 'paused', 'stopping', 'launching', 'unknown'])
+// Only a run in one of these states has finished; any other status (queued, started, running, a new alias) changes nothing.
+const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'canceled', 'interrupted', 'expired', 'error', 'stopped', 'timed_out'])
 
 const clip = (value, max) => {
   const text = String(value ?? '').replace(/\s+/gu, ' ').trim()
@@ -175,7 +176,7 @@ export class AgentInboxStore {
     const record = typeof thread === 'string' && thread ? this.linked(agent, thread) : null
     if (!record) return null
     const status = String(run.status ?? '')
-    if (!status || ACTIVE.has(status)) return null
+    if (!TERMINAL.has(status)) return null
     const output = typeof run.output === 'string' ? run.output : ''
     const sig = hash(`${run.id ?? ''}\n${status}\n${output}`).slice(0, 24)
     if (record.run_sigs?.includes(sig)) return null
@@ -209,6 +210,9 @@ export class AgentInboxStore {
   #apply(record, status, raw, { final, continues }) {
     record.last_update = status.ask
     record.updated_at = this.now()
+    // Each status line carries its own decision: an earlier line's recommendation and answer tokens never stick to a
+    // later one. The deadline is the task's (often set at capture), so it stays unless a line names a new one.
+    Object.assign(record, { recommendation: '', options: {}, default_option: null, confirm: false })
     withExtras(record, extrasOf(raw))
     if (status.state === 'needs_you' || status.state === 'check') {
       record.state = 'new'; record.kind = 'needs_you'; record.ask = status.ask

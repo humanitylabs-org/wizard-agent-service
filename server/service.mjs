@@ -3733,7 +3733,9 @@ function buildWizardServer(options, lifetime) {
       const id = agent || MAIN_AGENT_ID
       if (!agentInbox.linked(id, sessionId)) return
       // More work still on its way for this thread (another queued or running turn): a fyi is progress, not the end.
-      const continues = Boolean(inboxQueue(id)?.queuedForSession('direct', sessionId).some(record => record.terminalAt == null && record.publicRunId !== runId && record.upstreamRunId !== runId))
+      // Owed heavy work is probed through the same guard: it would hold a done back as fyi.
+      const continues = heavyStatus(id, sessionId, { state: 'done', ask: 'probe' })?.state !== 'done'
+        || Boolean(inboxQueue(id)?.queuedForSession('direct', sessionId).some(record => record.terminalAt == null && record.publicRunId !== runId && record.upstreamRunId !== runId))
       agentInbox.noteRun(id, sessionId, { id: runId, status: run.status, output: run.output }, { continues, guard: status => heavyStatus(id, sessionId, status) })
     } catch (error) { console.warn(`[agent-inbox] status update failed: ${error?.message || error}`) }
   }

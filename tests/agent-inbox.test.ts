@@ -40,10 +40,13 @@ describe('agent inbox store', () => {
     const s = store()
     const r = task(s)
     expect(s.noteRun('hermes', 'wizard_worker_1', { id: 'run1', status: 'running', output: '' })).toBeNull()
+    // Any status that is not a finished one (routed 'started', a new alias) changes nothing.
+    for (const status of ['started', 'queued', 'waiting', 'something-new', '']) expect(s.noteRun('hermes', 'wizard_worker_1', { id: 'run0', status, output: '' })).toBeNull()
     s.noteRun('hermes', 'wizard_worker_1', { id: 'run1', status: 'completed', output: line({ state: 'needs_you', ask: 'Two slots free. Reply mon or tue', recommendation: 'Take Monday at 9.', options: { mon: 'Book Monday at 9.', tue: 'Book Tuesday at 4.', 'Bad Token': 'x' }, default_option: 'mon', deadline: '2026-11-20', confirm: true }) })
     expect(s.get(r.id)).toMatchObject({ state: 'new', kind: 'needs_you', ask: 'Two slots free. Reply mon or tue', last_update: 'Two slots free. Reply mon or tue', recommendation: 'Take Monday at 9.', options: { mon: 'Book Monday at 9.', tue: 'Book Tuesday at 4.' }, default_option: 'mon', deadline: '2026-11-20T00:00:00.000Z', confirm: true })
     s.noteRun('hermes', 'wizard_worker_1', { id: 'run2', status: 'completed', output: line({ state: 'check', ask: 'Booked Monday. Say if the time is right' }) })
-    expect(s.get(r.id)).toMatchObject({ state: 'new', kind: 'needs_you' })
+    // A later line without options carries no stale tokens or recommendation; the task's deadline stays.
+    expect(s.get(r.id)).toMatchObject({ state: 'new', kind: 'needs_you', options: {}, recommendation: '', default_option: null, confirm: false, deadline: '2026-11-20T00:00:00.000Z' })
     s.noteRun('hermes', 'wizard_worker_1', { id: 'run3', status: 'completed', output: line({ state: 'done', ask: 'Dentist booked for Monday at 9' }) })
     expect(s.get(r.id)).toMatchObject({ state: 'new', kind: 'result', last_update: 'Dentist booked for Monday at 9' })
     // fyi while more work is on its way only moves last_update; at the end of the work it is an FYI record.
