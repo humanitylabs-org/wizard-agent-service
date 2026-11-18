@@ -88,3 +88,31 @@ The Importer reaches that with the same engine, no second migration system:
 Rehearsal (real Hermes runtime, live alongside home read-only, throwaway container-agent home): 1,051 chats,
 169 skills, 466 facts, SOUL.md and 5 approved facts moved in 81 s; the stock runtime image read all 466 facts
 from the copied store; undo removed every file, skill, fact, memory entry and the personality.
+
+## Bring your Wizard: an earlier agent's past as History (issue 544)
+
+Someone who already has a Hermes agent brings its past (not the agent) into WizardOS, read-only. The Importer turns
+this on per scan with `history: true`, only while its `hermes-history` app switch is on (`Switch:
+importer:hermes-history`); without the flag nothing below runs and a Hermes import works as before.
+
+- Source: a `hermes backup` zip (or a Hermes folder on this box). Only its own home is read, through the same allowlist
+  (sessions, memories, `memory_store.db` facts, skills, and `cron/jobs.json` only). `config.yaml`, `.env`,
+  `auth.json`, `plugins/`, cron output and every `profiles/<name>` stay unread; a backup holding only a profile is
+  refused. Only a Hermes source is accepted.
+- A private agent is never a source (this applies to every import, not only history): its home in the Agents
+  registry is not offered and is refused if named, and a folder or zip whose `agent.json` says `privacy: private` is refused.
+- Secrets are scrubbed before anything is written: the stock Hermes redactor (`redact_sensitive_text`), the
+  engine's key patterns, then any random-looking string of 32+ characters. Tool output rows are never read.
+- Chats go to `Files/Imported/Hermes/Chats/…` labelled "From your earlier agent"; memories go to `What Hermes knew
+  about me.md` with "as of <date>" (the memory file's date), never into the always-on memory. The owner-approved
+  "What I know about you" card still works as before.
+- Facts get `[Earlier agent, <date>]` and the tags `imported,earlier-agent`, with trust capped at 0.3 (a fact of this
+  agent's own starts at 0.5), so the newer fact wins a conflict.
+- Skills become reference documents in `Files/Imported/Hermes/Skills/` (+ `Index.md`), never active skills.
+- Cron jobs are an opt-in list (`scan.history.cron_jobs`). `import` with `schedules: [ids]` sends only the ticked ones
+  to the Agent Service (loopback `POST /wizard/internal/schedules/import-history`, the wizard-schedule plugin's
+  token), which creates each as a paused Wizard schedule (script jobs stay behind). Undo deletes them.
+- The personality (SOUL.md) stays behind; it is in `What Hermes knew about me.md` as reference.
+- Once an import has History, the agent gets one instruction line (`wizard-os.history` prompt section): older or
+  imported material lives in History (Files/Imported); its own memory is newer and wins.
+- Undo removes the chat, memory and skill files, the facts, the schedules and the line.

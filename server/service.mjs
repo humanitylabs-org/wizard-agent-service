@@ -93,7 +93,7 @@ import { createRestartGate, restartRequestRefusal } from './restart-gate.mjs'
 import { onboardingTools } from './onboarding.mjs'
 import { followUpThreadNote, followUpTool } from './follow-ups.mjs'
 import { agentReachOutTools, reachOutNote } from './agent-reach-out.mjs'
-import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, isSilentResult, isScheduleInput, projectFollowUps, scheduledRunEvents } from './scheduler.mjs'
+import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, importAgentHistorySchedules, isSilentResult, isScheduleInput, projectFollowUps, scheduledRunEvents } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { handleAgentNotesApi } from './agent-notes-http.mjs'
 import { createLookup } from './lookup.mjs'
@@ -6654,6 +6654,9 @@ function buildWizardServer(options, lifetime) {
             const all = scheduler.list().filter(job => value.all === true || job.thread === sessionId).map(job => scheduler.project(job))
             sendJson(response, 200, { schedules: all.filter(job => value.include_done === true || job.nextRun || job.lastRun?.outcome === 'running')
               .map(({ id, name, kind, window, when, nextRun, lastRun, thread, enabled }) => ({ id, name, kind, window, when, nextRun, lastRun, thread, enabled })) })
+          } else if (action === 'import-history') {
+            // The Importer's "Bring your Wizard" (issue 544): an earlier agent's cron jobs the owner ticked, created paused.
+            sendJson(response, 200, importAgentHistorySchedules(scheduler, { source: value.source, agent: value.agent, jobs: value.jobs }))
           } else if (action === 'cancel') {
             const job = scheduler.get(String(value.schedule_id || ''))
             if (job.thread !== sessionId && value.any_thread !== true) { sendJson(response, 409, { error: 'schedule belongs to another thread; pass any_thread' }); return }
