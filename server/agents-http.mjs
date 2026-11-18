@@ -983,6 +983,8 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     // The scheduler's own internal read of a notification run keeps [SILENT]-ending output intact, as on main.
     if (messageHistory || (!rawRunRead && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath))) result = ctx.projectStatusMarkers(result)
     if (messageHistory && searchParams.get('view') === 'wizard') result = ctx.projectWizardMessageHistory(result, historySource)
+    // Issue 550: the signal sweep card is the last row of the Daily thread it was posted into, on any agent's Daily.
+    if (messageHistory && searchParams.get('view') === 'wizard' && ctx.projectSweepCard) result = ctx.projectSweepCard(result, agent.id, sessionIdFromPath(upstreamPath), searchParams)
     if (messageHistory && ctx.projectAgentHistory) result = await ctx.projectAgentHistory(result, agent, searchParams.get('view') === 'wizard' ? sessionIdFromPath(upstreamPath) : '')
     // A finished run's output carries the same MEDIA lines the history will; project it identically.
     else if (method === 'GET' && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath) && ctx.projectAgentHistory) result = await ctx.projectAgentHistory(result, agent)

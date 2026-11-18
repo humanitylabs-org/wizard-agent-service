@@ -198,7 +198,24 @@ describe('agent inbox HTTP and switch', () => {
     expect((await fetch(u)).status).toBe(404)
     expect((await fetch(u, json('POST', { thread_id: 'wizard_w', title: 'x' }))).status).toBe(404)
     expect((await fetch(`${u}/inbox_000000000000000000000000`)).status).toBe(404)
+    // Issue 550: switch off = no card, no sweep, no Yes to all.
+    expect((await fetch(`${u}/sweep`)).status).toBe(404)
+    expect((await fetch(`${u}/sweep`, json('POST', {}))).status).toBe(404)
+    expect((await fetch(`${u}/sweep_000000000000000000000000/yes-to-all`, json('POST', {}))).status).toBe(404)
     expect(existsSync(join(d, 'agent-inbox.json'))).toBe(false)
+  })
+
+  it('issue 550: a sweep needs the Daily channel; the card route shapes are owner-only and strict', async () => {
+    const d = home(), u = await start(d, { agentInbox: true })
+    expect((await (await fetch(`${u}/sweep`)).json()).card).toBeNull()
+    // No Daily channel (Channels off): nowhere to post the card, nothing written.
+    const refused = await fetch(`${u}/sweep`, json('POST', {}))
+    expect([refused.status, (await refused.json()).error]).toEqual([409, 'daily_unavailable'])
+    expect((await fetch(`${u}/sweep`, json('PATCH', {}))).status).toBe(405)
+    expect((await fetch(`${u}/sweep_000000000000000000000000/yes-to-all`, json('POST', {}))).status).toBe(404)
+    expect((await fetch(`${u}/sweep_000000000000000000000000/yes-to-all`)).status).toBe(405)
+    expect((await fetch(`${u}/inbox_000000000000000000000000/yes-to-all`, json('POST', {}))).status).toBe(404)
+    expect((await fetch(`${u}/sweep`, json('POST', {}, { 'sec-fetch-site': 'cross-site' }))).status).toBe(403)
   })
 
   it('the owner switch in the Look file turns it on at runtime; the env/option choice wins', async () => {

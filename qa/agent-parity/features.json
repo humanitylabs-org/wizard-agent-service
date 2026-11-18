@@ -595,6 +595,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "agent-sweep",
+      "description": "Signal sweep card (issue 550, owner switch wizard/agent-inbox or WIZARD_AGENT_INBOX=1, off by default): saying or typing \"signal sweep\" to the main agent, a thread:'daily' schedule whose prompt is the phrase, or POST /wizard/v1/agent-inbox/sweep builds one capped card from the agent inbox (Waiting on you max 7 with recommendation and one button per answer token, Done max 10, counts for Running, Later and FYI, parked) and shows it as the last row of today's Daily thread (display_kind agent_sweep). A tap posts that token's full resume message into the record's own thread as its next turn; Yes to all answers only the card's Waiting items with a default and never a confirm item; an answered record archives at the worker's next status line; an item shown on 3 sweeps unanswered parks.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP routes (main, host-profile, container TCP, restricted Unix ingress) with agentInbox and the Daily channel on: a worker on this kind's thread asks with options and confirm, POST sweep shows it (seen 1, Yes to all count 0, skipped 1), main's Daily history ends with the card row while this kind's thread never carries it, Yes to all answers nothing, a tap posts the full yes sentence into this kind's thread (a second tap posts nothing) and the answer turn's own status line archives it (an earlier turn finishing first does not, unit test), then a plain item is answered by Yes to all with its full default sentence. On main, typing signal sweep posts a new card and the turn's run note says so; a thread:daily schedule with the phrase posts another card with a [SILENT] note; with the Daily archived a typed sweep posts no card and its run note says it could not be posted. tests/agent-sweep.test.ts covers the caps (30 waiting and 40 done show 7 and 10 plus and 23 more / more, no summary field), parking after 3 sweeps, Later, the history row placement and the switch off. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/agent-sweep.mjs",
+        "server/agent-inbox.mjs",
+        "server/service.mjs",
+        "server/agents-http.mjs"
+      ],
+      "reference_tests": [
+        "tests/agent-sweep.test.ts"
+      ],
+      "fixture": "agent-sweep",
+      "policy_exemptions": []
+    },
+    {
       "id": "chats-daily-channel",
       "description": "Daily channel (issue 527, part of the Channels switch wizard/chat-channels; WIZARD_CHANNEL_DAILY forces it): one pinned channel per agent holding one real thread per day (05:00 boundary in the owner's time zone). The main agent's Daily is seeded once, pinned above Alerts; PATCH kind makes another agent's channel its daily channel; POST /wizard/v1/channels/<id>/today creates today's thread once (racing first posts share it) and files it into Daily; GET /days pages every day thread with its opener and count; a thread:'daily' schedule and an origin-less reminder post into today's thread, while a notification-only reminder keeps its hidden schedule chat (issue 529); a run in a day thread is told yesterday's thread, but not once the Daily is archived. The main agent's own schedule tool (wizard_schedule, loopback /wizard/internal/schedules/create) may name thread 'daily' too (issue 532); any other thread it names stays the calling session; a 'daily' job whose Daily part is later off gets its own schedule chat, never a session named 'daily'.",
       "layer": "server",

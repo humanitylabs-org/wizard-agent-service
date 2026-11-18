@@ -768,6 +768,118 @@ export const serverChecks = {
     await s.restart()
     assert.equal((await record(made.id)).state, 'archived', 'durable across a restart')
   },
+  // Issue 550: the signal sweep card. Built from the agent inbox, posted as the last row of today's Daily thread of
+  // the main agent, and every tap posts that token's full resume message into the record's own thread (this kind's).
+  'agent-sweep': async s => {
+    const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const line = value => `Synthetic reply\n[WIZARD_STATUS_V1]${JSON.stringify(value)}[/WIZARD_STATUS_V1]`
+    const record = async id => (await (await s.raw(`/wizard/v1/agent-inbox/${id}`)).json()).record
+    const until = async (read, want, label) => {
+      let last
+      for (let n = 0; n < 80; n++) { last = await read(); if (want(last)) return last; await new Promise(r => setTimeout(r, 25)) }
+      assert.fail(`${label}: ${JSON.stringify(last)}`)
+    }
+    const finishLatest = async (status, output) => {
+      const run = [...s.runs.values()].at(-1)
+      Object.assign(run, { status, updated_at: Date.now() / 1000, output })
+      return run
+    }
+    const ask = (n, extra = {}) => line({ state: 'needs_you', ask: `Synthetic question ${n}. Reply yes or no`, recommendation: `Say yes to synthetic question ${n}.`,
+      options: { yes: `Yes: go ahead with synthetic question ${n} as recommended.`, no: `No: leave synthetic question ${n} alone.` }, default_option: 'yes', ...extra })
+    const latestCard = async () => (await (await s.raw('/wizard/v1/agent-inbox/sweep')).json()).card
+    assert.equal(await latestCard(), null, 'no card before the first sweep')
+    // A task on this kind's thread that needs a sure yes (confirm): Yes to all must skip it.
+    const captured = await (await s.raw('/wizard/v1/agent-inbox', json('POST', { agent: s.id, thread_id: 'wizard_parity', title: 'Synthetic send', ask: 'Synthetic send ask' }))).json()
+    const id = captured.record.id
+    let run = await admit(s, { input: 'Synthetic worker turn' })
+    await finishLatest('completed', ask(1, { confirm: true }))
+    assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
+    await until(() => record(id), r => r.kind === 'needs_you' && r.confirm === true, 'the worker asks')
+    const swept = await s.raw('/wizard/v1/agent-inbox/sweep', json('POST', {}))
+    assert.equal(swept.status, 201, await swept.clone().text())
+    const card = (await swept.json()).card
+    assert.equal(card.waiting.items.length, 1)
+    assert.deepEqual([card.waiting.items[0].id, card.waiting.items[0].confirm, card.waiting.items[0].options.map(o => o.token), card.waiting.items[0].seen], [id, true, ['yes', 'no'], 1])
+    assert.deepEqual(card.yes_to_all, { count: 0, skipped: 1 }, 'a confirm item is never covered by Yes to all')
+    assert.equal((await record(id)).state, 'surfaced')
+    // The card is the last row of today's Daily thread of the main agent (main only: routed scenes run no main Hermes).
+    if (s.id === 'hermes') {
+      const history = async () => (await (await s.raw(`/wizard/hermes/api/sessions/${encodeURIComponent(card.thread_id)}/messages?order=oldest&limit=500&offset=0&include_compacted=true&view=wizard`)).json())
+      s.sessions.get(card.thread_id)?.messages.push({ id: 'daily-synthetic-1', role: 'assistant', timestamp: Date.now() / 1000, content: 'Synthetic daily post' })
+      const rows = (await history()).data
+      assert.equal(rows.at(-1).id, card.id, 'the card is the last message of today\u2019s Daily thread')
+      assert.equal(rows.at(-1).display_kind, 'agent_sweep')
+      assert.equal(rows.at(-1).agent_sweep.waiting.items[0].id, id)
+      assert.match(rows.at(-1).content, /\*\*Waiting on you\*\* \(1\)/u)
+    }
+    // This kind's own thread never carries the card.
+    const own = await (await s.request('/api/sessions/wizard_parity/messages?order=oldest&limit=500&offset=0&view=wizard')).json()
+    assert.ok(!(own.data || own.messages || []).some(r => r.display_kind === 'agent_sweep'), 'only the Daily thread shows the card')
+    const yes = await s.raw(`/wizard/v1/agent-inbox/${card.id}/yes-to-all`, json('POST', {}))
+    assert.equal(yes.status, 200)
+    assert.deepEqual((await yes.json()).answered, [], 'Yes to all skipped the confirm item')
+    // A tap posts the token's whole resume message (never a bare "yes") into this kind's thread, which resumes.
+    const before = s.seen.length
+    const tapped = await s.raw(`/wizard/v1/agent-inbox/${id}`, json('PATCH', { action: 'answer', option: 'yes' }))
+    assert.equal(tapped.status, 200, await tapped.clone().text())
+    const tap = await tapped.json()
+    assert.ok(tap.run_id, 'the answer was admitted as a turn')
+    assert.deepEqual([tap.record.state, tap.record.answer], ['answered', 'yes'])
+    const sent = await until(async () => s.seen.slice(before).filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === 'wizard_parity').at(-1), Boolean, 'the answer reaches the thread')
+    assert.ok(JSON.stringify(sent.body.input).includes('Yes: go ahead with synthetic question 1 as recommended.'), 'the full recommendation sentence is posted, never a bare yes')
+    const again = await (await s.raw(`/wizard/v1/agent-inbox/${id}`, json('PATCH', { action: 'answer', option: 'yes' }))).json()
+    assert.equal(again.run_id, undefined, 'a second tap on the same answer posts nothing')
+    // The worker's next status line archives the answered record.
+    await until(async () => [...s.runs.values()].at(-1)?.status === 'running' ? [...s.runs.values()].at(-1) : null, Boolean, 'the answer turn is running')
+    run = await finishLatest('completed', line({ state: 'done', ask: 'Synthetic send done' }))
+    assert.equal((await s.request(`/v1/runs/${tap.run_id}`)).status, 200)
+    await until(() => record(id), r => r.state === 'archived', 'the answered record archives at the next status line')
+    // Yes to all on a plain item: its default answer's full message goes into the thread.
+    const second = await (await s.raw('/wizard/v1/agent-inbox', json('POST', { agent: s.id, thread_id: 'wizard_parity', title: 'Synthetic plain', ask: 'Synthetic plain ask' }))).json()
+    run = await admit(s, { input: 'Synthetic worker turn two' })
+    await finishLatest('completed', ask(2))
+    assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
+    await until(() => record(second.record.id), r => r.kind === 'needs_you', 'the second worker asks')
+    const card2 = (await (await s.raw('/wizard/v1/agent-inbox/sweep', json('POST', {}))).json()).card
+    assert.deepEqual(card2.waiting.items.map(i => i.id), [second.record.id])
+    const before2 = s.seen.length
+    const all = await (await s.raw(`/wizard/v1/agent-inbox/${card2.id}/yes-to-all`, json('POST', {}))).json()
+    assert.deepEqual(all.answered.map(a => [a.id, a.option]), [[second.record.id, 'yes']])
+    const sent2 = await until(async () => s.seen.slice(before2).filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === 'wizard_parity').at(-1), Boolean, 'Yes to all reaches the thread')
+    assert.ok(JSON.stringify(sent2.body.input).includes('Yes: go ahead with synthetic question 2 as recommended.'))
+    if (s.id === 'hermes') {
+      await until(async () => [...s.runs.values()].at(-1)?.status === 'running' ? 1 : null, Boolean, 'the yes-to-all turn is running')
+      await finishLatest('completed', 'Synthetic reply')
+      for (const r of s.runs.values()) if (r.status === 'running') r.status = 'completed'
+      // "signal sweep" typed to the main agent posts a new card and tells the turn so, once.
+      const typed = await admit(s, { session_id: card2.thread_id, input: 'Signal sweep' })
+      const fresh = await until(latestCard, c => c && c.id !== card2.id, 'typing signal sweep posts a card')
+      assert.equal(fresh.thread_id, card2.thread_id)
+      const dispatched = await until(async () => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === card2.thread_id).at(-1), Boolean, 'the turn is dispatched')
+      assert.match(String(dispatched.body.instructions || ''), /Signal sweep: the owner asked for a signal sweep/u)
+      assert.ok(typed.run_id || typed.id)
+      // A sweep the owner scheduled (a thread:'daily' job whose prompt is the phrase) posts a card too, quietly.
+      for (const r of s.runs.values()) if (r.status === 'running') r.status = 'completed'
+      const job = await s.raw('/wizard/v1/schedules', post({ name: 'Parity · Synthetic sweep', prompt: 'signal sweep', agent: s.id, enabled: false, when: { every: 3600 }, kind: 'run', thread: 'daily' }))
+      assert.equal(job.status, 201, await job.clone().text())
+      const made = await job.json()
+      assert.equal((await s.raw(`/wizard/v1/schedules/${made.id}/run`, post({}))).status, 202)
+      await s.server.scheduler.tick(false)
+      assert.equal(s.server.scheduler.latest(made.id).admitted, 1, s.server.scheduler.latest(made.id).error || 'admitted')
+      await until(latestCard, c => c && c.id !== fresh.id, 'a scheduled sweep posts a card')
+      const quiet = await until(async () => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === card2.thread_id && String(r.body?.input || '').startsWith('[Wizard schedule]')).at(-1), Boolean, 'the scheduled turn is dispatched')
+      assert.match(String(quiet.body.instructions || ''), /Respond exactly \[SILENT\]/u)
+      // No open Daily: the typed turn is told the card could not be posted, never that it was.
+      for (const r of s.runs.values()) if (r.status === 'running') r.status = 'completed'
+      const dailyId = (await (await s.raw('/wizard/v1/channels')).json()).channels.find(c => c.kind === 'daily').id
+      assert.equal((await s.raw('/wizard/v1/channels', json('PATCH', { id: dailyId, archived: true }))).status, 200)
+      const lastCard = (await latestCard()).id
+      await admit(s, { session_id: card2.thread_id, input: 'signal sweep' })
+      const refused = await until(async () => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === card2.thread_id && r.body?.input === 'signal sweep').at(-1), Boolean, 'the refused turn is dispatched')
+      assert.match(String(refused.body.instructions || ''), /could not post the sweep card because there is no open Daily thread/u)
+      assert.equal((await latestCard()).id, lastCard, 'no card without an open Daily')
+    }
+  },
   // wizard-ux issue 1358: one Channels switch. The owner's wizard/chat-channels switch in the synced Look file turns the
   // channel store, read marks and list fields on and off at runtime through each runtime's real Service route.
   'chats-channels-switch': async s => {
