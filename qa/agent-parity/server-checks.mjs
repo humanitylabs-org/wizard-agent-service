@@ -768,6 +768,56 @@ export const serverChecks = {
     await s.restart()
     assert.equal((await record(made.id)).state, 'archived', 'durable across a restart')
   },
+  // Issue 552: alert rules. Through this kind's Service routes: owner rules, rule hits reach Alerts, non-urgent events
+  // wait for the sweep, a borderline event goes to a private fake model on a local port (decision logged), the two
+  // feedback taps each add one example, and the 4th alert of the day collapses and flags the rules on the next card.
+  'agent-alerts': async s => {
+    const { createServer } = await import('node:http')
+    const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    let asked = 0
+    const fake = createServer((req, res) => { req.resume(); req.on('end', () => { asked++; res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { content: '{"urgent": true, "reason": "Synthetic person waiting today"}' } }] })) }) })
+    await new Promise(r => fake.listen(0, '127.0.0.1', r))
+    try {
+      const settingsPath = join(s.root, 'os', 'settings.json')
+      const current = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {}
+      mkdirSync(dirname(settingsPath), { recursive: true })
+      writeFileSync(settingsPath, JSON.stringify({ ...current, fast_router: { endpoint: `http://127.0.0.1:${fake.address().port}/v1/chat/completions`, model: 'fixture-private' } }))
+      const put = await s.raw('/wizard/v1/agent-inbox/rules', json('PUT', { senders: ['loud@example.test'] }))
+      assert.equal(put.status, 200)
+      assert.deepEqual((await put.json()).rules.senders, ['loud@example.test'])
+      const event = async body => { const r = await s.raw('/wizard/v1/agent-inbox/events', json('POST', { agent: s.id, ...body })); assert.equal(r.status, 201, JSON.stringify(body)); return r.json() }
+      let n = 0
+      const mail = extra => ({ type: 'mail', source: { app: 'wizard-mail', item: `m${++n}` }, sender: `quiet${n}@example.test`, title: `Synthetic mail ${n}`, ask: `Synthetic body ${n}`, ...extra })
+      const hit = await event(mail({ sender: 'Synthetic <loud@example.test>' }))
+      assert.deepEqual([hit.record.kind, hit.record.state, hit.decision.rule], ['alert', 'new', 'sender'], 'a named sender reaches Alerts')
+      const paid = await event({ type: 'payment_failed', source: { app: 'wizard-money', item: 'p1' }, title: 'Synthetic payment failed' })
+      assert.equal(paid.record.kind, 'alert', 'payment failed reaches Alerts')
+      const quiet = []
+      for (let i = 0; i < 4; i++) quiet.push(await event(mail()))
+      assert.ok(quiet.every(q => q.record.kind === 'fyi' && q.record.state === 'new'), 'non-urgent events wait for the sweep')
+      assert.equal(asked, 0, 'no model call for clear cases')
+      const border = await event(mail({ ask: 'Synthetic invoice due today', severity: 'high' }))
+      assert.deepEqual([border.record.kind, border.decision.stage, border.decision.rule], ['alert', 'model', 'model'], 'a borderline event is decided by the private model')
+      assert.equal(asked, 1)
+      const log = (await (await s.raw('/wizard/v1/agent-inbox/alert-log')).json()).log
+      assert.equal(log[0].record_id, border.record.id)
+      assert.equal(log[0].reason, 'Synthetic person waiting today', 'the model decision is logged')
+      const nu = await s.raw(`/wizard/v1/agent-inbox/${paid.record.id}`, json('PATCH', { action: 'not_urgent' }))
+      assert.equal(nu.status, 200)
+      const nuBody = await nu.json()
+      assert.deepEqual([nuBody.record.kind, nuBody.examples.not_urgent], ['fyi', 1], 'Not urgent adds one example and moves the alert to the sweep')
+      const sa = await (await s.raw(`/wizard/v1/agent-inbox/${quiet[0].record.id}`, json('PATCH', { action: 'should_alert' }))).json()
+      assert.equal(sa.examples.should_alert, 1, 'Should have alerted adds one example')
+      // Three alerts today so far (sender, payment, model): the 4th collapses.
+      const fourth = await event(mail({ sender: 'loud@example.test' }))
+      assert.equal(fourth.record.kind, 'fyi', 'the 4th alert of the day waits in the sweep')
+      const alerts = (await (await s.raw('/wizard/v1/agent-inbox?kind=alert')).json()).records
+      assert.equal(alerts.filter(r => r.alert_collapsed).length, 1, 'one collapsed alert')
+      const swept = await s.raw('/wizard/v1/agent-inbox/sweep', json('POST', {}))
+      if (swept.status === 201) assert.equal((await swept.json()).card.rules_flag.cap, 3, 'the next sweep flags the rules')
+      else assert.equal(swept.status, 409, 'no Daily in this scene: the flag waits for the next sweep')
+    } finally { await new Promise(r => fake.close(r)) }
+  },
   // Issue 551: the orb's dump route. A new task said to the orb comes back as route dump with its record already
   // written (state running); the Service then makes a hidden worker thread on the main agent and admits its turn on
   // the durable queue (key wizard-inbox-<record id>). The thread never lists. A question, or a shell that does not ask

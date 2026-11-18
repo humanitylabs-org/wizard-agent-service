@@ -35,6 +35,8 @@ export const DEFAULT_LINKS = Object.freeze({
   running: '/wizard-os-home/?inbox=running',
   later: '/wizard-os-home/?inbox=later',
   parked: '/wizard-os-home/?inbox=parked',
+  alerts: '/wizard-os-home/?inbox=alerts',
+  rules: '/wizard-os-home/?inbox=alert-rules',
 })
 
 const byWaiting = (a, b) => (SEVERITY_RANK[b.severity] ?? 1) - (SEVERITY_RANK[a.severity] ?? 1)
@@ -70,7 +72,7 @@ export function planSweep(records, { waitingCap = WAITING_CAP, doneCap = DONE_CA
 const optionList = record => Object.keys(record.options || {}).map(token => ({ token }))
 
 /** The stored card (what was shown, at the moment of the sweep). `seen` is how many sweeps showed the item. */
-export function composeCard(plan, { id, at, day = '', thread_id = '', agent = 'hermes', missing = 0, links = DEFAULT_LINKS } = {}) {
+export function composeCard(plan, { id, at, day = '', thread_id = '', agent = 'hermes', missing = 0, links = DEFAULT_LINKS, rulesFlag = null } = {}) {
   const threadLink = r => r.link || links.thread(r.thread_id, r.agent)
   return {
     schema: SWEEP_SCHEMA, id, at, day, thread_id, agent,
@@ -86,6 +88,8 @@ export function composeCard(plan, { id, at, day = '', thread_id = '', agent = 'h
     parked: { count: plan.parked, link: links.parked },
     // Finished worker runs with no inbox record at the last nightly check (issue 549); the target is zero.
     missing: Math.max(0, Number(missing) || 0),
+    // Alert rules (issue 552): more alerts than the daily cap got through, so the rules are flagged as too loose.
+    ...(rulesFlag ? { rules_flag: { day: String(rulesFlag.day || ''), alerts: Math.max(0, Number(rulesFlag.alerts) || 0), cap: Math.max(0, Number(rulesFlag.cap) || 0), link: links.rules || DEFAULT_LINKS.rules } } : {}),
   }
 }
 
@@ -144,6 +148,7 @@ export function cardMarkdown(view) {
   out.push(`[Later and FYI: ${view.later.count}](${view.later.link})`)
   if (view.parked.count) out.push(`[${view.parked.count} parked](${view.parked.link})`)
   if (view.missing) out.push(`${view.missing} finished task(s) had no inbox record at the last check.`)
+  if (view.rules_flag) out.push(`[Alert rules let ${view.rules_flag.alerts} alerts through on ${view.rules_flag.day} (more than ${view.rules_flag.cap}): check the rules](${view.rules_flag.link})`)
   return out.join('\n')
 }
 

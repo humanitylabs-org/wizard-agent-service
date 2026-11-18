@@ -58,6 +58,7 @@ import { createChannelsSwitch, channelPart } from './channels-switch.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS } from './agent-inbox.mjs'
 import { isSweepPhrase, isScheduledSweep, withCardRow } from './agent-sweep.mjs'
+import { AlertRulesFile, createAlertGate } from './agent-alerts.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
@@ -3764,6 +3765,20 @@ function buildWizardServer(options, lifetime) {
   const agentInbox = new AgentInboxStore(options.agentInboxStatePath ? resolve(String(options.agentInboxStatePath)) : '', { now: options.agentInboxNow ?? Date.now })
   const agentInboxSwitchOn = createChannelsSwitch({ id: AGENT_INBOX_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.agentInboxSwitchTtlMs ?? 3000 })
   const agentInboxOn = () => channelPart(options.agentInbox, agentInboxSwitchOn)
+  // Alert rules (issue 552, same switch): fixed rules, the owner's examples, then the fast private model decide which
+  // candidate events reach Alerts; everything else waits for the sweep. The rules file sits next to the inbox store.
+  const alertRules = new AlertRulesFile(options.alertRulesPath ? resolve(String(options.alertRulesPath))
+    : options.agentInboxStatePath ? join(dirname(resolve(String(options.agentInboxStatePath))), 'alert-rules.json') : '')
+  let alertNotifier
+  const alertGate = createAlertGate({
+    inbox: agentInbox, rules: alertRules, now: options.agentInboxNow ?? Date.now, timezone: () => dailyTimeZone(),
+    router: () => { try { return resolveFastRouter(readSettings(settingsPath).settings, router) } catch { return null } },
+    fetchImpl: options.alertFetch ?? fetch,
+    notify: options.alertNotifier ?? {
+      available: agent => { alertNotifier ??= bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null; return Boolean(alertNotifier?.available(agent)) },
+      send: note => alertNotifier.send(note),
+    },
+  })
   const inboxQueue = agent => (agent || MAIN_AGENT_ID) === MAIN_AGENT_ID ? runQueue : routedQueues?.loaded().find(queue => queue.agentId === agent)
   const inboxNoteRun = (agent, sessionId, run, runId = '') => {
     if (typeof sessionId !== 'string' || !sessionId || !run || !agentInboxOn()) return
@@ -3774,7 +3789,9 @@ function buildWizardServer(options, lifetime) {
       // Owed heavy work is probed through the same guard: it would hold a done back as fyi.
       const continues = heavyStatus(id, sessionId, { state: 'done', ask: 'probe' })?.state !== 'done'
         || Boolean(inboxQueue(id)?.queuedForSession('direct', sessionId).some(record => record.terminalAt == null && record.publicRunId !== runId && record.upstreamRunId !== runId))
-      agentInbox.noteRun(id, sessionId, { id: runId, status: run.status, output: run.output }, { continues, guard: status => heavyStatus(id, sessionId, status) })
+      const noted = agentInbox.noteRun(id, sessionId, { id: runId, status: run.status, output: run.output }, { continues, guard: status => heavyStatus(id, sessionId, status) })
+      // A finished task with a high or urgent severity is an alert candidate (issue 552), checked once.
+      if (noted) void alertGate.considerRecord(noted).catch(error => console.warn(`[agent-alerts] record not checked: ${error?.message || error}`))
     } catch (error) { console.warn(`[agent-inbox] status update failed: ${error?.message || error}`) }
   }
   // Finished worker runs (capture admits them with the INBOX_RUN_PREFIX idempotency key) on every loaded queue.
@@ -6504,7 +6521,11 @@ function buildWizardServer(options, lifetime) {
         // Issue 550: /sweep (GET the newest card, POST a sweep now) and /<card id>/yes-to-all (POST).
         const sweepRoute = one === 'sweep' && !yesToAll
         if (yesToAll && !/^sweep_[a-f0-9]{24}$/u.test(one)) { sendJson(response, 404, { error: 'not_found' }); return }
-        const methods = yesToAll ? ['POST'] : sweepRoute || !one ? ['GET', 'POST'] : ['GET', 'PATCH']
+        // Issue 552: /rules (GET, PUT the owner's alert rules), /events (POST one candidate event, e.g. from Mail's
+        // watcher), /alert-log (GET the decision log). PATCH <id> {action: not_urgent | should_alert} adds an example.
+        const alertRoute = !yesToAll && ['rules', 'events', 'alert-log'].includes(one) ? one : ''
+        const methods = yesToAll ? ['POST'] : alertRoute === 'rules' ? ['GET', 'PUT'] : alertRoute === 'events' ? ['POST'] : alertRoute ? ['GET']
+          : sweepRoute || !one ? ['GET', 'POST'] : ['GET', 'PATCH']
         if (!methods.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: methods.join(', ') }); return }
         if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         let input = {}
@@ -6515,7 +6536,18 @@ function buildWizardServer(options, lifetime) {
         }
         const view = record => { const { run_sigs: _sigs, ...rest } = record; return rest }
         try {
-          if (sweepRoute && request.method === 'GET') {
+          if (alertRoute === 'rules') {
+            sendJson(response, 200, { rules: request.method === 'PUT' ? alertRules.edit(input) : alertRules.read() }, { 'Cache-Control': 'no-store' })
+          } else if (alertRoute === 'events') {
+            const { record, decision, created } = await alertGate.consider(input, { agent: typeof input.agent === 'string' && input.agent ? input.agent : MAIN_AGENT_ID })
+            sendJson(response, created ? 201 : 200, { record: view(record), decision, created }, { 'Cache-Control': 'no-store' })
+          } else if (alertRoute) {
+            sendJson(response, 200, { log: agentInbox.alertLog(url.searchParams.get('limit') || 50) }, { 'Cache-Control': 'no-store' })
+          } else if (request.method === 'PATCH' && (input.action === 'not_urgent' || input.action === 'should_alert')) {
+            const done = alertGate.feedback(one, input.action)
+            if (!done) { sendJson(response, 404, { error: 'not_found' }); return }
+            sendJson(response, 200, { record: view(done.record), examples: { not_urgent: done.rules.examples.not_urgent.length, should_alert: done.rules.examples.should_alert.length } }, { 'Cache-Control': 'no-store' })
+          } else if (sweepRoute && request.method === 'GET') {
             const card = agentInbox.latestSweep()
             sendJson(response, 200, { card: card ? agentInbox.sweepView(card) : null }, { 'Cache-Control': 'no-store' })
           } else if (sweepRoute) {
