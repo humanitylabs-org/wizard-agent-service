@@ -108,6 +108,9 @@ const id = value => typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test
 // message in it comes back to the owner's Ready list with a notification.
 export const KINDS = ['run', 'remind', 'watch', 'return']
 export const RETURN_RUN_PREFIX = 'wzb_'
+const TERMINAL_RUN = ['completed', 'failed', 'cancelled', 'interrupted']
+// How long a finished run's report rewrite or unreadable result may hold its occurrence open (issue 564).
+export const RUN_DONE_GRACE_MS = 15 * 60_000
 function normalizeTarget(target) {
   if (target === undefined || target === null) return { message: null, excerpt: '' }
   if (!target || typeof target !== 'object' || Array.isArray(target) || Object.keys(target).some(k => !['message', 'excerpt'].includes(k))) throw fail('invalid target')
@@ -226,7 +229,7 @@ export class Scheduler {
   get channels() { try { return this.channelsOn() === true } catch { return false } }
   // Daily channel (issue 527): `{on(), thread(agent, instant) -> {thread, title, channel} | null, isDaily(agent, channel)}`.
   get dailyOn() { try { return this.daily?.on?.() === true } catch { return false } }
-  constructor({ statePath, deliver, lookup = null, onWatchResult = null, notifier = null, agentId = agent => agent, channels = false, daily = null, nightly = null, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
+  constructor({ statePath, deliver, lookup = null, runStatus = null, onWatchResult = null, notifier = null, agentId = agent => agent, channels = false, daily = null, nightly = null, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
     if (!statePath) throw fail('scheduler state path required', 503)
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
     this.db = new DatabaseSync(statePath)
@@ -245,8 +248,14 @@ export class Scheduler {
     }
     // Epoch ms, like `instant`: when the occurrence was admitted (notification rows age from here).
     if (!columns.has('admitted_at')) this.db.exec('ALTER TABLE schedule_occurrences ADD COLUMN admitted_at INTEGER')
+    // Epoch ms when the occurrence's run was first seen terminal in the run queue (issue 564). From then on it is
+    // no longer in-flight work, even while its report rewrite, notification or thread restoration is still pending.
+    if (!columns.has('run_done_at')) this.db.exec('ALTER TABLE schedule_occurrences ADD COLUMN run_done_at INTEGER')
     this.db.exec('CREATE INDEX IF NOT EXISTS schedule_latest ON schedule_occurrences(job_id, instant DESC)')
     this.lookup = lookup
+    // (occurrence, receipt) => the run queue's own status for receipt.run_id, or null. Read when the run lookup
+    // fails, so a finished run whose result can't be fetched still stops counting as in flight.
+    this.runStatus = typeof runStatus === 'function' ? runStatus : null
     this.deliver = deliver
     this.onWatchResult = typeof onWatchResult === 'function' ? onWatchResult : null
     // { available(): boolean, send({ title, message, key, priority }) }: the notifications slot. Absent or
@@ -309,11 +318,34 @@ export class Scheduler {
         if (!receipt.run_id) return
         try {
           const occurrence = JSON.parse(row.data)
-          let run = await this.lookup(occurrence, receipt)
-          if (run) {
-            const checked = await this.checkReport(row, occurrence, run)
-            if (checked.pending) return
-            run = checked.run
+          const markDone = () => {
+            if (row.run_done_at) return
+            row.run_done_at = this.now()
+            this.db.prepare('UPDATE schedule_occurrences SET run_done_at=coalesce(run_done_at, ?) WHERE key=?').run(row.run_done_at, row.key)
+          }
+          // Past the grace a finished run's pending follow-up work (report rewrite, unreadable result) stops holding it.
+          const overdue = () => Boolean(row.run_done_at) && this.now() - row.run_done_at >= RUN_DONE_GRACE_MS
+          let run = null
+          try { run = await this.lookup(occurrence, receipt) } catch { run = null }
+          let unread = false
+          if (!run) {
+            // The run lookup failed. The queue's own record still says whether the run is over (issue 564).
+            let status = null
+            try { status = this.runStatus ? await this.runStatus(occurrence, receipt) : null } catch { status = null }
+            if (!TERMINAL_RUN.includes(status)) return
+            markDone()
+            // A notification keeps retrying its lookup (observed for 7 days); other work finishes from the queue's
+            // status after the grace, so a watcher polls again on its next slot instead of waiting forever.
+            if (occurrence.deliver === 'notification' || !overdue()) return
+            run = { status, output: '' }
+            unread = true
+          } else if (TERMINAL_RUN.includes(run.status) || (occurrence.kind === 'watch' && run.status === 'waiting_for_approval')) markDone()
+          if (!unread) {
+            let checked
+            try { checked = await this.checkReport(row, occurrence, run) } catch (error) { if (!overdue()) throw error; checked = { run, pending: false } }
+            // A rewrite that never finishes cannot hold the occurrence: after the grace the original report stands.
+            if (checked.pending && !overdue()) return
+            if (!checked.pending) run = checked.run
           }
           if (!run || !['queued', 'accepted', 'pending', 'running', 'waiting_for_approval', 'stopping', 'completed', 'failed', 'cancelled', 'interrupted'].includes(run.status)) return
           const job = this.get(row.job_id)
@@ -647,9 +679,10 @@ export class Scheduler {
     await this.refreshRuns()
   }
   inflightCount() {
-    // Unfinished scheduled agent work. A run never observed finishing stops counting after 6 h.
+    // Unfinished scheduled agent work. A run never observed finishing stops counting after 6 h; a run the queue
+    // reports terminal stops counting at once, whatever its report check or delivery still waits on (issue 564).
     return this.db.prepare(`SELECT count(*) AS n FROM schedule_occurrences WHERE admitted=1 AND finished_at IS NULL
-      AND coalesce(json_extract(data,'$.kind'),'run') NOT IN ('remind','return') AND instant > ?`).get(this.now() - 6 * 3600_000).n
+      AND run_done_at IS NULL AND coalesce(json_extract(data,'$.kind'),'run') NOT IN ('remind','return') AND instant > ?`).get(this.now() - 6 * 3600_000).n
   }
   // The phone's reply watcher polls a run id. A Boomerang hands it `wzb_<job id>` at creation, so the same
   // native notification path tells the owner when the thread comes back. Never exposes a prompt: only the
