@@ -35,6 +35,7 @@ const ARCHIVE_KEEP_MS = 30 * 86400_000
 const MAX_RUN_SIGS = 20
 const MAX_SWEEPS = 10
 const MAX_OPTIONS = 6
+const MAX_ALERT_LOG = 200
 const THREAD_ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/u
 const RECORD_ID = /^inbox_[a-f0-9]{24}$/u
 const TOKEN = /^[a-z][a-z0-9-]{0,19}$/u
@@ -100,7 +101,12 @@ export class AgentInboxStore {
     if (!path || !existsSync(path)) return
     try {
       const parsed = JSON.parse(readFileSync(path, 'utf8'))
-      if (parsed?.schema === 1 && parsed.records && typeof parsed.records === 'object' && !Array.isArray(parsed.records)) this.data = { schema: 1, records: parsed.records, check: parsed.check ?? null, ...(Array.isArray(parsed.sweeps) ? { sweeps: parsed.sweeps } : {}) }
+      if (parsed?.schema === 1 && parsed.records && typeof parsed.records === 'object' && !Array.isArray(parsed.records)) {
+        this.data = { schema: 1, records: parsed.records, check: parsed.check ?? null, ...(Array.isArray(parsed.sweeps) ? { sweeps: parsed.sweeps } : {}) }
+        // Alert rules (issue 552): the decision log and a pending "rules too loose" flag for the next sweep.
+        if (Array.isArray(parsed.alert_log)) this.data.alert_log = parsed.alert_log
+        if (parsed.rules_flag && typeof parsed.rules_flag === 'object') this.data.rules_flag = parsed.rules_flag
+      }
     } catch { /* an unreadable store starts empty; the original bytes stay on disk until the next write */ }
   }
 
@@ -121,7 +127,7 @@ export class AgentInboxStore {
 
   /** Capture: create the task's record in state `running` (before its worker starts). The same mail or ask
    *  (same dedupe hash) never makes a second record: the existing one is returned with created false. */
-  capture(input = {}) {
+  capture(input = {}, { ready = false, fields = null } = {}) {
     const agent = input.agent || 'hermes'
     const thread = String(input.thread_id ?? '')
     if (!validAgentId(agent)) throw Object.assign(new Error('invalid agent'), { status: 400 })
@@ -139,7 +145,7 @@ export class AgentInboxStore {
     const record = {
       id: `inbox_${randomUUID().replaceAll('-', '').slice(0, 24)}`,
       agent, origin_item_id: input.origin_item_id ? clip(input.origin_item_id, 128) : null, thread_id: thread, source,
-      kind: INBOX_KINDS.has(input.kind) ? input.kind : 'note', state: 'running',
+      kind: INBOX_KINDS.has(input.kind) ? input.kind : 'note', state: ready ? 'new' : 'running',
       title, ask, last_update: ask, recommendation: '', options: {}, default_option: null,
       link: safeLink(input.link), deadline: null,
       severity: SEVERITIES.has(input.severity) ? input.severity : 'normal',
@@ -148,6 +154,8 @@ export class AgentInboxStore {
       created_at: t, updated_at: t, surfaced_at: null, answered_at: null, run_sigs: [],
     }
     withExtras(record, extrasOf(input))
+    // Service-set fields (issue 552: an event's alert decision); never from the request body.
+    if (fields && typeof fields === 'object') Object.assign(record, structuredClone(fields))
     this.data.records[record.id] = record
     this.#save()
     return { record: { ...record }, created: true }
@@ -333,7 +341,9 @@ export class AgentInboxStore {
     this.markStale()
     const t = this.now()
     const plan = planSweep(Object.values(this.data.records))
-    const card = composeCard(plan, { id: id || `sweep_${randomUUID().replaceAll('-', '').slice(0, 24)}`, at: t, day, thread_id, agent, missing: this.data.check?.missing || 0, links })
+    const card = composeCard(plan, { id: id || `sweep_${randomUUID().replaceAll('-', '').slice(0, 24)}`, at: t, day, thread_id, agent, missing: this.data.check?.missing || 0, links, rulesFlag: this.data.rules_flag || null })
+    // The "rules too loose" flag rides on one sweep card, then it is done.
+    delete this.data.rules_flag
     for (const r of plan.park) { r.state = 'parked'; r.parked_at = t; r.updated_at = t }
     for (const r of plan.waiting) { r.state = 'surfaced'; r.surfaced_count = (r.surfaced_count || 0) + 1; r.surfaced_at = t }
     for (const r of [...plan.done, ...plan.later]) { r.state = 'archived'; r.surfaced_at = t; r.updated_at = t }
@@ -359,6 +369,44 @@ export class AgentInboxStore {
     const card = this.sweepCard(cardId)
     return card ? yesToAllTargets(card, rid => this.data.records[rid] ? { ...this.data.records[rid] } : null) : null
   }
+
+  /** Service-side field changes on one record (issue 552: alert decisions and feedback). Returns the record. */
+  update(id, fields = {}) {
+    const record = RECORD_ID.test(String(id)) ? this.data.records[id] : null
+    if (!record) return null
+    Object.assign(record, structuredClone(fields), { updated_at: this.now() })
+    this.#save()
+    return { ...record }
+  }
+
+  /** The record captured for one source dedupe hash, if any. */
+  byDedupe(agent, dedupe) {
+    const record = Object.values(this.data.records).find(r => r.agent === (agent || 'hermes') && r.dedupe_hash === dedupe)
+    return record ? { ...record } : null
+  }
+
+  /** Alerts delivered on one alert day (issue 552), oldest first; `collapsed` picks the day's one collapsed alert. */
+  alertsOfDay(day, { collapsed = false } = {}) {
+    return Object.values(this.data.records)
+      .filter(r => r.alert_day === day && r.alert_delivered === true && (r.alert_collapsed === true) === collapsed)
+      .sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id)).map(r => ({ ...r }))
+  }
+
+  /** One alert decision (issue 552): kept newest first, capped. No record text, only ids, stage and the reason. */
+  logAlert(entry) {
+    this.data.alert_log = [{ at: this.now(), ...entry }, ...(Array.isArray(this.data.alert_log) ? this.data.alert_log : [])].slice(0, MAX_ALERT_LOG)
+    this.#save()
+  }
+
+  alertLog(limit = 50) { return (this.data.alert_log || []).slice(0, Math.max(1, Math.min(MAX_ALERT_LOG, Number(limit) || 50))).map(e => ({ ...e })) }
+
+  /** The volume guard tripped (issue 552): the next sweep card says the rules let too much through. */
+  flagRules(flag) {
+    this.data.rules_flag = { ...flag, at: this.now() }
+    this.#save()
+  }
+
+  rulesFlag() { return this.data.rules_flag ? { ...this.data.rules_flag } : null }
 
   /** For tests and repair: drop one record. */
   remove(id) {

@@ -212,7 +212,13 @@ describe('agent inbox HTTP and switch', () => {
     expect((await fetch(`${u}/sweep`)).status).toBe(404)
     expect((await fetch(`${u}/sweep`, json('POST', {}))).status).toBe(404)
     expect((await fetch(`${u}/sweep_000000000000000000000000/yes-to-all`, json('POST', {}))).status).toBe(404)
+    // Issue 552: switch off = no alert rules, no events, no feedback; Alerts exactly as now.
+    expect((await fetch(`${u}/rules`)).status).toBe(404)
+    expect((await fetch(`${u}/events`, json('POST', { type: 'payment_failed', title: 'x' }))).status).toBe(404)
+    expect((await fetch(`${u}/alert-log`)).status).toBe(404)
+    expect((await fetch(`${u}/inbox_000000000000000000000000`, json('PATCH', { action: 'not_urgent' }))).status).toBe(404)
     expect(existsSync(join(d, 'agent-inbox.json'))).toBe(false)
+    expect(existsSync(join(d, 'alert-rules.json'))).toBe(false)
   })
 
   it('issue 550: a sweep needs the Daily channel; the card route shapes are owner-only and strict', async () => {

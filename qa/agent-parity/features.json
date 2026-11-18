@@ -628,6 +628,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "agent-alerts",
+      "description": "Alert rules (issue 552, owner switch wizard/agent-inbox or WIZARD_AGENT_INBOX=1, off by default): a candidate event (POST /wizard/v1/agent-inbox/events from an app watcher, Mail first, or a finished worker record with a high or urgent severity) goes through fixed owner-editable rules first (named senders, keywords, payment failed, a meeting within 2 hours: an alert record, notified once through the notifications slot), then the owner's examples, then, for borderline events only, the fast private model with a strict rubric (decision and reason logged in /alert-log); everything else becomes a normal inbox record for the next sweep, nothing dropped. Not urgent on an alert and Should have alerted on a sweep item each append one example to alert-rules.json. More than 3 alerts in an alert day collapse into one alert and the next sweep card carries rules_flag.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP routes (main, host-profile, container TCP, restricted Unix ingress) with agentInbox on and a fake private model on a local port written into settings.json: PUT rules with a named sender, a mail from that sender and a payment-failed event become alert records, four plain mails wait as fyi records with no model call, a high-severity invoice mail is decided by the model (stage model, reason in the alert log), Not urgent and Should have alerted each report one example, the 4th alert of the day waits in the sweep with one collapsed alert, and the next sweep card (where the scene has a Daily) carries rules_flag. tests/agent-alerts.test.ts covers the rule hits, a 12-event non-urgent fixture with none lost, the model and its failure, the private-data rule (no non-private model), the examples on disk, the volume guard on a fake clock with the next-day reset, and worker records; tests/agent-inbox.test.ts covers the switch off (404, nothing written). Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/agent-alerts.mjs",
+        "server/agent-inbox.mjs",
+        "server/agent-sweep.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/agent-alerts.test.ts"
+      ],
+      "fixture": "agent-alerts",
+      "policy_exemptions": []
+    },
+    {
       "id": "chats-daily-channel",
       "description": "Daily channel (issue 527, part of the Channels switch wizard/chat-channels; WIZARD_CHANNEL_DAILY forces it): one pinned channel per agent holding one real thread per day (05:00 boundary in the owner's time zone). The main agent's Daily is seeded once, pinned above Alerts; PATCH kind makes another agent's channel its daily channel; POST /wizard/v1/channels/<id>/today creates today's thread once (racing first posts share it) and files it into Daily; GET /days pages every day thread with its opener and count; a thread:'daily' schedule and an origin-less reminder post into today's thread, while a notification-only reminder keeps its hidden schedule chat (issue 529); a run in a day thread is told yesterday's thread, but not once the Daily is archived. The main agent's own schedule tool (wizard_schedule, loopback /wizard/internal/schedules/create) may name thread 'daily' too (issue 532); any other thread it names stays the calling session; a 'daily' job whose Daily part is later off gets its own schedule chat, never a session named 'daily'.",
       "layer": "server",
