@@ -157,3 +157,14 @@ test('uncertain send inside the settle window or with an unreadable transcript s
   await assert.rejects(b.fetch('http://localhost:8865/v1/runs',start(payload)),e=>e.status===503);assert.equal(calls,1)
  }
 });
+test('a finished locked turn hands its transcript to onCompleted so sent files are kept at once (issue 556)',async()=>{
+ const seen=[];const transcript=[{role:'user',content:'send the samples'},{role:'assistant',content:'MEDIA:/synthetic/cache/audio/a.mp3'}];
+ const b=new LockedRunBridge({origin:'http://localhost:8865',log:()=>{},onCompleted:(entry,p)=>seen.push([entry.runId,p.messages]),fetchImpl:async()=>
+  stream(frame('run.started',{run_id:'run_sent_files',runtime:ack})+frame('run.completed',{messages:transcript,runtime:{model:route.model,provider:'custom',requested:route}}))});
+ await b.fetch('http://localhost:8865/v1/runs',start(payload));await Promise.all([...b.streams]);
+ assert.deepEqual(seen,[['run_sent_files',transcript]]);
+ const failing=new LockedRunBridge({origin:'http://localhost:8865',log:()=>{},onCompleted:()=>{throw new Error('synthetic')},fetchImpl:async()=>
+  stream(frame('run.started',{run_id:'run_sent_files_2',runtime:ack})+frame('run.completed',{runtime:{model:route.model,provider:'custom',requested:route}}))});
+ await failing.fetch('http://localhost:8865/v1/runs',start(payload));await Promise.all([...failing.streams]);
+ assert.equal([...failing.entries.values()][0].state,'completed','a failing keeper never breaks the turn')
+});

@@ -122,7 +122,8 @@ server = createWizardServer({
   agentArtifactDir: process.env.WIZARD_AGENT_ARTIFACT_DIR || resolve(hermesHome, 'data/apps/wizard-mobile/agent-artifacts'),
   agentArtifactRoots: process.env.WIZARD_AGENT_ARTIFACT_ROOTS
     ? process.env.WIZARD_AGENT_ARTIFACT_ROOTS.split(':')
-    : [resolve(hermesHome, 'cache/images'), resolve(hermesHome, 'media/images'), resolve(hermesHome, 'workspace')],
+    // The four cache folders the media contract names (chat-presentation.mjs), as WAM's alongside override sets them.
+    : [...['images', 'audio', 'videos', 'screenshots'].map(dir => resolve(hermesHome, 'cache', dir)), resolve(hermesHome, 'media/images'), resolve(hermesHome, 'workspace')],
   operatorWorkerStatePath: process.env.WIZARD_OPERATOR_STATE_PATH || '',
   threadStatusBackfillPath: process.env.WIZARD_THREAD_STATUS_BACKFILL_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-status-backfill.json'),
   threadDispositionStatePath: process.env.WIZARD_THREAD_DISPOSITION_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-dispositions.json'),

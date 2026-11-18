@@ -4,6 +4,7 @@ import { accessSync, appendFileSync, closeSync, constants as fsConstants, copyFi
 import { readFile, stat } from 'node:fs/promises'
 import { createServer, request as httpRequest } from 'node:http'
 import { servePhoneFeed } from './phone-feed.mjs'
+import { recallSentFile, rememberSentFile, sourceGone } from './sent-files.mjs'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { cpus, homedir, loadavg } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
@@ -2269,6 +2270,7 @@ function registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases =
   }
   const metadata = { id, name: cleanName, mime, kind: 'image', bytes: bytes.length, sha256 }
   writeAgentArtifactMetadata(artifactDir, metadata)
+  rememberSentFile(artifactDir, sourcePath, id)
   return metadata
 }
 
@@ -2300,7 +2302,7 @@ function registerAgentFile(sourcePath, artifactDir, artifactRoots, aliases = [])
   if (!mime) return null
   const cacheKey = `${artifactDir}\0${source}\0${details.ino}\0${details.size}\0${details.mtimeMs}`
   const cached = agentFileRegistrations.get(cacheKey)
-  if (cached && existsSync(resolve(artifactDir, `${cached.id}.json`))) return cached
+  if (cached && existsSync(resolve(artifactDir, `${cached.id}.json`))) { rememberSentFile(artifactDir, sourcePath, cached.id); return cached }
   try {
     const sha256 = hashFileSync(source)
     const id = sha256.slice(0, 32)
@@ -2321,8 +2323,28 @@ function registerAgentFile(sourcePath, artifactDir, artifactRoots, aliases = [])
     writeAgentArtifactMetadata(artifactDir, metadata)
     if (agentFileRegistrations.size > 512) agentFileRegistrations.clear()
     agentFileRegistrations.set(cacheKey, metadata)
+    rememberSentFile(artifactDir, sourcePath, id)
     return metadata
   } catch { return null }
+}
+
+// Issue 556: Hermes prunes its media caches after 24 h. A sent file whose source is gone still shows the copy this
+// Service saved when the message was first shown. Only a path that would have been trusted (inside the artifact
+// roots, not another agent's home) may fall back, and only when it no longer exists at all.
+function recallAgentSend(sourcePath, artifactDir, artifactRoots, aliases = []) {
+  if (!artifactDir || !artifactRoots.length) return null
+  let local = localAgentPath(sourcePath, aliases)
+  if (!sourceGone(local)) return null
+  // The file is gone, so resolve the nearest folder that still exists (roots are real paths).
+  for (let dir = dirname(local), rest = basename(local); dir !== dirname(dir); rest = join(basename(dir), rest), dir = dirname(dir)) {
+    try { local = join(realpathSync(dir), rest); break } catch { /* climb */ }
+  }
+  if (/(?:^|[/\\])(?:sealed|private-agents|agent-vault)(?:[/\\]|$)/i.test(local)) return null
+  if (!artifactRoots.some(root => local.startsWith(`${root}${sep}`))) return null
+  const artifact = recallSentFile(artifactDir, sourcePath, id => readAgentArtifact(id, artifactDir))
+  if (!artifact) return null
+  const { contentPath: _contentPath, ...metadata } = artifact
+  return metadata
 }
 
 function unavailableFileLine(sourcePath) {
@@ -2397,6 +2419,7 @@ export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = 
     const register = (_line, sourcePath) => {
       const artifact = imageResolver ? imageResolver(sourcePath) : registerAgentArtifact(sourcePath, artifactDir, artifactRoots, aliases, scoped)
         ?? registerAgentFile(sourcePath, artifactDir, artifactRoots, aliases)
+        ?? recallAgentSend(sourcePath, artifactDir, artifactRoots, aliases)
       // Never let a sent file vanish: say which one could not be shown.
       if (!artifact) return unavailableFileLine(sourcePath)
       if (!artifacts.some((item) => item.id === artifact.id)) artifacts.push(artifact)
@@ -2952,6 +2975,7 @@ function buildWizardServer(options, lifetime) {
   const tailnetShellOrigin = options.tailnetShellOrigin ? confinedUpstream(options.tailnetShellOrigin) : ''
   const diagnosticsOrigin = options.diagnosticsOrigin ? confinedUpstream(options.diagnosticsOrigin) : ''
   const rawFetchImpl = options.fetchImpl ?? fetch
+  let keepSentFiles = () => {} // set once the artifact folder is known (issue 556)
   const lockedBridge = new LockedRunBridge({
     fetchImpl: rawFetchImpl, origin: upstreamOrigin,
     // Read-only transcript check for sends whose connection dropped mid-request (gateway restart).
@@ -2970,6 +2994,9 @@ function buildWizardServer(options, lifetime) {
     statePath: options.runQueueStatePath ? resolve(dirname(String(options.runQueueStatePath)), 'model-locked-admissions.json') : '',
     // Separate process that holds locked reply streams across Agent Service restarts ('' = off).
     keeperSocket: options.runKeeperSocket ?? '',
+    // Issue 556: keep the files a finished turn sent now, not only when someone opens the thread, because Hermes
+    // prunes its media caches after 24 h. Only this turn's replies (after the last user message) are read.
+    onCompleted: (_entry, payload) => keepSentFiles(payload),
     sessionRoute: sessionId => {
       // Never infer a host state.db path on portable installs. Explicit client locks still work
       // without this optional read-only persisted-selector fallback.
@@ -3672,6 +3699,15 @@ function buildWizardServer(options, lifetime) {
   const agentArtifactRoots = canonicalArtifactRoots(options.agentArtifactRoots)
   // Where the agent's view of the user-files folder differs from ours, its paths map back onto ours.
   const agentPathAliases = mediaFiles && mediaFiles.agentRoot !== mediaFiles.root ? [[mediaFiles.agentRoot, mediaFiles.root]] : []
+  keepSentFiles = payload => {
+    if (!agentArtifactDir || !agentArtifactRoots.length || !payload || typeof payload !== 'object') return
+    const messages = Array.isArray(payload.messages) ? payload.messages : []
+    const lastUser = messages.findLastIndex(message => message?.role === 'user')
+    const replies = messages.slice(lastUser + 1).filter(message => message?.role === 'assistant')
+    const text = [typeof payload.output === 'string' ? payload.output : '', ...replies.map(message => message.content)]
+    if (!JSON.stringify(text).includes('MEDIA:')) return
+    projectAgentMedia(Buffer.from(JSON.stringify({ output: text.filter(value => typeof value === 'string').join('\n') })), agentArtifactDir, agentArtifactRoots, agentPathAliases)
+  }
   const runTrustedPaths = new Map()
   const directRuns = new Map()
   const terminalExternalRuns = new Map()

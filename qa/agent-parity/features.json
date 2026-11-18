@@ -1218,6 +1218,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "sent-media-pruned",
+      "description": "A file an agent sent in a chat still opens after Hermes prunes its media cache (24 h)",
+      "layer": "server",
+      "how_to_test": "Send an MP3 from the agent's cache/audio, open the thread so the Service keeps its copy, delete the source as Hermes housekeeping does, reopen the thread and assert the same file card is shown and serves the original bytes on every runtime.",
+      "source_refs": [
+        "server/sent-files.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/sent-files-pruned.test.ts"
+      ],
+      "fixture": "sent-media-pruned",
+      "policy_exemptions": []
+    },
+    {
       "id": "working-context",
       "description": "The wizard-work-progress plugin adds the Working milestone contract to Wizard turns without it showing in chat history",
       "layer": "server",
