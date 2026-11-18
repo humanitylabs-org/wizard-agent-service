@@ -10,6 +10,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { post, png, scene } from './fixture.mjs'
 import { PRESETS } from '../../server/agents.mjs'
+import { createChannelStore } from '../../server/channel-store.mjs'
 import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
@@ -983,6 +984,15 @@ export const serverChecks = {
     assert.deepEqual([pinned.status, (await pinned.json()).error], [409, 'pinned'], 'a pinned thread cannot be sent')
     assert.equal(s.sessions.get('wizard_parity').hidden, false, 'a refused send hides nothing')
     assert.equal((await prefs('remove')).status, 200)
+    // An Alerts (or Daily) thread stays in Chats too (issue 1569 review), read from the box's channel store.
+    const channels = createChannelStore(join(s.root, 'os', 'channels.sqlite'))
+    channels.seedAlerts()
+    const alerts = channels.list({ agent: 'hermes' }).channels.find(c => c.kind === 'alerts')
+    channels.move({ sessionId: 'wizard_parity', channelId: alerts.id })
+    const alerted = await s.raw('/wizard/v1/agent-inbox/send', json({ thread_id: 'wizard_parity' }))
+    assert.deepEqual([alerted.status, (await alerted.json()).error], [409, 'alerts_thread'], 'an Alerts thread cannot be sent')
+    assert.equal(s.sessions.get('wizard_parity').hidden, false, 'a refused Alerts send hides nothing')
+    channels.move({ sessionId: 'wizard_parity', channelId: null })
     const sent = await s.raw('/wizard/v1/agent-inbox/send', json({ thread_id: 'wizard_parity', utterance: 'Synthetic quarterly numbers' }))
     assert.equal(sent.status, 200, await sent.clone().text())
     const { record } = await sent.json()

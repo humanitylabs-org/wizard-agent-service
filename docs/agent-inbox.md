@@ -30,7 +30,8 @@ overrides it). Code: `server/agent-inbox.mjs`.
 
 ## Routes (owner settings gate on every method)
 
-- `GET /wizard/v1/agent-inbox?state=new,running&kind=&agent=&limit=` -> `{ records, check }`
+- `GET /wizard/v1/agent-inbox?state=new,running&kind=&agent=&limit=` -> `{ records, check, stay }`; `stay` lists the main agent's Daily and Alerts
+  threads (newest 500), which Send to inbox refuses, so the shell leaves the action off them
 - `POST /wizard/v1/agent-inbox` `{ thread_id, title, ask, agent?, source?, origin_item_id?, kind?, link?,
   severity?, privacy_class?, dedupe_hash?, recommendation?, options?, default_option?, deadline?, confirm? }`
   -> 201 `{ record, created: true }` or 200 with the existing record
@@ -58,7 +59,9 @@ thread answers 409 `main_only`.
 - `POST /wizard/v1/agent-inbox/open` `{ thread_id, utterance? }` -> `{ record, hidden: false, example }`: Hermes
   `hidden: false`, then `owner_turn_at` on the thread's records, so nothing hides it again until the owner sends it back.
 - `POST /wizard/v1/agent-inbox/send` `{ thread_id, title?, utterance? }` -> `{ record, hidden: true, example }`: refused
-  with 409 `pinned` for a thread the owner pinned (ui-preferences `pinnedChats`, or Hermes `pinned`). Hermes `hidden: true`, then the thread's record (or a new one, source
+  with 409 `pinned` for a thread the owner pinned (ui-preferences `pinnedChats`, or Hermes `pinned`), and with 409
+  `daily_thread` / `alerts_thread` for a Daily day thread or a thread filed in a Daily or Alerts channel (read from
+  channels.sqlite, Channels switch on or off). Hermes `hidden: true`, then the thread's record (or a new one, source
   `chats:send`) becomes a worker record with `owner_turn_at` cleared: `running` while a turn is still on its way (its
   status line updates it as usual), otherwise a result waiting for the next sweep. Sending is the owner's own choice, so
   it is the one way a thread he started becomes a worker thread.
