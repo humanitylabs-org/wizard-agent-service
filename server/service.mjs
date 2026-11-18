@@ -50,7 +50,7 @@ import { projectProviderSignInHistory, providerSignInEvents } from './run-provid
 import { bootstrapPayload, readApps, readSettings, normalizeSettings, ownerLinks, recordResponseStyleSwitch, RESPONSE_STYLES, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
 import { readUiPreferences, updateUiPreferences, patchUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
-import { createChannelStore, channelRequest } from './channel-store.mjs'
+import { createChannelStore, channelRequest, fixedChannelKind } from './channel-store.mjs'
 import { dayOf, mintDailyThreadId, dailyTitle, openerOf, dailyRunNote, validDay, DAYS_PAGE, DAYS_PAGE_MAX } from './daily-channel.mjs'
 import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigration } from './channel-spaces.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
@@ -3870,6 +3870,9 @@ function buildWizardServer(options, lifetime) {
       let pins = []
       try { pins = readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).pinnedChats || [] } catch { pins = [] }
       if (row?.pinned === true || pins.includes(thread)) throw inboxError(409, 'pinned')
+      // Daily and Alerts threads stay in Chats (issue 1569 review): the sweep card lives in today's Daily thread.
+      const fixed = fixedChannelKind(resolve(bridgeOsHome || wizardOsHome(), 'channels.sqlite'), agent, thread)
+      if (fixed) throw inboxError(409, `${fixed}_thread`)
       const running = Boolean(runQueue?.queuedForSession('direct', thread).some(record => record.terminalAt == null))
       await hermesJson(path, { method: 'PATCH', body: JSON.stringify({ hidden: true }) })
       const record = agentInbox.sendToInbox(agent, thread, { title: typeof input.title === 'string' ? input.title : String(row?.title || ''), ask: said, running })

@@ -362,6 +362,22 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
   return store
 }
 
+// Agent inbox (wizard-ux issue 1569): 'daily' or 'alerts' when this thread is a Daily day thread or is filed in a
+// Daily or Alerts channel, else ''. Read-only and independent of the Channels switch: those threads stay in Chats
+// with Channels off too, and Send to inbox must never hide them (the sweep card is posted in today's Daily thread).
+export function fixedChannelKind(path, agent, sessionId) {
+  if (!path || !existsSync(path) || !validThreadId(sessionId)) return ''
+  let db
+  try {
+    db = new DatabaseSync(path, { readOnly: true })
+    const who = agentOf(agent)
+    const filed = db.prepare("SELECT c.kind FROM membership m JOIN channels c ON c.id=m.channel_id WHERE m.agent=? AND m.session_id=? AND c.kind IN ('daily','alerts')").get(who, sessionId)
+    if (filed?.kind) return filed.kind
+    const day = db.prepare("SELECT 1 AS y FROM daily_days d JOIN channels c ON c.id=d.channel_id WHERE d.agent=? AND d.session_id=? AND c.kind='daily' LIMIT 1").get(who, sessionId)
+    return day ? 'daily' : ''
+  } catch { return '' } finally { try { db?.close() } catch {} }
+}
+
 // HTTP: /wizard/v1/channels (GET ?agent=, POST {name, agent?}, PATCH one of {id, name?, archived?, pinned?} |
 // {order:[ids]} | {pinOrder:[ids]} | {sort:'az'|'za'}) and /wizard/v1/channels/membership (GET ?channel= |
 // ?sessionId=&agent=, PUT {sessionId, channelId|null, agent?}) and, with the read sync on, /wizard/v1/channels/read

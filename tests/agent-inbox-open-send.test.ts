@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { AgentInboxStore, SENT_NOTE, ROUTE_EXAMPLES } from '../server/agent-inbox.mjs'
 import { routerSystemPrompt, routeUtterance, examplesBlock } from '../server/voice-router.mjs'
 import { createWizardServer, listen } from '../server/service.mjs'
+import { createChannelStore } from '../server/channel-store.mjs'
 
 const dirs: string[] = [], servers: any[] = []
 afterEach(async () => {
@@ -84,7 +85,8 @@ describe('the orb classifier reads the latest examples', () => {
 
 describe('Open and Send to inbox over HTTP', () => {
   async function start(d: string, extra: any = {}) {
-    const sessions = new Map<string, any>([['wizard_visible_1', { id: 'wizard_visible_1', title: 'Lisbon flights', hidden: false }], ['wizard_pinned_1', { id: 'wizard_pinned_1', title: 'Plan with James', pinned: true }]])
+    const sessions = new Map<string, any>([['wizard_visible_1', { id: 'wizard_visible_1', title: 'Lisbon flights', hidden: false }], ['wizard_pinned_1', { id: 'wizard_pinned_1', title: 'Plan with James', pinned: true }],
+      ['wizard_daily_1', { id: 'wizard_daily_1', title: 'Today' }], ['wizard_alert_1', { id: 'wizard_alert_1', title: 'Disk almost full' }], ['wizard_filed_1', { id: 'wizard_filed_1', title: 'Trip' }]])
     const patches: any[] = []
     const routerCalls: any[] = []
     const upstream = createServer((req, res) => {
@@ -155,4 +157,28 @@ describe('Open and Send to inbox over HTTP', () => {
     expect(patches).toEqual([])
     expect(new AgentInboxStore(join(d, 'agent-inbox.json')).routeExamples(5)).toEqual([])
   })
+
+  // Issue 1569 review: one tap must never hide today's Daily thread (where the sweep card is posted) or an Alerts thread.
+  for (const channels of [true, false]) {
+    it(`refuses Daily and Alerts threads with 409, Channels ${channels ? 'on' : 'off'}`, async () => {
+      const d = home()
+      const store = createChannelStore(join(d, 'channels.sqlite'))
+      store.seedAlerts(); store.seedDaily()
+      const listed = store.list({ agent: 'hermes' }).channels
+      const alerts = listed.find((c: any) => c.kind === 'alerts'), daily = listed.find((c: any) => c.kind === 'daily')
+      const trips = store.create({ name: 'Trips' })
+      store.claimDay(daily.id, '2026-11-18', () => 'wizard_daily_1')
+      store.move({ sessionId: 'wizard_alert_1', channelId: alerts.id })
+      store.move({ sessionId: 'wizard_filed_1', channelId: trips.id })
+      const { u, sessions, patches } = await start(d, { agentInbox: true, ...(channels ? { channelStore: true } : {}) })
+      for (const [id, code] of [['wizard_daily_1', 'daily_thread'], ['wizard_alert_1', 'alerts_thread']]) {
+        const r = await fetch(`${u}/send`, json('POST', { thread_id: id }))
+        expect([r.status, (await r.json()).error]).toEqual([409, code])
+        expect(sessions.get(id).hidden).toBeUndefined()
+      }
+      expect(patches).toEqual([])
+      // A thread in an ordinary channel can still be sent.
+      expect((await fetch(`${u}/send`, json('POST', { thread_id: 'wizard_filed_1' }))).status).toBe(200)
+    })
+  }
 })
