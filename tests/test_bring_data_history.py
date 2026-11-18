@@ -295,6 +295,7 @@ class HistoryTests(unittest.TestCase):
         for secret in (SK_KEY, GH_TOKEN, RANDOM40):
             self.assertNotIn(secret, blob)
         self.assertIn('plan the beds', blob)
+        self.assertEqual(scan['draft_facts'], ['Owner is Ana.', 'Lives in Lisbon.'])  # the key line is no fact
         self.assertNotIn('API key', json.dumps(self.facts_here()))   # a fact that was a key stays behind
         self.assertEqual(bd.scrub('a slug-like-name-that-is-long-but-only-words'), 'a slug-like-name-that-is-long-but-only-words')
 

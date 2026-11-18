@@ -1231,7 +1231,7 @@ def _scan(args: dict) -> dict:
         "soul": _clip(data["soul"], RESULT_LIMITS["soul_chars"]),
         "archive_to": f"{IMPORT_DIR}/{label}",
         "new_skill_count": len(new_skills),
-        "draft_facts": draft_facts(data),
+        "draft_facts": [f for f in draft_facts(data) if not (history and _SCRUBBED.search(f))],
         "personality": {"found": bool(data["soul"]), "here": soul_state()},
         "fact_store": {"found": len(data.get("facts") or []), "here": _fact_count(hermes_home() / FACT_DB)},
         "into": _here_label(),
@@ -2299,6 +2299,9 @@ HISTORY_NOTE = ("Older or imported material (an earlier agent's chats, memories,
                 "Files/Imported. Look there when asked about the past; your own memory is newer and wins when they disagree.")
 _RANDOMISH = re.compile(r"(?<![A-Za-z0-9_+/=.-])[A-Za-z0-9_+/=-]{32,}(?![A-Za-z0-9_+/=-])")
 _DEST_ID: ContextVar = ContextVar("wizard_bring_data_dest", default="")
+
+
+_SCRUBBED = re.compile(r"\[secret removed\]|«redacted|\*\*\*")  # a card line that held a key is no fact about the owner
 
 
 def _random_looking(token: str) -> bool:
