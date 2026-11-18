@@ -226,7 +226,7 @@ export class Scheduler {
   get channels() { try { return this.channelsOn() === true } catch { return false } }
   // Daily channel (issue 527): `{on(), thread(agent, instant) -> {thread, title, channel} | null, isDaily(agent, channel)}`.
   get dailyOn() { try { return this.daily?.on?.() === true } catch { return false } }
-  constructor({ statePath, deliver, lookup = null, onWatchResult = null, notifier = null, agentId = agent => agent, channels = false, daily = null, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
+  constructor({ statePath, deliver, lookup = null, onWatchResult = null, notifier = null, agentId = agent => agent, channels = false, daily = null, nightly = null, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
     if (!statePath) throw fail('scheduler state path required', 503)
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
     this.db = new DatabaseSync(statePath)
@@ -257,6 +257,9 @@ export class Scheduler {
     // read on every use (the owner's Channels switch, wizard-ux issue 1358).
     this.channelsOn = typeof channels === 'function' ? channels : () => channels === true
     this.daily = daily
+    // Housekeeping called on every scheduling tick with the scheduler clock (the agent inbox's nightly check, issue
+    // 549); the callee decides whether a day has passed. A failure never stops the tick.
+    this.nightly = typeof nightly === 'function' ? nightly : null
     this.now = now
     this.timezone = timezone
     this.hermesHome = hermesHome
@@ -597,6 +600,7 @@ export class Scheduler {
     return this.inflight
   }
   async work(schedule) {
+    if (schedule && this.nightly) { try { await this.nightly(this.now()) } catch { console.error('[scheduler] nightly check failed') } }
     if (schedule) this.transaction(() => {
       const now = this.now()
       for (const job of this.list()) {

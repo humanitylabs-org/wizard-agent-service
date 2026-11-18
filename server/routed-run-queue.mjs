@@ -8,7 +8,7 @@ import { readSteerResentHttp } from './hermes-http-readers.mjs'
 import { normalizeProviderPreflightFailure, projectProviderSignInHistory, projectProviderSignInEvent } from './run-provider-failure.mjs'
 const terminal = new Set(['completed','failed','cancelled','interrupted'])
 const json = (status, payload) => new Response(JSON.stringify(payload),{status,headers:{'Content-Type':'application/json'}})
-export function createRoutedQueues({ registry, queuedHistory, restoreOwnerTurns = null, keepOwnerTurns = false, own, pollIntervalMs = 1500, maxActive = 8, onStatus, onDispatch, decorateDispatch, providerAccessRecovery = false, providerAccessWindowSeconds, providerFailureDismissed, providerSignInReady = null, launchWaitMs, launchHold = null }) {
+export function createRoutedQueues({ registry, queuedHistory, restoreOwnerTurns = null, keepOwnerTurns = false, own, pollIntervalMs = 1500, maxActive = 8, onStatus, onRun, onDispatch, decorateDispatch, providerAccessRecovery = false, providerAccessWindowSeconds, providerFailureDismissed, providerSignInReady = null, launchWaitMs, launchHold = null }) {
   const entries = new Map()
   const get = async agent => {
     if (!entries.has(agent.id)) {
@@ -37,7 +37,7 @@ export function createRoutedQueues({ registry, queuedHistory, restoreOwnerTurns 
           }
           return {upstreamRunId:payload.run_id||payload.id,capacityStatus:payload.status,payload}
         },
-        lookup:async record=>{ const payload=await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`); if(normalizeProviderPreflightFailure(payload).status==='completed') onStatus?.(agent.id,record.sessionId,payload.output); return {payload} },
+        lookup:async record=>{ const payload=await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`); if(normalizeProviderPreflightFailure(payload).status==='completed') onStatus?.(agent.id,record.sessionId,payload.output); onRun?.(agent.id,record.sessionId,payload,record.publicRunId); return {payload} },
         // A steer this agent accepted but never consumed is replayed once, like main; only this agent's history is read.
         steerDelivered:(record,text)=>readSteerResentHttp(path=>call(path),record.sessionId,record.createdAt,text,queuedInputTextOf(record.body)),
       })

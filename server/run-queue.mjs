@@ -570,6 +570,16 @@ export class DurableRunQueue {
   }
 
   /** Every queued row for a thread, including ones that have not reached Hermes (no upstream run yet). */
+  /** Finished runs whose idempotency key starts with `prefix` (agent inbox worker runs, issue 549), terminal at or
+   *  after `sinceSeconds`, newest first. Read by the agent inbox's nightly check. */
+  finishedRunsWithKeyPrefix(prefix, sinceSeconds = 0, limit = 5000) {
+    if (typeof prefix !== 'string' || !prefix) return []
+    return this.database.prepare(`SELECT public_run_id, session_id, agent_id, terminal_at FROM wizard_run_queue
+      WHERE terminal_at IS NOT NULL AND terminal_at >= ? AND substr(idempotency_key, 1, ?) = ?
+      ORDER BY terminal_at DESC LIMIT ?`).all(Number(sinceSeconds) || 0, prefix.length, prefix, limit)
+      .map(row => ({ run_id: row.public_run_id, session_id: row.session_id, agent: row.agent_id ?? this.agentId, terminal_at: Number(row.terminal_at) }))
+  }
+
   queuedForSession(runtime, sessionId) {
     if (!['direct', 'operator'].includes(runtime) || typeof sessionId !== 'string' || !sessionId || sessionId.length > 512) return []
     return this.database.prepare(`SELECT * FROM wizard_run_queue
