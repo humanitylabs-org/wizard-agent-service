@@ -2,7 +2,7 @@
 // a visible thread into the background, and each tap is one example the orb router reads as few-shot context.
 import { afterEach, describe, expect, it } from 'vitest'
 import { createServer } from 'node:http'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { AgentInboxStore, SENT_NOTE, ROUTE_EXAMPLES } from '../server/agent-inbox.mjs'
@@ -156,6 +156,15 @@ describe('Open and Send to inbox over HTTP', () => {
     expect((await fetch(`${u}/send`, json('POST', { thread_id: 'wizard_visible_1' }, { 'sec-fetch-site': 'cross-site' }))).status).toBe(403)
     expect(patches).toEqual([])
     expect(new AgentInboxStore(join(d, 'agent-inbox.json')).routeExamples(5)).toEqual([])
+  })
+
+  it('fails closed when the channel store exists but cannot be read', async () => {
+    const d = home()
+    writeFileSync(join(d, 'channels.sqlite'), 'not a database')
+    const { u, patches } = await start(d, { agentInbox: true })
+    const r = await fetch(`${u}/send`, json('POST', { thread_id: 'wizard_visible_1' }))
+    expect([r.status, (await r.json()).error]).toEqual([503, 'channels_unavailable'])
+    expect(patches).toEqual([])
   })
 
   // Issue 1569 review: one tap must never hide today's Daily thread (where the sweep card is posted) or an Alerts thread.

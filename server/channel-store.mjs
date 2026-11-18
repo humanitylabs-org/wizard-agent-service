@@ -363,7 +363,7 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
 }
 
 // Agent inbox (wizard-ux issue 1569): 'daily' or 'alerts' when this thread is a Daily day thread or is filed in a
-// Daily or Alerts channel, else ''. Read-only and independent of the Channels switch: those threads stay in Chats
+// Daily or Alerts channel, else ''; 'unreadable' when the store exists but can't be read (callers fail closed). Read-only and independent of the Channels switch: those threads stay in Chats
 // with Channels off too, and Send to inbox must never hide them (the sweep card is posted in today's Daily thread).
 export function fixedChannelKind(path, agent, sessionId) {
   if (!path || !existsSync(path) || !validThreadId(sessionId)) return ''
@@ -375,7 +375,7 @@ export function fixedChannelKind(path, agent, sessionId) {
     if (filed?.kind) return filed.kind
     const day = db.prepare("SELECT 1 AS y FROM daily_days d JOIN channels c ON c.id=d.channel_id WHERE d.agent=? AND d.session_id=? AND c.kind='daily' LIMIT 1").get(who, sessionId)
     return day ? 'daily' : ''
-  } catch { return '' } finally { try { db?.close() } catch {} }
+  } catch { return 'unreadable' } finally { try { db?.close() } catch {} }
 }
 
 // The same threads as a list (newest filed first, at most `limit`), so the shell can leave Send to inbox off them.

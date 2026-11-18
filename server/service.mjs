@@ -3872,6 +3872,7 @@ function buildWizardServer(options, lifetime) {
       if (row?.pinned === true || pins.includes(thread)) throw inboxError(409, 'pinned')
       // Daily and Alerts threads stay in Chats (issue 1569 review): the sweep card lives in today's Daily thread.
       const fixed = fixedChannelKind(resolve(bridgeOsHome || wizardOsHome(), 'channels.sqlite'), agent, thread)
+      if (fixed === 'unreadable') throw inboxError(503, 'channels_unavailable')
       if (fixed) throw inboxError(409, `${fixed}_thread`)
       const running = Boolean(runQueue?.queuedForSession('direct', thread).some(record => record.terminalAt == null))
       await hermesJson(path, { method: 'PATCH', body: JSON.stringify({ hidden: true }) })
