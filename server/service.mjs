@@ -3787,9 +3787,13 @@ function buildWizardServer(options, lifetime) {
     const channel = channelDailyOn() ? channelStoreNow()?.dailyChannel(MAIN_AGENT_ID) : null
     if (!channel || channel.archived) throw inboxError(409, 'daily_unavailable')
     const claim = claimDailyThread(channel)
-    if (claim.created) {
-      // Nothing was posted today yet: open today's thread the way the Daily's first post does.
-      const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${agents ? `?agent=${encodeURIComponent(channel.agent)}` : ''}`, { id: claim.sessionId, title: claim.title })
+    // Today's thread must really exist before any record changes: a claim whose first create failed, or whose session
+    // was deleted since, is (re)created the way the Daily's first post does.
+    const agentQuery = agents ? `?agent=${encodeURIComponent(channel.agent)}` : ''
+    const exists = claim.created ? null : await deliverySession(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(claim.sessionId)}${agentQuery}`).catch(() => null)
+    if (!exists?.ok) {
+      if (exists && exists.status !== 404) throw inboxError(503, 'daily_thread_unavailable')
+      const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${agentQuery}`, { id: claim.sessionId, title: claim.title })
       if (!created.ok && created.status !== 409) throw inboxError(503, 'daily_thread_unavailable')
     }
     return agentInbox.sweepView(agentInbox.sweep({ thread_id: claim.sessionId, agent: channel.agent, day: claim.day }))
@@ -3812,26 +3816,38 @@ function buildWizardServer(options, lifetime) {
     if (option && option !== 'later' && Object.keys(current.options || {}).length && !Object.hasOwn(current.options, option)) throw inboxError(400, 'unknown option')
     if (current.state === 'answered' && current.answer === option) return { record: current, run_id: '' }
     const runId = option && option !== 'later' ? await postInboxAnswer(current, option) : ''
-    return { record: agentInbox.patch(id, { action: 'answer', option }), run_id: runId }
+    // The admitted answer turn is remembered: only its finish archives the record.
+    return { record: agentInbox.patch(id, { action: 'answer', option, run_id: runId }), run_id: runId }
   }
   // "signal sweep" said or typed to the main agent (or a sweep the owner scheduled): the card is posted at once and
   // the turn itself is told so, once, in its run note, so the reply never repeats the card.
   const sweepNotes = new Map()
   const noteSweepRequest = (sessionId, body, principal, request) => {
-    if (!sessionId || !agentInboxOn()) return false
+    if (!sessionId || !agentInboxOn()) return null
     let text = ''
-    try { text = visibleInputText(parseJsonBody(body).input) } catch { return false }
+    try { text = visibleInputText(parseJsonBody(body).input) } catch { return null }
     const scheduled = principal?.kind === 'service' && typeof request.headers['x-wizard-schedule-kind'] === 'string' && isScheduledSweep(text)
-    if (!scheduled && !(principal?.kind === 'owner' && isSweepPhrase(text))) return false
-    sweepNotes.set(sessionId, { scheduled, at: Date.now() })
+    if (!scheduled && !(principal?.kind === 'owner' && isSweepPhrase(text))) return null
+    return { scheduled }
+  }
+  // The sweep runs before the turn is admitted, so the run note says what really happened.
+  const sweepForTurn = async (sessionId, asked) => {
+    let failed = ''
+    try { await runSweep() } catch (error) { failed = error?.code === 'daily_unavailable' ? 'daily_unavailable' : 'failed'; console.warn(`[agent-inbox] sweep failed: ${error?.code || error?.message || error}`) }
+    sweepNotes.set(sessionId, { scheduled: asked.scheduled, failed, at: Date.now() })
     if (sweepNotes.size > 50) sweepNotes.delete(sweepNotes.keys().next().value)
-    return true
   }
   const sweepRunNote = sessionId => {
     const pending = sessionId ? sweepNotes.get(sessionId) : null
     if (!pending) return ''
     sweepNotes.delete(sessionId)
     if (Date.now() - pending.at > 10 * 60_000) return ''
+    if (pending.failed) {
+      const why = pending.failed === 'daily_unavailable' ? 'there is no open Daily thread (the Daily channel is off or archived)' : 'the inbox could not be read'
+      return pending.scheduled
+        ? `Signal sweep: the Wizard Agent Service could not post the sweep card because ${why}. Respond exactly [SILENT].`
+        : `Signal sweep: the owner asked for a signal sweep, but the Wizard Agent Service could not post the sweep card because ${why}. Say so in one short line; do not make up a sweep yourself.`
+    }
     return pending.scheduled
       ? 'Signal sweep: the Wizard Agent Service has posted the sweep card at the bottom of today\'s Daily thread. Do not repeat or summarise it. Respond exactly [SILENT].'
       : 'Signal sweep: the owner asked for a signal sweep and the Wizard Agent Service has posted the sweep card at the bottom of today\'s Daily thread. Reply in one short line that it is there; do not list, repeat or summarise its items.'
@@ -7856,11 +7872,11 @@ function buildWizardServer(options, lifetime) {
           }
           heavyWork?.supersede(queuedAdmission.sessionId)
           if (queuedAdmission.runtime === 'direct' && !quietWatcherAdmission && !queuedAdmission.continuation) noteProvisionalTitle(queuedAdmission.sessionId, body.toString('utf8'))
-          // A "signal sweep" turn: its run note is set before admission (the queue may dispatch at once), the card after.
-          const sweepAsked = queuedAdmission.runtime === 'direct' && noteSweepRequest(queuedAdmission.sessionId, body, principal, request)
+          // A "signal sweep" turn: the card is posted first (the queue may dispatch at once), then its run note says so.
+          const sweepAsked = queuedAdmission.runtime === 'direct' ? noteSweepRequest(queuedAdmission.sessionId, body, principal, request) : null
+          if (sweepAsked) await sweepForTurn(queuedAdmission.sessionId, sweepAsked)
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
-          if (sweepAsked && !admitted.replayed) void runSweep().catch(error => console.warn(`[agent-inbox] sweep failed: ${error?.code || error?.message || error}`))
-          else if (sweepAsked) sweepNotes.delete(queuedAdmission.sessionId)
+          if (sweepAsked && admitted.replayed) sweepNotes.delete(queuedAdmission.sessionId)
           // A durable queue receipt is not proof that Hermes has materialized this session.
           if (await agents?.catalogContains(MAIN_AGENT_ID, queuedAdmission.sessionId) === true) agents.pin(queuedAdmission.sessionId, MAIN_AGENT_ID, 'runtime_verified')
           if (!quietWatcherAdmission) threadDispositionStore.clearSession(queuedAdmission.runtime, queuedAdmission.sessionId)

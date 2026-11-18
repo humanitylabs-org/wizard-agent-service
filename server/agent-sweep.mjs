@@ -157,8 +157,9 @@ export function cardRow(view) {
   }
 }
 
-/** Add the card to one history page (`{data|messages|items: [...]}`) when it is the thread's newest page:
- *  order=oldest with fewer rows than the limit (the last page), or order=latest at offset 0 (the first row). */
+/** Add the card as the last row of one history page (`{data|messages|items: [...]}`) when it is the thread's newest
+ *  page: order=oldest with fewer rows than the limit (the last page), or order=latest at offset 0 (Hermes returns the
+ *  newest page in chronological order, so the card goes last there too). */
 export function withCardRow(payload, view, searchParams) {
   if (!view || !payload || typeof payload !== 'object' || Array.isArray(payload)) return payload
   const key = ['data', 'messages', 'items'].find(k => Array.isArray(payload[k]))
@@ -168,7 +169,7 @@ export function withCardRow(payload, view, searchParams) {
   const offset = Number(searchParams?.get?.('offset') || 0) || 0
   const limit = Number(searchParams?.get?.('limit') || 0) || 0
   if (rows.some(row => row?.id === view.id)) return payload
-  if (order === 'latest') return offset === 0 ? { ...payload, [key]: [cardRow(view), ...rows] } : payload
+  if (order === 'latest') return offset === 0 ? { ...payload, [key]: [...rows, cardRow(view)] } : payload
   if (payload.has_more === true || payload.pagination?.has_more === true) return payload
   if (limit && rows.length >= limit) return payload
   if (offset > 0 && !rows.length) return payload

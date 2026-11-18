@@ -179,6 +179,9 @@ export class AgentInboxStore {
     if (!record) return null
     const status = String(run.status ?? '')
     if (!TERMINAL.has(status)) return null
+    // Answered from the sweep card (issue 550): only the turn that carried the answer moves the record on. An earlier
+    // turn that was still running when the owner answered finishes without touching it.
+    if (record.state === 'answered' && record.answer_run && String(run.id ?? '') !== record.answer_run) return null
     const output = typeof run.output === 'string' ? run.output : ''
     const sig = hash(`${run.id ?? ''}\n${status}\n${output}`).slice(0, 24)
     if (record.run_sigs?.includes(sig)) return null
@@ -225,7 +228,7 @@ export class AgentInboxStore {
     } else if (answered) {
       // The worker's next status line after the owner's answer (issue 550): the record has done its job. A progress
       // line while the answer's turn is still running leaves it answered.
-      if (final || status.state === 'done') record.state = 'archived'
+      if (final) record.state = 'archived'
     } else if (status.state === 'done') {
       record.state = 'new'; record.kind = 'result'
     } else if (final && !continues) {
@@ -291,6 +294,7 @@ export class AgentInboxStore {
     } else if (action === 'answer') {
       if (Object.keys(record.options || {}).length && !Object.hasOwn(record.options, option)) throw Object.assign(new Error('unknown option'), { status: 400 })
       record.state = 'answered'; record.answered_at = t; record.answer = option || null
+      record.answer_run = typeof input.run_id === 'string' && input.run_id ? input.run_id.slice(0, 200) : null
     } else if (action === 'snooze') {
       record.state = 'new'; record.snoozed_at = t
     } else if (action === 'archive') {

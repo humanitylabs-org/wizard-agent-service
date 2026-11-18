@@ -869,6 +869,15 @@ export const serverChecks = {
       await until(latestCard, c => c && c.id !== fresh.id, 'a scheduled sweep posts a card')
       const quiet = await until(async () => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === card2.thread_id && String(r.body?.input || '').startsWith('[Wizard schedule]')).at(-1), Boolean, 'the scheduled turn is dispatched')
       assert.match(String(quiet.body.instructions || ''), /Respond exactly \[SILENT\]/u)
+      // No open Daily: the typed turn is told the card could not be posted, never that it was.
+      for (const r of s.runs.values()) if (r.status === 'running') r.status = 'completed'
+      const dailyId = (await (await s.raw('/wizard/v1/channels')).json()).channels.find(c => c.kind === 'daily').id
+      assert.equal((await s.raw('/wizard/v1/channels', json('PATCH', { id: dailyId, archived: true }))).status, 200)
+      const lastCard = (await latestCard()).id
+      await admit(s, { session_id: card2.thread_id, input: 'signal sweep' })
+      const refused = await until(async () => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === card2.thread_id && r.body?.input === 'signal sweep').at(-1), Boolean, 'the refused turn is dispatched')
+      assert.match(String(refused.body.instructions || ''), /could not post the sweep card because there is no open Daily thread/u)
+      assert.equal((await latestCard()).id, lastCard, 'no card without an open Daily')
     }
   },
   // wizard-ux issue 1358: one Channels switch. The owner's wizard/chat-channels switch in the synced Look file turns the
