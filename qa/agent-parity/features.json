@@ -612,6 +612,22 @@
       "policy_exemptions": []
     },
     {
+      "id": "orb-dump",
+      "description": "Orb dump route (issue 551, owner switch wizard/agent-inbox or WIZARD_AGENT_INBOX=1, off by default; only when the shell sends accept_dump): POST /wizard/v1/route sorts a new task request into route dump in the same fast-router call, writes its agent inbox record (state running, title, ask, deadline from words like today or by Friday, privacy private) before answering, then creates a hidden worker thread on the main agent and admits its turn on the durable queue with key wizard-inbox-<record id> and a background-task run note. Reply, tell me, a conversation or a short direct question stay route agent; commands and view answers are unchanged; without accept_dump the routing is exactly as before. A worker that cannot start leaves the record waiting on the owner; the same words again start it again.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP routes with agentInbox on and a fake fast router on a local port written into settings.json: no accept_dump routes as before and captures nothing; a short question stays agent even when the model says dump; a task request returns dump with record and thread ids and a running record with its deadline. On main the worker thread is created hidden, its turn carries the wizard-inbox key and the run note, it never lists in view=list, the same words again reuse the record with no second worker, and the finished turn updates the record. On host-profile, container and restricted the orb's main agent is not in the scene, so the record must turn into a waiting needs_you, saying it again must restart the same record (restarted, then waiting again), and nothing reaches that kind's runtime. tests/voice-router-dump.test.ts covers the 22-utterance fixture (with a model that never and one that always says dump), deadlines and switch-off routing. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/voice-router.mjs",
+        "server/service.mjs",
+        "server/agent-inbox.mjs"
+      ],
+      "reference_tests": [
+        "tests/voice-router-dump.test.ts"
+      ],
+      "fixture": "orb-dump",
+      "policy_exemptions": []
+    },
+    {
       "id": "chats-daily-channel",
       "description": "Daily channel (issue 527, part of the Channels switch wizard/chat-channels; WIZARD_CHANNEL_DAILY forces it): one pinned channel per agent holding one real thread per day (05:00 boundary in the owner's time zone). The main agent's Daily is seeded once, pinned above Alerts; PATCH kind makes another agent's channel its daily channel; POST /wizard/v1/channels/<id>/today creates today's thread once (racing first posts share it) and files it into Daily; GET /days pages every day thread with its opener and count; a thread:'daily' schedule and an origin-less reminder post into today's thread, while a notification-only reminder keeps its hidden schedule chat (issue 529); a run in a day thread is told yesterday's thread, but not once the Daily is archived. The main agent's own schedule tool (wizard_schedule, loopback /wizard/internal/schedules/create) may name thread 'daily' too (issue 532); any other thread it names stays the calling session; a 'daily' job whose Daily part is later off gets its own schedule chat, never a session named 'daily'.",
       "layer": "server",

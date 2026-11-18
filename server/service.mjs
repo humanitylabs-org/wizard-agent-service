@@ -3780,6 +3780,55 @@ function buildWizardServer(options, lifetime) {
   // Finished worker runs (capture admits them with the INBOX_RUN_PREFIX idempotency key) on every loaded queue.
   const inboxWorkerRuns = now => [runQueue, ...(routedQueues ? routedQueues.loaded() : [])].filter(Boolean)
     .flatMap(queue => queue.finishedRunsWithKeyPrefix(INBOX_RUN_PREFIX, (now - CHECK_WINDOW_MS) / 1000))
+  // Orb dump (issue 551, same switch): a new task said to the orb starts in the background. The record is written
+  // (state running) before the answer goes back, so the shell's "Got it" toast never waits on Hermes; then the hidden
+  // worker thread is created and its turn admitted on the durable queue (key wizard-inbox-<record id>, which the
+  // nightly check counts). A worker that can't start leaves the record waiting on the owner, never lost.
+  const dumpRuns = new Map()
+  const startDumpWorker = async (record, words) => {
+    const agentQuery = agents ? `?agent=${encodeURIComponent(MAIN_AGENT_ID)}` : ''
+    try {
+      const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${agentQuery}`, { id: record.thread_id, title: record.title, source: 'wizard-mobile', hidden: true })
+      if (!created.ok && created.status !== 409) throw new Error(`session ${created.status}`)
+      // Stock Hermes keeps `hidden` out of a create body; the PATCH is what hides it from every list and count.
+      await hermesJson(`/api/sessions/${encodeURIComponent(record.thread_id)}`, { method: 'PATCH', body: JSON.stringify({ hidden: true }) })
+      const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${agentQuery}`, { session_id: record.thread_id, input: words }, `${INBOX_RUN_PREFIX}${record.id}`)
+      if (!run.ok) throw new Error(`run ${run.status}`)
+      return String(run.payload?.run_id || run.payload?.id || '')
+    } catch (error) {
+      console.warn(`[agent-inbox] dump worker did not start: ${error?.message || error}`)
+      agentInbox.startFailed(record.id)
+      return ''
+    }
+  }
+  const captureDump = (text, cmd) => {
+    const words = String(text ?? '').replace(/\s+/gu, ' ').trim().slice(0, 4000)
+    const day = new Date().toISOString().slice(0, 10)
+    const { record, created } = agentInbox.capture({
+      agent: MAIN_AGENT_ID, thread_id: mintDailyThreadId(), source: 'orb:dump', kind: 'note', title: cmd.title, ask: words,
+      deadline: cmd.deadline || null, privacy_class: 'private',
+      // The same words said twice the same day are one task (a double capture); the same chore next week is a new one.
+      dedupe_hash: createHash('sha256').update(`${MAIN_AGENT_ID}\norb\n${day}\n${words.toLowerCase()}`).digest('hex').slice(0, 32),
+    })
+    // Said again after its worker could not start: the same record starts again (same idempotency key).
+    const retry = created ? null : agentInbox.retryStart(record.id)
+    if (created || retry) {
+      const started = startDumpWorker(retry || record, words)
+      dumpRuns.set(record.id, started)
+      started.finally(() => dumpRuns.delete(record.id)).catch(() => undefined)
+    }
+    return { record_id: record.id, thread_id: record.thread_id, created, ...(retry ? { restarted: true } : {}) }
+  }
+  // The worker's run note: nobody is watching this thread, so it works the task through and reports in its status line.
+  const dumpRunNote = sessionId => {
+    if (!sessionId || !agentInboxOn()) return ''
+    const record = agentInbox.linked(MAIN_AGENT_ID, sessionId)
+    if (!record || record.source !== 'orb:dump' || record.state !== 'running') return ''
+    return 'Background task: the owner handed you this by voice and is not watching this thread; your reply is read later, if at all. '
+      + 'Do the whole task now without stopping to ask unless you must. End with a short reply: what you did and the result. '
+      + 'If you need the owner, end with a needs_you status whose ask is one plain question, with a recommendation and short answer options.'
+      + (record.deadline ? ` Deadline: ${record.deadline}.` : '')
+  }
   // Signal sweep (issue 550, same switch): one capped card at the bottom of today's Daily thread of the main agent.
   const inboxError = (status, code) => Object.assign(new Error(code), { status, code })
   const runSweep = async () => {
@@ -4826,7 +4875,7 @@ function buildWizardServer(options, lifetime) {
   const runTitleNote = (sessionId) => {
     const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes')].filter(Boolean).join('\n')
     if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote, trackerNote('hermes', '')].filter(Boolean).join('\n')
-    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId), dailyNote('hermes', sessionId), sweepRunNote(sessionId)].filter(Boolean).join('\n')
+    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId), dailyNote('hermes', sessionId), sweepRunNote(sessionId), dumpRunNote(sessionId)].filter(Boolean).join('\n')
   }
   const patchHermesTitle = async (sessionId, title, { exact = false, datedAt = null } = {}) => {
     // A title another thread holds is dated, never numbered (James, 8 Nov: no #N). An exact patch never is.
@@ -7084,8 +7133,17 @@ function buildWizardServer(options, lifetime) {
         let input
         try { input = JSON.parse((await readBoundedBody(request, 8192)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
         const { settings } = readSettings(settingsPath)
+        // Issue 551: only a shell that handles the dump route asks for it, and only the owner's own same-origin JSON
+        // request may start a background task. Anything else routes exactly as before.
+        const dump = input?.accept_dump === true && agentInboxOn() && ownerLike(principalOf(request)) && !skinOriginRefused(request)
+          && /^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))
         try {
-          sendJson(response, 200, await routeUtterance({ input, settings, router: fast, fetchImpl }))
+          const routed = await routeUtterance({ input, settings, router: fast, fetchImpl, dump })
+          if (routed.cmd?.route === 'dump') {
+            try { routed.cmd = { ...routed.cmd, ...captureDump(input.text, routed.cmd) } }
+            catch (error) { console.warn(`[agent-inbox] dump capture failed: ${error?.message || error}`); routed.cmd = { route: 'agent', summary: routed.cmd.summary } }
+          }
+          sendJson(response, 200, routed)
         } catch (error) {
           sendJson(response, error?.status === 400 ? 400 : 502, { error: error?.status === 400 ? 'invalid_request' : 'router_unavailable' })
         }
