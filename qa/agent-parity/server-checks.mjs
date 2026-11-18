@@ -972,6 +972,13 @@ export const serverChecks = {
     // A row only lists with an owner message in it.
     if (!thread.messages.some(m => m.role === 'user')) thread.messages.push({ id: 'move-user-1', role: 'user', timestamp: Date.now() / 1000, content: 'Synthetic quarterly numbers' })
     await settle(true, 'the visible thread lists before it is sent')
+    // A thread pinned through the box's ui-preferences stays in Chats.
+    const prefs = (op) => s.raw('/wizard/v1/ui-preferences', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ops: [{ op, key: 'pinnedChats', item: 'wizard_parity' }] }) })
+    assert.equal((await prefs('add')).status, 200)
+    const pinned = await s.raw('/wizard/v1/agent-inbox/send', json({ thread_id: 'wizard_parity' }))
+    assert.deepEqual([pinned.status, (await pinned.json()).error], [409, 'pinned'], 'a pinned thread cannot be sent')
+    assert.equal(s.sessions.get('wizard_parity').hidden, false, 'a refused send hides nothing')
+    assert.equal((await prefs('remove')).status, 200)
     const sent = await s.raw('/wizard/v1/agent-inbox/send', json({ thread_id: 'wizard_parity', utterance: 'Synthetic quarterly numbers' }))
     assert.equal(sent.status, 200, await sent.clone().text())
     const { record } = await sent.json()

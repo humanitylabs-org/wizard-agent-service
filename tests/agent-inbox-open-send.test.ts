@@ -141,6 +141,11 @@ describe('Open and Send to inbox over HTTP', () => {
     const d = home(), { u, patches } = await start(d, { agentInbox: true })
     const pinned = await fetch(`${u}/send`, json('POST', { thread_id: 'wizard_pinned_1' }))
     expect([pinned.status, (await pinned.json()).error]).toEqual([409, 'pinned'])
+    // A pin made in a Wizard client lives in the box's ui-preferences (pinnedChats), not in Hermes.
+    const prefs = `http://127.0.0.1:${new URL(u).port}/wizard/v1/ui-preferences`
+    expect((await fetch(prefs, json('PATCH', { ops: [{ op: 'add', key: 'pinnedChats', item: 'wizard_visible_1' }] }))).status).toBe(200)
+    const pinnedByUi = await fetch(`${u}/send`, json('POST', { thread_id: 'wizard_visible_1' }))
+    expect([pinnedByUi.status, (await pinnedByUi.json()).error]).toEqual([409, 'pinned'])
     const routed = await fetch(`${u}/send`, json('POST', { thread_id: 'wizard_visible_1', agent: 'research' }))
     expect([routed.status, (await routed.json()).error]).toEqual([409, 'main_only'])
     expect((await fetch(`${u}/open`, json('POST', { thread_id: 'wizard_missing_1' }))).status).toBe(404)

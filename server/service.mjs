@@ -3866,7 +3866,10 @@ function buildWizardServer(options, lifetime) {
     const row = session?.session ?? session
     const said = typeof input.utterance === 'string' ? input.utterance : ''
     if (move === 'send') {
-      if (row?.pinned === true) throw inboxError(409, 'pinned')
+      // A pin is the box-wide pinnedChats list (ui-preferences) or Hermes' own pinned flag.
+      let pins = []
+      try { pins = readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).pinnedChats || [] } catch { pins = [] }
+      if (row?.pinned === true || pins.includes(thread)) throw inboxError(409, 'pinned')
       const running = Boolean(runQueue?.queuedForSession('direct', thread).some(record => record.terminalAt == null))
       await hermesJson(path, { method: 'PATCH', body: JSON.stringify({ hidden: true }) })
       const record = agentInbox.sendToInbox(agent, thread, { title: typeof input.title === 'string' ? input.title : String(row?.title || ''), ask: said, running })

@@ -58,7 +58,7 @@ thread answers 409 `main_only`.
 - `POST /wizard/v1/agent-inbox/open` `{ thread_id, utterance? }` -> `{ record, hidden: false, example }`: Hermes
   `hidden: false`, then `owner_turn_at` on the thread's records, so nothing hides it again until the owner sends it back.
 - `POST /wizard/v1/agent-inbox/send` `{ thread_id, title?, utterance? }` -> `{ record, hidden: true, example }`: refused
-  with 409 `pinned` for a thread the owner pinned. Hermes `hidden: true`, then the thread's record (or a new one, source
+  with 409 `pinned` for a thread the owner pinned (ui-preferences `pinnedChats`, or Hermes `pinned`). Hermes `hidden: true`, then the thread's record (or a new one, source
   `chats:send`) becomes a worker record with `owner_turn_at` cleared: `running` while a turn is still on its way (its
   status line updates it as usual), otherwise a result waiting for the next sweep. Sending is the owner's own choice, so
   it is the one way a thread he started becomes a worker thread.
