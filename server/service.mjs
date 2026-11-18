@@ -7815,7 +7815,11 @@ function buildWizardServer(options, lifetime) {
           ? operatorWorkers.get(queuedProxyRecord.upstreamRunId)
           : null
         if (queuedPath && !queuedProxyRecord) { sendJson(response, 404, { error: 'not_found' }); return }
-        if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'steer') heavyWork?.supersede(queuedProxyRecord.sessionId)
+        if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'steer') {
+          heavyWork?.supersede(queuedProxyRecord.sessionId)
+          // The owner typing while a hidden worker runs is a turn of his too (issue 1569): the thread lists again.
+          if (queuedProxyRecord.runtime === 'direct' && principal.kind === 'owner') inboxOwnerTurn(MAIN_AGENT_ID, queuedProxyRecord.sessionId)
+        }
         if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'stop') heavyWork?.stopSession(queuedProxyRecord.sessionId)
         // Record the owner's Stop before it reaches Hermes, so the resulting `cancelled` is never auto-resumed.
         if (runQueue && request.method === 'POST' && /^\/v1\/runs\/[^/]+\/stop$/.test(upstreamPath)) runQueue.markOwnerStop(upstreamPath.split('/')[3])

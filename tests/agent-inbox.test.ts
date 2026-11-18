@@ -61,6 +61,9 @@ describe('agent inbox store', () => {
     expect(s.ownerTurnPending('hermes', 'wizard_worker_9')).toBe(false)
     expect(s.ownerTurn('hermes', 'wizard_worker_9')).toEqual([])
     expect(s.mayHide('hermes', 'wizard_worker_9')).toBe(false)
+    // An orb dump record kept from before the worker marker is still a worker (its thread is already hidden).
+    s.capture({ thread_id: 'wizard_worker_8', title: 'Old dump', ask: 'Plan the move', source: 'orb:dump' })
+    expect(s.mayHide('hermes', 'wizard_worker_8')).toBe(true)
   })
   it('every finished worker run updates exactly one record: needs_you, done, fyi, no status line, killed', () => {
     const s = store()

@@ -904,6 +904,18 @@ export const serverChecks = {
       const shown = await settle(async () => { const l = await (await s.request('/api/sessions?view=list&limit=100')).json(); return (l.data || []).some(x => x.id === cmd.thread_id) ? l : null }, 'the thread lists once the owner typed in it')
       assert.ok(shown)
       assert.ok((await record()).owner_turn_at > 0, 'the record remembers the owner typed in it')
+      // Typing while a hidden worker still runs (a steer of its turn) shows the thread again too.
+      reply = { route: 'agent', summary: 'table' }
+      const second = (await (await say('Book a table for Saturday night', { accept_dump: true })).json()).cmd
+      assert.equal(second.route, 'dump')
+      await settle(() => s.sessions.get(second.thread_id)?.hidden === true, 'the second worker thread is hidden')
+      const queue = new DatabaseSync(join(s.root, 'queue.sqlite3'), { readOnly: true })
+      let publicRun
+      try { publicRun = await settle(() => queue.prepare('SELECT public_run_id FROM wizard_run_queue WHERE idempotency_key = ?').get(`wizard-inbox-${second.record_id}`)?.public_run_id, 'the worker turn is on the queue') }
+      finally { queue.close() }
+      // (a turn still launching answers 409 until it runs, as the shell's own steer retry sees)
+      await settle(async () => [200, 202].includes((await s.request(`/v1/runs/${encodeURIComponent(publicRun)}/steer`, post({ input: 'Make it 8 pm' }))).status), 'the owner can steer the hidden worker')
+      await settle(() => s.sessions.get(second.thread_id)?.hidden === false, 'the owner steering the worker shows its thread again')
     } finally { await new Promise(r => fake.close(r)) }
   },
   // Issue 550: the signal sweep card. Built from the agent inbox, posted as the last row of today's Daily thread of

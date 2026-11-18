@@ -199,10 +199,10 @@ export class AgentInboxStore {
 
   /** Hidden worker threads (issue 1569). Only a thread the Service started itself for a capture (`worker: true`, set
    *  before the thread exists) may be hidden, and never once the owner has typed in it: a thread the owner started or
-   *  wrote in is his chat and always lists. */
+   *  wrote in is his chat and always lists. An orb dump record written before `worker` existed is a worker too. */
   mayHide(agent, thread) {
     const records = Object.values(this.data.records).filter(r => r.agent === (agent || 'hermes') && r.thread_id === thread)
-    return records.some(r => r.worker === true) && !records.some(r => r.owner_turn_at)
+    return records.some(r => r.worker === true || r.source === 'orb:dump') && !records.some(r => r.owner_turn_at)
   }
 
   /** The owner typed in this thread: true when a record on it has not been told yet (the Service then shows the thread
