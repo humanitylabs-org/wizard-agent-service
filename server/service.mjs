@@ -17,6 +17,7 @@ import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
 import { createDevices, devicesTool } from './devices.mjs'
 import { transcribeTool } from './transcribe.mjs'
+import { collapseSpeechRepeats } from './speech-repeats.mjs'
 import { projectOpenAskSession, backgroundHelperStatus, threadBackground, liveWorker, ENDED_WITH_ERROR, replyEpoch } from './open-ask.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { indexedSearchWords, readHermesFirstRequests, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, createHermesSessionTruthReader, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
@@ -6972,7 +6973,7 @@ function buildWizardServer(options, lifetime) {
           if (sttNoSpeech(upstream.status, raw)) { sendJson(response, 200, { text: '', no_speech: true, ms: Date.now() - started, model: '' }); return }
           if (!upstream.ok || raw.length > 256 * 1024) throw new Error('voice transcription failed')
           const value = JSON.parse(raw.toString('utf8'))
-          const text = typeof value.text === 'string' ? value.text.trim().slice(0, 64_000) : ''
+          const text = typeof value.text === 'string' ? collapseSpeechRepeats(value.text.trim()).slice(0, 64_000) : ''
           // Same shape as /wizard/voice/transcribe: a blank reading is no speech.
           sendJson(response, 200, { text, ...(text ? {} : { no_speech: true }), ms: Date.now() - started, model: typeof value.model === 'string' ? value.model.slice(0, 120) : '' })
         } catch { sendJson(response, 502, { error: 'transcription_failed' }) }
@@ -7014,7 +7015,7 @@ function buildWizardServer(options, lifetime) {
           // verbose_json carries per-segment tokens, several times the plain reply; long takes need room.
           if (!upstream.ok || raw.length > (sttInfo.segments ? 4 * 1024 * 1024 : 256 * 1024)) throw new Error('voice transcription failed')
           const value = JSON.parse(raw.toString('utf8'))
-          const text = spellProductName(speechText(value)).trim().slice(0, 64_000)
+          const text = collapseSpeechRepeats(spellProductName(speechText(value)).trim()).slice(0, 64_000)
           // A blank reading is "no speech" too: clients drop the take with a note (never a 4xx/5xx they retry).
           if (!text) { sendJson(response, 200, { text: '', no_speech: true, provider: '', model: '' }); return }
           sendJson(response, 200, {
