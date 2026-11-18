@@ -92,5 +92,18 @@ export function createMainProviderAttach({ path, loadOptions }) {
     return write([...new Set(list.map(providerKey))])
   }
 
-  return { filterOptions, refusal, state, set, attached: stored }
+  /** Private first (issue 545): a Claude or ChatGPT sign-in attaches that provider to the standard agent, kept with the rest. */
+  async function attach(slug) {
+    const key = providerKey(slug)
+    if (!SLUG_RE.test(key)) throw Object.assign(new Error('invalid provider'), { status: 400, code: 'invalid_attached_providers' })
+    let current = stored()
+    if (!current) {
+      let options = null
+      try { options = await loadOptions() } catch { options = null }
+      current = options ? attachedFor(options) : []
+    }
+    return current.includes(key) ? current : write([...current, key])
+  }
+
+  return { filterOptions, refusal, state, set, attach, attached: stored }
 }

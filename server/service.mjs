@@ -110,6 +110,7 @@ import { DEFAULT_PRIVATE_ACCESS_SOCKET, createPhoneSetup } from './phone-setup.m
 import { readArchivedSessions } from './archived-sessions.mjs'
 import { createHermesStateHealth } from './hermes-state-health.mjs'
 import { createMainProviderAttach } from './main-provider-attach.mjs'
+import { createPrivateFirst, PRIVATE_FIRST_SWITCH } from './private-first.mjs'
 export { readArchivedSessions }
 
 export const BODY_LIMIT = 12 * 1024 * 1024
@@ -3056,7 +3057,13 @@ function buildWizardServer(options, lifetime) {
     ? createRuntimeClient({ url: options.agentRuntimeUrl, token: options.agentRuntimeToken, fetchImpl })
     : null)
   let agentSockets
+  // Private first (issue 545, private-first.mjs): the owner's `wizard/private-first-setup` switch in the Look file;
+  // option privateFirst (env WIZARD_PRIVATE_FIRST, '1' on / '0' off) wins, because a fresh box has no Look file yet.
+  const privateFirstSwitchOn = createChannelsSwitch({ id: PRIVATE_FIRST_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.privateFirstTtlMs ?? 3000 })
+  const privateFirstOn = () => channelPart(options.privateFirst, privateFirstSwitchOn)
+  let privateFirst = null
   const agents = options.agents !== false && agentsDir ? createAgentRegistry({
+    privateFirstAgent: () => (privateFirst?.on() ? privateFirst.privateAgentId() : null),
     mainHome: options.hermesHome || process.env.HERMES_HOME || join(homedir(), '.hermes'),
     agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath, mainOrigin: upstreamOrigin, mainUpstreamOrigin: upstreamOrigin, mainKey: hermesKey,
     isBindingTarget: id => appBindings?.list().some(binding => binding.agent === id && !binding.is_default),
@@ -3096,13 +3103,31 @@ function buildWizardServer(options, lifetime) {
   }
   // Switch WIZARD_MAIN_PROVIDER_ATTACH (issue 428): a provider sign-in joins the box's pool only; the main agent
   // uses just the providers the owner attached to it (the onboarding choice is attached first).
-  const mainProviderAttach = options.mainProviderAttach === true && agentsDir
+  // Private first (issue 545) turns the protection on too, without the env setting.
+  const mainProviderAttachStore = agentsDir
     ? createMainProviderAttach({ path: join(agentsDir, '.main-providers.json'), loadOptions: () => hermesJson('/api/model/options') })
     : null
+  const mainProviderAttachOn = () => Boolean(mainProviderAttachStore) && (options.mainProviderAttach === true || privateFirstOn())
   // App → agent binding (spec/AGENTS.md): per installed app, Service-owned, default = the main agent.
   const appBindings = agents && bridgeOsHome && options.appBindings !== false
     ? createAppBindings({ osHome: bridgeOsHome, registry: agents, appsJsonPath, launcherPath })
     : null
+  privateFirst = agents ? createPrivateFirst({
+    on: privateFirstOn, registry: agents, agentsDir,
+    mainOptions: () => hermesJson('/api/model/options'),
+    bindings: () => appBindings, attach: () => mainProviderAttachStore,
+    log: line => process.stdout.write(`[private-first] ${line}\n`),
+    // The owner's default agent (settings.json agents.default_agent_id), written the way PUT /wizard/v1/settings does.
+    setDefaultAgent: (id) => {
+      if (!settingsPath) return
+      let stored = {}
+      try { stored = JSON.parse(readFileSync(settingsPath, 'utf8')) } catch { /* new settings store */ }
+      mkdirSync(dirname(settingsPath), { recursive: true, mode: 0o700 })
+      const temporary = `${settingsPath}.${process.pid}.tmp`
+      writeFileSync(temporary, `${JSON.stringify({ ...stored, agents: { ...stored.agents, default_agent_id: id } }, null, 2)}\n`, { mode: 0o600 })
+      renameSync(temporary, settingsPath)
+    },
+  }) : null
   const agentChatInputs = agents ? new AgentChatInputs(bridgeOsHome ? join(bridgeOsHome, 'agent-chat-inputs.sqlite3') : ':memory:') : null
   if (agentChatInputs) lifetime.own(() => agentChatInputs.close())
   // Each routed agent's sent files live in its own folder, so a private agent's bytes never join the
@@ -6665,6 +6690,31 @@ function buildWizardServer(options, lifetime) {
         } catch (error) { sendJson(response, error?.status || 500, { error: error?.status ? error.message : 'schedule request failed' }) }
         return
       }
+      if (url.pathname.startsWith('/wizard/internal/private-first/')) {
+        // Private first (issue 545): the provider images ask through the wizard-os plugin on the main Hermes
+        // dashboard (wizard-app-store images/PRIVATE_FIRST.md), which calls here with the same loopback token and
+        // refusal rules as the schedule tools. Switch off: `on: false`, and every change is refused.
+        if (!privateFirst || !options.heavyToken) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
+        const token = String(options.heavyToken)
+        if (isAgentIngress(request) || principalOf(request).kind === 'agent' || request.headers.origin || request.headers['sec-fetch-site']
+          || supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { sendJson(response, 403, { error: 'private first access denied' }); return }
+        let value
+        try { value = JSON.parse((await readBoundedBody(request, 16 * 1024)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid body' }); return }
+        if (!value || typeof value !== 'object' || Array.isArray(value)) { sendJson(response, 400, { error: 'invalid body' }); return }
+        const action = url.pathname.slice('/wizard/internal/private-first/'.length)
+        try {
+          if (action === 'state') sendJson(response, 200, privateFirst.state(), { 'Cache-Control': 'no-store' })
+          else if (action === 'private-agent') sendJson(response, 200, await privateFirst.ensurePrivateAgent(value))
+          else if (action === 'standard-agent') sendJson(response, 200, await privateFirst.ensureStandardAgent(value))
+          else sendJson(response, 404, { error: 'not_found' })
+        } catch (error) {
+          const status = error instanceof AgentError ? error.status : error?.status
+          sendJson(response, Number.isInteger(status) ? status : 500, { ok: false, error: error?.code || error?.error || 'private_first_failed' })
+        }
+        return
+      }
       if (url.pathname.startsWith('/wizard/internal/agents/')) {
         // The main agent's read-only cross-agent tools (Hermes plugin wizard-agents): the same six
         // wizard_agents__* tools container agents get on /wizard/mcp, read as the main agent. Same loopback
@@ -6765,8 +6815,19 @@ function buildWizardServer(options, lifetime) {
         tickQueues()
         return
       }
+      if (url.pathname === '/wizard/v1/private-first') {
+        // Private first (issue 545): read-only, for the owner's Welcome and Agents views.
+        if (!privateFirst) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (request.method !== 'GET') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        sendJson(response, 200, privateFirst.state(), { 'Cache-Control': 'no-store' })
+        return
+      }
       if (url.pathname === '/wizard/v1/main-providers') {
-        if (!mainProviderAttach) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (!mainProviderAttachOn()) { sendJson(response, 404, { error: 'not_found' }); return }
+        const mainProviderAttach = mainProviderAttachStore
         if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
@@ -7413,9 +7474,9 @@ function buildWizardServer(options, lifetime) {
           }
         }
         // Issue 428: the main agent's model picker lists only the providers attached to it.
-        if (mainProviderAttach && !operator && request.method === 'GET' && upstreamPath === '/api/model/options' && url.searchParams.size === 0) {
+        if (mainProviderAttachOn() && !operator && request.method === 'GET' && upstreamPath === '/api/model/options' && url.searchParams.size === 0) {
           if (!hermesKey) { sendJson(response, 503, { error: 'service_unavailable' }); return }
-          sendJson(response, 200, mainProviderAttach.filterOptions(await hermesJson('/api/model/options')), { 'Cache-Control': 'no-store' })
+          sendJson(response, 200, mainProviderAttachStore.filterOptions(await hermesJson('/api/model/options')), { 'Cache-Control': 'no-store' })
           return
         }
         // Embedders without the agent registry use the same admission rule.
@@ -7501,11 +7562,11 @@ function buildWizardServer(options, lifetime) {
         const hasBody = request.method === 'PATCH' || request.method === 'POST' && !upstreamPath.endsWith('/stop')
         if (hasBody && !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
         let body = hasBody ? (agentResolution?.bodyRead ? agentResolution.body : unscopedBody ?? await readBoundedBody(request)) : undefined
-        if (mainProviderAttach && !operator && body && request.method === 'POST'
+        if (mainProviderAttachOn() && !operator && body && request.method === 'POST'
           && (upstreamPath === '/v1/runs' || upstreamPath === '/api/sessions' || /^\/api\/sessions\/[^/]+\/model$/u.test(upstreamPath))) {
           let requested = null
           try { requested = JSON.parse(body.toString('utf8')) } catch { requested = null }
-          const refused = await mainProviderAttach.refusal(requested)
+          const refused = await mainProviderAttachStore.refusal(requested)
           if (refused) { sendJson(response, 409, refused); return }
         }
         if (request.method === 'POST' && upstreamPath.endsWith('/resolve-unknown')) {

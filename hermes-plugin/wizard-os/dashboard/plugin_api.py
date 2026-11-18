@@ -52,6 +52,12 @@ assert _bspec is not None and _bspec.loader is not None
 _bring = module_from_spec(_bspec)
 _bspec.loader.exec_module(_bring)
 router.include_router(_bring.router)
+# Private first (issue 545): the provider images' questions, relayed to the Agent Service (private_first_api.py).
+_pspec = spec_from_file_location('wizard_private_first_api', Path(__file__).with_name('private_first_api.py'))
+assert _pspec is not None and _pspec.loader is not None
+_private_first = module_from_spec(_pspec)
+_pspec.loader.exec_module(_private_first)
+router.include_router(_private_first.router)
 
 # Add / reconnect / remove ship switched OFF. The read-only listing works on every box regardless of
 # auth.adopt_external_logins (Hermes keeps importing an existing Claude Code login). Turning account changes on needs a

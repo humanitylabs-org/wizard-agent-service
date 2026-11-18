@@ -1191,6 +1191,27 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     const changed = await s.request('/api/sessions/wizard_parity/model', post(allowed))
     assert.ok(changed.status < 300, `attached provider still changes the model (${changed.status})`)
   },
+  'private-first-setup': async s => {
+    // Issue 545: with the private-first switch on (and no WIZARD_MAIN_PROVIDER_ATTACH), the owner's state route says
+    // so, the main agent's provider attach protection is active, and routed agents keep their own allowed models.
+    const state = await (await s.raw('/wizard/v1/private-first', { headers: s.ownerHeaders })).json()
+    assert.equal(state.schema, 'wizard.private-first/1')
+    assert.equal(state.on, true)
+    assert.equal(state.standard_agent, 'hermes')
+    const options = await (await s.request('/api/model/options')).json()
+    const before = s.seen.length
+    const refused = await s.request('/api/sessions/wizard_parity/model', post({ model: 'gpt-6.1-sol', provider: 'openai-codex' }))
+    assert.equal(refused.status, 409)
+    assert.ok(!s.seen.slice(before).some(r => r.path.endsWith('/model')), 'a refused provider switch never reaches any Hermes')
+    if (s.kind === 'main') {
+      assert.deepEqual(options.wizard_attached_providers, ['anthropic'], 'the protection is on without its own setting')
+      assert.equal((await refused.json()).error, 'provider_not_attached')
+      assert.equal((await s.raw('/wizard/v1/main-providers', { headers: s.ownerHeaders })).status, 200)
+    } else {
+      assert.equal(options.wizard_attached_providers, undefined, 'routed agents are untouched')
+      assert.equal((await refused.json()).error, 'model_not_allowed')
+    }
+  },
   'graceful-restart-hold': async s => {
     // Issue 480: while a restart waits for running turns, a send is saved and held (never refused, never sent),
     // health says so without thread ids, and lifting the hold (or the next process) sends it once.

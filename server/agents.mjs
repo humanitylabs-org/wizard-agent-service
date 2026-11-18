@@ -592,11 +592,15 @@ export function createAgentRegistry(options = {}) {
     try {
       if (fresh.length) {
         const privateFresh = privateApps()
+        // Private first (issue 545, spec/AGENTS.md section 5): with the switch on, every new app starts on the box's
+        // default private agent and unticked for the main agent; the owner ticks the standard agent himself.
+        let firstPrivate = null
+        try { firstPrivate = options.privateFirstAgent?.() || null } catch { firstPrivate = null }
         for (const id of folderIds()) {
           const agent = readRaw(id)
           if (!agent || agent.imported || ["profile", "external"].includes(agent.runtime.kind) || agent.runtime?.admission === 'importing') continue
           if (agent.privacy !== 'private') continue
-          const joining = fresh.filter((app) => privateFresh.has(app))
+          const joining = id === firstPrivate ? fresh : fresh.filter((app) => privateFresh.has(app))
           if (!joining.length) continue
           const next = structuredClone(agent)
           for (const app of joining) if (!agentAppIds(next).has(app)) next.permissions[kinds.get(app)].push(app)
@@ -612,7 +616,7 @@ export function createAgentRegistry(options = {}) {
         }
         queueMicrotask(appsChanged)
         const stored = readJson(mainPath)
-        if (stored?.schema === 1) {
+        if (stored?.schema === 1 && !firstPrivate) {
           const apps = { wizard_apps: listIds(stored.wizard_apps), agent_apps: listIds(stored.agent_apps) }
           for (const app of fresh) if (!privateFresh.has(app) && !apps.wizard_apps.includes(app) && !apps.agent_apps.includes(app)) apps[kinds.get(app)].push(app)
           writeJsonAtomic(mainPath, { ...stored, schema: 1, ...apps })
