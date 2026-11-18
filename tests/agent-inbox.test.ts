@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { AgentInboxStore, INBOX_RUN_PREFIX, NO_SUMMARY, STALE_NOTE, textForModel } from '../server/agent-inbox.mjs'
+import { AgentInboxStore, INBOX_RUN_PREFIX, NO_SUMMARY, STALE_NOTE, START_FAILED, textForModel } from '../server/agent-inbox.mjs'
 import { DurableRunQueue } from '../server/run-queue.mjs'
 import { Scheduler } from '../server/scheduler.mjs'
 import { createWizardServer, listen } from '../server/service.mjs'
@@ -34,6 +34,14 @@ describe('agent inbox store', () => {
     expect(s.list()).toHaveLength(2)
     expect(() => s.capture({ thread_id: '../x', title: 'x' })).toThrow()
     expect(() => s.capture({ thread_id: 'wizard_ok' })).toThrow()
+  })
+
+  it('a captured task whose worker could not start waits on the owner, never lost (issue 551)', () => {
+    const s = store()
+    const made = task(s)
+    expect(s.startFailed(made.id)).toMatchObject({ state: 'new', kind: 'needs_you', last_update: START_FAILED })
+    expect(s.startFailed(made.id)).toBeNull()
+    expect(s.startFailed('inbox_' + '0'.repeat(24))).toBeNull()
   })
 
   it('every finished worker run updates exactly one record: needs_you, done, fyi, no status line, killed', () => {

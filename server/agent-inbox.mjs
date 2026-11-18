@@ -25,6 +25,7 @@ export const INBOX_KINDS = new Set(['result', 'needs_you', 'alert', 'fyi', 'note
 export const INBOX_STATES = new Set(['running', 'new', 'surfaced', 'answered', 'parked', 'archived', 'stale'])
 export const NO_SUMMARY = 'Finished without a summary. Open it to read.'
 export const STALE_NOTE = 'No news for 6 h.'
+export const START_FAILED = 'Could not start this task. Open it or say it again.'
 export const STALE_MS = 6 * 3600_000
 const NIGHTLY_MS = 24 * 3600_000
 // Finished worker runs older than this are not checked (their records may have been pruned on purpose).
@@ -166,6 +167,15 @@ export class AgentInboxStore {
       if (!best || r.created_at > best.created_at) best = r
     }
     return best
+  }
+
+  /** A captured task whose worker could not be started (issue 551): it is never lost, it waits on the owner. */
+  startFailed(id, note = START_FAILED) {
+    const record = RECORD_ID.test(String(id)) ? this.data.records[id] : null
+    if (!record || record.state !== 'running') return null
+    Object.assign(record, { state: 'new', kind: 'needs_you', last_update: clip(note, 140), updated_at: this.now() })
+    this.#save()
+    return { ...record }
   }
 
   has(agent, thread) { return Object.values(this.data.records).some(r => r.agent === (agent || 'hermes') && r.thread_id === thread) }

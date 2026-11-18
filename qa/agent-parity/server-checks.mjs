@@ -768,6 +768,74 @@ export const serverChecks = {
     await s.restart()
     assert.equal((await record(made.id)).state, 'archived', 'durable across a restart')
   },
+  // Issue 551: the orb's dump route. A new task said to the orb comes back as route dump with its record already
+  // written (state running); the Service then makes a hidden worker thread on the main agent and admits its turn on
+  // the durable queue (key wizard-inbox-<record id>). The thread never lists. A question, or a shell that does not ask
+  // for dumps, routes exactly as before. On every other kind the orb's main agent is not in the scene, so the worker
+  // cannot start: the record must then wait on the owner (never lost) and nothing reaches this kind's runtime.
+  'orb-dump': async s => {
+    const { createServer } = await import('node:http')
+    let reply = { route: 'agent', summary: 'x' }
+    const fake = createServer((req, res) => { req.resume(); req.on('end', () => { res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(reply) } }] })) }) })
+    await new Promise(r => fake.listen(0, '127.0.0.1', r))
+    try {
+      const settingsPath = join(s.root, 'os', 'settings.json')
+      const current = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {}
+      mkdirSync(dirname(settingsPath), { recursive: true })
+      writeFileSync(settingsPath, JSON.stringify({ ...current, fast_router: { endpoint: `http://127.0.0.1:${fake.address().port}/v1/chat/completions`, model: 'fixture-router' } }))
+      const say = (text, extra = {}) => s.raw('/wizard/v1/route', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, timezone: 'UTC', ...extra }) })
+      const records = async () => (await (await s.raw('/wizard/v1/agent-inbox')).json()).records
+      const runsBefore = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).length
+      // No accept_dump (today's shell): exactly today's routing, nothing captured.
+      let r = await say('Research flights to Lisbon by Friday')
+      assert.equal(r.status, 200)
+      assert.deepEqual((await r.json()).cmd, { route: 'agent', summary: 'x' }, 'a shell that does not ask for dumps routes as before')
+      assert.deepEqual(await records(), [], 'no record without the dump route')
+      // A short direct question stays visible even when the model says dump.
+      reply = { route: 'dump', title: 'Tokyo time' }
+      r = await say('What time is it in Tokyo?', { accept_dump: true })
+      assert.equal((await r.json()).cmd.route, 'agent', 'a short direct question keeps a visible thread')
+      reply = { route: 'agent', summary: 'flights' }
+      r = await say('Research flights to Lisbon by Friday', { accept_dump: true })
+      assert.equal(r.status, 200)
+      const { cmd } = await r.json()
+      assert.equal(cmd.route, 'dump', 'a new task request routes to dump')
+      assert.match(cmd.record_id, /^inbox_[a-f0-9]{24}$/u)
+      assert.match(cmd.thread_id, /^wizard_\d{13}_[0-9a-f]{12}$/u)
+      const record = async () => (await (await s.raw(`/wizard/v1/agent-inbox/${cmd.record_id}`)).json()).record
+      const made = await record()
+      assert.equal(made.thread_id, cmd.thread_id)
+      assert.ok(made.deadline && made.deadline.endsWith('T23:59:00.000Z'), 'the deadline the words carry is on the record')
+      assert.equal(made.privacy_class, 'private')
+      const settle = async (ok, label) => {
+        for (let n = 0; n < 80; n++) { const got = await ok(); if (got) return got; await new Promise(r => setTimeout(r, 25)) }
+        assert.fail(label)
+      }
+      if (s.kind !== 'main') {
+        const waiting = await settle(async () => { const got = await record(); return got.state === 'new' ? got : null }, 'a worker that cannot start leaves the record waiting')
+        assert.deepEqual([waiting.kind, waiting.last_update], ['needs_you', 'Could not start this task. Open it or say it again.'])
+        assert.equal(s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).length, runsBefore, `${s.kind}: nothing reaches this kind's runtime`)
+        return
+      }
+      const worker = await settle(() => s.seen.find(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === cmd.thread_id), 'the worker turn is admitted')
+      assert.equal(worker.headers['idempotency-key'], `wizard-inbox-${cmd.record_id}`, 'the worker run carries the inbox key the nightly check counts')
+      assert.equal(s.sessions.get(cmd.thread_id)?.hidden, true, 'the worker thread is hidden')
+      assert.ok(String(worker.body.instructions || '').includes('Background task: the owner handed you this by voice'), 'the worker is told nobody is watching')
+      assert.equal((await record()).state, 'running', 'the record is running while the worker works')
+      const listed = await (await s.request('/api/sessions?view=list&limit=100')).json()
+      assert.ok(!(listed.data || []).some(x => x.id === cmd.thread_id), 'no new visible thread in the chat list')
+      // The same words again the same day are one task: same record, no second worker.
+      const again = (await (await say('Research flights to Lisbon by Friday', { accept_dump: true })).json()).cmd
+      assert.deepEqual([again.record_id, again.created], [cmd.record_id, false])
+      await new Promise(r => setTimeout(r, 100))
+      assert.equal(s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === cmd.thread_id).length, 1, 'no second worker')
+      // The worker's finish lands on the record.
+      const run = [...s.runs.values()].find(x => x.session_id === cmd.thread_id)
+      Object.assign(run, { status: 'completed', updated_at: Date.now() / 1000, output: `Found three.\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'done', ask: 'Three Lisbon flights found' })}[/WIZARD_STATUS_V1]` })
+      assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
+      await settle(async () => { const got = await record(); return got.kind === 'result' && got.last_update === 'Three Lisbon flights found' ? got : null }, 'the finished worker updates the record')
+    } finally { await new Promise(r => fake.close(r)) }
+  },
   // Issue 550: the signal sweep card. Built from the agent inbox, posted as the last row of today's Daily thread of
   // the main agent, and every tap posts that token's full resume message into the record's own thread (this kind's).
   'agent-sweep': async s => {
