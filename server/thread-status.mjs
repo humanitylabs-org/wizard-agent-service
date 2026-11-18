@@ -81,6 +81,18 @@ export function parseStatus(text) {
   return found
 }
 
+// The last status marker's raw JSON object when it is a valid status (parseStatus would not return null), for
+// readers of optional keys normalizeStatus drops (the agent inbox: recommendation, options, deadline, confirm).
+export function parseStatusObject(text) {
+  if (!parseStatus(text)) return null
+  let found = null
+  for (const match of text.matchAll(MARKER)) {
+    found = null
+    try { found = JSON.parse(match[1]) } catch { /* malformed: ignore */ }
+  }
+  return found && typeof found === 'object' && !Array.isArray(found) ? found : null
+}
+
 // Short-answer length (ui-preferences replySummary, set from the shell's reply-summary view): the character budget
 // of the status ask, only while that view is on. Protocol only: one number for one field. The chat list still clips
 // at 140 (parseStatus); the history row keeps up to 400 (fullStatusAsk).

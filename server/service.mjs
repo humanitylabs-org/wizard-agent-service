@@ -55,6 +55,7 @@ import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigratio
 import { createSpaceFiling } from './thread-spaces.mjs'
 import { createChannelsSwitch, channelPart } from './channels-switch.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
+import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS } from './agent-inbox.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
@@ -3341,7 +3342,8 @@ function buildWizardServer(options, lifetime) {
     decorateDispatch: (agentId, sessionId, body) => {
       const note = heavyNotices(agentId, sessionId)
       return note && !String(body.instructions || '').includes(note) ? { ...body, instructions: [body.instructions, note].filter(Boolean).join('\n') } : body
-    }, onDispatch: acknowledgeHeavyNotices, onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)) }) : null
+    }, onDispatch: acknowledgeHeavyNotices, onStatus: (agent, thread, output) => spaceFiling.apply(agent, thread, parseStatus(output)),
+    onRun: (agent, thread, payload, runId) => inboxNoteRun(agent, thread, payload, runId) }) : null
   const routedOpenAskEvidence = (agent, ids) => {
     const home = routedAgentMedia(agent)?.home
     const path = home ? join(home, 'state.db') : ''
@@ -3361,6 +3363,7 @@ function buildWizardServer(options, lifetime) {
     return evidence
   }
   const agentCtx = agents ? {
+    agentInboxNoteRun: (agent, thread, run, runId) => inboxNoteRun(agent, thread, run, runId),
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
     // An owner-dismissed failure of this agent's thread stops showing until a newer run (wizard-ux issue 1488).
@@ -3718,6 +3721,27 @@ function buildWizardServer(options, lifetime) {
   // reads exactly as with the tweak off; its stored ledger rows are kept, just never served.
   const trackerFor = agent => trackerOn() && (agent || MAIN_AGENT_ID) === MAIN_AGENT_ID
   const trackerNote = (agent, thread) => trackerFor(agent) ? [ITEMS_INSTRUCTIONS, threadItems.runNote(agent, thread)].filter(Boolean).join('\n') : ''
+  // Agent inbox (issue 549; owner switch wizard/agent-inbox, off by default; env WIZARD_AGENT_INBOX '1'/'0' forces it).
+  // One record per background task, updated from every finished run on its thread. Switch off: nothing is written.
+  const agentInbox = new AgentInboxStore(options.agentInboxStatePath ? resolve(String(options.agentInboxStatePath)) : '', { now: options.agentInboxNow ?? Date.now })
+  const agentInboxSwitchOn = createChannelsSwitch({ id: AGENT_INBOX_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.agentInboxSwitchTtlMs ?? 3000 })
+  const agentInboxOn = () => channelPart(options.agentInbox, agentInboxSwitchOn)
+  const inboxQueue = agent => (agent || MAIN_AGENT_ID) === MAIN_AGENT_ID ? runQueue : routedQueues?.loaded().find(queue => queue.agentId === agent)
+  const inboxNoteRun = (agent, sessionId, run, runId = '') => {
+    if (typeof sessionId !== 'string' || !sessionId || !run || !agentInboxOn()) return
+    try {
+      const id = agent || MAIN_AGENT_ID
+      if (!agentInbox.linked(id, sessionId)) return
+      // More work still on its way for this thread (another queued or running turn): a fyi is progress, not the end.
+      // Owed heavy work is probed through the same guard: it would hold a done back as fyi.
+      const continues = heavyStatus(id, sessionId, { state: 'done', ask: 'probe' })?.state !== 'done'
+        || Boolean(inboxQueue(id)?.queuedForSession('direct', sessionId).some(record => record.terminalAt == null && record.publicRunId !== runId && record.upstreamRunId !== runId))
+      agentInbox.noteRun(id, sessionId, { id: runId, status: run.status, output: run.output }, { continues, guard: status => heavyStatus(id, sessionId, status) })
+    } catch (error) { console.warn(`[agent-inbox] status update failed: ${error?.message || error}`) }
+  }
+  // Finished worker runs (capture admits them with the INBOX_RUN_PREFIX idempotency key) on every loaded queue.
+  const inboxWorkerRuns = now => [runQueue, ...(routedQueues ? routedQueues.loaded() : [])].filter(Boolean)
+    .flatMap(queue => queue.finishedRunsWithKeyPrefix(INBOX_RUN_PREFIX, (now - CHECK_WINDOW_MS) / 1000))
   // A finished run that listed asks: read its real reply row back so the ledger anchors on the message id.
   const itemsInFlight = new Set()
   const noteRunItems = (sessionId, output) => {
@@ -4315,6 +4339,7 @@ function buildWizardServer(options, lifetime) {
     const lookupQueuedRun = async (record) => {
       const payload = await hermesJson(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)
       if (payload.status === 'completed') { chatPhotos?.kick('completed_assistant'); if (record.runtime !== 'operator') { spaceFiling.apply('hermes', record.sessionId, parseStatus(payload.output)); noteRunItems(record.sessionId, payload.output) } }
+      if (record.runtime !== 'operator') inboxNoteRun(MAIN_AGENT_ID, record.sessionId, payload, record.publicRunId)
       let capacityStatus = payload.status
       let workerRunId = record.workerRunId
       if (record.runtime === 'operator' && workerRunId) {
@@ -5229,6 +5254,7 @@ function buildWizardServer(options, lifetime) {
   const safeQueuedRunPayload = (record, raw = false) => {
     const value = runQueue.publicPayload(record)
     if (value.status === 'completed' && record.runtime !== 'operator') { spaceFiling.apply('hermes', record.sessionId, parseStatus(value.output)); noteRunItems(record.sessionId, value.output) }
+    if (record.runtime !== 'operator') inboxNoteRun(MAIN_AGENT_ID, record.sessionId, value, record.publicRunId)
     return safeQueueValue(value, record, raw)
   }
   const sendQueuedRun = (response, status, record, headers = {}, raw = false) => sendJson(response, status, safeQueuedRunPayload(record, raw), headers)
@@ -5636,6 +5662,7 @@ function buildWizardServer(options, lifetime) {
     notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
     agentId: agent => (agent === 'main' ? MAIN_AGENT_ID : agent),
     channels: () => channelAgentFilingOn(),
+    nightly: now => { if (agentInboxOn()) agentInbox.nightly(now, inboxWorkerRuns(now)) },
     daily: { on: () => channelDailyOn(), thread: dailyScheduleThread, isDaily: (agent, channel) => !!channel && channelDailyOn() && channelStoreNow().dailyChannel(agent === 'main' ? MAIN_AGENT_ID : agent)?.id === channel },
     lookup: lookupBackgroundOccurrence,
     onWatchResult: async job => {
@@ -6290,6 +6317,41 @@ function buildWizardServer(options, lifetime) {
         if (!source) { sendJson(response, 404, { error: 'run_not_found' }); return }
         const child = runQueue.byIdempotencyKey(source.runtime, 'wizard-saved-retry-' + source.publicRunId)
         sendJson(response, 200, { status: child?.status || source.status, resent: !!child, sent: child?.status === 'completed' })
+        return
+      }
+      // Agent inbox (issue 549): GET /wizard/v1/agent-inbox[?state=new,running&kind=&agent=&limit=] lists records (plus
+      // the last nightly check); POST captures one task in state running, before its worker starts; GET and PATCH
+      // /wizard/v1/agent-inbox/<id> read one record or apply an owner action (answer, snooze, archive, surface).
+      // Owner settings gate on every method (issue 488). Switch off: every inbox route is 404 and nothing is written.
+      const inboxRoute = /^\/wizard\/v1\/agent-inbox(?:\/([^/]+))?$/u.exec(url.pathname)
+      if (inboxRoute) {
+        if (!agentInboxOn()) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        const one = inboxRoute[1] ? decodeURIComponent(inboxRoute[1]) : ''
+        const methods = one ? ['GET', 'PATCH'] : ['GET', 'POST']
+        if (!methods.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: methods.join(', ') }); return }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        let input = {}
+        if (request.method !== 'GET') {
+          if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
+          try { input = JSON.parse((await readBoundedBody(request, 64 * 1024)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+          if (!input || typeof input !== 'object' || Array.isArray(input)) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        }
+        const view = record => { const { run_sigs: _sigs, ...rest } = record; return rest }
+        try {
+          if (!one && request.method === 'GET') {
+            const q = url.searchParams
+            sendJson(response, 200, { records: agentInbox.list({ state: q.get('state') || '', kind: q.get('kind') || '', agent: q.get('agent') || '', limit: q.get('limit') || 200 }).map(view), check: agentInbox.lastCheck() }, { 'Cache-Control': 'no-store' })
+          } else if (!one) {
+            const { record, created } = agentInbox.capture({ ...input, agent: typeof input.agent === 'string' && input.agent ? input.agent : MAIN_AGENT_ID })
+            sendJson(response, created ? 201 : 200, { record: view(record), created }, { 'Cache-Control': 'no-store' })
+          } else {
+            const record = request.method === 'GET' ? agentInbox.get(one) : agentInbox.patch(one, input)
+            if (!record) { sendJson(response, 404, { error: 'not_found' }); return }
+            sendJson(response, 200, { record: view(record) }, { 'Cache-Control': 'no-store' })
+          }
+        } catch (error) { sendJson(response, error?.status === 400 ? 400 : 503, { error: error?.status === 400 ? 'invalid_request' : 'inbox_unavailable', ...(error?.status === 400 ? { detail: String(error.message || '') } : {}) }) }
         return
       }
       if (url.pathname === '/wizard/v1/thread-items' || url.pathname === '/wizard/v1/thread-items/counts' || url.pathname === '/wizard/v1/thread-items/seen') {
@@ -7778,7 +7840,7 @@ function buildWizardServer(options, lifetime) {
             const tracked = directRuns.get(runId)
             const completedRun = JSON.parse(result.toString('utf8'))
             const status = completedRun.status
-            if (!ACTIVE_RUN_STATUSES.has(status)) { spaceFiling.apply('hermes', completedRun.session_id || tracked?.sessionId, parseStatus(completedRun.output)); if (status === 'completed') noteRunItems(completedRun.session_id || tracked?.sessionId, completedRun.output) }
+            if (!ACTIVE_RUN_STATUSES.has(status)) { spaceFiling.apply('hermes', completedRun.session_id || tracked?.sessionId, parseStatus(completedRun.output)); if (status === 'completed') noteRunItems(completedRun.session_id || tracked?.sessionId, completedRun.output); inboxNoteRun(MAIN_AGENT_ID, completedRun.session_id || tracked?.sessionId, completedRun, runId) }
             if (tracked && ACTIVE_RUN_STATUSES.has(status)) directRuns.set(runId, { ...tracked, status })
             else if (tracked) {
               directRuns.delete(runId)

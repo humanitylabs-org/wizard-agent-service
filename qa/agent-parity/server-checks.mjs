@@ -721,6 +721,53 @@ export const serverChecks = {
     await s.restart()
     assert.equal((await read())[own], t, 'durable across a restart')
   },
+  // Issue 549: the agent inbox. One record per background task, captured as running before its worker starts and
+  // updated from every finished run on its thread (status line, no status line, a killed worker), through each
+  // runtime's real Service routes; the record survives a restart.
+  'agent-inbox': async s => {
+    const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const record = async id => { const r = await s.raw(`/wizard/v1/agent-inbox/${id}`); assert.equal(r.status, 200); return (await r.json()).record }
+    const settle = async (id, want, label) => {
+      let last
+      for (let n = 0; n < 40; n++) { last = await record(id); if (want(last)) return last; await new Promise(r => setTimeout(r, 25)) }
+      assert.fail(`${label}: ${JSON.stringify(last)}`)
+    }
+    const finish = async (id, status, output) => {
+      Object.assign([...s.runs.values()].at(-1), { status, updated_at: Date.now() / 1000, output })
+      assert.equal((await s.request(`/v1/runs/${id}`)).status, 200)
+    }
+    const line = value => `Synthetic reply\n[WIZARD_STATUS_V1]${JSON.stringify(value)}[/WIZARD_STATUS_V1]`
+    const listed = await s.raw('/wizard/v1/agent-inbox')
+    assert.equal(listed.status, 200)
+    assert.deepEqual((await listed.json()).records, [], 'a fresh inbox is empty')
+    const captured = await s.raw('/wizard/v1/agent-inbox', json('POST', { agent: s.id, thread_id: 'wizard_parity', title: 'Synthetic task', ask: 'Synthetic background ask' }))
+    assert.equal(captured.status, 201)
+    const { record: made } = await captured.json()
+    assert.equal(made.state, 'running', 'capture writes the record before the worker starts')
+    const again = await s.raw('/wizard/v1/agent-inbox', json('POST', { agent: s.id, thread_id: 'wizard_parity', title: 'Synthetic task', ask: 'Synthetic background ask' }))
+    assert.equal(again.status, 200)
+    assert.equal((await again.json()).record.id, made.id, 'the same ask never makes a second record')
+    let run = await admit(s, { input: 'Synthetic worker turn' })
+    await finish(run.run_id, 'completed', line({ state: 'needs_you', ask: 'Two synthetic options. Reply a or b', recommendation: 'Pick a.', options: { a: 'Go with option a.', b: 'Go with option b.' }, default_option: 'a', confirm: true }))
+    const needs = await settle(made.id, r => r.kind === 'needs_you', 'needs_you maps to new/needs_you')
+    assert.deepEqual([needs.state, needs.last_update, needs.recommendation, needs.options.a, needs.default_option, needs.confirm], ['new', 'Two synthetic options. Reply a or b', 'Pick a.', 'Go with option a.', 'a', true])
+    run = await admit(s, { input: 'Synthetic worker turn two' })
+    await finish(run.run_id, 'completed', line({ state: 'done', ask: 'Synthetic task finished' }))
+    await settle(made.id, r => r.kind === 'result' && r.last_update === 'Synthetic task finished', 'done maps to new/result')
+    run = await admit(s, { input: 'Synthetic worker turn three' })
+    await finish(run.run_id, 'completed', 'Synthetic reply with no status line')
+    await settle(made.id, r => r.last_update === 'Finished without a summary. Open it to read.', 'no status line still finishes the record')
+    run = await admit(s, { input: 'Synthetic worker turn four' })
+    await finish(run.run_id, 'completed', line({ state: 'fyi', ask: 'Synthetic note for later' }))
+    await settle(made.id, r => r.kind === 'fyi' && r.last_update === 'Synthetic note for later', 'a final fyi is an FYI record')
+    run = await admit(s, { input: 'Synthetic worker turn five' })
+    await finish(run.run_id, 'failed', '')
+    await settle(made.id, r => r.kind === 'result' && r.last_update === 'Finished without a summary. Open it to read.', 'a killed worker still finishes the record')
+    assert.equal((await (await s.raw('/wizard/v1/agent-inbox')).json()).records.length, 1, 'every update lands on the one record')
+    assert.equal((await s.raw(`/wizard/v1/agent-inbox/${made.id}`, json('PATCH', { action: 'archive' }))).status, 200)
+    await s.restart()
+    assert.equal((await record(made.id)).state, 'archived', 'durable across a restart')
+  },
   // wizard-ux issue 1358: one Channels switch. The owner's wizard/chat-channels switch in the synced Look file turns the
   // channel store, read marks and list fields on and off at runtime through each runtime's real Service route.
   'chats-channels-switch': async s => {

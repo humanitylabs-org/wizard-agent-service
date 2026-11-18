@@ -578,6 +578,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "agent-inbox",
+      "description": "Agent inbox store (issue 549, owner switch wizard/agent-inbox or WIZARD_AGENT_INBOX=1, off by default): one record per background task, captured in state running before its worker starts and updated by the Service from every finished run on its thread: needs_you/check become new needs_you, done becomes new result, a final fyi becomes new fyi, and a run with no status line or a killed worker becomes a result that says it finished without a summary.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP routes (main, host-profile, container TCP, restricted Unix ingress) with agentInbox on: capture a record for the parity thread (running), capture the same ask again (same record), finish runs with needs_you (recommendation, options, confirm read), done, no status line, fyi and a failed run, and read the one record after each; archive it, restart and read it back. tests/agent-inbox.test.ts covers the store rules (dedupe, stale after 6 h on a fake clock, the nightly missing-run count on 20 worker runs, restart) and the switch off (404, nothing written). Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/agent-inbox.mjs",
+        "server/service.mjs",
+        "server/agents-http.mjs",
+        "server/routed-run-queue.mjs"
+      ],
+      "reference_tests": [
+        "tests/agent-inbox.test.ts"
+      ],
+      "fixture": "agent-inbox",
+      "policy_exemptions": []
+    },
+    {
       "id": "chats-daily-channel",
       "description": "Daily channel (issue 527, part of the Channels switch wizard/chat-channels; WIZARD_CHANNEL_DAILY forces it): one pinned channel per agent holding one real thread per day (05:00 boundary in the owner's time zone). The main agent's Daily is seeded once, pinned above Alerts; PATCH kind makes another agent's channel its daily channel; POST /wizard/v1/channels/<id>/today creates today's thread once (racing first posts share it) and files it into Daily; GET /days pages every day thread with its opener and count; a thread:'daily' schedule and an origin-less reminder post into today's thread, while a notification-only reminder keeps its hidden schedule chat (issue 529); a run in a day thread is told yesterday's thread, but not once the Daily is archived. The main agent's own schedule tool (wizard_schedule, loopback /wizard/internal/schedules/create) may name thread 'daily' too (issue 532); any other thread it names stays the calling session; a 'daily' job whose Daily part is later off gets its own schedule chat, never a session named 'daily'.",
       "layer": "server",

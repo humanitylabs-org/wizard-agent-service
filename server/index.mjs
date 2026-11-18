@@ -128,6 +128,9 @@ server = createWizardServer({
   threadDispositionStatePath: process.env.WIZARD_THREAD_DISPOSITION_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-dispositions.json'),
   threadTitleStatePath: process.env.WIZARD_THREAD_TITLE_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-titles.json'),
   threadItemsStatePath: process.env.WIZARD_THREAD_ITEMS_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-items.json'),
+  // Agent inbox (issue 549): next to the Thread tracker ledger, in the agent's private data and the normal backup.
+  agentInboxStatePath: process.env.WIZARD_AGENT_INBOX_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'agent-inbox.json'),
+  agentInbox: envChoice(process.env.WIZARD_AGENT_INBOX),
   threadSeenStatePath: process.env.WIZARD_THREAD_SEEN_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-seen.json'),
   voiceRecoveryManifestPath: process.env.WIZARD_VOICE_RECOVERY_MANIFEST_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'voice-recoveries.json'),
   dismissedFailureStatePath: process.env.WIZARD_DISMISSED_FAILURE_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'dismissed-failures.json'),

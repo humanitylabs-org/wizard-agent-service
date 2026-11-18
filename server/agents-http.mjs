@@ -849,6 +849,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     if (method === 'GET' && /^\/v1\/runs\/[^/]+$/u.test(upstreamPath)) {
       const run = JSON.parse(result.toString('utf8'))
       if (!['queued', 'running', 'waiting', 'paused'].includes(run.status)) ctx.routedPresentation?.fileStatus(agent, run.session_id || registry.runThread?.(agent.id, runIdFromPath(upstreamPath))?.session_id, parseStatus(run.output))
+      ctx.agentInboxNoteRun?.(agent.id, run.session_id || registry.runThread?.(agent.id, runIdFromPath(upstreamPath))?.session_id, run, runIdFromPath(upstreamPath))
     }
     if (method === 'POST' && upstreamPath === '/v1/runs') {
       try {
