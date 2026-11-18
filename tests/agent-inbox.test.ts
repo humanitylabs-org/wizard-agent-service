@@ -42,6 +42,8 @@ describe('agent inbox store', () => {
     expect(s.startFailed(made.id)).toMatchObject({ state: 'new', kind: 'needs_you', last_update: START_FAILED })
     expect(s.startFailed(made.id)).toBeNull()
     expect(s.startFailed('inbox_' + '0'.repeat(24))).toBeNull()
+    expect(s.retryStart(made.id)).toMatchObject({ state: 'running', kind: 'note', last_update: made.ask })
+    expect(s.retryStart(made.id)).toBeNull()
   })
 
   it('every finished worker run updates exactly one record: needs_you, done, fyi, no status line, killed', () => {

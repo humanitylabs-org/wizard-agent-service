@@ -104,10 +104,11 @@ export function deadlineFrom(text, timezone, now = Date.now()) {
   if (/\b(?:today|tonight|this evening|end of (?:the )?day)\b/u.test(t)) days = 0
   else if (/\btomorrow\b/u.test(t)) days = 1
   else {
-    const named = /\b(?:by|on|before|for|until|this|next) (sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/u.exec(t)
+    const named = /\b(by|on|before|for|until|this|next) (sunday|monday|tuesday|wednesday|thursday|friday|saturday)\b/u.exec(t)
     if (named) {
       const current = WEEKDAYS.indexOf(zoneParts(zone, now).weekday.toLowerCase())
-      days = (WEEKDAYS.indexOf(named[1]) - current + 7) % 7
+      days = (WEEKDAYS.indexOf(named[2]) - current + 7) % 7
+      if (days === 0 && named[1] === 'next') days = 7
     }
   }
   if (days == null) return null

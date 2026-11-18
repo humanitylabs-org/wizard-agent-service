@@ -84,6 +84,8 @@ describe('dump route (issue 551)', () => {
     expect(deadlineFrom('book it by Friday', 'UTC', now)).toBe('2026-11-20T23:59:00.000Z')
     expect(deadlineFrom('by Friday', 'Europe/Amsterdam', now)).toBe('2026-11-20T22:59:00.000Z')
     expect(deadlineFrom('plan the trip', 'UTC', now)).toBeNull()
+    expect(deadlineFrom('by next Wednesday', 'UTC', now)).toBe('2026-11-25T23:59:00.000Z')
+    expect(deadlineFrom('by Wednesday', 'UTC', now)).toBe('2026-11-18T23:59:00.000Z')
   })
 
   it('titles a dump from the words when the model gives none', () => {

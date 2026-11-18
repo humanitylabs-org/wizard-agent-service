@@ -3810,12 +3810,14 @@ function buildWizardServer(options, lifetime) {
       // The same words said twice the same day are one task (a double capture); the same chore next week is a new one.
       dedupe_hash: createHash('sha256').update(`${MAIN_AGENT_ID}\norb\n${day}\n${words.toLowerCase()}`).digest('hex').slice(0, 32),
     })
-    if (created) {
-      const started = startDumpWorker(record, words)
+    // Said again after its worker could not start: the same record starts again (same idempotency key).
+    const retry = created ? null : agentInbox.retryStart(record.id)
+    if (created || retry) {
+      const started = startDumpWorker(retry || record, words)
       dumpRuns.set(record.id, started)
       started.finally(() => dumpRuns.delete(record.id)).catch(() => undefined)
     }
-    return { record_id: record.id, thread_id: record.thread_id, created }
+    return { record_id: record.id, thread_id: record.thread_id, created, ...(retry ? { restarted: true } : {}) }
   }
   // The worker's run note: nobody is watching this thread, so it works the task through and reports in its status line.
   const dumpRunNote = sessionId => {

@@ -814,6 +814,9 @@ export const serverChecks = {
       if (s.kind !== 'main') {
         const waiting = await settle(async () => { const got = await record(); return got.state === 'new' ? got : null }, 'a worker that cannot start leaves the record waiting')
         assert.deepEqual([waiting.kind, waiting.last_update], ['needs_you', 'Could not start this task. Open it or say it again.'])
+        const retried = (await (await say('Research flights to Lisbon by Friday', { accept_dump: true })).json()).cmd
+        assert.deepEqual([retried.record_id, retried.restarted], [cmd.record_id, true], 'saying it again starts the same task again')
+        await settle(async () => { const got = await record(); return got.state === 'new' && got.kind === 'needs_you' ? got : null }, 'the retry that cannot start waits again')
         assert.equal(s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).length, runsBefore, `${s.kind}: nothing reaches this kind's runtime`)
         return
       }

@@ -178,6 +178,15 @@ export class AgentInboxStore {
     return { ...record }
   }
 
+  /** The same task said again after its worker could not start: back to running, so the Service starts it again. */
+  retryStart(id) {
+    const record = RECORD_ID.test(String(id)) ? this.data.records[id] : null
+    if (!record || record.state !== 'new' || record.kind !== 'needs_you' || record.last_update !== START_FAILED) return null
+    Object.assign(record, { state: 'running', kind: 'note', last_update: record.ask, updated_at: this.now() })
+    this.#save()
+    return { ...record }
+  }
+
   has(agent, thread) { return Object.values(this.data.records).some(r => r.agent === (agent || 'hermes') && r.thread_id === thread) }
 
   /** A worker run seen by the Service. Active runs change nothing; a finished run applies its status line (or the
