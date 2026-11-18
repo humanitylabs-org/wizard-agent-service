@@ -17,6 +17,7 @@ const featureScenes = {
   'chats-read-marks': kind => scene(kind, { channelStore: true, channelReadSync: true }),
   'agent-inbox': kind => scene(kind, ({ root }) => ({ agentInbox: true, agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'orb-dump': kind => scene(kind, ({ root }) => ({ agentInbox: true, agentInboxStatePath: join(root, 'agent-inbox.json') })),
+  'agent-inbox-move': kind => scene(kind, ({ root }) => ({ agentInbox: true, agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'agent-alerts': kind => scene(kind, ({ root }) => ({ agentInbox: true, agentInboxStatePath: join(root, 'agent-inbox.json'), channelStore: true, channelDaily: true, dailyTimezone: 'UTC', schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),
   'agent-sweep': kind => scene(kind, ({ root }) => ({ agentInbox: true, agentInboxStatePath: join(root, 'agent-inbox.json'), channelStore: true, channelDaily: true, dailyTimezone: 'UTC', schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),
   'scheduler-finished-runs': kind => scene(kind, ({ root }) => ({ schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),

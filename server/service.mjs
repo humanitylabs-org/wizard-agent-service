@@ -58,7 +58,7 @@ import { createChannelsSwitch, channelPart } from './channels-switch.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS } from './agent-inbox.mjs'
 import { isSweepPhrase, isScheduledSweep, withCardRow } from './agent-sweep.mjs'
-import { AlertRulesFile, createAlertGate } from './agent-alerts.mjs'
+import { AlertRulesFile, createAlertGate, privateRouter } from './agent-alerts.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
@@ -3850,6 +3850,34 @@ function buildWizardServer(options, lifetime) {
       } catch (error) { console.warn(`[agent-inbox] owner thread not shown again: ${error?.message || error}`) }
     })()
   }
+  // Open / Send to inbox (wizard-ux issue 1570, same switch). Main agent only, like the orb's dump: only main threads
+  // are hidden (Hermes `hidden`), so a routed agent's thread is refused instead of half moved. Send refuses a thread
+  // the owner pinned (a collaborative thread stays in Chats). The Hermes PATCH comes first, so a refused or failed
+  // hide or unhide changes no record and logs no example.
+  const INBOX_THREAD = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/u
+  const moveInboxThread = async (move, input = {}) => {
+    const agent = typeof input.agent === 'string' && input.agent ? input.agent : MAIN_AGENT_ID
+    const thread = typeof input.thread_id === 'string' ? input.thread_id : ''
+    if (!INBOX_THREAD.test(thread)) throw inboxError(400, 'invalid_thread')
+    if (agent !== MAIN_AGENT_ID) throw inboxError(409, 'main_only')
+    const path = `/api/sessions/${encodeURIComponent(thread)}`
+    let session
+    try { session = await hermesJson(path, {}, true) } catch (error) { throw error?.status === 404 ? inboxError(404, 'not_found') : error }
+    const row = session?.session ?? session
+    const said = typeof input.utterance === 'string' ? input.utterance : ''
+    if (move === 'send') {
+      if (row?.pinned === true) throw inboxError(409, 'pinned')
+      const running = Boolean(runQueue?.queuedForSession('direct', thread).some(record => record.terminalAt == null))
+      await hermesJson(path, { method: 'PATCH', body: JSON.stringify({ hidden: true }) })
+      const record = agentInbox.sendToInbox(agent, thread, { title: typeof input.title === 'string' ? input.title : String(row?.title || ''), ask: said, running })
+      const example = agentInbox.addRouteExample({ utterance: said || record.ask || record.title, chosen: 'agent', wanted: 'dump' })
+      return { record, hidden: true, example }
+    }
+    await hermesJson(path, { method: 'PATCH', body: JSON.stringify({ hidden: false }) })
+    const record = agentInbox.openFromInbox(agent, thread)
+    const example = agentInbox.addRouteExample({ utterance: said || record?.ask || '', chosen: 'dump', wanted: 'agent' })
+    return { record, hidden: false, example }
+  }
   // The worker's run note: nobody is watching this thread, so it works the task through and reports in its status line.
   const dumpRunNote = sessionId => {
     if (!sessionId || !agentInboxOn()) return ''
@@ -6547,7 +6575,10 @@ function buildWizardServer(options, lifetime) {
         // Issue 552: /rules (GET, PUT the owner's alert rules), /events (POST one candidate event, e.g. from Mail's
         // watcher), /alert-log (GET the decision log). PATCH <id> {action: not_urgent | should_alert} adds an example.
         const alertRoute = !yesToAll && ['rules', 'events', 'alert-log'].includes(one) ? one : ''
-        const methods = yesToAll ? ['POST'] : alertRoute === 'rules' ? ['GET', 'PUT'] : alertRoute === 'events' ? ['POST'] : alertRoute ? ['GET']
+        // Wizard-ux issue 1570: /open (POST: a hidden thread moves into the chat list) and /send (POST: a visible
+        // thread moves into the background). Each tap is also one route example for the orb router.
+        const moveRoute = !yesToAll && (one === 'open' || one === 'send') ? one : ''
+        const methods = yesToAll || moveRoute ? ['POST'] : alertRoute === 'rules' ? ['GET', 'PUT'] : alertRoute === 'events' ? ['POST'] : alertRoute ? ['GET']
           : sweepRoute || !one ? ['GET', 'POST'] : ['GET', 'PATCH']
         if (!methods.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: methods.join(', ') }); return }
         if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
@@ -6559,7 +6590,10 @@ function buildWizardServer(options, lifetime) {
         }
         const view = record => { const { run_sigs: _sigs, ...rest } = record; return rest }
         try {
-          if (alertRoute === 'rules') {
+          if (moveRoute) {
+            const moved = await moveInboxThread(moveRoute, input)
+            sendJson(response, 200, { record: moved.record ? view(moved.record) : null, hidden: moved.hidden, example: Boolean(moved.example) }, { 'Cache-Control': 'no-store' })
+          } else if (alertRoute === 'rules') {
             sendJson(response, 200, { rules: request.method === 'PUT' ? alertRules.edit(input) : alertRules.read() }, { 'Cache-Control': 'no-store' })
           } else if (alertRoute === 'events') {
             const { record, decision, created } = await alertGate.consider(input, { agent: typeof input.agent === 'string' && input.agent ? input.agent : MAIN_AGENT_ID })
@@ -7193,7 +7227,10 @@ function buildWizardServer(options, lifetime) {
         const dump = input?.accept_dump === true && agentInboxOn() && ownerLike(principalOf(request)) && !skinOriginRefused(request)
           && /^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))
         try {
-          const routed = await routeUtterance({ input, settings, router: fast, fetchImpl, dump })
+          // The owner's own Open / Send to inbox taps (wizard-ux issue 1570) are few-shot examples, and they are his
+          // private words: only a private router (checked by endpoint host) ever sees them.
+          const examples = dump && privateRouter(fast) ? agentInbox.routeExamples(8) : []
+          const routed = await routeUtterance({ input, settings, router: fast, fetchImpl, dump, examples })
           if (routed.cmd?.route === 'dump') {
             try { routed.cmd = { ...routed.cmd, ...captureDump(input.text, routed.cmd) } }
             catch (error) { console.warn(`[agent-inbox] dump capture failed: ${error?.message || error}`); routed.cmd = { route: 'agent', summary: routed.cmd.summary } }
