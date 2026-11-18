@@ -147,7 +147,7 @@ const senderOf = value => {
   if (!value) return { name: '', email: '' }
   if (typeof value === 'string') {
     const m = /<([^<>\s]+@[^<>\s]+)>/u.exec(value) || /([^\s<>]+@[^\s<>]+)/u.exec(value)
-    return { name: clip(value.replace(/<[^>]*>/gu, ''), 120), email: m ? m[1].toLowerCase() : '' }
+    return { name: clip(value.split('<')[0].replace(/[<>"]/gu, ''), 120), email: m ? m[1].toLowerCase() : '' }
   }
   return { name: clip(value.name, 120), email: clip(value.email, 200).toLowerCase() }
 }
@@ -253,7 +253,9 @@ export async function decideWithModel(event, rules, { router, fetchImpl = fetch,
 }
 
 /** The alert gate: stages, the volume guard, delivery and the two feedback taps, over one inbox store and rules file. */
-export function createAlertGate({ inbox, rules, router = () => /** @type {any} */ (null), notify = /** @type {any} */ (null), fetchImpl = fetch, now = Date.now, timezone = () => 'UTC', log = message => console.log(message) } = {}) {
+/** @param {any} options */
+export function createAlertGate(options = {}) {
+  const { inbox, rules, router = () => null, notify = null, fetchImpl = fetch, now = Date.now, timezone = () => 'UTC', log = message => console.log(message) } = options
   const alertDay = at => dayOf(at, timezone() || 'UTC')
 
   const decide = async (event, current, at) => {
@@ -288,8 +290,10 @@ export function createAlertGate({ inbox, rules, router = () => /** @type {any} *
     const ask = `${extra} more alert${extra === 1 ? '' : 's'} today. They wait in the next sweep; the alert rules may be too loose.`
     inbox.flagRules({ day, alerts: delivered + extra, cap: current.daily_cap })
     if (existing) return inbox.update(existing.id, { alert_extra: extra, ask, last_update: ask, state: existing.state === 'archived' ? existing.state : 'new' })
-    const { record } = inbox.capture({ agent, thread_id: `alert_${hash(`collapsed\n${day}`).slice(0, 24)}`, source: 'alerts:collapsed', kind: 'alert', title: COLLAPSED_TITLE, ask, severity: 'high', link: '/wizard-os-home/?inbox=alerts', dedupe_hash: hash(`${agent}\ncollapsed\n${day}`).slice(0, 32) },
+    const { record, created } = inbox.capture({ agent, thread_id: `alert_${hash(`collapsed\n${day}`).slice(0, 24)}`, source: 'alerts:collapsed', kind: 'alert', title: COLLAPSED_TITLE, ask, severity: 'high', link: '/wizard-os-home/?inbox=alerts', dedupe_hash: hash(`${agent}\ncollapsed\n${day}`).slice(0, 32) },
       { ready: true, fields: { alert_day: day, alert_delivered: true, alert_collapsed: true, alert_extra: extra } })
+    // Two extras racing: the second finds the first's collapsed alert and only counts.
+    if (!created) return inbox.update(record.id, { alert_extra: (record.alert_extra || 0) + 1, ask, last_update: ask })
     return inbox.update(record.id, { notified: await send(record) })
   }
 
@@ -321,15 +325,21 @@ export function createAlertGate({ inbox, rules, router = () => /** @type {any} *
       inbox.logAlert({ record_id: forRecord.id, stage: decision.stage, decision: 'collapsed', rule: decision.rule })
       return { record: inbox.get(forRecord.id), decision, created: false }
     }
+    // The same event posted again while this one was being decided: the first call's record wins, nothing is sent twice.
+    const once = captured => (captured.created ? captured.record : null)
+    const again = () => { const first = inbox.byDedupe(agent, dedupe); return { record: first, decision: first?.alert_decision || null, created: false } }
     if (decision.decision === 'alert' && inbox.alertsOfDay(day).length < current.daily_cap) {
-      record = inbox.capture({ ...base, kind: 'alert' }, { ready: true, fields: { ...fields, alert_day: day, alert_delivered: true } }).record
+      record = once(inbox.capture({ ...base, kind: 'alert' }, { ready: true, fields: { ...fields, alert_day: day, alert_delivered: true } }))
+      if (!record) return again()
       record = inbox.update(record.id, { notified: await send(record) })
     } else if (decision.decision === 'alert') {
       // The 4th alert of the day (with the default cap): it waits in the sweep, the day's collapsed alert counts it.
-      record = inbox.capture({ ...base, kind: 'fyi', link: event.link || '/wizard-os-home/?inbox=later' }, { ready: true, fields: { ...fields, alert_day: day, alert_held: true } }).record
+      record = once(inbox.capture({ ...base, kind: 'fyi', link: event.link || '/wizard-os-home/?inbox=later' }, { ready: true, fields: { ...fields, alert_day: day, alert_held: true } }))
+      if (!record) return again()
       await collapse(day, current, agent)
     } else {
-      record = inbox.capture({ ...base, kind: 'fyi' }, { ready: true, fields }).record
+      record = once(inbox.capture({ ...base, kind: 'fyi' }, { ready: true, fields }))
+      if (!record) return again()
     }
     inbox.logAlert({ record_id: record.id, stage: decision.stage, decision: record.kind === 'alert' ? 'alert' : record.alert_held ? 'collapsed' : 'sweep', rule: decision.rule, ...(decision.reason ? { reason: decision.reason } : {}), ...(decision.model ? { model: decision.model } : {}) })
     return { record: inbox.get(record.id), decision, created: true }

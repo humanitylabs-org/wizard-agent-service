@@ -49,6 +49,18 @@ describe('alert rules: stages', () => {
     expect(notified).toHaveLength(3)
   })
 
+  it('the same event posted twice at once is one record and one notification', async () => {
+    const calls: any[] = []
+    const { gate, inbox, notified } = setup({ urgent: true, calls })
+    const event = mail({ ask: 'Synthetic invoice due today', severity: 'high' })
+    const [a, b] = await Promise.all([gate.consider(event), gate.consider(event)])
+    expect(a.record.id).toBe(b.record.id)
+    expect([a.created, b.created].sort()).toEqual([false, true])
+    expect(notified).toHaveLength(1)
+    expect(inbox.list({ kind: 'alert' })).toHaveLength(1)
+    expect(normalizeEvent({ title: 'x', sender: 'Synthetic <b>Name</b> <name@example.test>' }).sender).toEqual({ name: 'Synthetic', email: 'name@example.test' })
+  })
+
   it('a meeting three hours away is not a rule hit', () => {
     const e = normalizeEvent({ type: 'meeting', title: 'Later meeting', starts_at: new Date(T0 + 180 * 60_000).toISOString() })
     expect(classifyEvent(e, defaultRules(), T0).decision).toBe('sweep')
