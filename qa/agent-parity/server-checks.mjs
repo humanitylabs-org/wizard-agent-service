@@ -808,6 +808,11 @@ export const serverChecks = {
       assert.deepEqual([nuBody.record.kind, nuBody.examples.not_urgent], ['fyi', 1], 'Not urgent adds one example and moves the alert to the sweep')
       const sa = await (await s.raw(`/wizard/v1/agent-inbox/${quiet[0].record.id}`, json('PATCH', { action: 'should_alert' }))).json()
       assert.equal(sa.examples.should_alert, 1, 'Should have alerted adds one example')
+      // A router that is not private (whatever its account label says) is never called, general events included.
+      writeFileSync(settingsPath, JSON.stringify({ ...current, fast_router: { account: 'tinfoil', endpoint: 'https://api.openai.example/v1/chat/completions', model: 'fixture-cloud' } }))
+      const cloud = await event(mail({ ask: 'Synthetic invoice due today', severity: 'high', privacy_class: 'general' }))
+      assert.deepEqual([cloud.record.kind, cloud.decision.rule], ['fyi', 'no_private_model'], 'a non-private router never decides, general events included')
+      assert.equal(asked, 1, 'no call to the non-private router')
       // Three alerts today so far (sender, payment, model): the 4th collapses.
       const fourth = await event(mail({ sender: 'loud@example.test' }))
       assert.equal(fourth.record.kind, 'fyi', 'the 4th alert of the day waits in the sweep')

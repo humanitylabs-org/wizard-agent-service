@@ -392,6 +392,13 @@ export class AgentInboxStore {
       .sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id)).map(r => ({ ...r }))
   }
 
+  /** An alert record only while the day is under its cap (issue 552): the count and the write are one step, so two
+   *  alerts decided at the same moment can never both pass the cap. Over the cap -> null (nothing written). */
+  captureAlertUnderCap(day, cap, input, { fields = null } = {}) {
+    if (this.alertsOfDay(day).length >= cap) return null
+    return this.capture({ ...input, kind: 'alert' }, { ready: true, fields: { ...(fields || {}), alert_day: day, alert_delivered: true } })
+  }
+
   /** One alert decision (issue 552): kept newest first, capped. No record text, only ids, stage and the reason. */
   logAlert(entry) {
     this.data.alert_log = [{ at: this.now(), ...entry }, ...(Array.isArray(this.data.alert_log) ? this.data.alert_log : [])].slice(0, MAX_ALERT_LOG)
