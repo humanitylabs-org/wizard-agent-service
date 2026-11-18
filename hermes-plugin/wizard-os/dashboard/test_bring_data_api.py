@@ -70,6 +70,15 @@ class ImporterApiTests(unittest.TestCase):
         self.assertEqual(self.client.post(P + "/undo", json={"import_id": iid}, headers=H).status_code, 200)
         self.assertEqual(self.client.get(P + "/imports").json()["imports"], [])
 
+    def test_history_flag_reaches_the_engine(self):
+        """Bring your Wizard (issue 544): only a literal true turns history mode on; a ChatGPT export is refused."""
+        r = self.client.post(P + "/scan", json={"path": "Inbox/chatgpt.zip", "history": True}, headers=H)
+        self.assertEqual(r.status_code, 409)
+        self.assertIn("earlier Hermes agent", r.json()["detail"])
+        r = self.client.post(P + "/scan", json={"path": "Inbox/chatgpt.zip", "history": "yes"}, headers=H)
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertNotIn("history", r.json())
+
     def test_scan_progress_and_cancel(self):
         scan = self.client.post(P + "/scan", json={"path": "Inbox/chatgpt.zip", "scan_id": "scan-api-0001"}, headers=H)
         self.assertEqual(scan.status_code, 200, scan.text)

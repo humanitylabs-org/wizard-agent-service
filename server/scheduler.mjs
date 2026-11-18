@@ -806,6 +806,41 @@ export function importHermesSchedules(scheduler, { dryRun = true, threads = {} }
   return { dryRun, results }
 }
 
+/**
+ * An earlier agent's cron jobs the owner ticked in the Importer (issue 544, "Bring your Wizard"). The rows come from
+ * the backup's cron/jobs.json, read by the bring-data engine; this never reads that agent's home, config or scripts.
+ * Each one becomes a paused Wizard schedule (the owner turns it on in Schedules): its prompt may name tools the
+ * new agent lacks. Script-only and script jobs stay behind, and so do skills (old skills are reference documents
+ * now, so the prompt points at them instead). Imported once per source + job id.
+ */
+export function importAgentHistorySchedules(scheduler, { source, agent = 'main', jobs } = {}) {
+  if (typeof source !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(source)) throw fail('invalid source')
+  if (!Array.isArray(jobs) || jobs.length > 50) throw fail('invalid jobs')
+  const results = scheduler.transaction(() => jobs.map(row => {
+    if (!row || typeof row !== 'object' || Array.isArray(row) || !id(row.id)) return { status: 'not imported: invalid job' }
+    const base = { id: row.id, name: typeof row.name === 'string' ? row.name.slice(0, 120) : row.id }
+    if (row.no_agent) return { ...base, status: 'not imported: script-only job' }
+    if (row.script) return { ...base, status: 'not imported: it runs a script from the old agent' }
+    const sourceKey = `history:${source}:${row.id}`
+    const previous = scheduler.db.prepare('SELECT job_id FROM schedule_imports WHERE source=?').get(sourceKey)
+    if (previous) return { ...base, status: 'already imported', scheduleId: previous.job_id }
+    const s = row.schedule
+    const when = s?.kind === 'cron' ? { cron: s.expr } : s?.kind === 'interval' ? { every: s.minutes } : s?.kind === 'once' ? { once: s.run_at } : null
+    const skills = [...new Set([...(Array.isArray(row.skills) ? row.skills : []), row.skill].filter(name => typeof name === 'string' && name))]
+    try {
+      if (!row.prompt && !skills.length) throw fail('prompt or skill required')
+      const note = skills.length ? `This job came from your earlier agent, which used the skill${skills.length > 1 ? 's' : ''} ${skills.map(n => JSON.stringify(n)).join(', ')}. `
+        + 'Old skills are reference documents in History (Files/Imported/Hermes/Skills), not active skills: read it there and use your own WizardOS version.' : ''
+      const job = scheduler.normalize({ name: base.name, when, ...(typeof row.timezone === 'string' ? { timezone: row.timezone } : {}), agent,
+        prompt: [typeof row.prompt === 'string' ? row.prompt : '', note, HERMES_DELIVERY_NOTE].filter(Boolean).join('\n\n'), enabled: false })
+      scheduler.save(job)
+      scheduler.db.prepare('INSERT INTO schedule_imports VALUES (?,?)').run(sourceKey, job.id)
+      return { ...base, status: 'imported (paused)', scheduleId: job.id }
+    } catch { return { ...base, status: 'not imported: unsupported or invalid job' } }
+  }))
+  return { results }
+}
+
 export async function handleSchedulesApi(request, response, url, { scheduler, readBody, sendJson }) {
   if (url.pathname !== '/wizard/v1/schedules' && !url.pathname.startsWith('/wizard/v1/schedules/')) return false
   if (!scheduler) throw fail('scheduler state unavailable', 503)

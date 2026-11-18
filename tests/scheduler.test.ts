@@ -884,6 +884,35 @@ describe('windows, reminders and trickled agent work', () => {
     expect((await (await call('list', { session_id: 'wizard_a' })).json()).schedules).toHaveLength(0)
   })
 
+  it('imports only the earlier agent cron jobs it is given, paused, once each (Bring your Wizard, issue 544)', async () => {
+    const token = 'fixture-heavy-token-with-more-than-32-chars'
+    const server: any = createWizardServer({ upstreamOrigin: 'http://127.0.0.1:9', hermesKey: 'fixture-key', ownerProof: 'fixture-owner-proof-with-32-characters', requireAccess: false,
+      requireJoinedDelegationCapability: false, followThrough: false, wizardOsHome: process.env.WIZARD_OS_HOME, heavyToken: token,
+      schedulerStatePath: join(root, 'history-schedules.sqlite3'), schedulerNow: () => clock, schedulerTimezone: BKK })
+    servers.push(server)
+    const origin = `http://127.0.0.1:${(await listen(server)).port}`
+    const call = (action: string, body: any, auth = token) => fetch(`${origin}/wizard/internal/schedules/${action}`, { method: 'POST',
+      headers: { Authorization: 'Bearer ' + auth, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const jobs = [
+      { id: 'brief', name: 'Morning brief', prompt: 'Summarise my garden.', skill: 'watering', schedule: { kind: 'cron', expr: '0 8 * * *' } },
+      { id: 'backup', name: 'Backup', script: 'backup.sh', schedule: { kind: 'interval', minutes: 60 } },
+      { id: 'sysjob', name: 'Sys', no_agent: true, prompt: 'x', schedule: { kind: 'interval', minutes: 60 } },
+    ]
+    expect((await call('import-history', { session_id: 'wizard-importer', source: 'abc123', jobs }, 'wrong-token-wrong-token-wrong-token-xx')).status).toBe(403)
+    expect((await call('import-history', { session_id: 'wizard-importer', source: '../x', jobs })).status).toBe(400)
+    const first = await (await call('import-history', { session_id: 'wizard-importer', source: 'abc123', jobs })).json()
+    expect(first.results.map((r: any) => r.status)).toEqual(['imported (paused)', 'not imported: it runs a script from the old agent', 'not imported: script-only job'])
+    const saved = server.scheduler.get(first.results[0].scheduleId)
+    expect(saved).toMatchObject({ name: 'Morning brief', enabled: false, agent: 'main', thread: null, skill: '' })
+    expect(saved.prompt).toContain('Summarise my garden.')
+    expect(saved.prompt).toContain('reference documents in History')
+    const again = await (await call('import-history', { session_id: 'wizard-importer', source: 'abc123', jobs: [jobs[0]] })).json()
+    expect(again.results[0]).toMatchObject({ status: 'already imported', scheduleId: first.results[0].scheduleId })
+    expect(server.scheduler.list()).toHaveLength(1)
+    expect((await call('cancel', { session_id: 'wizard-importer', schedule_id: saved.id, any_thread: true })).status).toBe(200)
+    expect(server.scheduler.list()).toHaveLength(0)
+  })
+
   it('creates, lists and stops a current-thread watcher over the agent gateway only', async () => {
     vi.stubEnv('WIZARD_SCHEDULER', '1')
     const token = `fixture-gateway-${randomUUID()}`

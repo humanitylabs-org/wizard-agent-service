@@ -297,6 +297,8 @@ def resolve_source(path) -> Path:
     resolved = candidate.resolve()
     if not resolved.exists():
         raise ValueError(f"Nothing at {raw}. Drop the export zip in Files › Inbox and try again.")
+    if _is_private_home(resolved):
+        raise ValueError("That is a private agent. Its data never leaves it.")
     home = hermes_home().resolve()
     if resolved == home or (home in resolved.parents and not _other_profile(resolved, home)):
         raise ValueError("That is this Wizard's own agent. Pick another agent's folder or an export.")
@@ -403,6 +405,9 @@ class Source:
                         continue
                     if entry.is_file():
                         self._names[entry.name] = (None, entry)
+                    elif entry.is_dir() and entry.name == "cron" and (entry / "jobs.json").is_file() \
+                            and not (entry / "jobs.json").is_symlink():
+                        self._names["cron/jobs.json"] = (None, entry / "jobs.json")  # the job list only, never output/
                     elif entry.is_dir() and entry.name in WALKED_DIRS:
                         for dirpath, dirnames, filenames in os.walk(entry, followlinks=False):
                             dirnames[:] = [d for d in dirnames if d not in {"node_modules", "__pycache__", ".git"}]
@@ -419,6 +424,14 @@ class Source:
     def size(self, name: str) -> int:
         archive, item = self._names[name]
         return item.file_size if archive else item.stat().st_size
+
+    def mtime(self, name: str) -> float | None:
+        """When a member was last written (a zip keeps it per member), or None."""
+        archive, item = self._names[name]
+        try:
+            return datetime(*item.date_time).replace(tzinfo=timezone.utc).timestamp() if archive else item.stat().st_mtime
+        except (OSError, ValueError, OverflowError):
+            return None
 
     def _open(self, name: str):
         archive, item = self._names[name]
@@ -883,13 +896,14 @@ def _hermes_facts(src: Source, prefix: str) -> list[dict]:
             cols = {r[1] for r in con.execute("PRAGMA table_info(facts)")}
             if "content" not in cols:
                 return []
-            pick = ", ".join(c if c in cols else f"NULL AS {c}" for c in ("category", "tags", "trust_score"))
-            for content, category, tags, trust in con.execute(
+            pick = ", ".join(c if c in cols else f"NULL AS {c}" for c in ("category", "tags", "trust_score", "created_at"))
+            for content, category, tags, trust, created in con.execute(
                     f"SELECT content, {pick} FROM facts ORDER BY fact_id LIMIT ?", (MAX_STORE_FACTS,)):
                 text = str(content or "").strip()
                 if text and not _SECRET_TEXT.search(text):
                     facts.append({"content": text, "category": str(category or "general"), "tags": str(tags or ""),
-                                  "trust": float(trust) if isinstance(trust, (int, float)) else 0.5})
+                                  "trust": float(trust) if isinstance(trust, (int, float)) else 0.5,
+                                  "created": str(created or "")[:10]})
         finally:
             con.close()
     except sqlite3.DatabaseError:
@@ -904,18 +918,20 @@ def _hermes_facts(src: Source, prefix: str) -> list[dict]:
 
 
 def parse_hermes(src: Source, prefix: str, with_sessions: bool = True) -> dict:
-    memories = []
+    memories, memories_at = [], None
     for which in ("USER", "MEMORY"):
         name = prefix + f"memories/{which}.md"
         if name in src.names():
             memories += _split_memory(src.text(name))
+            memories_at = max(filter(None, (memories_at, src.mtime(name))), default=None)
     soul = src.text(prefix + "SOUL.md") if (prefix + "SOUL.md") in src.names() else ""
     chats = _hermes_sessions(src, prefix) if with_sessions else []
     _tick("skills")
     skills = hermes_skills(src, prefix)
     _tick("facts")
     return {"chats": chats, "memories": memories, "instructions": [], "projects": [], "skills": skills,
-            "soul": soul.strip(), "account_name": "", "facts": _hermes_facts(src, prefix)}
+            "soul": soul.strip(), "account_name": "", "facts": _hermes_facts(src, prefix),
+            "memories_at": memories_at, "cron": _hermes_cron(src, prefix), "private": _private_marker(src, prefix)}
 
 
 # Claude Code (~/.claude): CLAUDE.md (global instructions), projects/<cwd slug>/memory/*.md (auto memory,
@@ -1056,6 +1072,8 @@ def load(path: Path, *, with_sessions: bool = True) -> tuple[str, dict, Source, 
             data = parse_claude_code(src, prefix, with_sessions)
         else:
             data = parse_hermes(src, prefix, with_sessions)
+            if data.get("private"):
+                raise ValueError("That is a private agent. Its data never leaves it.")
     except BaseException:
         src.close()
         raise
@@ -1161,8 +1179,11 @@ def scan(args: dict) -> dict:
 
 def _scan(args: dict) -> dict:
     path = resolve_sources(args)
+    history = args.get("history") is True
     kind, data, src, _prefix_ = load(path)
     src.close()
+    if history:
+        _history_checks(kind, _prefix_, data)
     _tick("checking")
     import_id = _import_id(path)
     chats = data["chats"]
@@ -1178,9 +1199,14 @@ def _scan(args: dict) -> dict:
                                "left_behind": [f"{f['file']} ({f['reason']})" for f in s["flagged"]]})
     recent = sorted(chats, key=lambda c: c.get("updated") or 0, reverse=True)[:RESULT_LIMITS["recent"]]
     _record(import_id, source=_source_field(path), kind=kind, scanned_at=int(time.time()), chats=len(chats),
-            skills=len(data["skills"]))
+            skills=len(data["skills"]), history=history)
     label = SOURCES[kind]
-    return {
+    extra = {"history": _history_scan(data)} if history else {}
+    if history:  # what the screen shows is scrubbed too
+        data = {**data, "memories": [scrub(m) for m in data["memories"]], "soul": scrub(data["soul"])}
+        chats = [{**c, "title": scrub(c["title"])} for c in chats]
+        recent = [{**c, "title": scrub(c["title"])} for c in recent]
+    return {**extra,
         "import_id": import_id,
         "kind": kind,
         "source": label,
@@ -1217,19 +1243,20 @@ def _scan(args: dict) -> dict:
     }
 
 
-def _chat_markdown(chat: dict, label: str) -> str:
+def _chat_markdown(chat: dict, label: str, history: bool = False) -> str:
     def stamp(ts):
         return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC") if ts else ""
 
     head = [f"# {chat['title'].strip() or 'Untitled'}", "",
-            f"*Imported from {label}* · started {stamp(chat.get('created')) or 'unknown'}"
+            (f"*From your earlier agent ({label}), read-only History*" if history else f"*Imported from {label}*")
+            + f" · started {stamp(chat.get('created')) or 'unknown'}"
             + (f" · last message {stamp(chat.get('updated'))}" if chat.get("updated") else "")
             + f" · {len(chat['messages'])} messages · id `{chat['id']}`"]
     if chat.get("note"):
         head += ["", f"> {chat['note']}"]
     body = []
     for msg in chat["messages"]:
-        who = "You" if msg["role"] == "user" else label
+        who = "You" if msg["role"] == "user" else (f"Earlier agent ({label})" if history else label)
         when = stamp(msg.get("time"))
         body += ["", f"### {who}" + (f" · {when}" if when else ""), "", msg["text"]]
     return "\n".join(head + ["", "---"] + body) + "\n"
@@ -1277,8 +1304,13 @@ def _chat_relpath(chat: dict) -> str:
 def archive(args: dict) -> dict:
     _writable()
     path, import_id = _lookup(args)
+    history = args.get("history") is True
     kind, data, src, _p = load(path)
     src.close()
+    if history:
+        _history_checks(kind, _p, data)
+        data = {**data, "chats": [_history_chat(c) for c in data["chats"]], "soul": scrub(data["soul"]),
+                "memories": [scrub(m) for m in data["memories"]]}
     label = SOURCES[kind]
     root = files_root() / IMPORT_DIR / label
     root.mkdir(parents=True, exist_ok=True)
@@ -1288,13 +1320,19 @@ def archive(args: dict) -> dict:
         target = root / rel
         if not _within(target, root):
             continue
-        _atomic_write(target, _chat_markdown(chat, label))
+        _atomic_write(target, _chat_markdown(chat, label, history))
         written += 1
         mine.append(f"{label}/{rel}")
     _rebuild_index(root, label)
 
     about = [f"# What {label} knew about you", "",
              "Copied as-is from your export. Your Wizard only remembers what you approve in *About me.md*.", ""]
+    if history:
+        as_of = _day(data.get("memories_at")) if data.get("memories_at") else "an unknown date"
+        about = [f"# What your earlier agent ({label}) knew", "",
+                 f"From your earlier agent, as of {as_of}. Read-only History: older than your Wizard's own memory, "
+                 "so where they disagree, your Wizard's own memory wins.", ""]
+        data = {**data, "memories": [f"(as of {as_of}) {m}" for m in data["memories"]]}
     if data["account_name"]:
         about += [f"Account name: {data['account_name']}", ""]
     for item in data["instructions"]:
@@ -1829,6 +1867,21 @@ def _plain(error: BaseException) -> str:
     return str(error)
 
 
+def _history_steps(import_id: str, args: dict) -> list:
+    """Bring your Wizard: chats and memories as History, skills as documents, dated facts, ticked schedules."""
+    steps = []
+    if args.get("chats"):
+        steps.append(("chats", lambda: archive({"import_id": import_id, "history": True})))
+    skills = args.get("skills")
+    if skills == "all" or (isinstance(skills, list) and skills):
+        steps.append(("skills", lambda: skill_documents({"import_id": import_id, "names": skills})))
+    if args.get("facts"):
+        steps.append(("facts", lambda: history_facts({"import_id": import_id})))
+    if isinstance(args.get("schedules"), list) and args["schedules"]:
+        steps.append(("schedules", lambda: history_schedules({"import_id": import_id, "ids": args["schedules"][:50]})))
+    return steps
+
+
 def run_import(args: dict) -> dict:
     """The Importer's one Import button: each chosen part in turn; a failed part never undoes the others.
     Running it again with only the parts that failed is safe: chats overwrite the same files, skills and memory
@@ -1838,10 +1891,13 @@ def run_import(args: dict) -> dict:
     if not import_id or import_id not in _registry():
         raise ValueError("Scan the export first.")
     done, errors = {}, {}
-    steps = []
-    if args.get("chats"):
+    history = bool(_registry()[import_id].get("history"))
+    steps = _history_steps(import_id, args) if history else []
+    if args.get("chats") and not history:
         steps.append(("chats", lambda: archive({"import_id": import_id})))
-    if args.get("skills") == "all":  # every skill this agent lacks (the screen lists only the first 80 by name)
+    if history:
+        pass  # skills, facts and schedules are History steps; the personality stays behind
+    elif args.get("skills") == "all":  # every skill this agent lacks (the screen lists only the first 80 by name)
         def all_skills():
             kind, data, src, _p = load(_lookup({"import_id": import_id})[0], with_sessions=False)
             src.close()
@@ -1849,9 +1905,9 @@ def run_import(args: dict) -> dict:
         steps.append(("skills", all_skills))
     elif isinstance(args.get("skills"), list) and args["skills"]:
         steps.append(("skills", lambda: install_skills({"import_id": import_id, "names": args["skills"]})))
-    if args.get("personality"):
+    if args.get("personality") and not history:
         steps.append(("personality", lambda: set_personality({"import_id": import_id})))
-    if args.get("facts"):
+    if args.get("facts") and not history:
         steps.append(("facts", lambda: import_facts({"import_id": import_id})))
     about = args.get("about")
     if isinstance(about, dict) and (about.get("facts") or str(about.get("text") or "").strip()):
@@ -2043,7 +2099,7 @@ def sources(_args: dict) -> dict:
         for home in homes:
             if not any((home / n).exists() for n in ("state.db", "SOUL.md", "memories")):
                 continue
-            if home.resolve() == own:
+            if home.resolve() == own or _is_private_home(home):
                 continue
             local.append(_estimated({"kind": "hermes", "label": _home_label(home), "path": str(home)}))
     if into and any((own / n).exists() for n in ("state.db", "SOUL.md", "memories", FACT_DB)):
@@ -2101,6 +2157,7 @@ def undo(args: dict) -> dict:
                 if leftover.is_file():
                     leftover.unlink()
         _rebuild_index(root, label)
+        _rebuild_skill_index(root, label)
         for folder in sorted((p for p in root.rglob("*") if p.is_dir()), key=lambda p: len(p.parts), reverse=True):
             try:
                 folder.rmdir()  # only empty folders
@@ -2126,6 +2183,7 @@ def undo(args: dict) -> dict:
         removed_facts = _undo_facts(entry)
     except sqlite3.DatabaseError:
         removed_facts = 0
+    removed_schedules = _undo_schedules(entry)
     restored = _undo_owner_side(import_id, entry)
     reg = _registry()
     reg.pop(import_id, None)
@@ -2133,7 +2191,7 @@ def undo(args: dict) -> dict:
     kept = "" if entry.get("via") == "importer" else \
         "Files/Imported/About me.md and memory entries were approved by the owner: ask which to remove."
     return {"removed_files": removed_files, "removed_skills": removed_skills, "removed_facts": removed_facts,
-            **restored, "kept": kept}
+            "removed_schedules": removed_schedules, **restored, "kept": kept}
 
 
 def _other_agents_imports() -> list[dict]:
@@ -2219,8 +2277,360 @@ def status(_args: dict) -> dict:
         "kind", "source", "scanned_at", "archived_at", "chats", "archived_chats", "imported_at", "via")},
         "label": SOURCES.get(v.get("kind"), ""), "skills_installed": len(v.get("skills_installed") or []),
         "memories_added": len(v.get("memory_added") or []), "personality": bool(v.get("soul")),
-        "facts_added": len(v.get("facts_added") or []),
+        "facts_added": len(v.get("facts_added") or []), "history": bool(v.get("history")),
+        "schedules_created": len(v.get("schedules_created") or []),
         "about": bool(v.get("about"))} for k, v in reg.items()]}
+
+
+# ---------------------------------------------------------------------------- Bring your Wizard (history mode)
+# Issue 544: someone with an old Hermes agent brings its PAST into WizardOS, read-only: chats, memories, facts and
+# skills become History the new agent searches, never the old agent itself. The Importer turns it on per scan
+# (``history: true``) behind its ``hermes-history`` switch; without it nothing below runs. What changes then:
+# * only a Hermes source, only its own home (never a ``profiles/<name>`` inside a backup), never a private agent;
+# * every text is scrubbed (the stock redactor plus a check for random-looking strings) before it is written;
+# * memories go to a dated History file, never into the always-on memory (only the owner's approved card does);
+# * facts carry their date and an "earlier agent" label and rank below this agent's own (trust capped);
+# * skills become reference documents in Files (``Imported/Hermes/Skills``), never active skills;
+# * cron jobs are an opt-in list; only ticked ones become (paused) Wizard schedules; personality stays behind.
+
+HISTORY_TRUST = 0.3            # below the 0.5 a fact of this agent's own starts with
+HISTORY_SKILL_DIR = "Skills"
+HISTORY_NOTE = ("Older or imported material (an earlier agent's chats, memories, facts and skills) lives in History: "
+                "Files/Imported. Look there when asked about the past; your own memory is newer and wins when they disagree.")
+_RANDOMISH = re.compile(r"(?<![A-Za-z0-9_+/=.-])[A-Za-z0-9_+/=-]{32,}(?![A-Za-z0-9_+/=-])")
+_DEST_ID: ContextVar = ContextVar("wizard_bring_data_dest", default="")
+
+
+def _random_looking(token: str) -> bool:
+    """A key-like run: letters and digits mixed with high entropy (a word, a path or a slug never is)."""
+    body = token.strip("=")
+    if len(body) < 32 or not re.search(r"\d", body) or not re.search(r"[A-Za-z]", body):
+        return False
+    counts = Counter(body)
+    entropy = -sum(n / len(body) * __import__("math").log2(n / len(body)) for n in counts.values())
+    return entropy >= 3.5
+
+
+def scrub(text: str) -> str:
+    """Secrets out before anything is indexed: the stock Hermes redactor (when this runs inside Hermes), the
+    engine's own key patterns, then any random-looking string the patterns miss."""
+    text = str(text or "")
+    try:
+        from agent.redact import redact_sensitive_text
+
+        text = redact_sensitive_text(text, force=True, file_read=True)
+    except Exception:  # noqa: BLE001 - outside Hermes (tests): the two checks below still run
+        pass
+    text = _SECRET_TEXT.sub("[secret removed]", text)
+    return _RANDOMISH.sub(lambda m: "[secret removed]" if _random_looking(m.group(0)) else m.group(0), text)
+
+
+def _private_marker(src: Source, prefix: str) -> bool:
+    """A WizardOS agent folder says what it is in agent.json (no secrets in it): a private one is never a source."""
+    for name in (prefix + "agent.json", _prefix(prefix.rstrip("/")) + "agent.json" if prefix else ""):
+        if name and name in src.names():
+            try:
+                if json.loads(src.text(name, 256 * 1024)).get("privacy") == "private":
+                    return True
+            except (ValueError, AttributeError):
+                continue
+    return False
+
+
+def _private_homes() -> list[Path]:
+    """Hermes homes of the box's private agents (Agents registry): never offered, refused if named."""
+    homes = []
+    for folder in _agents_dirs():
+        for entry in sorted(folder.iterdir()):
+            try:
+                agent = json.loads((entry / "agent.json").read_text("utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(agent, dict) or agent.get("privacy") != "private":
+                continue
+            homes.append(entry)
+            profile = (agent.get("runtime") or {}).get("profile") if isinstance(agent.get("runtime"), dict) else None
+            if isinstance(profile, str) and AGENT_ID.match(profile):
+                homes += [r / ".hermes" / "profiles" / profile for r in _home_candidates()]
+    return homes
+
+
+def _is_private_home(path: Path) -> bool:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    for home in _private_homes():
+        try:
+            home = home.resolve()
+        except OSError:
+            continue
+        if resolved == home or home in resolved.parents:
+            return True
+    return False
+
+
+def _when_words(schedule) -> str:
+    if not isinstance(schedule, dict):
+        return ""
+    kind = schedule.get("kind")
+    if kind == "cron":
+        return f"cron {schedule.get('expr', '')}".strip()
+    if kind == "interval":
+        return f"every {schedule.get('minutes')} min"
+    if kind == "once":
+        return f"once at {schedule.get('run_at', '')}"
+    return str(schedule.get("display") or "")
+
+
+def _hermes_cron(src: Source, prefix: str) -> list[dict]:
+    """The source's own cron/jobs.json (never its output folder): scrubbed rows for the opt-in list."""
+    name = prefix + "cron/jobs.json"
+    if name not in src.names():
+        return []
+    try:
+        raw = src.json(name, MAX_TEXT)
+    except ValueError:
+        return []
+    jobs = raw if isinstance(raw, list) else raw.get("jobs") if isinstance(raw, dict) else None
+    out = []
+    for row in (jobs or [])[:200]:
+        if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not re.fullmatch(r"[A-Za-z0-9._:-]{1,160}", row["id"]):
+            continue
+        why = "runs a script from the old agent" if row.get("script") else "script-only job" if row.get("no_agent") else ""
+        prompt = scrub(str(row.get("prompt") or ""))[:4000]
+        skills = [str(n)[:80] for n in ([row.get("skill")] + list(row.get("skills") or [])) if isinstance(n, str) and n][:5]
+        out.append({"id": row["id"], "name": scrub(str(row.get("name") or row["id"]))[:120],
+                    "when": _when_words(row.get("schedule")), "schedule": row.get("schedule") if isinstance(row.get("schedule"), dict) else None,
+                    "timezone": row.get("timezone") if isinstance(row.get("timezone"), str) else None,
+                    "prompt": prompt, "skills": skills, "can_import": not why, "why_not": why,
+                    "was_enabled": row.get("enabled") is not False})
+    return out
+
+
+def _history_checks(kind: str, prefix: str, data: dict) -> None:
+    if kind != "hermes":
+        raise ValueError("Bring your Wizard takes an earlier Hermes agent: its `hermes backup` zip or its folder.")
+    if "profiles" in PurePosixPath(prefix).parts:
+        raise ValueError("That holds a second Hermes agent (a profile) only. Use the backup of the agent itself.")
+
+
+def _history_scan(data: dict) -> dict:
+    return {"cron_jobs": [{k: j[k] for k in ("id", "name", "when", "skills", "can_import", "why_not", "was_enabled")}
+                          | {"prompt": _clip(j["prompt"], 200)} for j in data.get("cron") or []],
+            "memories_as_of": _day(data.get("memories_at")) if data.get("memories_at") else "",
+            "skills_as": "reference documents in Files › Imported › Hermes › Skills",
+            "note": HISTORY_NOTE}
+
+
+def _history_chat(chat: dict) -> dict:
+    return {**chat, "title": scrub(chat["title"]), "messages": [{**m, "text": scrub(m["text"])} for m in chat["messages"]]}
+
+
+def skill_documents(args: dict) -> dict:
+    """Old skills as searchable, readable reference documents in Files (never in the agent's skills folder):
+    when a task needs one, the agent reads it and writes its own WizardOS version."""
+    _writable()
+    path, import_id = _lookup(args)
+    wanted = args.get("names")
+    kind, data, src, prefix = load(path, with_sessions=False)
+    try:
+        if kind != "hermes":
+            raise ValueError("Only an earlier Hermes agent's skills come in as History.")
+        existing = _existing_skill_names()
+        label = SOURCES[kind]
+        root = files_root() / IMPORT_DIR / label
+        folder = root / HISTORY_SKILL_DIR
+        written, skipped, mine = [], [], []
+        for skill in data["skills"]:
+            if wanted != "all" and (not isinstance(wanted, list) or skill["name"].lower() not in {str(n).lower() for n in wanted}):
+                continue
+            if skill["name"].lower() in existing or not skill["has_skill_md"]:
+                skipped.append({"name": skill["name"], "reason": "this agent already has it" if skill["has_skill_md"]
+                                else "its SKILL.md could not be read safely"})
+                continue
+            body = scrub(src.text(f"{prefix}skills/{skill['path']}/SKILL.md", MAX_SKILL_FILE))
+            others = [f for f in skill["files"] if f != "SKILL.md"]
+            doc = [f"# Old skill: {skill['name']}", "",
+                   f"*From your earlier agent ({label}), read-only reference.* This is not an active skill. When a task "
+                   "needs it, read it and write your own WizardOS version.", ""]
+            if skill["description"]:
+                doc += [f"Description: {scrub(skill['description'])}", ""]
+            if others:
+                doc += ["Other files it had (not copied): " + ", ".join(others[:40]), ""]
+            doc += ["---", "", body.strip(), ""]
+            rel = f"{HISTORY_SKILL_DIR}/{_safe_name(skill['name'], 60)} ({_short(skill['path'])}).md"
+            target = root / rel
+            if not _within(target, folder):
+                continue
+            _atomic_write(target, "\n".join(doc))
+            written.append(skill["name"])
+            mine.append(f"{label}/{rel}")
+        _rebuild_skill_index(root, label)
+        if mine:
+            _record(import_id, files=sorted(set(_registry().get(import_id, {}).get("files", [])) | set(mine)))
+        return {"documents": len(written), "names": written[:80], "skipped": skipped,
+                "folder": f"{IMPORT_DIR}/{label}/{HISTORY_SKILL_DIR}"}
+    finally:
+        src.close()
+
+
+def _rebuild_skill_index(root: Path, label: str) -> None:
+    folder = root / HISTORY_SKILL_DIR
+    docs = sorted(p for p in folder.glob("*.md") if p.name != "Index.md") if folder.is_dir() else []
+    index = folder / "Index.md"
+    if not docs:
+        try:
+            index.unlink()
+        except OSError:
+            pass
+        return
+    lines = [f"# Old skills from your earlier {label} agent", "",
+             "Reference only, never active skills. Read one when a task needs it, then write your own WizardOS version.", ""]
+    lines += [f"- [{p.stem}](<{p.name}>)" for p in docs]
+    _atomic_write(index, "\n".join(lines) + "\n")
+
+
+def _history_facts(data: dict) -> list[dict]:
+    out = []
+    for fact in data.get("facts") or []:
+        text = scrub(fact["content"])
+        if "[secret removed]" in text:
+            continue  # a fact that was mostly a key is no fact
+        when = fact.get("created") or "undated"
+        tags = ",".join(t for t in (fact.get("tags") or "").split(",") + ["imported", "earlier-agent"] if t.strip())
+        out.append({"content": f"[Earlier agent, {when}] {text}", "category": fact.get("category") or "general",
+                    "tags": tags, "trust": min(float(fact.get("trust") or 0.5), HISTORY_TRUST)})
+    return out
+
+
+def history_facts(args: dict) -> dict:
+    """The earlier agent's fact store, each fact labelled with its date and capped below this agent's own trust,
+    so a newer fact of this agent wins a conflict. Undo removes exactly these."""
+    _writable()
+    path, import_id = _lookup(args)
+    kind, data, src, prefix = load(path, with_sessions=False)
+    try:
+        facts = _history_facts(data)
+        if not facts:
+            raise ValueError("This agent has no fact store to bring.")
+        target = hermes_home() / FACT_DB
+        created = False
+        if not target.exists():
+            created = True
+            store_class = _fact_store_class()
+            if store_class is not None:
+                store_class(db_path=str(target)).close()
+            else:  # the source's own layout, emptied: the table and its full-text triggers, none of its rows
+                local, temporary = src.local_copy(prefix + FACT_DB, MAX_DB)
+                try:
+                    source = sqlite3.connect(f"file:{local}?mode=ro", uri=True, timeout=30)
+                    dest = sqlite3.connect(str(target))
+                    try:
+                        source.backup(dest)
+                        tables = {r[0] for r in dest.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+                        if "fact_entities" in tables:
+                            dest.execute("DELETE FROM fact_entities")
+                        dest.execute("DELETE FROM facts")
+                        _drop_orphans(dest)
+                        dest.commit()
+                    finally:
+                        source.close()
+                        dest.close()
+                finally:
+                    if temporary:
+                        os.unlink(local)
+            os.chmod(target, 0o600)
+        added = _merge_facts(target, facts)
+        prior = _registry().get(import_id, {})
+        _record(import_id, facts_added=sorted(set(prior.get("facts_added") or []) | set(added)),
+                facts_created=bool(prior.get("facts_created")) or created)
+        return {"facts_added": len(added), "already_here": len(facts) - len(added), "store": FACT_DB,
+                "provider_on": _holographic_on(), "trust": HISTORY_TRUST}
+    finally:
+        src.close()
+
+
+def _scheduler_call(action: str, value: dict) -> dict:
+    """The Agent Service's loopback schedule route (the wizard-schedule plugin's origin and token)."""
+    from urllib.request import ProxyHandler, Request, build_opener
+
+    def secret(name):
+        try:
+            from agent.secret_scope import get_secret
+
+            return get_secret(name) or os.environ.get(name, "")
+        except Exception:  # noqa: BLE001 - outside Hermes
+            return os.environ.get(name, "")
+
+    origin, token = str(secret("WIZARD_HEAVY_ORIGIN") or "").rstrip("/"), str(secret("WIZARD_HEAVY_TOKEN") or "")
+    if not re.fullmatch(r"http://(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?", origin) or not token:
+        raise ValueError("Wizard schedules can't be reached from this agent.")
+    request = Request(origin + "/wizard/internal/schedules/" + action, method="POST",
+                      data=json.dumps({**value, "session_id": "wizard-importer"}).encode(),
+                      headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
+    with build_opener(ProxyHandler({})).open(request, timeout=20) as response:
+        return json.loads(response.read(256 * 1024) or b"{}")
+
+
+def history_schedules(args: dict) -> dict:
+    """Only the cron jobs the owner ticked become Wizard schedules, each created paused."""
+    _writable()
+    path, import_id = _lookup(args)
+    wanted = {str(i) for i in (args.get("ids") or []) if isinstance(i, str)}
+    if not wanted:
+        raise ValueError("Tick the scheduled jobs to bring in.")
+    kind, data, src, _p = load(path, with_sessions=False)
+    src.close()
+    agent = _DEST_ID.get() or "main"
+    created, results = [], []
+    for job in data.get("cron") or []:
+        if job["id"] not in wanted:
+            continue
+        if not job["can_import"]:
+            results.append({"id": job["id"], "name": job["name"], "status": f"not imported: {job['why_not']}"})
+            continue
+        row = {"id": job["id"], "name": job["name"], "schedule": job["schedule"], "prompt": job["prompt"],
+               "skills": job["skills"], **({"timezone": job["timezone"]} if job["timezone"] else {})}
+        try:
+            answer = _scheduler_call("import-history", {"source": import_id, "agent": agent, "jobs": [row]})
+            result = (answer.get("results") or [{}])[0]
+        except Exception as error:  # noqa: BLE001 - one job never loses the others
+            result = {"status": f"not imported: {_plain(error) if isinstance(error, OSError) else error}"}
+        results.append({"id": job["id"], "name": job["name"], "status": str(result.get("status") or "not imported")})
+        if result.get("scheduleId") and str(result.get("status", "")).startswith("imported"):
+            created.append(str(result["scheduleId"]))
+    if created:
+        prior = _registry().get(import_id, {})
+        _record(import_id, schedules_created=sorted(set(prior.get("schedules_created") or []) | set(created)))
+    return {"created": len(created), "results": results, "paused": True}
+
+
+def _undo_schedules(entry: dict) -> int:
+    removed = 0
+    for schedule_id in entry.get("schedules_created") or []:
+        try:
+            removed += bool(_scheduler_call("cancel", {"schedule_id": schedule_id, "any_thread": True}).get("deleted"))
+        except Exception:  # noqa: BLE001 - already deleted by the owner, or the Service is down: listed as kept
+            continue
+    return removed
+
+
+_NOTE_CACHE: dict = {}
+
+
+def history_note() -> str:
+    """The one instruction line, only for an agent that has History from an earlier agent."""
+    path = _state_dir() / "imports.json"
+    try:
+        stamp = path.stat().st_mtime_ns
+    except OSError:
+        return ""
+    if _NOTE_CACHE.get("key") != (str(path), stamp):
+        reg = _registry()
+        _NOTE_CACHE.update(key=(str(path), stamp), on=any(isinstance(v, dict) and v.get("history") and v.get("imported_at")
+                                                          for v in reg.values()))
+    return HISTORY_NOTE if _NOTE_CACHE.get("on") else ""
 
 
 ACTIONS = {"scan": scan, "archive": archive, "skills": install_skills, "save_profile": save_profile, "status": status,
@@ -2272,6 +2682,7 @@ def handle_app(action: str, args: dict) -> str:
         return json.dumps({"success": False, "error": f"action must be one of {', '.join(APP_ACTIONS)}"})
     args = dict(args or {})
     dest = str(args.pop("dest", "") or "")
+    dest_token = _DEST_ID.set(dest if dest != "here" else "")
     try:
         if dest and dest != "here" and action != "sources":
             with _into(_destination(dest)):
@@ -2279,3 +2690,5 @@ def handle_app(action: str, args: dict) -> str:
         return json.dumps({"success": True, **fn(args)}, ensure_ascii=False)
     except (ValueError, OSError, ImportError, zipfile.BadZipFile, json.JSONDecodeError) as error:
         return json.dumps({"success": False, "error": str(error)}, ensure_ascii=False)
+    finally:
+        _DEST_ID.reset(dest_token)

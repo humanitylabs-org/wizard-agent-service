@@ -153,8 +153,17 @@ def _section(_session_info) -> str:
     return _kernel.kernel_for_session()
 
 
+def _history_section(_session_info) -> str:
+    """One line for an agent that has History from an earlier agent (Importer, Bring your Wizard; issue 544)."""
+    try:
+        return _bring_data.history_note()
+    except Exception:  # noqa: BLE001 - never block a turn on it
+        return ""
+
+
 def register(ctx) -> None:
     ctx.register_system_prompt_section(SECTION_ID, _section, position="after_memory", max_chars=2000)
+    ctx.register_system_prompt_section("wizard-os.history", _history_section, position="after_memory", max_chars=400)
     ctx.register_tool(name="wizard_follow_up", toolset="wizard_os", schema=_FOLLOW_UP_SCHEMA,
                       handler=_follow_up_request, emoji="👁")
     # Bring my ChatGPT / Claude / Hermes: the owner's own exports become searchable files and

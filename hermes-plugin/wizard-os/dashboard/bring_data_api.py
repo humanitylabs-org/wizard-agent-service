@@ -6,10 +6,11 @@ engine is the same module the ``wizard_bring_data`` agent tool uses; nothing her
 GET  sources   agent folders on this box (Claude Code, other Hermes homes) + exports in Files Inbox/Downloads,
                and ``into``: other WizardOS agents an import can go into (then this agent is a source too)
 GET  imports?dest=<agent>   earlier imports (for per-import Undo)
-POST scan      {path} or {paths: [...]}, dest?, scan_id?    -> counts, draft facts, skills, personality, fact store
+POST scan      {path} or {paths: [...]}, dest?, scan_id?, history?   -> counts, draft facts, skills, personality, fact store
+               (``history: true``: Bring your Wizard, an earlier Hermes agent's past as read-only History)
 GET  progress?scan_id=<id>   where that scan is: step, done/total, idle seconds, seconds_left
 POST cancel    {scan_id}     stop that scan at its next step (it answers "Scan cancelled.")
-POST import    {import_id, chats, skills, personality, facts, about: {facts, text}, dest?}
+POST import    {import_id, chats, skills, personality, facts, about: {facts, text}, schedules?: [cron job ids], dest?}
 POST undo      {import_id, dest?}
 
 ``dest`` is an agent id from ``sources.into`` (never a path); omitted means this agent.
@@ -115,8 +116,10 @@ async def scan(request: Request, response: Response):
     _guard(request)
     args = await _body(request)
     dest = _dest(args.get("dest"))
+    history = {"history": True} if args.get("history") is True else {}  # the Importer's hermes-history switch
     args = {k: args[k] for k in ("path", "paths", "scan_id") if k in args}
     _paths_ok(args)
+    args.update(history)
     return await _answer(response, "scan", {**args, **dest})
 
 
@@ -136,7 +139,7 @@ async def cancel(request: Request, response: Response):
 async def run_import(request: Request, response: Response):
     _guard(request)
     body = await _body(request)
-    args = {k: body[k] for k in ("import_id", "chats", "skills", "personality", "facts", "about") if k in body}
+    args = {k: body[k] for k in ("import_id", "chats", "skills", "personality", "facts", "about", "schedules") if k in body}
     return await _answer(response, "import", {**args, **_dest(body.get("dest"))}, lock=True)
 
 
