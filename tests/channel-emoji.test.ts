@@ -26,6 +26,7 @@ it('the keyword map picks a fitting emoji, or none', () => {
   expect([channelAutoEmoji('Money'), channelAutoEmoji('Podcast'), channelAutoEmoji('Music'), channelAutoEmoji('Health')]).toEqual(['💰', '🎙️', '🎵', '🩺'])
   expect(channelAutoEmoji('Zzzqx')).toBe('')
   expect(channelAutoEmoji('Podcasts')).toBe('🎙️'); expect(channelAutoEmoji('Podcasting')).toBe('🎙️'); expect(channelAutoEmoji('Morning workout')).toBe('🏋️')
+  expect(channelAutoEmoji('Shopping')).toBe('🛒'); expect(channelAutoEmoji('Photos')).toBe('📷')
   expect(channelAutoEmoji('Carrots')).toBe(''); expect(channelAutoEmoji('Said')).toBe('')
   expect(channelAutoName('Money')).toBe('💰 Money'); expect(channelAutoName('Zzzqx')).toBe('Zzzqx'); expect(channelAutoName('🎯 Money')).toBe('🎯 Money')
   expect(channelAutoName('Money ' + 'x'.repeat(54))).toBe('Money ' + 'x'.repeat(54))
