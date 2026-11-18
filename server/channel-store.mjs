@@ -378,6 +378,21 @@ export function fixedChannelKind(path, agent, sessionId) {
   } catch { return '' } finally { try { db?.close() } catch {} }
 }
 
+// The same threads as a list (newest filed first, at most `limit`), so the shell can leave Send to inbox off them.
+export function fixedChannelThreads(path, agent, limit = 500) {
+  if (!path || !existsSync(path)) return []
+  let db
+  try {
+    db = new DatabaseSync(path, { readOnly: true })
+    const who = agentOf(agent)
+    const rows = db.prepare(`SELECT session_id, MAX(at) AS at FROM (
+        SELECT m.session_id, m.filed_at AS at FROM membership m JOIN channels c ON c.id=m.channel_id WHERE m.agent=? AND c.kind IN ('daily','alerts')
+        UNION ALL SELECT d.session_id, d.created_at AS at FROM daily_days d JOIN channels c ON c.id=d.channel_id WHERE d.agent=? AND c.kind='daily'
+      ) GROUP BY session_id ORDER BY at DESC, session_id LIMIT ?`).all(who, who, limit)
+    return rows.map(r => r.session_id)
+  } catch { return [] } finally { try { db?.close() } catch {} }
+}
+
 // HTTP: /wizard/v1/channels (GET ?agent=, POST {name, agent?}, PATCH one of {id, name?, archived?, pinned?} |
 // {order:[ids]} | {pinOrder:[ids]} | {sort:'az'|'za'}) and /wizard/v1/channels/membership (GET ?channel= |
 // ?sessionId=&agent=, PUT {sessionId, channelId|null, agent?}) and, with the read sync on, /wizard/v1/channels/read

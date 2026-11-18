@@ -177,6 +177,8 @@ describe('Open and Send to inbox over HTTP', () => {
         expect(sessions.get(id).hidden).toBeUndefined()
       }
       expect(patches).toEqual([])
+      // The inbox list names them, so the shell leaves Send to inbox off their menus.
+      expect((await (await fetch(u)).json()).stay.sort()).toEqual(['wizard_alert_1', 'wizard_daily_1'])
       // A thread in an ordinary channel can still be sent.
       expect((await fetch(`${u}/send`, json('POST', { thread_id: 'wizard_filed_1' }))).status).toBe(200)
     })
