@@ -197,6 +197,9 @@ server = createWizardServer({
   // A provider sign-in joins the box's provider pool only; the main agent uses just the providers the owner
   // attached to it via PUT /wizard/v1/main-providers (issue 428). Off by default.
   mainProviderAttach: process.env.WIZARD_MAIN_PROVIDER_ATTACH === '1',
+  // Private first (issue 545): a fresh install's default agent is a private Tinfoil agent; Claude/ChatGPT switch on
+  // the standard agent. Follows the owner's `wizard/private-first-setup` switch; '1' forces it on, '0' off.
+  privateFirst: envChoice(process.env.WIZARD_PRIVATE_FIRST),
   // Graceful restart (issue 480): /wizard/v1/restart lets a restarter hold new sends (saved, launched by the next
   // process) and wait for running turns to finish before it restarts the service. Off by default.
   gracefulRestart: process.env.WIZARD_GRACEFUL_RESTART === '1',

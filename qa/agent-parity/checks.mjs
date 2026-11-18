@@ -11,6 +11,7 @@ const featureScenes = {
   'thread-tracker': kind => scene(kind, { threadTracker: true }),
   'routed-owner-turns': kind => scene(kind, { routedOwnerTurns: true }),
   'main-provider-attach': kind => scene(kind, { mainProviderAttach: true }),
+  'private-first-setup': kind => scene(kind, { privateFirst: true }),
   'graceful-restart-hold': kind => scene(kind, { gracefulRestart: true }),
   'chats-channels': kind => scene(kind, { channelStore: true, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true }),
   'chats-read-marks': kind => scene(kind, { channelStore: true, channelReadSync: true }),

@@ -1248,6 +1248,25 @@
       "policy_exemptions": []
     },
     {
+      "id": "private-first-setup",
+      "description": "Private first (issue 545, wizard-os DECISIONS 115, spec/AGENTS.md section 10), behind the owner's wizard/private-first-setup switch (Look file) or WIZARD_PRIVATE_FIRST=1, off by default: Tinfoil connected first on a fresh box creates one private agent (private preset, Tinfoil, no fallback) that becomes the default agent with every installed app and every app binding, while the standard agent (the main Hermes) stays hidden with no apps; a Claude or ChatGPT sign-in switches the standard agent on and attaches that provider to it without touching the private agent; apps installed later start on the private agent only; and the main-agent provider attach protection is on without WIZARD_MAIN_PROVIDER_ATTACH. Existing installs are not migrated.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile, container TCP, restricted Unix ingress) with privateFirst on and mainProviderAttach unset: GET /wizard/v1/private-first answers on, the main agent's picker lists only its attached configured provider and a model change onto an unattached provider is 409 provider_not_attached before Hermes, while routed kinds keep their own allowed models (409 model_not_allowed, no attach fields). tests/private-first.test.ts covers the switch off, the Look file switch, the loopback route's token, the fresh-box private agent (default, apps, bindings, standard agent hidden), Claude and ChatGPT switching the standard agent on with the private agent unchanged, the refused private model change, later apps and an existing install left as it is; hermes-plugin/wizard-os/dashboard/test_private_first_api.py covers the plugin relay. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/private-first.mjs",
+        "server/main-provider-attach.mjs",
+        "server/agents.mjs",
+        "server/service.mjs",
+        "hermes-plugin/wizard-os/dashboard/private_first_api.py"
+      ],
+      "reference_tests": [
+        "tests/private-first.test.ts",
+        "hermes-plugin/wizard-os/dashboard/test_private_first_api.py"
+      ],
+      "fixture": "private-first-setup",
+      "policy_exemptions": []
+    },
+    {
       "id": "graceful-restart-hold",
       "description": "A restart the product starts waits for running turns instead of cutting them: with WIZARD_GRACEFUL_RESTART on, POST /wizard/v1/restart holds new sends (saved in the durable queue as restart_pending, never refused), GET reports waiting / ready / overdue with the running turns, /wizard/health shows the wait without thread ids, and the next process (or DELETE) sends the held messages once. A new chat started during the wait (a session with no messages yet, its first message held) stays listed on every list read (full, view=list and the archive-50 window) as queued, titled with the owner's words, so it never drops out of the Chats list on any device (wizard-ux issue 1362). The owner's Restart now from the shell (POST {\"now\": true}) marks the waiting hold restart_now in GET and health, a later wait clears it, and with no hold it is a 409 that starts nothing. Only the owner's own origin may use the route: same-site or cross-site fetches and a foreign Origin get 403 on GET, POST and DELETE, and a POST must be JSON (415), so another app's page on the box cannot start or renew the hold.",
       "layer": "server",

@@ -20,13 +20,13 @@ export function envChoice(value) {
 }
 
 /** The switch, read from the Look file at most every `ttlMs`; an unreadable file reads as off. */
-export function createChannelsSwitch({ readLook, now = Date.now, ttlMs = 3000 } = {}) {
+export function createChannelsSwitch({ readLook, now = Date.now, ttlMs = 3000, id = CHANNELS_SWITCH } = {}) {
   let last = { at: -Infinity, on: false }
   return () => {
     const t = now()
     if (t - last.at < ttlMs) return last.on
     let on = false
-    try { on = lookSwitchOn(readLook?.()) } catch { on = false }
+    try { on = lookSwitchOn(readLook?.(), id) } catch { on = false }
     last = { at: t, on }
     return on
   }
