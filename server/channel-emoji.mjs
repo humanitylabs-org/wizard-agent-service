@@ -63,6 +63,12 @@ for (const [emoji, words] of CHANNEL_AUTO_EMOJI) for (const k of words.split(' '
 /** Does the name already start with an emoji (the owner's or the agent's own)? */
 export const startsWithEmoji = name => LEAD.test(String(name || ''))
 
+/** The name's words without a leading emoji ("💰 Money" -> "Money"); an emoji-only name stays as it is. */
+export function bareChannelName(name) {
+  const n = String(name || '').trim(), m = n.match(LEAD)
+  return (m && n.slice(m[0].length).replace(/^[\s\uFE0F]+/u, '')) || n
+}
+
 /** The fitting emoji for a name, or ''. Whole words first, then a word that starts with a keyword of 4+ letters. */
 export function channelAutoEmoji(name) {
   const words = String(name || '').toLowerCase().normalize('NFKC').split(/[^\p{L}\p{N}]+/u).filter(Boolean)

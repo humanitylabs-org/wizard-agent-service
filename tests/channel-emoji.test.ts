@@ -7,7 +7,7 @@ import { join } from 'node:path'
 import { createChannelStore } from '../server/channel-store.mjs'
 import { createSpacesTools } from '../server/spaces-tools.mjs'
 import { readUiPreferences } from '../server/ui-preferences.mjs'
-import { CHANNEL_AUTO_EMOJI, channelAutoEmoji, channelAutoName, startsWithEmoji } from '../server/channel-emoji.mjs'
+import { CHANNEL_AUTO_EMOJI, bareChannelName, channelAutoEmoji, channelAutoName, startsWithEmoji } from '../server/channel-emoji.mjs'
 
 const dirs: string[] = [], closers: any[] = []
 afterEach(async () => { for (const c of closers.splice(0)) await c.close(); dirs.splice(0).forEach(d => rmSync(d, { recursive: true, force: true })) })
@@ -53,6 +53,11 @@ it('Channels on: a channel the owner already named without an emoji is reused as
   const old = store!.create({ name: 'Money', agent: 'hermes' })
   const got = (await call('spaces_create', { name: 'Money' })).space
   expect(got).toMatchObject({ id: old.id, name: 'Money' })
+  expect((await call('spaces_create', { name: '💰 Money' })).space.id).toBe(old.id) // words match without the emoji
+  expect((await call('spaces_create', { name: '🎯 money' })).space.id).toBe(old.id)
+  const exact = store!.create({ name: '💰 Money', agent: 'hermes' })
+  expect((await call('spaces_create', { name: '💰 Money' })).space.id).toBe(exact.id) // an exact name wins
+  expect(bareChannelName('💰 Money')).toBe('Money'); expect(bareChannelName('🚀')).toBe('🚀'); expect(bareChannelName('Money')).toBe('Money')
 })
 
 it('Channels off (classic Spaces): every name is stored exactly as given', async () => {

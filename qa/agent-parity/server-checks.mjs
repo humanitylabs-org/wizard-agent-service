@@ -710,6 +710,10 @@ export const serverChecks = {
     assert.ok(!JSON.stringify(found).includes('CONTENT_CANARY'))
     const created = (await tool('spaces_create', { name: 'Gateway Space' })).space
     assert.equal((await tool('spaces_create', { name: 'Gateway Space' })).space.id, created.id)
+    // wizard-ux issue 1580: with Channels off (classic Spaces) an agent's new Space keeps its name exactly as given.
+    const plain = (await tool('spaces_create', { name: 'Money' })).space
+    assert.equal(plain.name, 'Money', `${s.kind}: no emoji added with Channels off`)
+    await tool('spaces_delete', { space_id: plain.id })
     for (const name of ['spaces_add', 'spaces_remove', 'spaces_delete']) {
       const args = name === 'spaces_delete' ? {} : { thread_ids: ['wizard_parity'] }
       await tool(name, { space_id: foreign.id, ...args }, 'not_found')
@@ -1127,6 +1131,18 @@ export const serverChecks = {
     look(true)
     const made = await s.raw('/wizard/v1/channels', json('POST', { name: 'Synthetic switch channel', agent: s.id })); assert.equal(made.status, 201, 'the switch opens the store with no restart')
     const own = await made.json()
+    // wizard-ux issue 1580: with the switch on, a channel the agent creates through its own gateway gets a fitting
+    // emoji in front ("Money" -> "💰 Money"), is reused rather than made twice, and a name matching nothing stays as given.
+    const tool = async (name, args) => {
+      const r = await s.agentMcp('tools/call', { name, arguments: args }); assert.equal(r.status, 200, 'agent gateway authentication/transport')
+      const reply = (await r.json()).result; assert.notEqual(reply.isError, true, JSON.stringify(reply)); return JSON.parse(reply.content[0].text)
+    }
+    const money = (await tool('spaces_create', { name: 'Money' })).space
+    assert.equal(money.name, '💰 Money', `${s.kind}: the agent's channel gets its emoji`)
+    assert.equal((await tool('spaces_create', { name: 'Money' })).space.id, money.id, `${s.kind}: reused, never a second Money`)
+    assert.equal((await tool('spaces_create', { name: 'Zzzqx' })).space.name, 'Zzzqx', `${s.kind}: no match keeps the name`)
+    const stored = (await (await s.raw('/wizard/v1/channels')).json()).channels.find(c => c.id === money.id)
+    assert.equal(stored?.agent, s.id, `${s.kind}: filed under the calling agent`)
     assert.equal((await s.raw('/wizard/v1/channels/membership', json('PUT', { sessionId: 'wizard_parity', channelId: own.id }))).status, 200)
     assert.equal((await s.raw('/wizard/v1/channels/read')).status, 200, 'read marks come with the switch')
     assert.equal((await item(x => x.channel === own.id))?.channel, own.id, 'list rows carry the channel while on')

@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto'
 import { readUiPreferences, updateUiPreferences, fileInOneSpace } from './ui-preferences.mjs'
 import { spaceAgent, normalizeSpaceId } from './thread-spaces.mjs'
-import { channelAutoName } from './channel-emoji.mjs'
+import { channelAutoName, bareChannelName } from './channel-emoji.mjs'
 const threadId = /^[A-Za-z0-9._:-]{1,180}(?![\s\S])/u
 const schema = (properties = {}, required = []) => ({ type: 'object', properties, required, additionalProperties: false })
 const sid = { type: 'string', description: 'Exact existing own Space ID.' }
@@ -98,7 +98,9 @@ function channelCall(channels, name, args, agent, own) {
   if (name === 'spaces_create') {
     // wizard-ux issue 1580: a fitting emoji goes in front ("Money" -> "💰 Money"); a channel already named as asked
     // (with or without that emoji) is reused, never made twice.
-    const typed = args.name.trim(), same = channels.list({ agent }).channels.find(c => c.name.toLowerCase() === typed.toLowerCase())
+    // Words compare without a leading emoji, so "💰 Money" also finds an owner's plain "Money"; an exact name wins.
+    const typed = args.name.trim(), low = n => n.toLowerCase(), all = channels.list({ agent }).channels
+    const same = all.find(c => low(c.name) === low(typed)) || all.find(c => low(bareChannelName(c.name)) === low(bareChannelName(typed)))
     return { space: channelSummary(same ? channels.get(same.id) : channels.create({ name: channelAutoName(typed), agent, reuseName: true })) }
   }
   if (!own(args.space_id, agent)) fail('not_found') // may have been deleted while checking thread ownership
