@@ -5,7 +5,7 @@ import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { AgentInboxStore } from '../server/agent-inbox.mjs'
-import { AlertRulesFile, classifyEvent, createAlertGate, defaultRules, normalizeEvent, privateRouter, COLLAPSED_TITLE } from '../server/agent-alerts.mjs'
+import { AlertRulesFile, classifyEvent, createAlertGate, decideWithModel, defaultRules, normalizeEvent, privateRouter, COLLAPSED_TITLE } from '../server/agent-alerts.mjs'
 import { cardMarkdown } from '../server/agent-sweep.mjs'
 
 const T0 = Date.parse('2026-11-18T09:00:00Z')
@@ -107,6 +107,66 @@ describe('alert rules: stages', () => {
     expect(privateRouter(router)).toBe(true)
   })
 
+  it('a general event never goes to a model that is not private either (stage 3 is the private model only)', async () => {
+    const calls: any[] = []
+    const c = clock()
+    const inbox = new AgentInboxStore('', { now: c.now, log: () => undefined })
+    const gate = createAlertGate({ inbox, rules: new AlertRulesFile(''), now: c.now, log: () => undefined,
+      router: () => ({ url: 'https://api.openai.example/v1/chat/completions', model: 'cloud', account: 'tinfoil' }), fetchImpl: modelSaying(true, calls) as any })
+    const r = await gate.consider(mail({ ask: 'Synthetic invoice overdue', severity: 'urgent', privacy_class: 'general' }))
+    expect(r.record.kind).toBe('fyi')
+    expect(r.decision.rule).toBe('no_private_model')
+    expect(calls).toHaveLength(0)
+  })
+
+  it('privateRouter trusts the endpoint host, never the account label', () => {
+    expect(privateRouter({ url: 'https://api.openai.example/v1', account: 'tinfoil' })).toBe(false)
+    expect(privateRouter({ url: 'https://api.openai.example/v1', private: true })).toBe(false)
+    expect(privateRouter({ url: 'https://inference.tinfoil.sh/v1/chat/completions' })).toBe(true)
+    expect(privateRouter({ url: 'http://inference.tinfoil.sh/v1/chat/completions' })).toBe(false)
+    expect(privateRouter({ url: 'https://inference.tinfoil.sh.evil.example/v1' })).toBe(false)
+    expect(privateRouter({ url: 'http://agent-hermes-tinfoil:3301/v1/chat/completions' })).toBe(true)
+    expect(privateRouter({ url: 'http://localhost:8080/v1/chat/completions' })).toBe(true)
+    expect(privateRouter({ url: 'not a url' })).toBe(false)
+  })
+
+  it('a private-derived example never appears in any request to a router that is not private', async () => {
+    const calls: any[] = []
+    const c = clock()
+    const inbox = new AgentInboxStore('', { now: c.now, log: () => undefined })
+    const rules = new AlertRulesFile('')
+    let current: any = router
+    const gate = createAlertGate({ inbox, rules, now: c.now, log: () => undefined, router: () => current, fetchImpl: modelSaying(false, calls) as any,
+      notify: { available: () => true, send: async () => undefined } })
+    rules.edit({ senders: ['dr.smith@clinic.example'] })
+    const alert = (await gate.consider(mail({ sender: 'Dr Smith <dr.smith@clinic.example>', title: 'Biopsy results ready' }))).record
+    expect(alert.kind).toBe('alert')
+    expect(gate.feedback(alert.id, 'not_urgent')!.rules.examples.not_urgent[0]).toMatchObject({ privacy_class: 'private', sender: 'dr.smith@clinic.example' })
+    const general = (await gate.consider(mail({ sender: 'news@shop.example', title: 'Weekly synthetic deals', privacy_class: 'general' }))).record
+    gate.feedback(general.id, 'should_alert')
+    // The gate itself: a non-private router gets no call at all.
+    current = { url: 'https://api.openai.example/v1/chat/completions', model: 'cloud', account: 'tinfoil' }
+    await gate.consider(mail({ ask: 'Synthetic invoice overdue', severity: 'urgent', privacy_class: 'general' }))
+    expect(calls).toHaveLength(0)
+    // decideWithModel directly (defence in depth): only general-derived examples reach a non-private endpoint.
+    const sent: any[] = []
+    await decideWithModel(normalizeEvent(mail({ privacy_class: 'general', severity: 'urgent' })), rules.read(), { router: current, fetchImpl: modelSaying(false, sent) as any })
+    const body = JSON.stringify(sent)
+    expect(body).not.toMatch(/Biopsy|dr\.smith/u)
+    expect(body).toContain('news@shop.example')
+    // A private router may learn from every example.
+    current = router
+    await gate.consider(mail({ ask: 'Synthetic invoice overdue again', severity: 'urgent' }))
+    expect(calls).toHaveLength(1)
+    expect(JSON.stringify(calls)).toContain('dr.smith@clinic.example')
+  })
+
+  it('examples saved before privacy_class was stored count as private', () => {
+    const rules = new AlertRulesFile('')
+    rules.write({ ...defaultRules(), examples: { not_urgent: [{ sig: 'x|mail|old@example.test', sender: 'old@example.test', title: 'Old synthetic', at: 1 }], should_alert: [] } })
+    expect(rules.read().examples.not_urgent[0].privacy_class).toBe('private')
+  })
+
   it('a model failure leaves the event in the sweep', async () => {
     const c = clock()
     const inbox = new AgentInboxStore('', { now: c.now, log: () => undefined })
@@ -176,6 +236,26 @@ describe('alert rules: volume guard (fake clock)', () => {
     // Next day (after 05:00): alerts again.
     c.at = Date.parse('2026-11-19T06:00:00Z')
     expect((await gate.consider(mail({ sender: 'loud@example.test' }))).record.kind).toBe('alert')
+  })
+})
+
+describe('alert rules: cap under concurrency', () => {
+  it('alerts decided at the same moment never pass the daily cap together', async () => {
+    const c = clock()
+    const inbox = new AgentInboxStore('', { now: c.now, log: () => undefined })
+    const notified: any[] = []
+    let release: () => void = () => undefined
+    const gate = createAlertGate({ inbox, rules: new AlertRulesFile(''), now: c.now, timezone: () => 'UTC', log: () => undefined, router: () => router,
+      fetchImpl: (async (url: string, init: any) => { await new Promise<void>(r => { const prev = release; release = () => { prev(); r() } }); return modelSaying(true)(url, init) }) as any,
+      notify: { available: () => true, send: async (x: any) => { notified.push(x) } } })
+    const pending = Array.from({ length: 5 }, (_, i) => gate.consider(mail({ ask: `Synthetic urgent ${i}`, severity: 'urgent' })))
+    await new Promise(r => setTimeout(r, 20))
+    release()
+    const results = await Promise.all(pending)
+    expect(results.filter(r => r.record.kind === 'alert')).toHaveLength(3)
+    expect(inbox.alertsOfDay('2026-11-18')).toHaveLength(3)
+    expect(inbox.alertsOfDay('2026-11-18', { collapsed: true })).toHaveLength(1)
+    expect(notified.map(x => x.title).filter(t => t === COLLAPSED_TITLE)).toHaveLength(1)
   })
 })
 

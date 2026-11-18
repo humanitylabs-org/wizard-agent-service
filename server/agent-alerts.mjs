@@ -64,7 +64,9 @@ export function defaultRules() {
 
 const cleanList = (value, max) => [...new Set((Array.isArray(value) ? value : []).map(v => clip(v, max)).filter(Boolean))].slice(0, MAX_LIST)
 const cleanExample = e => e && typeof e === 'object' && typeof e.sig === 'string' && e.sig
-  ? { sig: clip(e.sig, 300), app: clip(e.app, 60), type: clip(e.type, 30), sender: clip(e.sender, 120), title: clip(e.title, 80), at: Number(e.at) || 0 }
+  // An example with no privacy_class (written before it was stored) counts as private.
+  ? { sig: clip(e.sig, 300), app: clip(e.app, 60), type: clip(e.type, 30), sender: clip(e.sender, 120), title: clip(e.title, 80), at: Number(e.at) || 0,
+    privacy_class: e.privacy_class === 'general' ? 'general' : 'private' }
   : null
 
 /** Owner-edited rules made safe: unknown fields dropped, lists capped, the daily cap between 1 and 20. */
@@ -187,7 +189,8 @@ export function exampleSig(event) {
   return `${event.app || ''}|${event.type || ''}|${who || `title:${lower(event.title)}`}`
 }
 
-const exampleOf = (event, at) => ({ sig: exampleSig(event), app: event.app, type: event.type, sender: event.sender?.email || event.sender?.name || '', title: event.title, at })
+const exampleOf = (event, at) => ({ sig: exampleSig(event), app: event.app, type: event.type, sender: event.sender?.email || event.sender?.name || '', title: event.title, at,
+  privacy_class: event.privacy_class === 'general' ? 'general' : 'private' })
 
 const senderHit = (event, senders) => {
   const email = event.sender?.email || ''
@@ -219,19 +222,35 @@ export function classifyEvent(event, rules, now = Date.now()) {
   return borderline ? { stage: 'model', decision: 'model', rule: 'borderline' } : { stage: 'rule', decision: 'sweep', rule: 'no_rule' }
 }
 
-/** A router the owner's private data may go to: Tinfoil, or a model on this box. */
+// Hosts the owner's private data may go to, checked on the endpoint itself (never on a configurable account label):
+// Tinfoil's attested inference host, an agent's on-box Tinfoil attestation proxy, or a model on this box.
+const TINFOIL_HOSTS = new Set(['inference.tinfoil.sh'])
+const ON_BOX_TINFOIL = /^(?:agent-)?[a-z0-9][a-z0-9-]{0,80}-tinfoil$/u
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
+
+/** A router the owner's private data may go to: Tinfoil (by host), or a model on this box. */
 export function privateRouter(router) {
   if (!router?.url) return false
-  if (String(router.account || '').toLowerCase() === 'tinfoil' || router.private === true) return true
-  try { return ['localhost', '127.0.0.1', '[::1]', '::1'].includes(new URL(router.url).hostname) } catch { return false }
+  try {
+    const url = new URL(router.url)
+    const host = url.hostname.toLowerCase()
+    if (LOOPBACK.has(host) || ON_BOX_TINFOIL.test(host)) return url.protocol === 'http:' || url.protocol === 'https:'
+    return url.protocol === 'https:' && TINFOIL_HOSTS.has(host)
+  } catch { return false }
 }
+
+/** The owner's examples a router may see: all of them for a private router, only general-derived ones otherwise. */
+export const examplesFor = (examples, router) => privateRouter(router) ? examples : examples.filter(e => e.privacy_class === 'general')
 
 /** Stage 3: the fast private model with the strict rubric. -> { urgent, reason } (throws on any failure). */
 export async function decideWithModel(event, rules, { router, fetchImpl = fetch, now = Date.now(), timeoutMs = 15_000 } = {}) {
   const line = e => `- ${[e.app, e.type, e.sender, e.title].filter(Boolean).join(' / ')}`
+  // Defence in depth: a private-derived example never reaches a router that is not private.
+  const shouldAlert = examplesFor(rules.examples.should_alert, router).slice(-10)
+  const notUrgent = examplesFor(rules.examples.not_urgent, router).slice(-10)
   const examples = [
-    rules.examples.should_alert.length ? `The owner said these SHOULD have alerted:\n${rules.examples.should_alert.slice(-10).map(line).join('\n')}` : '',
-    rules.examples.not_urgent.length ? `The owner said these were NOT urgent:\n${rules.examples.not_urgent.slice(-10).map(line).join('\n')}` : '',
+    shouldAlert.length ? `The owner said these SHOULD have alerted:\n${shouldAlert.map(line).join('\n')}` : '',
+    notUrgent.length ? `The owner said these were NOT urgent:\n${notUrgent.map(line).join('\n')}` : '',
   ].filter(Boolean).join('\n\n')
   const facts = { now: new Date(now).toISOString(), type: event.type, app: event.app, from: event.sender?.name || event.sender?.email || '', title: event.title, text: event.ask, deadline: event.deadline, starts_at: event.starts_at, severity: event.severity }
   const controller = new AbortController()
@@ -262,7 +281,8 @@ export function createAlertGate(options = {}) {
     const first = classifyEvent(event, current, at)
     if (first.decision !== 'model') return first
     const r = router()
-    if (!r || (event.privacy_class !== 'general' && !privateRouter(r))) return { stage: 'model', decision: 'sweep', rule: 'no_private_model' }
+    // Stage 3 is the PRIVATE model for every event, general ones too: no private router, the event waits for the sweep.
+    if (!r || !privateRouter(r)) return { stage: 'model', decision: 'sweep', rule: 'no_private_model' }
     try {
       const { urgent, reason } = await decideWithModel(event, current, { router: r, fetchImpl, now: at })
       log(`[agent-alerts] borderline event decided by the private model: ${urgent ? 'alert' : 'sweep'}`)
@@ -328,8 +348,9 @@ export function createAlertGate(options = {}) {
     // The same event posted again while this one was being decided: the first call's record wins, nothing is sent twice.
     const once = captured => (captured.created ? captured.record : null)
     const again = () => { const first = inbox.byDedupe(agent, dedupe); return { record: first, decision: first?.alert_decision || null, created: false } }
-    if (decision.decision === 'alert' && inbox.alertsOfDay(day).length < current.daily_cap) {
-      record = once(inbox.capture({ ...base, kind: 'alert' }, { ready: true, fields: { ...fields, alert_day: day, alert_delivered: true } }))
+    const underCap = decision.decision === 'alert' ? inbox.captureAlertUnderCap(day, current.daily_cap, base, { fields }) : null
+    if (underCap) {
+      record = once(underCap)
       if (!record) return again()
       record = inbox.update(record.id, { notified: await send(record) })
     } else if (decision.decision === 'alert') {
@@ -359,7 +380,7 @@ export function createAlertGate(options = {}) {
     const record = inbox.get(id)
     if (!record) return null
     const event = record.event ? { ...record.event } : eventOfRecord(record)
-    const example = exampleOf({ ...event, sender: event.sender || { name: '', email: '' }, title: record.title }, now())
+    const example = exampleOf({ ...event, sender: event.sender || { name: '', email: '' }, title: record.title, privacy_class: record.privacy_class }, now())
     if (record.event?.sig) example.sig = record.event.sig
     if (action === 'not_urgent') {
       if (record.kind !== 'alert') throw Object.assign(new Error('not an alert'), { status: 400 })
