@@ -185,6 +185,20 @@ describe('private first (issue 545)', () => {
     expect((await forced.internal('state')).json.on).toBe(false)
   })
 
+  it('Claude or ChatGPT connected before Tinfoil: the standard agent stays the box\'s agent', async () => {
+    const b = await box()
+    expect((await b.internal('standard-agent', { provider: 'anthropic', model: 'claude-opus-5-5' })).json).toMatchObject({ ok: true, agent: 'hermes' })
+    expect((await b.internal('private-agent', TINFOIL)).json).toMatchObject({ ok: true, agent: 'private' })
+    const list = await b.agents()
+    const main = list.find((a) => a.id === 'hermes')
+    expect(main).toMatchObject({ is_default: true })
+    expect(main.hidden).toBeFalsy()
+    expect(main.permissions.wizard_apps.length).toBe(4)
+    expect(list.find((a) => a.id === 'private')).toMatchObject({ is_default: false, permissions: { wizard_apps: [] } })
+    expect((await b.call('GET', '/wizard/v1/app-bindings')).json.bindings.every((x: any) => x.agent === 'hermes')).toBe(true)
+    expect((await b.internal('state')).json).toMatchObject({ on: true, private_agent: null, standard_on: true })
+  })
+
   it('an existing install is not migrated: no new default, app lists or bindings', async () => {
     const b = await box({ mainModel: 'gpt-6.1-sol' })
     const r = await b.internal('private-agent', TINFOIL)

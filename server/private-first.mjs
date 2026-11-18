@@ -140,15 +140,13 @@ export function createPrivateFirst({ on, registry, agentsDir, mainOptions, setDe
       if (!SLUG_RE.test(provider) || isConfidentialProvider(provider)) throw refusal(400, 'invalid_provider')
       const model = typeof body?.model === 'string' ? body.model.trim() : ''
       if (model && !MODEL_RE.test(model)) throw refusal(400, 'invalid_model')
-      const fresh = await freshness()
+      // Claude or ChatGPT connected before Tinfoil: the box now runs on the standard agent, so a later Tinfoil sign-in
+      // is no first run any more and never takes over the default, the apps or the bindings (Codex review on PR 547).
+      if (await freshness() && !privateAgentId()) save({ fresh: false })
       const main = registry.read(MAIN_AGENT_ID)
-      if (fresh && record()?.standard_on !== true) {
-        // A fresh box's standard agent starts with no apps; the owner ticks each one (spec section 5).
-        const patch = existsSync(join(agentsDir, '.main-agent.json')) ? {} : { permissions: { wizard_apps: [], agent_apps: [] } }
-        await registry.update(MAIN_AGENT_ID, { hidden: false, ...patch })
-      } else if (main?.hidden === true && main?.role !== 'recovery') {
-        await registry.update(MAIN_AGENT_ID, { hidden: false })
-      }
+      // After a private first run the standard agent is shown again with the no apps it was left with; the owner
+      // ticks each one (spec section 5).
+      if (main?.hidden === true && main?.role !== 'recovery') await registry.update(MAIN_AGENT_ID, { hidden: false })
       save({ standard_on: true, standard_at: Math.floor(Date.now() / 1000) })
       await attach()?.attach(provider)
       let options = null
