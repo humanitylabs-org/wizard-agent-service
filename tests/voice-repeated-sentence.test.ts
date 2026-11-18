@@ -5,11 +5,10 @@ import { join } from 'node:path'
 import { createWizardServer } from '../server/service.mjs'
 import { collapseSpeechRepeats } from '../server/speech-repeats.mjs'
 
-// wizard-messenger issue 298: James dictated two short things into a Messenger chat and every sentence arrived
-// twice ("To do my call because everyone was gonna go home from the cafe. To do my call because ..."). The reading
-// itself carried the repeat, so the transcription step every dictation, voice note and orb take uses drops it.
-const ONE = 'To do my call because everyone was gonna go home from the cafe.'
-const TWO = 'And it is a meditation call and it is quieter in our home.'
+// wizard-messenger issue 298: dictated sentences arrived twice in a row in a chat. The reading itself carried the
+// repeat, so the transcription step every dictation, voice note and orb take uses drops it. Synthetic sentences only.
+const ONE = 'Meet me at the station after the late meeting tonight.'
+const TWO = 'The blue kettle on the second shelf needs a new lid.'
 
 describe('a sentence the reading wrote twice comes out once', () => {
   it('drops a long sentence repeated back to back (the reported takes)', () => {
@@ -19,13 +18,19 @@ describe('a sentence the reading wrote twice comes out once', () => {
   })
 
   it('ignores case, spacing and punctuation differences between the copies', () => {
-    expect(collapseSpeechRepeats(`${ONE}  to do my call, because everyone was gonna go home from the cafe!`)).toBe(ONE)
+    expect(collapseSpeechRepeats(`${ONE}  meet me at the station, after the late meeting tonight!`)).toBe(ONE)
     expect(collapseSpeechRepeats(`${ONE} ${ONE.slice(0, -1)}`)).toBe(ONE)
   })
 
   it('keeps one copy of a whole passage said twice', () => {
     expect(collapseSpeechRepeats('Call me back. I will be home soon. Call me back. I will be home soon.'))
       .toBe('Call me back. I will be home soon.')
+  })
+
+  it('counts words in languages written without spaces', () => {
+    const zh = '我们明天早上在火车站门口见面吧。'
+    expect(collapseSpeechRepeats(zh + zh)).toBe(zh)
+    expect(collapseSpeechRepeats('好。好。')).toBe('好。好。')
   })
 
   it('drops a decoder loop of a shorter sentence', () => {

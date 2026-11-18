@@ -1,9 +1,9 @@
 // A speech-to-text reading sometimes writes a sentence twice in a row: the model decodes the end of a short take
-// again, so "Meet me at the cafe after the call." comes back as that sentence twice (wizard-messenger issue 298,
-// James's dictation 18 Nov 2026). Nobody says a long sentence twice word for word, so the repeat is dropped here, in
+// again, so "Meet me at the station after the late meeting." comes back as that sentence twice (wizard-messenger
+// issue 298). Nobody says a long sentence twice word for word, so the repeat is dropped here, in
 // the one transcription step every dictation, voice note and orb take goes through.
 //
-// The rule is the one Archimedes Anywhere tuned on James's own dictation (DictationCleanup.collapseRepeatedSentenceLoops
+// The rule is the one Archimedes Anywhere tuned on real dictation (DictationCleanup.collapseRepeatedSentenceLoops
 // in the Android app): a sentence of three or more words repeated three or more times in a
 // row is a decoder loop; a sentence of eight or more words that comes twice in a row is a repeat. Short repeats
 // ("No. No.", "Go. Go. Go.") are ordinary speech and stay. A take that is
@@ -13,7 +13,14 @@ const SENTENCE = /[^.!?。！？]+(?:[.!?。！？]+["'”’)\]]*|$)/gu
 const WORD = /[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu
 export const LONG_REPEAT_WORDS = 8
 
-const words = (text) => (String(text).toLowerCase().match(WORD) || [])
+// Words by the runtime's word segmenter, so languages written without spaces (Chinese, Japanese, Thai) count words
+// too; the regex is the fallback for a runtime without Intl.Segmenter.
+const SEGMENTER = typeof Intl?.Segmenter === 'function' ? new Intl.Segmenter(undefined, { granularity: 'word' }) : null
+const words = (text) => {
+  const lower = String(text).toLowerCase()
+  if (!SEGMENTER) return lower.match(WORD) || []
+  return [...SEGMENTER.segment(lower)].filter((part) => part.isWordLike).map((part) => part.segment)
+}
 const same = (a, b) => a.length === b.length && a.every((word, i) => word === b[i])
 
 const sentences = (text) => [...text.matchAll(SENTENCE)].filter((m) => m[0].trim()).map((m) => ({ text: m[0], words: words(m[0]) }))
