@@ -628,6 +628,22 @@
       "policy_exemptions": []
     },
     {
+      "id": "agent-inbox-move",
+      "description": "Open and Send to inbox (wizard-ux issue 1570, owner switch wizard/agent-inbox or WIZARD_AGENT_INBOX=1, off by default): POST /wizard/v1/agent-inbox/send hides a visible main-agent thread (Hermes hidden true), creates or updates its worker record (running while a turn is on its way, else a result waiting for the next sweep) and clears owner_turn_at so it stays hidden; POST /wizard/v1/agent-inbox/open shows a hidden thread again (Hermes hidden false) and stamps owner_turn_at so nothing hides it again. Each tap stores one route example {utterance, route chosen, route wanted, time} that the orb router reads as few-shot context, only when the router is private. Main agent only (the only agent whose threads are hidden): a routed agent's thread is refused with main_only, and a pinned thread (box-wide pinnedChats or Hermes pinned) cannot be sent.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP routes with agentInbox on: every kind refuses a routed agent's thread with 409 main_only. On main, a thread pinned through PATCH /wizard/v1/ui-preferences pinnedChats is refused with 409 pinned and stays visible; Send to inbox on the unpinned parity thread hides it, returns a worker record and drops it from view=list; Open shows it again and lists it; the store keeps two examples (agent->dump, then dump->agent). On host-profile, container and restricted the main agent is not in the scene, so no main thread is found and no record or example is written. tests/agent-inbox-open-send.test.ts covers the store (worker record, owner_turn_at cleared and set, one record per thread), the example cap and restart, the few-shot lines in the router prompt and the request body, switch off (404, nothing written), pinned, unknown, bad ids, methods and cross-site writes. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/agent-inbox.mjs",
+        "server/service.mjs",
+        "server/voice-router.mjs"
+      ],
+      "reference_tests": [
+        "tests/agent-inbox-open-send.test.ts"
+      ],
+      "fixture": "agent-inbox-move",
+      "policy_exemptions": []
+    },
+    {
       "id": "agent-alerts",
       "description": "Alert rules (issue 552, owner switch wizard/agent-inbox or WIZARD_AGENT_INBOX=1, off by default): a candidate event (POST /wizard/v1/agent-inbox/events from an app watcher, Mail first, or a finished worker record with a high or urgent severity) goes through fixed owner-editable rules first (named senders, keywords, payment failed, a meeting within 2 hours: an alert record, notified once through the notifications slot), then the owner's examples, then, for borderline events only, the fast private model with a strict rubric (decision and reason logged in /alert-log); everything else becomes a normal inbox record for the next sweep, nothing dropped. Not urgent on an alert and Should have alerted on a sweep item each append one example to alert-rules.json. More than 3 alerts in an alert day collapse into one alert and the next sweep card carries rules_flag.",
       "layer": "server",

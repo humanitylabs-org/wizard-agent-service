@@ -47,10 +47,21 @@ question with a short answer (\"what time is it in Tokyo?\").
 
 `
 
-export function routerSystemPrompt({ settings, apps, timezone, view, force, now, dump = false }) {
+// The owner's own corrections (wizard-ux issue 1570): each Open on a background task ("I wanted a visible thread") and
+// each Send to inbox on a visible thread ("this could have run in the background") is one example. The latest few go
+// into the dump rule as few-shot context, so the default drifts toward his habits. No retraining.
+const ROUTE_WORDS = { dump: 'dump (background task)', agent: 'agent (visible thread)' }
+export function examplesBlock(examples = []) {
+  const lines = (Array.isArray(examples) ? examples : [])
+    .filter(e => e && ROUTE_WORDS[e.wanted] && typeof e.utterance === 'string' && e.utterance.trim())
+    .slice(0, 8).map(e => `- ${JSON.stringify(clip(e.utterance, 200))} -> ${ROUTE_WORDS[e.wanted]}`)
+  return lines.length ? `The owner moved these earlier requests himself; route similar requests the way he wanted:\n${lines.join('\n')}\n\n` : ''
+}
+
+export function routerSystemPrompt({ settings, apps, timezone, view, force, now, dump = false, examples = [] }) {
   const place = settings?.owner?.place
   let system = ROUTER_SYSTEM
-    .replace('%DUMP%', dump ? DUMP_RULE : '')
+    .replace('%DUMP%', dump ? DUMP_RULE + examplesBlock(examples) : '')
     .replace('%APPS%', apps.length ? apps.join(', ') : 'none')
     .replace('%TODAY%', today(timezone || settings?.clock?.timezone, now))
     .replace('%PLACE%', place
@@ -125,7 +136,7 @@ export function dumpTitle(cmd, text) {
   return clip(bare.charAt(0).toUpperCase() + bare.slice(1), 60)
 }
 
-export async function routeUtterance({ input, settings, router, fetchImpl = fetch, now, dump = false }) {
+export async function routeUtterance({ input, settings, router, fetchImpl = fetch, now, dump = false, examples = [] }) {
   const text = clip(input?.text, 600)
   if (!text) throw Object.assign(new Error('empty'), { status: 400 })
   const apps = (Array.isArray(input?.apps) ? input.apps : []).map((name) => clip(name, 40)).filter(Boolean).slice(0, 60)
@@ -133,7 +144,7 @@ export async function routeUtterance({ input, settings, router, fetchImpl = fetc
   const view = input?.view && typeof input.view === 'object'
     ? { name: clip(input.view.name, 80), kind: clip(input.view.kind, 40) } : null
   const timezone = clip(input?.timezone, 64)
-  const system = routerSystemPrompt({ settings, apps, timezone, view, force, now, dump })
+  const system = routerSystemPrompt({ settings, apps, timezone, view, force, now, dump, examples })
   const started = Date.now()
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), 30_000)

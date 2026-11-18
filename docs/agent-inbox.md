@@ -45,10 +45,27 @@ record for a non-private model, for the later steps that may ask a model to fill
 A worker thread the Service starts for a capture (the orb dump, `worker: true` on its record) is hidden in Hermes, so it
 stays out of the chat list, Activity, Channels, unread counts and badges. Reading it by id still works, so every link
 (sweep card, Running view, Ready, notification) opens it; reading it never unhides it. `AgentInboxStore.mayHide` is the
-one rule for any later hide (Send to inbox, wizard-ux issue 1570): only a Service-started worker thread, never one the
+one rule for any later hide: only a Service-started worker thread (or one the owner sent there, below), never one the
 owner started. When the owner sends a turn in a hidden worker thread, the Service shows it again (Hermes `hidden: false`)
 and stamps `owner_turn_at` on its records, so it is never hidden after that. The shell's Running view reads
 `GET /wizard/v1/agent-inbox?state=running,stale`.
+
+## Open and Send to inbox (wizard-ux issue 1570)
+
+One tap fixes a wrong routing either way. Main agent only (its threads are the only hidden ones); a routed agent's
+thread answers 409 `main_only`.
+
+- `POST /wizard/v1/agent-inbox/open` `{ thread_id, utterance? }` -> `{ record, hidden: false, example }`: Hermes
+  `hidden: false`, then `owner_turn_at` on the thread's records, so nothing hides it again until the owner sends it back.
+- `POST /wizard/v1/agent-inbox/send` `{ thread_id, title?, utterance? }` -> `{ record, hidden: true, example }`: refused
+  with 409 `pinned` for a thread the owner pinned (ui-preferences `pinnedChats`, or Hermes `pinned`). Hermes `hidden: true`, then the thread's record (or a new one, source
+  `chats:send`) becomes a worker record with `owner_turn_at` cleared: `running` while a turn is still on its way (its
+  status line updates it as usual), otherwise a result waiting for the next sweep. Sending is the owner's own choice, so
+  it is the one way a thread he started becomes a worker thread.
+
+Each tap stores one example `{ at, utterance, chosen, wanted, privacy_class }` (the words said, else the record's ask;
+newest first, 50 kept). The orb router (`/wizard/v1/route` with the dump route) puts the latest 8 into its prompt as
+few-shot lines, only when the router is private (`privateRouter`, by endpoint host). No retraining.
 
 ## Signal sweep card (issue 550)
 

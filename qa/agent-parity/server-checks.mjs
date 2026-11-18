@@ -949,6 +949,50 @@ export const serverChecks = {
       await settle(() => s.sessions.get(second.thread_id)?.hidden === false, 'the owner steering the worker shows its thread again')
     } finally { await new Promise(r => fake.close(r)) }
   },
+  // Wizard-ux issue 1570: Open (a hidden worker thread moves into the chat list) and Send to inbox (a visible thread
+  // moves into the background), each tap one route example for the orb router. Main agent only: a routed thread is
+  // refused, never half moved.
+  'agent-inbox-move': async s => {
+    const json = body => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const examples = () => { const f = join(s.root, 'agent-inbox.json'); return existsSync(f) ? JSON.parse(readFileSync(f, 'utf8')).route_examples || [] : [] }
+    const routed = await s.raw('/wizard/v1/agent-inbox/send', json({ thread_id: 'wizard_parity', agent: s.id === 'hermes' ? 'research' : s.id }))
+    assert.deepEqual([routed.status, (await routed.json()).error], [409, 'main_only'], `${s.kind}: a routed agent's thread is refused`)
+    if (s.kind !== 'main') {
+      // The orb's main agent is not in this scene: its thread cannot be found, and nothing is written.
+      const none = await s.raw('/wizard/v1/agent-inbox/send', json({ thread_id: 'wizard_parity' }))
+      assert.notEqual(none.status, 200, `${s.kind}: no main thread to move`)
+      assert.deepEqual((await (await s.raw('/wizard/v1/agent-inbox')).json()).records, [], `${s.kind}: no record`)
+      assert.deepEqual(examples(), [], `${s.kind}: no example`)
+      return
+    }
+    const listed = async () => ((await (await s.request('/api/sessions?view=list&limit=100')).json()).data || []).some(x => x.id === 'wizard_parity')
+    const settle = async (want, label) => { for (let n = 0; n < 80; n++) { if (await listed() === want) return; await new Promise(r => setTimeout(r, 50)) } assert.fail(label) }
+    const thread = s.sessions.get('wizard_parity')
+    thread.hidden = false
+    // A row only lists with an owner message in it.
+    if (!thread.messages.some(m => m.role === 'user')) thread.messages.push({ id: 'move-user-1', role: 'user', timestamp: Date.now() / 1000, content: 'Synthetic quarterly numbers' })
+    await settle(true, 'the visible thread lists before it is sent')
+    // A thread pinned through the box's ui-preferences stays in Chats.
+    const prefs = (op) => s.raw('/wizard/v1/ui-preferences', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ops: [{ op, key: 'pinnedChats', item: 'wizard_parity' }] }) })
+    assert.equal((await prefs('add')).status, 200)
+    const pinned = await s.raw('/wizard/v1/agent-inbox/send', json({ thread_id: 'wizard_parity' }))
+    assert.deepEqual([pinned.status, (await pinned.json()).error], [409, 'pinned'], 'a pinned thread cannot be sent')
+    assert.equal(s.sessions.get('wizard_parity').hidden, false, 'a refused send hides nothing')
+    assert.equal((await prefs('remove')).status, 200)
+    const sent = await s.raw('/wizard/v1/agent-inbox/send', json({ thread_id: 'wizard_parity', utterance: 'Synthetic quarterly numbers' }))
+    assert.equal(sent.status, 200, await sent.clone().text())
+    const { record } = await sent.json()
+    assert.equal(s.sessions.get('wizard_parity').hidden, true, 'Send to inbox hides the thread')
+    assert.equal(record.worker, true, 'its record is a worker record')
+    assert.ok(['running', 'new'].includes(record.state), 'its result waits for the sweep')
+    await settle(false, 'a sent thread leaves the chat list')
+    const opened = await s.raw('/wizard/v1/agent-inbox/open', json({ thread_id: 'wizard_parity' }))
+    assert.equal(opened.status, 200, await opened.clone().text())
+    assert.equal((await opened.json()).record.id, record.id)
+    assert.equal(s.sessions.get('wizard_parity').hidden, false, 'Open shows the thread again')
+    await settle(true, 'an opened thread lists in Chats')
+    assert.deepEqual(examples().map(e => [e.utterance, e.chosen, e.wanted]), [['Synthetic quarterly numbers', 'dump', 'agent'], ['Synthetic quarterly numbers', 'agent', 'dump']], 'each tap stores one example')
+  },
   // Issue 550: the signal sweep card. Built from the agent inbox, posted as the last row of today's Daily thread of
   // the main agent, and every tap posts that token's full resume message into the record's own thread (this kind's).
   'agent-sweep': async s => {

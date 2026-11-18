@@ -26,6 +26,8 @@ export const INBOX_STATES = new Set(['running', 'new', 'surfaced', 'answered', '
 export const NO_SUMMARY = 'Finished without a summary. Open it to read.'
 export const STALE_NOTE = 'No news for 6 h.'
 export const START_FAILED = 'Could not start this task. Open it or say it again.'
+export const SENT_NOTE = 'Sent here from Chats. Open it to read.'
+export const ROUTE_EXAMPLES = 50
 export const STALE_MS = 6 * 3600_000
 const NIGHTLY_MS = 24 * 3600_000
 // Finished worker runs older than this are not checked (their records may have been pruned on purpose).
@@ -106,6 +108,8 @@ export class AgentInboxStore {
         // Alert rules (issue 552): the decision log and a pending "rules too loose" flag for the next sweep.
         if (Array.isArray(parsed.alert_log)) this.data.alert_log = parsed.alert_log
         if (parsed.rules_flag && typeof parsed.rules_flag === 'object') this.data.rules_flag = parsed.rules_flag
+        // Open / Send to inbox taps (wizard-ux issue 1570): the orb router's few-shot examples, newest first.
+        if (Array.isArray(parsed.route_examples)) this.data.route_examples = parsed.route_examples
       }
     } catch { /* an unreadable store starts empty; the original bytes stay on disk until the next write */ }
   }
@@ -203,6 +207,53 @@ export class AgentInboxStore {
   mayHide(agent, thread) {
     const records = Object.values(this.data.records).filter(r => r.agent === (agent || 'hermes') && r.thread_id === thread)
     return records.some(r => r.worker === true || r.source === 'orb:dump') && !records.some(r => r.owner_turn_at)
+  }
+
+  /** Send to inbox (wizard-ux issue 1570): the owner moves a visible thread into the background. The thread's record
+   *  (or a new one) becomes a worker record the Service may hide (`worker: true`, every `owner_turn_at` cleared), so
+   *  its next result reaches the sweep. `running`: a turn is still on its way, so the record waits for it; otherwise
+   *  the thread is already done and waits in the inbox as a result. Returns the record. */
+  sendToInbox(agent = 'hermes', thread = '', { title = '', ask = '', running = false } = {}) {
+    if (!THREAD_ID.test(String(thread))) throw Object.assign(new Error('invalid thread'), { status: 400 })
+    const dedupe = hash(`${agent}\nchats:send\n${thread}`).slice(0, 32)
+    let record = this.linked(agent, thread) || Object.values(this.data.records).find(r => r.agent === agent && r.dedupe_hash === dedupe) || null
+    if (!record) {
+      record = this.data.records[this.capture({ agent, thread_id: thread, source: 'chats:send', kind: 'note', title: clip(title, 60) || clip(ask, 60) || 'Background task', ask, dedupe_hash: dedupe }, { fields: { worker: true } }).record.id]
+    }
+    const t = this.now()
+    for (const r of Object.values(this.data.records)) if (r.agent === agent && r.thread_id === thread) delete r.owner_turn_at
+    record.worker = true
+    record.sent_at = t
+    if (running) Object.assign(record, { state: 'running', kind: record.kind === 'needs_you' ? 'note' : record.kind })
+    else Object.assign(record, { state: 'new', kind: 'result', last_update: SENT_NOTE })
+    record.updated_at = t
+    this.#save()
+    return { ...record }
+  }
+
+  /** Open (wizard-ux issue 1570): the owner moves a hidden thread into the chat list. Like his own turn there, it is
+   *  his chat from now on (`owner_turn_at`), so nothing hides it again until he sends it back. Returns its record. */
+  openFromInbox(agent = 'hermes', thread = '') {
+    const record = this.linked(agent, thread)
+    this.ownerTurn(agent, thread)
+    return record ? { ...this.data.records[record.id] } : null
+  }
+
+  /** One Open / Send to inbox tap as an example for the orb router (wizard-ux issue 1570): what was said (or the
+   *  thread's first message), the route the orb chose and the route the owner wanted. Newest first, capped. */
+  addRouteExample({ utterance = '', chosen = '', wanted = '', privacy_class = 'private' } = {}) {
+    const text = clip(utterance, 200)
+    const ok = route => route === 'agent' || route === 'dump'
+    if (!text || !ok(chosen) || !ok(wanted) || chosen === wanted) return null
+    const example = { at: this.now(), utterance: text, chosen, wanted, privacy_class: privacy_class === 'general' ? 'general' : 'private' }
+    this.data.route_examples = [example, ...(Array.isArray(this.data.route_examples) ? this.data.route_examples : [])].slice(0, ROUTE_EXAMPLES)
+    this.#save()
+    return { ...example }
+  }
+
+  /** The latest route examples, newest first. */
+  routeExamples(limit = 8) {
+    return (Array.isArray(this.data.route_examples) ? this.data.route_examples : []).slice(0, Math.max(0, Math.min(ROUTE_EXAMPLES, Number(limit) || 0))).map(e => ({ ...e }))
   }
 
   /** The owner typed in this thread: true when a record on it has not been told yet (the Service then shows the thread
