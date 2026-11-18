@@ -197,6 +197,31 @@ export class AgentInboxStore {
 
   has(agent, thread) { return Object.values(this.data.records).some(r => r.agent === (agent || 'hermes') && r.thread_id === thread) }
 
+  /** Hidden worker threads (issue 1569). Only a thread the Service started itself for a capture (`worker: true`, set
+   *  before the thread exists) may be hidden, and never once the owner has typed in it: a thread the owner started or
+   *  wrote in is his chat and always lists. An orb dump record written before `worker` existed is a worker too. */
+  mayHide(agent, thread) {
+    const records = Object.values(this.data.records).filter(r => r.agent === (agent || 'hermes') && r.thread_id === thread)
+    return records.some(r => r.worker === true || r.source === 'orb:dump') && !records.some(r => r.owner_turn_at)
+  }
+
+  /** The owner typed in this thread: true when a record on it has not been told yet (the Service then shows the thread
+   *  again and calls ownerTurn once that worked). */
+  ownerTurnPending(agent, thread) {
+    return Object.values(this.data.records).some(r => r.agent === (agent || 'hermes') && r.thread_id === thread && !r.owner_turn_at)
+  }
+
+  ownerTurn(agent, thread) {
+    const t = this.now(), marked = []
+    for (const r of Object.values(this.data.records)) {
+      if (r.agent !== (agent || 'hermes') || r.thread_id !== thread || r.owner_turn_at) continue
+      r.owner_turn_at = t
+      marked.push({ ...r })
+    }
+    if (marked.length) this.#save()
+    return marked
+  }
+
   /** A worker run seen by the Service. Active runs change nothing; a finished run applies its status line (or the
    *  no-summary result). The same run output read again (list polls, history reads) is applied once.
    *  `continues`: more work is still on its way for this thread (another queued run, owed background work), so a

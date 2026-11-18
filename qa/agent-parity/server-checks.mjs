@@ -892,6 +892,30 @@ export const serverChecks = {
       Object.assign(run, { status: 'completed', updated_at: Date.now() / 1000, output: `Found three.\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'done', ask: 'Three Lisbon flights found' })}[/WIZARD_STATUS_V1]` })
       assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
       await settle(async () => { const got = await record(); return got.kind === 'result' && got.last_update === 'Three Lisbon flights found' ? got : null }, 'the finished worker updates the record')
+      // Issue 1569: the hidden thread still opens from any link (read by id), and stays out of the list while read.
+      const opened = await s.request(`/api/sessions/${encodeURIComponent(cmd.thread_id)}/messages?view=wizard`)
+      assert.equal(opened.status, 200, 'a hidden worker thread reads by id')
+      assert.ok(JSON.stringify(await opened.json()).includes('Research flights to Lisbon by Friday'), 'its messages come back')
+      assert.equal(s.sessions.get(cmd.thread_id)?.hidden, true, 'reading it does not unhide it')
+      // A thread the owner typed in is his chat: it lists again and is never hidden after that.
+      const typed = await s.request('/v1/runs', post({ session_id: cmd.thread_id, input: 'Also check Porto' }))
+      assert.equal(typed.status, 202, 'the owner can write in a hidden worker thread')
+      await settle(() => s.sessions.get(cmd.thread_id)?.hidden === false, 'the owner typing in the worker thread shows it again')
+      const shown = await settle(async () => { const l = await (await s.request('/api/sessions?view=list&limit=100')).json(); return (l.data || []).some(x => x.id === cmd.thread_id) ? l : null }, 'the thread lists once the owner typed in it')
+      assert.ok(shown)
+      assert.ok((await record()).owner_turn_at > 0, 'the record remembers the owner typed in it')
+      // Typing while a hidden worker still runs (a steer of its turn) shows the thread again too.
+      reply = { route: 'agent', summary: 'table' }
+      const second = (await (await say('Book a table for Saturday night', { accept_dump: true })).json()).cmd
+      assert.equal(second.route, 'dump')
+      await settle(() => s.sessions.get(second.thread_id)?.hidden === true, 'the second worker thread is hidden')
+      const queue = new DatabaseSync(join(s.root, 'queue.sqlite3'), { readOnly: true })
+      let publicRun
+      try { publicRun = await settle(() => queue.prepare('SELECT public_run_id FROM wizard_run_queue WHERE idempotency_key = ?').get(`wizard-inbox-${second.record_id}`)?.public_run_id, 'the worker turn is on the queue') }
+      finally { queue.close() }
+      // (a turn still launching answers 409 until it runs, as the shell's own steer retry sees)
+      await settle(async () => [200, 202].includes((await s.request(`/v1/runs/${encodeURIComponent(publicRun)}/steer`, post({ input: 'Make it 8 pm' }))).status), 'the owner can steer the hidden worker')
+      await settle(() => s.sessions.get(second.thread_id)?.hidden === false, 'the owner steering the worker shows its thread again')
     } finally { await new Promise(r => fake.close(r)) }
   },
   // Issue 550: the signal sweep card. Built from the agent inbox, posted as the last row of today's Daily thread of

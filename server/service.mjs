@@ -3807,8 +3807,9 @@ function buildWizardServer(options, lifetime) {
     try {
       const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${agentQuery}`, { id: record.thread_id, title: record.title, source: 'wizard-mobile', hidden: true })
       if (!created.ok && created.status !== 409) throw new Error(`session ${created.status}`)
-      // Stock Hermes keeps `hidden` out of a create body; the PATCH is what hides it from every list and count.
-      await hermesJson(`/api/sessions/${encodeURIComponent(record.thread_id)}`, { method: 'PATCH', body: JSON.stringify({ hidden: true }) })
+      // Stock Hermes keeps `hidden` out of a create body; the PATCH is what hides it from every list and count. Only a
+      // worker thread the owner never typed in is hidden (issue 1569, AgentInboxStore.mayHide).
+      if (agentInbox.mayHide(MAIN_AGENT_ID, record.thread_id)) await hermesJson(`/api/sessions/${encodeURIComponent(record.thread_id)}`, { method: 'PATCH', body: JSON.stringify({ hidden: true }) })
       const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${agentQuery}`, { session_id: record.thread_id, input: words }, `${INBOX_RUN_PREFIX}${record.id}`)
       if (!run.ok) throw new Error(`run ${run.status}`)
       return String(run.payload?.run_id || run.payload?.id || '')
@@ -3826,7 +3827,7 @@ function buildWizardServer(options, lifetime) {
       deadline: cmd.deadline || null, privacy_class: 'private',
       // The same words said twice the same day are one task (a double capture); the same chore next week is a new one.
       dedupe_hash: createHash('sha256').update(`${MAIN_AGENT_ID}\norb\n${day}\n${words.toLowerCase()}`).digest('hex').slice(0, 32),
-    })
+    }, { fields: { worker: true } })
     // Said again after its worker could not start: the same record starts again (same idempotency key).
     const retry = created ? null : agentInbox.retryStart(record.id)
     if (created || retry) {
@@ -3835,6 +3836,19 @@ function buildWizardServer(options, lifetime) {
       started.finally(() => dumpRuns.delete(record.id)).catch(() => undefined)
     }
     return { record_id: record.id, thread_id: record.thread_id, created, ...(retry ? { restarted: true } : {}) }
+  }
+  // A thread the owner typed in is his chat (issue 1569): a hidden worker thread he writes in lists in Chats again, and
+  // the record remembers it so the thread is never hidden after that. The send itself never waits on this; a failed
+  // unhide is tried again at his next turn (the record is only marked once Hermes took it).
+  const inboxOwnerTurn = (agent, sessionId) => {
+    if (!sessionId || !agentInboxOn() || !agentInbox.ownerTurnPending(agent, sessionId)) return
+    const hidden = agent === MAIN_AGENT_ID && agentInbox.mayHide(agent, sessionId)
+    void (async () => {
+      try {
+        if (hidden) await hermesJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'PATCH', body: JSON.stringify({ hidden: false }) })
+        agentInbox.ownerTurn(agent, sessionId)
+      } catch (error) { console.warn(`[agent-inbox] owner thread not shown again: ${error?.message || error}`) }
+    })()
   }
   // The worker's run note: nobody is watching this thread, so it works the task through and reports in its status line.
   const dumpRunNote = sessionId => {
@@ -7801,7 +7815,11 @@ function buildWizardServer(options, lifetime) {
           ? operatorWorkers.get(queuedProxyRecord.upstreamRunId)
           : null
         if (queuedPath && !queuedProxyRecord) { sendJson(response, 404, { error: 'not_found' }); return }
-        if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'steer') heavyWork?.supersede(queuedProxyRecord.sessionId)
+        if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'steer') {
+          heavyWork?.supersede(queuedProxyRecord.sessionId)
+          // The owner typing while a hidden worker runs is a turn of his too (issue 1569): the thread lists again.
+          if (queuedProxyRecord.runtime === 'direct' && principal.kind === 'owner') inboxOwnerTurn(MAIN_AGENT_ID, queuedProxyRecord.sessionId)
+        }
         if (queuedProxyRecord && request.method === 'POST' && queuedPath[2] === 'stop') heavyWork?.stopSession(queuedProxyRecord.sessionId)
         // Record the owner's Stop before it reaches Hermes, so the resulting `cancelled` is never auto-resumed.
         if (runQueue && request.method === 'POST' && /^\/v1\/runs\/[^/]+\/stop$/.test(upstreamPath)) runQueue.markOwnerStop(upstreamPath.split('/')[3])
@@ -7967,6 +7985,7 @@ function buildWizardServer(options, lifetime) {
           if (sweepAsked) await sweepForTurn(queuedAdmission.sessionId, sweepAsked)
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
           if (sweepAsked && admitted.replayed) sweepNotes.delete(queuedAdmission.sessionId)
+          if (queuedAdmission.runtime === 'direct' && principal.kind === 'owner' && !queuedAdmission.continuation) inboxOwnerTurn(MAIN_AGENT_ID, queuedAdmission.sessionId)
           // A durable queue receipt is not proof that Hermes has materialized this session.
           if (await agents?.catalogContains(MAIN_AGENT_ID, queuedAdmission.sessionId) === true) agents.pin(queuedAdmission.sessionId, MAIN_AGENT_ID, 'runtime_verified')
           if (!quietWatcherAdmission) threadDispositionStore.clearSession(queuedAdmission.runtime, queuedAdmission.sessionId)

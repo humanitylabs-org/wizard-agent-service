@@ -46,6 +46,25 @@ describe('agent inbox store', () => {
     expect(s.retryStart(made.id)).toBeNull()
   })
 
+  it('issue 1569: only a Service-started worker thread may be hidden, never a thread the owner started or typed in', () => {
+    const s = store()
+    // A thread the owner started himself has no worker record (a capture from his own thread is not a worker).
+    expect(s.mayHide('hermes', 'wizard_owner_1')).toBe(false)
+    s.capture({ thread_id: 'wizard_owner_1', title: 'From my chat', ask: 'Look into this later' })
+    expect(s.mayHide('hermes', 'wizard_owner_1')).toBe(false)
+    // The orb's worker thread may be hidden until the owner writes in it; after that, never again.
+    s.capture({ thread_id: 'wizard_worker_9', title: 'Flights', ask: 'Research flights to Lisbon' }, { fields: { worker: true } })
+    expect(s.mayHide('hermes', 'wizard_worker_9')).toBe(true)
+    expect(s.mayHide('other', 'wizard_worker_9')).toBe(false)
+    expect(s.ownerTurnPending('hermes', 'wizard_worker_9')).toBe(true)
+    expect(s.ownerTurn('hermes', 'wizard_worker_9')).toHaveLength(1)
+    expect(s.ownerTurnPending('hermes', 'wizard_worker_9')).toBe(false)
+    expect(s.ownerTurn('hermes', 'wizard_worker_9')).toEqual([])
+    expect(s.mayHide('hermes', 'wizard_worker_9')).toBe(false)
+    // An orb dump record kept from before the worker marker is still a worker (its thread is already hidden).
+    s.capture({ thread_id: 'wizard_worker_8', title: 'Old dump', ask: 'Plan the move', source: 'orb:dump' })
+    expect(s.mayHide('hermes', 'wizard_worker_8')).toBe(true)
+  })
   it('every finished worker run updates exactly one record: needs_you, done, fyi, no status line, killed', () => {
     const s = store()
     const r = task(s)
