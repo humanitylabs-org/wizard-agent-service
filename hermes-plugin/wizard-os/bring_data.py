@@ -486,6 +486,12 @@ class Source:
         for archive in self.zips:
             archive.close()
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self.close()
+
 
 def _prefix(name: str) -> str:
     parent = PurePosixPath(name).parent.as_posix()
@@ -1191,6 +1197,12 @@ def _scan(args: dict) -> dict:
     existing = _existing_skill_names()
     # Stock Hermes homes carry the bundled skills too: list only the ones this agent lacks in full.
     new_skills, already = [], []
+    if history:  # History keeps every old skill that differs from this agent's own copy, as a document
+        texts = _skill_texts_here()
+        with Source(path) as src_again:
+            same = {s["name"] for s in data["skills"] if s["has_skill_md"] and _sha(src_again.text(
+                f"{_prefix_}skills/{s['path']}/SKILL.md", MAX_SKILL_FILE).strip()) in texts.get(s["name"].lower(), set())}
+        existing = {n.lower() for n in same}
     for s in data["skills"]:
         if s["name"].lower() in existing or not s["has_skill_md"]:
             already.append(s["name"])
@@ -1922,7 +1934,9 @@ def run_import(args: dict) -> dict:
                 errors[name] = done[name]["file_error"]
         except (ValueError, OSError, ImportError, zipfile.BadZipFile, json.JSONDecodeError, sqlite3.DatabaseError) as error:
             errors[name] = _plain(error)
-    _record(import_id, imported_at=int(time.time()), via="importer")
+    made = (done.get("chats", {}).get("chats_written"), done.get("skills", {}).get("documents"),
+            done.get("facts", {}).get("facts_added"), done.get("schedules", {}).get("created")) if history else ()
+    _record(import_id, imported_at=int(time.time()), via="importer", **({"history_done": True} if any(made) else {}))
     return {"import_id": import_id, "done": done, "errors": errors}
 
 
@@ -2402,7 +2416,8 @@ def _hermes_cron(src: Source, prefix: str) -> list[dict]:
             continue
         why = "runs a script from the old agent" if row.get("script") else "script-only job" if row.get("no_agent") else ""
         prompt = scrub(str(row.get("prompt") or ""))[:4000]
-        skills = [str(n)[:80] for n in ([row.get("skill")] + list(row.get("skills") or [])) if isinstance(n, str) and n][:5]
+        skills = [scrub(n)[:80] for n in ([row.get("skill")] + list(row.get("skills") or [])) if isinstance(n, str) and n]
+        skills = [n for n in skills if not _SCRUBBED.search(n)][:5]  # a "name" that was a key is no skill name
         out.append({"id": row["id"], "name": scrub(str(row.get("name") or row["id"]))[:120],
                     "when": _when_words(row.get("schedule")), "schedule": row.get("schedule") if isinstance(row.get("schedule"), dict) else None,
                     "timezone": row.get("timezone") if isinstance(row.get("timezone"), str) else None,
@@ -2440,7 +2455,6 @@ def skill_documents(args: dict) -> dict:
     try:
         if kind != "hermes":
             raise ValueError("Only an earlier Hermes agent's skills come in as History.")
-        existing = _existing_skill_names()
         label = SOURCES[kind]
         root = files_root() / IMPORT_DIR / label
         folder = root / HISTORY_SKILL_DIR
@@ -2448,11 +2462,14 @@ def skill_documents(args: dict) -> dict:
         for skill in data["skills"]:
             if wanted != "all" and (not isinstance(wanted, list) or skill["name"].lower() not in {str(n).lower() for n in wanted}):
                 continue
-            if skill["name"].lower() in existing or not skill["has_skill_md"]:
-                skipped.append({"name": skill["name"], "reason": "this agent already has it" if skill["has_skill_md"]
-                                else "its SKILL.md could not be read safely"})
+            if not skill["has_skill_md"]:
+                skipped.append({"name": skill["name"], "reason": "its SKILL.md could not be read safely"})
                 continue
-            body = scrub(src.text(f"{prefix}skills/{skill['path']}/SKILL.md", MAX_SKILL_FILE))
+            raw = src.text(f"{prefix}skills/{skill['path']}/SKILL.md", MAX_SKILL_FILE)
+            if _same_skill_here(skill["name"], raw):  # the stock skill both agents ship, unchanged: nothing of the past
+                skipped.append({"name": skill["name"], "reason": "this agent has the very same skill"})
+                continue
+            body = scrub(raw)
             others = [f for f in skill["files"] if f != "SKILL.md"]
             doc = [f"# Old skill: {skill['name']}", "",
                    f"*From your earlier agent ({label}), read-only reference.* This is not an active skill. When a task "
@@ -2476,6 +2493,24 @@ def skill_documents(args: dict) -> dict:
                 "folder": f"{IMPORT_DIR}/{label}/{HISTORY_SKILL_DIR}"}
     finally:
         src.close()
+
+
+def _skill_texts_here() -> dict:
+    """This agent's own SKILL.md files by skill name: name -> set of content hashes."""
+    out = {}
+    root = hermes_home() / "skills"
+    for skill_md in root.rglob("SKILL.md") if root.is_dir() else []:
+        try:
+            text = skill_md.read_text("utf-8", errors="ignore")
+        except OSError:
+            continue
+        for name in {skill_md.parent.name.lower(), str(_frontmatter(text[:4000]).get("name") or "").lower()} - {""}:
+            out.setdefault(name, set()).add(_sha(text.strip()))
+    return out
+
+
+def _same_skill_here(name: str, text: str) -> bool:
+    return _sha(text.strip()) in _skill_texts_here().get(name.lower(), set())
 
 
 def _rebuild_skill_index(root: Path, label: str) -> None:
@@ -2631,7 +2666,7 @@ def history_note() -> str:
         return ""
     if _NOTE_CACHE.get("key") != (str(path), stamp):
         reg = _registry()
-        _NOTE_CACHE.update(key=(str(path), stamp), on=any(isinstance(v, dict) and v.get("history") and v.get("imported_at")
+        _NOTE_CACHE.update(key=(str(path), stamp), on=any(isinstance(v, dict) and v.get("history_done")
                                                           for v in reg.values()))
     return HISTORY_NOTE if _NOTE_CACHE.get("on") else ""
 

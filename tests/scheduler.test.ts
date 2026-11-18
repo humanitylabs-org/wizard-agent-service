@@ -911,6 +911,9 @@ describe('windows, reminders and trickled agent work', () => {
     expect(server.scheduler.list()).toHaveLength(1)
     expect((await call('cancel', { session_id: 'wizard-importer', schedule_id: saved.id, any_thread: true })).status).toBe(200)
     expect(server.scheduler.list()).toHaveLength(0)
+    const back = await (await call('import-history', { session_id: 'wizard-importer', source: 'abc123', jobs: [jobs[0]] })).json()
+    expect(back.results[0].status).toBe('imported (paused)')  // an undone job comes in again on a second import
+    expect(server.scheduler.list()).toHaveLength(1)
   })
 
   it('creates, lists and stops a current-thread watcher over the agent gateway only', async () => {

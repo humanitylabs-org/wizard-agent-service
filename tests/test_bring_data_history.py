@@ -27,6 +27,7 @@ CANARY = 'CANARY-' + 'never-imported-7f3a'
 SK_KEY = 'sk-' + 'proj-' + 'Q' * 6 + 'abcDEF123456ghiJKL7890'
 GH_TOKEN = 'gh' + 'p_' + 'a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8'
 _RNG = random.Random(544)
+STOCK_SKILL = '---\nname: plan\ndescription: Stock planning skill.\n---\nPlan things.\n'
 RANDOM40 = ''.join(_RNG.choice(string.ascii_letters + string.digits) for _ in range(40))
 
 
@@ -87,9 +88,11 @@ def backup_zip(base: Path, name='hermes-backup.zip', profile_only=False, private
             'SOUL.md': 'You are Archimedes Prime, calm and concise.',
             'skills/garden/watering/SKILL.md': '---\nname: watering\ndescription: Plan garden watering.\n---\n# Watering\n\nWater at dawn.\n',
             'skills/garden/watering/notes.md': 'Clay soil holds water.',
+            'skills/stock/plan/SKILL.md': STOCK_SKILL,
+            'skills/mine/notes-style/SKILL.md': '---\nname: notes-style\n---\nMY OLD WAY OF TAKING NOTES\n',
             'cron/jobs.json': json.dumps({'jobs': [
                 {'id': 'brief', 'name': 'Morning brief', 'prompt': f'Summarise my garden. Token {SK_KEY}',
-                 'schedule': {'kind': 'cron', 'expr': '0 8 * * *'}, 'skill': 'watering'},
+                 'schedule': {'kind': 'cron', 'expr': '0 8 * * *'}, 'skill': 'watering', 'skills': [GH_TOKEN]},
                 {'id': 'weekly', 'name': 'Weekly review', 'prompt': 'Review the week.',
                  'schedule': {'kind': 'interval', 'minutes': 10080}},
                 {'id': 'backup', 'name': 'Backup script', 'no_agent': True, 'script': 'backup.sh',
@@ -263,7 +266,7 @@ class HistoryTests(unittest.TestCase):
     def test_skills_are_documents_not_active_skills(self):
         backup_zip(self.base)
         _, result = self.bring_all()
-        self.assertEqual(result['done']['skills']['documents'], 1)
+        self.assertEqual(result['done']['skills']['documents'], 3)
         doc = next((self.files / 'Imported/Hermes/Skills').glob('watering (*).md')).read_text('utf-8')
         self.assertIn('This is not an active skill', doc)
         self.assertIn('Water at dawn.', doc)
@@ -345,6 +348,38 @@ class HistoryTests(unittest.TestCase):
         out = call('scan', path='Inbox/chatgpt.zip', history=True)
         self.assertFalse(out['success'])
         self.assertIn('earlier Hermes agent', out['error'])
+
+    def own_skills(self):
+        for rel, text in (('skills/stock/plan/SKILL.md', STOCK_SKILL),
+                          ('skills/mine/notes-style/SKILL.md', '---\nname: notes-style\n---\nTHE NEW WAY\n')):
+            (self.home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.home / rel).write_text(text, 'utf-8')
+
+    def test_a_changed_skill_of_the_same_name_comes_in_and_the_identical_stock_one_does_not(self):
+        self.own_skills()
+        backup_zip(self.base)
+        scan = self.scan()
+        self.assertEqual(sorted(s['name'] for s in scan['new_skills']), ['notes-style', 'watering'])
+        result = call('import', import_id=scan['import_id'], skills='all')
+        self.assertEqual(sorted(result['done']['skills']['names']), ['notes-style', 'watering'])
+        self.assertIn('MY OLD WAY OF TAKING NOTES', self.written())
+        self.assertEqual((self.home / 'skills/mine/notes-style/SKILL.md').read_text('utf-8').count('THE NEW WAY'), 1)
+
+    def test_cron_skill_names_are_scrubbed_too(self):
+        backup_zip(self.base)
+        scan = self.scan()
+        brief = next(j for j in scan['history']['cron_jobs'] if j['id'] == 'brief')
+        self.assertEqual(brief['skills'], ['watering'])
+        call('import', import_id=scan['import_id'], schedules=['brief'])
+        self.assertNotIn(GH_TOKEN, json.dumps(self.schedules))
+
+    def test_the_history_line_needs_history_that_came_in(self):
+        backup_zip(self.base)
+        scan = self.scan()
+        call('import', import_id=scan['import_id'], about={'facts': ['Owner is Ana.']})
+        self.assertEqual(bd.history_note(), '')
+        call('import', import_id=scan['import_id'], facts=True)
+        self.assertEqual(bd.history_note(), bd.HISTORY_NOTE)
 
     # Switch off (no history flag): the Hermes import works as before
     def test_without_the_switch_nothing_changes(self):

@@ -823,7 +823,8 @@ export function importAgentHistorySchedules(scheduler, { source, agent = 'main',
     if (row.script) return { ...base, status: 'not imported: it runs a script from the old agent' }
     const sourceKey = `history:${source}:${row.id}`
     const previous = scheduler.db.prepare('SELECT job_id FROM schedule_imports WHERE source=?').get(sourceKey)
-    if (previous) return { ...base, status: 'already imported', scheduleId: previous.job_id }
+    if (previous && scheduler.db.prepare('SELECT 1 FROM schedules WHERE id=?').get(previous.job_id)) return { ...base, status: 'already imported', scheduleId: previous.job_id }
+    if (previous) scheduler.db.prepare('DELETE FROM schedule_imports WHERE source=?').run(sourceKey)  // undone or deleted since: bring it again
     const s = row.schedule
     const when = s?.kind === 'cron' ? { cron: s.expr } : s?.kind === 'interval' ? { every: s.minutes } : s?.kind === 'once' ? { once: s.run_at } : null
     const skills = [...new Set([...(Array.isArray(row.skills) ? row.skills : []), row.skill].filter(name => typeof name === 'string' && name))]
