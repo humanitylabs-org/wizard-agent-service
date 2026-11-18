@@ -1976,6 +1976,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "scheduler-finished-runs",
+      "description": "A scheduled run its agent's queue reports finished stops counting toward the scheduler's in-flight cap",
+      "layer": "server",
+      "how_to_test": "On each agent kind, create a schedule for that agent, run it now and let the scheduler admit it: it counts as in flight. Finish the run upstream and make the scheduler's run lookup return nothing (an unreadable result). The Service's runStatus reads the agent's own queue (main queue or the routed queue) and reports completed; after one refresh the occurrence has run_done_at and the in-flight count is 0, so other threads' watches are admitted (issue 564).",
+      "source_refs": [
+        "server/scheduler.mjs",
+        "server/service.mjs",
+        "server/routed-run-queue.mjs"
+      ],
+      "reference_tests": [
+        "tests/scheduler.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "fixture": "scheduler-finished-runs",
+      "policy_exemptions": []
+    },
+    {
       "id": "reminders-and-tips",
       "description": "Set a reminder and opt in to the five-day tips from a chat",
       "layer": "runtime",
