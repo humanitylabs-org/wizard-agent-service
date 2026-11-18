@@ -5867,6 +5867,15 @@ function buildWizardServer(options, lifetime) {
     nightly: now => { if (agentInboxOn()) agentInbox.nightly(now, inboxWorkerRuns(now)) },
     daily: { on: () => channelDailyOn(), thread: dailyScheduleThread, isDaily: (agent, channel) => !!channel && channelDailyOn() && channelStoreNow().dailyChannel(agent === 'main' ? MAIN_AGENT_ID : agent)?.id === channel },
     lookup: lookupBackgroundOccurrence,
+    // The queue's own record of a scheduled run, read when the run lookup fails (issue 564): a finished run must
+    // stop counting toward the scheduler's in-flight cap even when its result can't be fetched.
+    runStatus: async (occurrence, receipt) => {
+      const agent = occurrence.agent === 'main' ? MAIN_AGENT_ID : occurrence.agent
+      if (agent === MAIN_AGENT_ID) return runQueue?.get(receipt.run_id)?.status ?? null
+      const entry = agents?.read(agent)
+      const queue = entry && routedQueues ? await routedQueues.queueFor(entry) : null
+      return queue?.get(receipt.run_id)?.status ?? null
+    },
     onWatchResult: async job => {
       // A visible watcher result is a real new turn: bring the same thread back from either Defer or Done.
       const agent = job.agent === 'main' ? MAIN_AGENT_ID : job.agent

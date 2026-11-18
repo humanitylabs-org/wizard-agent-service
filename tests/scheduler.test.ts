@@ -862,6 +862,42 @@ describe('windows, reminders and trickled agent work', () => {
     expect(new Set(admitted).size).toBe(8)
   })
 
+  it('stops counting a run the queue reports finished, so stuck rows never block a new watch (issue 564)', async () => {
+    const delivered: any[] = []
+    const runs: Record<string, any> = {}
+    const s = scheduler(async (o: any) => {
+      delivered.push(o)
+      const id = `run_${delivered.length}`
+      // Corrections never finish; every other run is running until the test finishes it.
+      runs[id] = o.key.endsWith(':reporter') ? { status: 'running' } : { status: 'running', output: 'not a report' }
+      return { run_id: id }
+    }, { trickleMs: 0, maxInflight: 6,
+      // Older runs: the run lookup fails (null) for half of them, while the queue's own record says completed.
+      lookup: async (_o: any, r: any) => (runs[r.run_id]?.unreadable ? null : runs[r.run_id] ?? null),
+      runStatus: async (_o: any, r: any) => runs[r.run_id]?.status ?? null })
+    // Seven due runs: four whose report rewrite stays pending, three whose result can't be read.
+    for (let i = 0; i < 7; i++) s.create({ name: `Work ${i}`, when: { once: '2026-10-20T23:00:00Z' }, prompt: 'go', thread: `wizard_w${i}`, ...(i < 4 ? { report: 'status' } : {}) })
+    await s.tick()
+    expect(delivered).toHaveLength(6)
+    for (const [i, o] of delivered.entries()) { runs[`run_${i + 1}`].status = 'completed'; if (!o.body.input.includes('[reporter]') && Number(o.thread.slice(7)) >= 4) runs[`run_${i + 1}`].unreadable = true }
+    await s.refreshRuns()
+    expect(s.inflightCount()).toBe(0)
+    const watch = s.create({ name: 'Build · Watch', kind: 'watch', when: { every: 5 }, prompt: 'check the build', thread: 'wizard_build' })
+    clock += 5 * 60_000
+    await s.tick(); await s.tick()
+    // The seventh run and the watcher's check are both admitted although no row has finished_at yet.
+    expect(delivered.filter(o => o.jobId === watch.id)).toHaveLength(1)
+    expect(new Set(delivered.filter(o => !o.key.endsWith(':reporter')).map(o => o.jobId)).size).toBe(8)
+    const open = () => new DatabaseSync(join(root, 'scheduler.sqlite3')).prepare("SELECT count(*) AS n FROM schedule_occurrences WHERE admitted=1 AND finished_at IS NULL AND job_id != ?").get(watch.id) as any
+    expect(open().n).toBeGreaterThan(0)
+    // Past the grace a pending rewrite or an unreadable result no longer holds the occurrence open.
+    for (const id of Object.keys(runs)) if (runs[id].status === 'running' && !delivered[Number(id.slice(4)) - 1].key.endsWith(':reporter')) runs[id].status = 'completed'
+    await s.refreshRuns()
+    clock += 16 * 60_000
+    await s.refreshRuns(); await s.refreshRuns()
+    expect(open().n).toBe(0)
+  })
+
   it('lets the main agent schedule, list and cancel in its own thread over the loopback token only', async () => {
     const token = 'fixture-heavy-token-with-more-than-32-chars'
     const server: any = createWizardServer({ upstreamOrigin: 'http://127.0.0.1:9', hermesKey: 'fixture-key', ownerProof: 'fixture-owner-proof-with-32-characters', requireAccess: false,

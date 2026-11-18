@@ -59,6 +59,37 @@ export const dailyScheduleToken = crypto.randomUUID() + crypto.randomUUID() // g
 export const serverChecks = {
   // Issue 527 (Daily channel, with the channel store): one pinned channel per agent holding one real thread per day,
   // through each runtime's real Service routes and scheduler.
+  // Issue 564: a scheduled run the agent's queue reports finished stops counting toward the scheduler's in-flight
+  // cap, even when its result can't be read, so stuck rows never hold back other threads' watches.
+  'scheduler-finished-runs': async s => {
+    const scheduler = s.server.scheduler
+    const made = await s.raw('/wizard/v1/schedules', post({ name: 'Parity · Synthetic work', prompt: 'Synthetic work.', agent: s.id, enabled: false, when: { every: 3600 } }))
+    assert.equal(made.status, 201, await made.clone().text())
+    const job = await made.json()
+    assert.equal((await s.raw(`/wizard/v1/schedules/${job.id}/run`, post({}))).status, 202)
+    await scheduler.tick(false)
+    let row = scheduler.latest(job.id)
+    assert.equal(row.admitted, 1, row.error || 'admitted')
+    const occurrence = JSON.parse(row.data), receipt = JSON.parse(row.receipt)
+    assert.equal(scheduler.inflightCount(), 1, `${s.kind}: the running scheduled run counts as in flight`)
+    const lookup = scheduler.lookup
+    try {
+      // The run's result becomes unreadable (the box's failing run lookup); only the agent's own queue knows it ended.
+      scheduler.lookup = async () => null
+      for (const run of s.runs.values()) Object.assign(run, { status: 'completed', updated_at: Date.now() / 1000, output: 'Synthetic reply' })
+      let status = null
+      for (let i = 0; i < 40 && status !== 'completed'; i++) {
+        await s.request(`/v1/runs/${encodeURIComponent(receipt.run_id)}`)
+        status = await scheduler.runStatus(occurrence, receipt)
+        if (status !== 'completed') await new Promise(resolve => setTimeout(resolve, 50))
+      }
+      assert.equal(status, 'completed', `${s.kind}: the agent's queue reports the scheduled run finished`)
+      await scheduler.refreshRuns()
+      row = scheduler.latest(job.id)
+      assert.ok(row.run_done_at, `${s.kind}: the finished run is marked done although its result can't be read`)
+      assert.equal(scheduler.inflightCount(), 0, `${s.kind}: a finished run no longer holds the in-flight cap`)
+    } finally { scheduler.lookup = lookup }
+  },
   'chats-daily-channel': async s => {
     const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const channels = async () => (await (await s.raw('/wizard/v1/channels')).json()).channels
