@@ -58,7 +58,9 @@ export function probeText(input) {
 }
 
 export class LockedRunBridge {
-  constructor({ fetchImpl = fetch, origin, statePath = '', sessionRoute = () => null, deliveryProbe = null, uncertainSettleMs = 15_000, keeperSocket = '', log = (line) => console.warn(line) }) {
+  constructor({ fetchImpl = fetch, origin, statePath = '', sessionRoute = () => null, deliveryProbe = null, uncertainSettleMs = 15_000, keeperSocket = '', log = (line) => console.warn(line), onCompleted = null }) {
+    // onCompleted(entry, payload): the finished turn's transcript, so files it sent are kept before any cache prune.
+    this.onCompleted = onCompleted
     // Hermes interrupts a locked turn when its stream closes. The run stream keeper holds that
     // stream in a separate process so an Agent Service restart no longer cuts replies.
     this.keeperSocket = keeperSocket
@@ -246,6 +248,9 @@ export class LockedRunBridge {
             if (payload.runtime?.model_lock === 'confirmed') { entry.runtime = payload.runtime; this.save() }
             if (event?.startsWith('run.') && ['completed','failed','cancelled','interrupted'].includes(event.slice(4))) {
               entry.state = event.slice(4)
+              if (event === 'run.completed' && this.onCompleted) {
+                try { this.onCompleted(entry, payload) } catch (error) { this.log(`[locked-run] keeping sent files failed: ${error?.message || error}`) }
+              }
               if (payload.runtime && !runtimeMatches(payload.runtime, route)) entry.state = 'runtime_mismatch'
               this.save()
             }

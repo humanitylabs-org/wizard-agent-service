@@ -1158,6 +1158,23 @@ export const serverChecks = {
     writeFileSync(join(scratch, 'screenshot.png'), Buffer.concat([png.subarray(0, 8), Buffer.from('REWRITTEN')]), { flag: 'r+' })
     assert.deepEqual(await served(), png, 'rewriting the source in place never changes an earlier chat message')
   },
+  'sent-media-pruned': async s => {
+    // Issue 556: Hermes prunes cache/audio after 24 h. A file sent in a chat keeps playing from the Service's own copy.
+    mkdirSync(join(s.agentHome, 'cache/audio'), { recursive: true })
+    const source = join(s.agentHome, 'cache/audio/parity-voice.mp3'), bytes = Buffer.concat([Buffer.from('ID3'), Buffer.alloc(4096, 9)])
+    writeFileSync(source, bytes)
+    const visible = ['container', 'restricted'].includes(s.kind) ? '/opt/data/cache/audio/parity-voice.mp3' : source
+    s.sessions.get('wizard_parity').messages.push({ id: 'pruned-reply', role: 'assistant', timestamp: Date.now() / 1000, content: `Synthetic voice sample\nMEDIA:${visible}` })
+    const shown = async () => (await history(s)).find(m => m.id === 'pruned-reply').content
+    const [first] = envelope(await shown())
+    assert.ok(first && first.kind === 'audio', 'the voice sample is a file card on every runtime')
+    rmSync(source)
+    const later = await shown()
+    assert.ok(!later.includes('unavailable'), 'a pruned source still shows the saved copy')
+    assert.deepEqual(envelope(later), [first])
+    const r = await s.raw(`/wizard/attachments/${first.id}`); assert.equal(r.status, 200)
+    assert.deepEqual(Buffer.from(await r.arrayBuffer()), bytes)
+  },
   'bring-my-data': async s => {
     // The owner drops exports into Files through the Service; the wizard-os bring_data tool, run with THIS runtime's
     // own home, archives chats into the owner's Files and installs picked skills only into this agent's home.
