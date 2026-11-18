@@ -15,6 +15,7 @@ import { dirname } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { atomicStoreWrite, validAgentId } from './thread-reference.mjs'
 import { normalizeStatus, parseStatusObject } from './thread-status.mjs'
+import { planSweep, composeCard, cardView, yesToAllTargets, DEFAULT_LINKS } from './agent-sweep.mjs'
 
 export const AGENT_INBOX_SWITCH = 'wizard/agent-inbox'
 // Worker runs admitted by capture carry this idempotency-key prefix, so the nightly check can find finished worker
@@ -31,6 +32,7 @@ export const CHECK_WINDOW_MS = 7 * 86400_000
 const MAX_RECORDS = 3000
 const ARCHIVE_KEEP_MS = 30 * 86400_000
 const MAX_RUN_SIGS = 20
+const MAX_SWEEPS = 10
 const MAX_OPTIONS = 6
 const THREAD_ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/u
 const RECORD_ID = /^inbox_[a-f0-9]{24}$/u
@@ -97,7 +99,7 @@ export class AgentInboxStore {
     if (!path || !existsSync(path)) return
     try {
       const parsed = JSON.parse(readFileSync(path, 'utf8'))
-      if (parsed?.schema === 1 && parsed.records && typeof parsed.records === 'object' && !Array.isArray(parsed.records)) this.data = { schema: 1, records: parsed.records, check: parsed.check ?? null }
+      if (parsed?.schema === 1 && parsed.records && typeof parsed.records === 'object' && !Array.isArray(parsed.records)) this.data = { schema: 1, records: parsed.records, check: parsed.check ?? null, ...(Array.isArray(parsed.sweeps) ? { sweeps: parsed.sweeps } : {}) }
     } catch { /* an unreadable store starts empty; the original bytes stay on disk until the next write */ }
   }
 
@@ -187,7 +189,8 @@ export class AgentInboxStore {
       const guarded = guard(parsed) || parsed
       this.#apply(record, guarded, raw, { final: true, continues: continues || guarded.state !== parsed.state })
     } else {
-      record.state = 'new'
+      // An answered record archives at the worker's next status line (issue 550); a run with none counts as one.
+      record.state = record.state === 'answered' ? 'archived' : 'new'
       record.kind = 'result'
       record.last_update = NO_SUMMARY
       record.updated_at = this.now()
@@ -208,6 +211,7 @@ export class AgentInboxStore {
   }
 
   #apply(record, status, raw, { final, continues }) {
+    const answered = record.state === 'answered'
     record.last_update = status.ask
     record.updated_at = this.now()
     // Each status line carries its own decision: an earlier line's recommendation and answer tokens never stick to a
@@ -216,6 +220,12 @@ export class AgentInboxStore {
     withExtras(record, extrasOf(raw))
     if (status.state === 'needs_you' || status.state === 'check') {
       record.state = 'new'; record.kind = 'needs_you'; record.ask = status.ask
+      // A new question after an answer is a fresh ask: it starts its own sweep count.
+      if (answered) { record.surfaced_count = 0; record.answer = null }
+    } else if (answered) {
+      // The worker's next status line after the owner's answer (issue 550): the record has done its job. A progress
+      // line while the answer's turn is still running leaves it answered.
+      if (final || status.state === 'done') record.state = 'archived'
     } else if (status.state === 'done') {
       record.state = 'new'; record.kind = 'result'
     } else if (final && !continues) {
@@ -274,8 +284,11 @@ export class AgentInboxStore {
     if (!record) return null
     const t = this.now()
     const action = String(input.action ?? '')
-    if (action === 'answer') {
-      const option = typeof input.option === 'string' ? input.option.trim().toLowerCase() : ''
+    const option = typeof input.option === 'string' ? input.option.trim().toLowerCase() : ''
+    // "Later" on the sweep card snoozes the item to the next sweep (issue 550), whatever tokens the record has.
+    if (action === 'answer' && option === 'later') {
+      record.state = 'new'; record.snoozed_at = t
+    } else if (action === 'answer') {
       if (Object.keys(record.options || {}).length && !Object.hasOwn(record.options, option)) throw Object.assign(new Error('unknown option'), { status: 400 })
       record.state = 'answered'; record.answered_at = t; record.answer = option || null
     } else if (action === 'snooze') {
@@ -288,6 +301,40 @@ export class AgentInboxStore {
     record.updated_at = t
     this.#save()
     return { ...record }
+  }
+
+  /** A signal sweep (issue 550): park items that sat on PARK_AFTER sweeps unanswered, pick what the card shows
+   *  (caps in code), mark the shown Waiting items surfaced (one more sweep each), archive the shown Done items and
+   *  the counted Later/FYI ones, and keep the card. Returns the stored card. */
+  sweep({ id = '', thread_id = '', agent = 'hermes', day = '', links = DEFAULT_LINKS } = {}) {
+    this.markStale()
+    const t = this.now()
+    const plan = planSweep(Object.values(this.data.records))
+    const card = composeCard(plan, { id: id || `sweep_${randomUUID().replaceAll('-', '').slice(0, 24)}`, at: t, day, thread_id, agent, missing: this.data.check?.missing || 0, links })
+    for (const r of plan.park) { r.state = 'parked'; r.parked_at = t; r.updated_at = t }
+    for (const r of plan.waiting) { r.state = 'surfaced'; r.surfaced_count = (r.surfaced_count || 0) + 1; r.surfaced_at = t }
+    for (const r of [...plan.done, ...plan.later]) { r.state = 'archived'; r.surfaced_at = t; r.updated_at = t }
+    this.data.sweeps = [card, ...(Array.isArray(this.data.sweeps) ? this.data.sweeps : [])].slice(0, MAX_SWEEPS)
+    this.#save()
+    return structuredClone(card)
+  }
+
+  /** The newest card (optionally the newest one posted into `thread`), as stored. */
+  latestSweep({ thread = '', agent = '' } = {}) {
+    const card = (this.data.sweeps || []).find(c => (!thread || c.thread_id === thread) && (!agent || c.agent === agent)) || null
+    // Only the newest card is live: an older card in another day's thread stays as it was.
+    return card && card === this.data.sweeps[0] ? structuredClone(card) : null
+  }
+
+  sweepCard(id) { const card = (this.data.sweeps || []).find(c => c.id === id); return card ? structuredClone(card) : null }
+
+  /** The card with each Waiting item's current state and answer. */
+  sweepView(card) { return cardView(card, rid => this.data.records[rid] ? { ...this.data.records[rid] } : null) }
+
+  /** What Yes to all would answer on this card: `[{ id, option }]` (never confirm items, never hidden ones). */
+  yesToAll(cardId) {
+    const card = this.sweepCard(cardId)
+    return card ? yesToAllTargets(card, rid => this.data.records[rid] ? { ...this.data.records[rid] } : null) : null
   }
 
   /** For tests and repair: drop one record. */

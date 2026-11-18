@@ -57,6 +57,7 @@ import { createSpaceFiling } from './thread-spaces.mjs'
 import { createChannelsSwitch, channelPart } from './channels-switch.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS } from './agent-inbox.mjs'
+import { isSweepPhrase, isScheduledSweep, withCardRow } from './agent-sweep.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
@@ -3390,6 +3391,7 @@ function buildWizardServer(options, lifetime) {
     return evidence
   }
   const agentCtx = agents ? {
+    projectSweepCard: (result, agent, sessionId, searchParams) => projectSweepCard(result, agent, sessionId, searchParams),
     agentInboxNoteRun: (agent, thread, run, runId) => inboxNoteRun(agent, thread, run, runId),
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
@@ -3778,6 +3780,74 @@ function buildWizardServer(options, lifetime) {
   // Finished worker runs (capture admits them with the INBOX_RUN_PREFIX idempotency key) on every loaded queue.
   const inboxWorkerRuns = now => [runQueue, ...(routedQueues ? routedQueues.loaded() : [])].filter(Boolean)
     .flatMap(queue => queue.finishedRunsWithKeyPrefix(INBOX_RUN_PREFIX, (now - CHECK_WINDOW_MS) / 1000))
+  // Signal sweep (issue 550, same switch): one capped card at the bottom of today's Daily thread of the main agent.
+  const inboxError = (status, code) => Object.assign(new Error(code), { status, code })
+  const runSweep = async () => {
+    if (!agentInboxOn()) throw inboxError(404, 'not_found')
+    const channel = channelDailyOn() ? channelStoreNow()?.dailyChannel(MAIN_AGENT_ID) : null
+    if (!channel || channel.archived) throw inboxError(409, 'daily_unavailable')
+    const claim = claimDailyThread(channel)
+    if (claim.created) {
+      // Nothing was posted today yet: open today's thread the way the Daily's first post does.
+      const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${agents ? `?agent=${encodeURIComponent(channel.agent)}` : ''}`, { id: claim.sessionId, title: claim.title })
+      if (!created.ok && created.status !== 409) throw inboxError(503, 'daily_thread_unavailable')
+    }
+    return agentInbox.sweepView(agentInbox.sweep({ thread_id: claim.sessionId, agent: channel.agent, day: claim.day }))
+  }
+  // A tap on the card: that token's full resume message goes into the record's own thread as the owner's next turn,
+  // through the same run admission every Service-made turn uses (queued behind a running turn, idempotent per tap).
+  const postInboxAnswer = async (record, option) => {
+    const message = record?.options?.[option]
+    if (!message) return ''
+    const agent = record.agent || MAIN_AGENT_ID
+    if (!agents && agent !== MAIN_AGENT_ID) throw inboxError(409, 'agent_unavailable')
+    const key = `${INBOX_RUN_PREFIX}answer-${record.id}-${option}-${record.surfaced_count || 0}`
+    const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${agents ? `?agent=${encodeURIComponent(agent)}` : ''}`, { session_id: record.thread_id, input: message }, key)
+    if (!run.ok) throw inboxError(503, 'answer_not_sent')
+    return String(run.payload?.run_id || run.payload?.id || '')
+  }
+  const answerInboxRecord = async (id, option) => {
+    const current = agentInbox.get(id)
+    if (!current) return null
+    if (option && option !== 'later' && Object.keys(current.options || {}).length && !Object.hasOwn(current.options, option)) throw inboxError(400, 'unknown option')
+    if (current.state === 'answered' && current.answer === option) return { record: current, run_id: '' }
+    const runId = option && option !== 'later' ? await postInboxAnswer(current, option) : ''
+    return { record: agentInbox.patch(id, { action: 'answer', option }), run_id: runId }
+  }
+  // "signal sweep" said or typed to the main agent (or a sweep the owner scheduled): the card is posted at once and
+  // the turn itself is told so, once, in its run note, so the reply never repeats the card.
+  const sweepNotes = new Map()
+  const noteSweepRequest = (sessionId, body, principal, request) => {
+    if (!sessionId || !agentInboxOn()) return false
+    let text = ''
+    try { text = visibleInputText(parseJsonBody(body).input) } catch { return false }
+    const scheduled = principal?.kind === 'service' && typeof request.headers['x-wizard-schedule-kind'] === 'string' && isScheduledSweep(text)
+    if (!scheduled && !(principal?.kind === 'owner' && isSweepPhrase(text))) return false
+    sweepNotes.set(sessionId, { scheduled, at: Date.now() })
+    if (sweepNotes.size > 50) sweepNotes.delete(sweepNotes.keys().next().value)
+    return true
+  }
+  const sweepRunNote = sessionId => {
+    const pending = sessionId ? sweepNotes.get(sessionId) : null
+    if (!pending) return ''
+    sweepNotes.delete(sessionId)
+    if (Date.now() - pending.at > 10 * 60_000) return ''
+    return pending.scheduled
+      ? 'Signal sweep: the Wizard Agent Service has posted the sweep card at the bottom of today\'s Daily thread. Do not repeat or summarise it. Respond exactly [SILENT].'
+      : 'Signal sweep: the owner asked for a signal sweep and the Wizard Agent Service has posted the sweep card at the bottom of today\'s Daily thread. Reply in one short line that it is there; do not list, repeat or summarise its items.'
+  }
+  // The newest card is the last row of its Daily thread's newest history page (view=wizard, every runtime).
+  const projectSweepCard = (result, agent, sessionId, searchParams) => {
+    if (!sessionId || !agentInboxOn()) return result
+    const card = agentInbox.latestSweep({ thread: sessionId, agent: agent || MAIN_AGENT_ID })
+    if (!card) return result
+    try {
+      const payload = JSON.parse(Buffer.isBuffer(result) ? result.toString('utf8') : String(result))
+      const next = withCardRow(payload, agentInbox.sweepView(card), searchParams)
+      if (next === payload) return result
+      return Buffer.isBuffer(result) ? Buffer.from(JSON.stringify(next)) : JSON.stringify(next)
+    } catch { return result }
+  }
   // A finished run that listed asks: read its real reply row back so the ledger anchors on the message id.
   const itemsInFlight = new Set()
   const noteRunItems = (sessionId, output) => {
@@ -4740,7 +4810,7 @@ function buildWizardServer(options, lifetime) {
   const runTitleNote = (sessionId) => {
     const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes')].filter(Boolean).join('\n')
     if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote, trackerNote('hermes', '')].filter(Boolean).join('\n')
-    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId), dailyNote('hermes', sessionId)].filter(Boolean).join('\n')
+    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId), dailyNote('hermes', sessionId), sweepRunNote(sessionId)].filter(Boolean).join('\n')
   }
   const patchHermesTitle = async (sessionId, title, { exact = false, datedAt = null } = {}) => {
     // A title another thread holds is dated, never numbered (James, 8 Nov: no #N). An exact patch never is.
@@ -6359,13 +6429,17 @@ function buildWizardServer(options, lifetime) {
       // the last nightly check); POST captures one task in state running, before its worker starts; GET and PATCH
       // /wizard/v1/agent-inbox/<id> read one record or apply an owner action (answer, snooze, archive, surface).
       // Owner settings gate on every method (issue 488). Switch off: every inbox route is 404 and nothing is written.
-      const inboxRoute = /^\/wizard\/v1\/agent-inbox(?:\/([^/]+))?$/u.exec(url.pathname)
+      const inboxRoute = /^\/wizard\/v1\/agent-inbox(?:\/([^/]+))?(?:\/(yes-to-all))?$/u.exec(url.pathname)
       if (inboxRoute) {
         if (!agentInboxOn()) { sendJson(response, 404, { error: 'not_found' }); return }
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
         const one = inboxRoute[1] ? decodeURIComponent(inboxRoute[1]) : ''
-        const methods = one ? ['GET', 'PATCH'] : ['GET', 'POST']
+        const yesToAll = inboxRoute[2] === 'yes-to-all'
+        // Issue 550: /sweep (GET the newest card, POST a sweep now) and /<card id>/yes-to-all (POST).
+        const sweepRoute = one === 'sweep' && !yesToAll
+        if (yesToAll && !/^sweep_[a-f0-9]{24}$/u.test(one)) { sendJson(response, 404, { error: 'not_found' }); return }
+        const methods = yesToAll ? ['POST'] : sweepRoute || !one ? ['GET', 'POST'] : ['GET', 'PATCH']
         if (!methods.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: methods.join(', ') }); return }
         if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         let input = {}
@@ -6376,18 +6450,42 @@ function buildWizardServer(options, lifetime) {
         }
         const view = record => { const { run_sigs: _sigs, ...rest } = record; return rest }
         try {
-          if (!one && request.method === 'GET') {
+          if (sweepRoute && request.method === 'GET') {
+            const card = agentInbox.latestSweep()
+            sendJson(response, 200, { card: card ? agentInbox.sweepView(card) : null }, { 'Cache-Control': 'no-store' })
+          } else if (sweepRoute) {
+            sendJson(response, 201, { card: await runSweep() }, { 'Cache-Control': 'no-store' })
+          } else if (yesToAll) {
+            // Only the Waiting items this card shows; never a confirm item, never one hidden by the cap.
+            const targets = agentInbox.yesToAll(one)
+            if (!targets) { sendJson(response, 404, { error: 'not_found' }); return }
+            const answered = []
+            for (const { id, option } of targets) {
+              const done = await answerInboxRecord(id, option)
+              if (done) answered.push({ id, option, run_id: done.run_id })
+            }
+            const card = agentInbox.sweepCard(one)
+            sendJson(response, 200, { answered, card: card ? agentInbox.sweepView(card) : null }, { 'Cache-Control': 'no-store' })
+          } else if (!one && request.method === 'GET') {
             const q = url.searchParams
             sendJson(response, 200, { records: agentInbox.list({ state: q.get('state') || '', kind: q.get('kind') || '', agent: q.get('agent') || '', limit: q.get('limit') || 200 }).map(view), check: agentInbox.lastCheck() }, { 'Cache-Control': 'no-store' })
           } else if (!one) {
             const { record, created } = agentInbox.capture({ ...input, agent: typeof input.agent === 'string' && input.agent ? input.agent : MAIN_AGENT_ID })
             sendJson(response, created ? 201 : 200, { record: view(record), created }, { 'Cache-Control': 'no-store' })
+          } else if (request.method === 'PATCH' && input.action === 'answer') {
+            // An answer with a token posts that token's full resume message into the record's thread first.
+            const done = await answerInboxRecord(one, typeof input.option === 'string' ? input.option.trim().toLowerCase() : '')
+            if (!done) { sendJson(response, 404, { error: 'not_found' }); return }
+            sendJson(response, 200, { record: view(done.record), ...(done.run_id ? { run_id: done.run_id } : {}) }, { 'Cache-Control': 'no-store' })
           } else {
             const record = request.method === 'GET' ? agentInbox.get(one) : agentInbox.patch(one, input)
             if (!record) { sendJson(response, 404, { error: 'not_found' }); return }
             sendJson(response, 200, { record: view(record) }, { 'Cache-Control': 'no-store' })
           }
-        } catch (error) { sendJson(response, error?.status === 400 ? 400 : 503, { error: error?.status === 400 ? 'invalid_request' : 'inbox_unavailable', ...(error?.status === 400 ? { detail: String(error.message || '') } : {}) }) }
+        } catch (error) {
+          const status = [400, 404, 409].includes(error?.status) ? error.status : 503
+          sendJson(response, status, { error: status === 400 ? 'invalid_request' : status === 503 && !error?.code ? 'inbox_unavailable' : error.code || 'inbox_unavailable', ...(status === 400 ? { detail: String(error.message || '') } : {}) })
+        }
         return
       }
       if (url.pathname === '/wizard/v1/thread-items' || url.pathname === '/wizard/v1/thread-items/counts' || url.pathname === '/wizard/v1/thread-items/seen') {
@@ -7758,7 +7856,11 @@ function buildWizardServer(options, lifetime) {
           }
           heavyWork?.supersede(queuedAdmission.sessionId)
           if (queuedAdmission.runtime === 'direct' && !quietWatcherAdmission && !queuedAdmission.continuation) noteProvisionalTitle(queuedAdmission.sessionId, body.toString('utf8'))
+          // A "signal sweep" turn: its run note is set before admission (the queue may dispatch at once), the card after.
+          const sweepAsked = queuedAdmission.runtime === 'direct' && noteSweepRequest(queuedAdmission.sessionId, body, principal, request)
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
+          if (sweepAsked && !admitted.replayed) void runSweep().catch(error => console.warn(`[agent-inbox] sweep failed: ${error?.code || error?.message || error}`))
+          else if (sweepAsked) sweepNotes.delete(queuedAdmission.sessionId)
           // A durable queue receipt is not proof that Hermes has materialized this session.
           if (await agents?.catalogContains(MAIN_AGENT_ID, queuedAdmission.sessionId) === true) agents.pin(queuedAdmission.sessionId, MAIN_AGENT_ID, 'runtime_verified')
           if (!quietWatcherAdmission) threadDispositionStore.clearSession(queuedAdmission.runtime, queuedAdmission.sessionId)
@@ -8047,6 +8149,7 @@ function buildWizardServer(options, lifetime) {
           if ((messageHistory || /^\/v1\/runs\/[^/]+$/.test(upstreamPath)) && !scheduleRaw) result = projectStatusMarkers(result)
           result = projectAgentMedia(result, agentArtifactDir, agentArtifactRoots, agentPathAliases)
           if (messageHistory && url.searchParams.get('view') === 'wizard') result = projectWizardMessageHistory(result, historySource)
+          if (messageHistory && !operator && url.searchParams.get('view') === 'wizard') result = projectSweepCard(result, MAIN_AGENT_ID, decodeURIComponent(upstreamPath.split('/')[3]), url.searchParams)
         }
         // Issue 440: hydrate the first owner request before the credential and private-path guards below,
         // so state.db text gets exactly the same redaction and fail-closed scan as every other list field.

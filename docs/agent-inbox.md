@@ -39,3 +39,33 @@ overrides it). Code: `server/agent-inbox.mjs`.
 
 Records default to `privacy_class: private`; `textForModel(record, { privateModel })` returns nothing of a private
 record for a non-private model, for the later steps that may ask a model to fill a missing title.
+
+## Signal sweep card (issue 550)
+
+Step 3 of the series, same switch. One capped card, built only from inbox records (code: `server/agent-sweep.mjs`).
+
+- **When:** the owner says or types "signal sweep" (on its own) to the main agent, a schedule the owner made with
+  thread `daily` and the prompt `signal sweep` fires (none exist by default), or `POST /wizard/v1/agent-inbox/sweep`.
+  The typed or scheduled turn still runs; its run note says the card is posted (a scheduled one answers `[SILENT]`).
+- **Where:** today's Daily thread of the main agent (Channels switch on, Daily channel open; otherwise the sweep
+  answers 409 `daily_unavailable`). The card is not a Hermes message: the Service keeps the newest card and adds it as
+  the last row of that thread's newest `view=wizard` history page (`display_kind: agent_sweep`, the card in
+  `agent_sweep`, a plain-markdown copy in `content` for a shell that does not draw the buttons).
+- **Caps, in code:** Waiting on you max 7 (needs_you records `new` or `surfaced`; urgent first, then deadline, then
+  oldest), each with title, ask, recommendation and one button per answer token; beyond 7 "and N more" with a link.
+  Done max 10 (newest first), beyond 10 "more". Running (with stale), Later and FYI, and parked are counts with links.
+  No free-text summary field anywhere.
+- **What a sweep changes:** each shown Waiting item is `surfaced` (one more sweep; `seen` on the card is the age
+  badge); an item already shown on 3 sweeps unanswered parks instead. Shown Done and counted FYI records archive.
+- **Answers:** `PATCH /wizard/v1/agent-inbox/<id> { action: 'answer', option }` first posts that token's full resume
+  message into the record's own thread as its next turn (run admission, idempotency key
+  `wizard-inbox-answer-<id>-<token>-<sweep count>`), then marks it `answered`; it archives at the worker's next status
+  line (a new needs_you instead starts it over). The token `later` snoozes it to the next sweep, posting nothing.
+- **Yes to all:** `POST /wizard/v1/agent-inbox/<card id>/yes-to-all` answers each Waiting item on that card with its
+  `default_option`, never an item hidden by the cap, never a `confirm` item (the card shows those as "Open to
+  confirm"), never one answered since.
+- `GET /wizard/v1/agent-inbox/sweep` -> `{ card }`: the newest card with each item's current `state` / `answer` and
+  `yes_to_all: { count, skipped }`.
+- Links: threads use the shell's `/wizard-os-home/?session=<id>` deep link; the list views are
+  `/wizard-os-home/?inbox=waiting|done|running|later|parked` (the Running view, wizard-ux issue 1569, and the inbox
+  views after it).
