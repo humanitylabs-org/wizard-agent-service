@@ -20,14 +20,38 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+# The `wizard` MCP URL: http://wizard-agent-service:8787/wizard/mcp (fresh box) or http://127.0.0.1:<port>/wizard/mcp
+_GATEWAY = re.compile(r'(https?://[A-Za-z0-9.\-]+(?::\d{1,5})?|http://\[::1\](?::\d{1,5})?)/wizard/mcp/?')
+
+
+def _gateway():
+    """This Hermes's own `wizard` MCP entry: (Service origin, gateway key), or (None, None).
+
+    No standard install sets the heavy-lane pair (issue 577), but every linked main Hermes has this entry
+    (WAM agent_link on a fresh box, `wizard link` alongside). The key only goes to the origin Hermes already sends it to.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        server = ((load_config_readonly() or {}).get('mcp_servers') or {}).get('wizard') or {}
+        url = server.get('url') if isinstance(server, dict) else None
+    except Exception:  # noqa: BLE001 - outside Hermes, or no config yet
+        url = None
+    match = _GATEWAY.fullmatch(url) if isinstance(url, str) else None
+    token = str(get_secret('WIZARD_MCP_TOKEN') or '').strip()
+    return (match.group(1), token) if match and token else (None, None)
+
+
 def _endpoint():
+    """The heavy-lane loopback pair where a box has one, else this Hermes's own gateway (issue 577)."""
     origin = (get_secret('WIZARD_HEAVY_ORIGIN') or '').rstrip('/')
     parsed = urllib.parse.urlparse(origin)
-    if (parsed.scheme != 'http' or parsed.hostname not in ('127.0.0.1', 'localhost', '::1')
-            or parsed.username is not None or parsed.password is not None
-            or parsed.path or parsed.query or parsed.fragment):
-        return None, None
-    return origin, get_secret('WIZARD_HEAVY_TOKEN')
+    token = get_secret('WIZARD_HEAVY_TOKEN')
+    if (token and parsed.scheme == 'http' and parsed.hostname in ('127.0.0.1', 'localhost', '::1')
+            and parsed.username is None and parsed.password is None
+            and not parsed.path and not parsed.query and not parsed.fragment):
+        return origin, token
+    return _gateway()
 
 
 def configured():

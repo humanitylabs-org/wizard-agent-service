@@ -898,6 +898,24 @@ describe('windows, reminders and trickled agent work', () => {
     expect(open().n).toBe(0)
   })
 
+  it('a standard install (no heavy-lane token, issue 577): the main Hermes gateway key schedules, nothing else does', async () => {
+    const key = 'fixture-main-gateway-key-0123456789abcdef'
+    const appsJsonPath = join(root, 'apps.json'); writeFileSync(appsJsonPath, JSON.stringify({ apps: [] }))
+    const server: any = createWizardServer({ upstreamOrigin: 'http://127.0.0.1:9', hermesKey: 'fixture-key', ownerProof: 'fixture-owner-proof-with-32-characters', requireAccess: false,
+      requireJoinedDelegationCapability: false, followThrough: false, wizardOsHome: process.env.WIZARD_OS_HOME, appsJsonPath,
+      mcpToken: key, bridgeWatchMs: 0, bridgeWriteSkills: false, bridgeLog: () => {},
+      schedulerStatePath: join(root, 'gateway-schedules.sqlite3'), schedulerNow: () => clock, schedulerTimezone: BKK })
+    servers.push(server)
+    const origin = `http://127.0.0.1:${(await listen(server)).port}`
+    const call = (action: string, body: any, auth = key, extra: Record<string, string> = {}) => fetch(`${origin}/wizard/internal/schedules/${action}`, { method: 'POST',
+      headers: { Authorization: 'Bearer ' + auth, 'Content-Type': 'application/json', ...extra }, body: JSON.stringify(body) })
+    const made = await call('create', { session_id: 'wizard_a', name: 'Reminder', kind: 'remind', when: { at: 'morning' }, text: 'Water the plants' })
+    expect(made.status).toBe(201)
+    expect((await (await call('list', { session_id: 'wizard_a' })).json()).schedules).toHaveLength(1)
+    expect((await call('list', { session_id: 'wizard_a' }, 'wrong-token-wrong-token-wrong-token-xx')).status).toBe(403)
+    expect((await call('list', { session_id: 'wizard_a' }, key, { Origin: 'https://evil.example' })).status).toBe(403)
+  })
+
   it('lets the main agent schedule, list and cancel in its own thread over the loopback token only', async () => {
     const token = 'fixture-heavy-token-with-more-than-32-chars'
     const server: any = createWizardServer({ upstreamOrigin: 'http://127.0.0.1:9', hermesKey: 'fixture-key', ownerProof: 'fixture-owner-proof-with-32-characters', requireAccess: false,

@@ -210,6 +210,69 @@ class LoopbackNeverUsesProxy(unittest.TestCase):
         finally:
             service.shutdown(); proxy.shutdown()
 
+class GatewayFallback(unittest.TestCase):
+    """Issue 577: no standard install sets WIZARD_HEAVY_*, so both plugins use this Hermes's own wizard MCP entry."""
+    def setUp(self):
+        import http.server, threading
+        self.calls = []
+        calls = self.calls
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length') or 0))
+                calls.append((self.path, self.headers.get('Authorization')))
+                if self.path.endswith('/redirect'):
+                    self.send_response(302); self.send_header('Location', '/elsewhere'); self.end_headers(); return
+                self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
+                self.wfile.write(json.dumps({'content': [{'text': 'ok'}], 'schedules': []}).encode())
+            def log_message(self, *args): pass
+        self.server = http.server.HTTPServer(('127.0.0.1', 0), H)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.shutdown)
+        self.origin = 'http://127.0.0.1:%d' % self.server.server_port
+        self.config = {'mcp_servers': {'wizard': {'url': self.origin + '/wizard/mcp'}}}
+        cli, config = types.ModuleType('hermes_cli'), types.ModuleType('hermes_cli.config')
+        config.load_config_readonly = lambda: self.config
+        cli.config = config
+        modules = patch.dict(sys.modules, {'hermes_cli': cli, 'hermes_cli.config': config})
+        modules.start(); self.addCleanup(modules.stop)
+        secrets.clear()
+        secrets['WIZARD_MCP_TOKEN'] = 'gateway-key-0123456789abcdef'
+
+    def test_without_heavy_secrets_the_gateway_key_reaches_the_service(self):
+        for plugin in (schedule, agents):
+            self.assertTrue(plugin.configured())
+            self.assertEqual(plugin._endpoint(), (self.origin, 'gateway-key-0123456789abcdef'))
+        self.assertEqual(agents.call('list', {}), 'ok')
+        self.assertEqual(json.loads(schedule.call('list', {}, 'wizard_1_fixture')), {'content': [{'text': 'ok'}], 'schedules': []})
+        self.assertEqual(self.calls, [('/wizard/internal/agents/list', 'Bearer gateway-key-0123456789abcdef'),
+                                      ('/wizard/internal/schedules/list', 'Bearer gateway-key-0123456789abcdef')])
+
+    def test_fresh_box_service_host_is_accepted(self):
+        self.config = {'mcp_servers': {'wizard': {'url': 'http://wizard-agent-service:8787/wizard/mcp'}}}
+        for plugin in (schedule, agents):
+            self.assertEqual(plugin._endpoint(), ('http://wizard-agent-service:8787', 'gateway-key-0123456789abcdef'))
+
+    def test_heavy_secrets_still_win(self):
+        secrets.update(WIZARD_HEAVY_ORIGIN='http://127.0.0.1:8923', WIZARD_HEAVY_TOKEN='fixture-capability')
+        for plugin in (schedule, agents):
+            self.assertEqual(plugin._endpoint(), ('http://127.0.0.1:8923', 'fixture-capability'))
+
+    def test_no_key_or_another_url_means_not_configured(self):
+        secrets.clear()
+        for plugin in (schedule, agents):
+            self.assertFalse(plugin.configured())
+        secrets['WIZARD_MCP_TOKEN'] = 'gateway-key-0123456789abcdef'
+        for url in (None, 'http://wizard-agent-service:8787/other', 'ftp://wizard-agent-service/wizard/mcp',
+                    'http://user@evil.example/wizard/mcp', 'http://box/wizard/mcp?x=1'):
+            self.config = {'mcp_servers': {'wizard': {'url': url}}} if url else {}
+            for plugin in (schedule, agents):
+                self.assertEqual(plugin._endpoint(), (None, None), url)
+        self.assertEqual(self.calls, [])
+
+    def test_a_redirect_never_carries_the_key(self):
+        self.assertIn('error', json.loads(agents.call('redirect', {})))
+        self.assertEqual(self.calls, [('/wizard/internal/agents/redirect', 'Bearer gateway-key-0123456789abcdef')])
+
 class ResponseBounds(unittest.TestCase):
     def setUp(self):
         secrets.clear()

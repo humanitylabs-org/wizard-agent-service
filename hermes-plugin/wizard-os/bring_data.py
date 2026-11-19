@@ -2589,10 +2589,13 @@ def history_facts(args: dict) -> dict:
         src.close()
 
 
-def _scheduler_call(action: str, value: dict) -> dict:
-    """The Agent Service's loopback schedule route (the wizard-schedule plugin's origin and token)."""
-    from urllib.request import ProxyHandler, Request, build_opener
+# The `wizard` MCP URL: http://wizard-agent-service:8787/wizard/mcp (fresh box) or http://127.0.0.1:<port>/wizard/mcp
+_GATEWAY = re.compile(r"(https?://[A-Za-z0-9.\-]+(?::\d{1,5})?|http://\[::1\](?::\d{1,5})?)/wizard/mcp/?")
 
+
+def _schedule_service() -> tuple[str, str]:
+    """(origin, token) for the Service's loopback schedule route: the heavy-lane pair where a box has one, else this
+    Hermes's own `wizard` MCP origin and gateway key (issue 577: no standard install sets the heavy-lane pair)."""
     def secret(name):
         try:
             from agent.secret_scope import get_secret
@@ -2602,12 +2605,35 @@ def _scheduler_call(action: str, value: dict) -> dict:
             return os.environ.get(name, "")
 
     origin, token = str(secret("WIZARD_HEAVY_ORIGIN") or "").rstrip("/"), str(secret("WIZARD_HEAVY_TOKEN") or "")
-    if not re.fullmatch(r"http://(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?", origin) or not token:
+    if re.fullmatch(r"http://(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?", origin) and token:
+        return origin, token
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        server = ((load_config_readonly() or {}).get("mcp_servers") or {}).get("wizard") or {}
+        url = server.get("url") if isinstance(server, dict) else None
+    except Exception:  # noqa: BLE001 - outside Hermes, or no config yet
+        url = None
+    match = _GATEWAY.fullmatch(url) if isinstance(url, str) else None
+    token = str(secret("WIZARD_MCP_TOKEN") or "").strip()
+    return (match.group(1), token) if match and token else ("", "")
+
+
+def _scheduler_call(action: str, value: dict) -> dict:
+    """The Agent Service's loopback schedule route (the wizard-schedule plugin's origin and token)."""
+    from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
+
+    class _NoRedirect(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001 - a redirect never gets the key
+            return None
+
+    origin, token = _schedule_service()
+    if not origin or not token:
         raise ValueError("Wizard schedules can't be reached from this agent.")
     request = Request(origin + "/wizard/internal/schedules/" + action, method="POST",
                       data=json.dumps({**value, "session_id": "wizard-importer"}).encode(),
                       headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
-    with build_opener(ProxyHandler({})).open(request, timeout=20) as response:
+    with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=20) as response:
         return json.loads(response.read(256 * 1024) or b"{}")
 
 
