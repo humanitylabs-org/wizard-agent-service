@@ -280,19 +280,24 @@ describe('app doors over HTTP', () => {
     const event = await fetch(`${u}/events`, json('POST', { type: 'mail', source: { app: 'wizard-mail', item: 'acct:1' }, sender: 'Boss <boss@example.com>', title: 'Synthetic urgent mail', ask: 'Synthetic' }, MAIL))
     expect(event.status).toBe(201)
     expect(store().list({ kind: 'alert' })).toHaveLength(1)
-    const pings = await (await fetch(`${u}/pings`, get(MESSENGER))).json()
+    const pings = await (await fetch(`${u}/pings?keep=1`, get(MESSENGER))).json()
     expect(pings.pings.map((p: any) => p.title)).toEqual(['Synthetic urgent mail'])
-    // A read consumes nothing (issue 325): the door got no answer or crashed, so it reads the same ping again.
-    expect((await (await fetch(`${u}/pings`, get(MESSENGER))).json()).pings.map((p: any) => p.id)).toEqual([pings.pings[0].id])
+    // A keep read consumes nothing (issue 325): the door got no answer or crashed, so it reads the same ping again.
+    expect((await (await fetch(`${u}/pings?keep=1`, get(MESSENGER))).json()).pings.map((p: any) => p.id)).toEqual([pings.pings[0].id])
     // Only the door acks its pings; the owner, a bad body or a big list is refused.
     expect((await fetch(`${u}/pings`, json('POST', { ack: [pings.pings[0].id] }))).status).toBe(403)
     expect((await fetch(`${u}/pings`, json('POST', { ack: 'x' }, MESSENGER))).status).toBe(400)
     expect((await fetch(`${u}/pings`, json('POST', { ack: Array(501).fill('x') }, MESSENGER))).status).toBe(400)
     const ack = await fetch(`${u}/pings`, json('POST', { ack: [pings.pings[0].id] }, MESSENGER))
     expect([ack.status, await ack.json()]).toEqual([200, { acked: [pings.pings[0].id] }])
+    expect((await (await fetch(`${u}/pings?keep=1`, get(MESSENGER))).json()).pings).toEqual([])
     expect((await (await fetch(`${u}/pings`, get(MESSENGER))).json()).pings).toEqual([])
     // The same event posted again is the same record: no second alert, no second ping.
     expect((await fetch(`${u}/events`, json('POST', { type: 'mail', source: { app: 'wizard-mail', item: 'acct:1' }, sender: 'Boss <boss@example.com>', title: 'Synthetic urgent mail', ask: 'Synthetic' }, MAIL))).status).toBe(200)
     expect((await (await fetch(`${u}/pings`, get(MESSENGER))).json()).pings).toEqual([])
+    // A plain GET (the contract before issue 325) still hands a new ping out once, at the read.
+    expect((await fetch(`${u}/events`, json('POST', { type: 'mail', source: { app: 'wizard-mail', item: 'acct:2' }, sender: 'Boss <boss@example.com>', title: 'Synthetic second mail', ask: 'Synthetic' }, MAIL))).status).toBe(201)
+    expect((await (await fetch(`${u}/pings`, get(MESSENGER))).json()).pings.map((p: any) => p.title)).toEqual(['Synthetic second mail'])
+    expect((await (await fetch(`${u}/pings?keep=1`, get(MESSENGER))).json()).pings).toEqual([])
   })
 })
