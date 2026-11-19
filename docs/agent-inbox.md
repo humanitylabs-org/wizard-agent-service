@@ -99,3 +99,36 @@ Step 3 of the series, same switch. One capped card, built only from inbox record
 - Links: threads use the shell's `/wizard-os-home/?session=<id>` deep link; the list views are
   `/wizard-os-home/?inbox=waiting|done|running|later|parked` (the Running view, wizard-ux issue 1569, and the inbox
   views after it).
+
+## App doors (issue 569)
+
+Messenger's Agent chat (and any other app) is a second door to this one inbox: there is one store and one card
+builder, never a second list. An app proves itself with its own app token, the file
+`<wizard-os home>/app-tokens/<app id>` that the app delivery route already checks, sent as
+`Authorization: Bearer <token>`. That credential is never the owner, and it opens only these routes for that app:
+
+- `GET /wizard/v1/agent-inbox/doors`: the door probe, `{ on: true, sweep_caps: { waiting, done }, door, pings }`. With
+  the switch off it answers 404, which tells the app to keep its own behaviour (every route below is 404 then too).
+- `POST /wizard/v1/agent-inbox` with `{ source: { app, item_id }, text, title? }`: a note. One record (`source`
+  `app:<app>/<item_id>`, state running) and a hidden main-agent worker, started exactly like the orb dump. A resend of
+  the same item id returns the same record; a note whose worker could not start waits as needs_you and starts again.
+- `POST /wizard/v1/agent-inbox/sweep { door: '<app>' }` and `GET .../sweep`: the card as JSON, with each item's current
+  state. No Daily thread is needed, so an app door never gets 409 `daily_unavailable`.
+- `PATCH /wizard/v1/agent-inbox/<id>` `{ action: 'answer', option }` (a token or `later`) and
+  `POST .../<card id>/yes-to-all`: only for Waiting items on a card that door drew, and never for a record another app
+  sent. Yes to all never covers `confirm` items.
+- `POST /wizard/v1/agent-inbox/events`: only with `source.app` set to the app itself.
+- `POST /wizard/v1/agent-inbox/doors { pings: true }` and `GET .../pings`: urgent alerts the rules already delivered
+  to Alerts (decided once, issue 552), handed to that door once each, starting from when it asked.
+
+Every other inbox route answers 403 `owner_only` to an app token; `source.app` naming another app answers 403
+`wrong_app`.
+
+**One sweep event.** A sweep asked at any door (Daily, an app, a typed or scheduled sweep) within an hour of the
+newest card, from a door that has not drawn that card yet, draws the same card. So a sweep in Daily and then in
+Messenger shows the same items and counts, and surfacing, the age badge (`seen`), parking after 3 sweeps and the
+archiving of shown Done/FYI records happen once per event, not once per door. The same door asking again, or any door
+after the hour, is a new sweep. When the Daily draws a card an app made, the card gets today's Daily thread and shows
+there as its last row.
+
+Handing the token to the app (an env var or file in its container) is the App Manager's part.

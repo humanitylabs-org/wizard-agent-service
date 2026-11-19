@@ -38,6 +38,18 @@ const MAX_RUN_SIGS = 20
 const MAX_SWEEPS = 10
 const MAX_OPTIONS = 6
 const MAX_ALERT_LOG = 200
+// App doors (issue 569): a sweep any door asks for within this time of the newest card, from a door that has not drawn
+// that card yet, draws the same card (one sweep event); the same door asking again, or later, is a new sweep.
+export const SWEEP_SHARE_MS = 3600_000
+export const DAILY_DOOR = 'daily'
+const APP_ID = /^[a-z0-9][a-z0-9._-]{0,63}$/u
+const MAX_DOOR_PINGS = 200
+// An alert older than this is not pinged to a door any more (it waits in Alerts and the inbox as before).
+const PING_WINDOW_MS = 2 * 86400_000
+/** The door name of an app (its installed app id), kept apart from the Daily door. */
+export const appDoor = app => (APP_ID.test(String(app ?? '')) ? `app:${app}` : '')
+/** The app a record came from (`source` app:<id>/<item>), or '' for the orb, a thread, Chats or an alert rule. */
+export const recordApp = record => /^app:([a-z0-9][a-z0-9._-]{0,63})\//u.exec(String(record?.source ?? ''))?.[1] || ''
 const THREAD_ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/u
 const RECORD_ID = /^inbox_[a-f0-9]{24}$/u
 const TOKEN = /^[a-z][a-z0-9-]{0,19}$/u
@@ -110,6 +122,8 @@ export class AgentInboxStore {
         if (parsed.rules_flag && typeof parsed.rules_flag === 'object') this.data.rules_flag = parsed.rules_flag
         // Open / Send to inbox taps (wizard-ux issue 1570): the orb router's few-shot examples, newest first.
         if (Array.isArray(parsed.route_examples)) this.data.route_examples = parsed.route_examples
+        // App doors (issue 569): which app doors asked for alert pings, and the alerts each one was given.
+        if (parsed.doors && typeof parsed.doors === 'object' && !Array.isArray(parsed.doors)) this.data.doors = parsed.doors
       }
     } catch { /* an unreadable store starts empty; the original bytes stay on disk until the next write */ }
   }
@@ -140,7 +154,7 @@ export class AgentInboxStore {
     const title = clip(input.title || ask, 60)
     if (!title) throw Object.assign(new Error('title or ask required'), { status: 400 })
     const source = clip(typeof input.source === 'object' && input.source
-      ? `app:${input.source.app ?? ''}/${input.source.item ?? ''}` : input.source || `thread:${thread}`, 200)
+      ? `app:${input.source.app ?? ''}/${input.source.item ?? input.source.item_id ?? ''}` : input.source || `thread:${thread}`, 200)
     const given = typeof input.dedupe_hash === 'string' && /^[a-f0-9]{16,64}$/u.test(input.dedupe_hash) ? input.dedupe_hash : ''
     const dedupe = given || hash(`${agent}\n${source.startsWith('thread:') ? '' : source}\n${(ask || title).toLowerCase()}`).slice(0, 32)
     const existing = Object.values(this.data.records).find(r => r.agent === agent && r.dedupe_hash === dedupe)
@@ -413,11 +427,13 @@ export class AgentInboxStore {
   /** A signal sweep (issue 550): park items that sat on PARK_AFTER sweeps unanswered, pick what the card shows
    *  (caps in code), mark the shown Waiting items surfaced (one more sweep each), archive the shown Done items and
    *  the counted Later/FYI ones, and keep the card. Returns the stored card. */
-  sweep({ id = '', thread_id = '', agent = 'hermes', day = '', links = DEFAULT_LINKS } = {}) {
+  sweep({ id = '', thread_id = '', agent = 'hermes', day = '', links = DEFAULT_LINKS, door = DAILY_DOOR } = {}) {
     this.markStale()
     const t = this.now()
     const plan = planSweep(Object.values(this.data.records))
     const card = composeCard(plan, { id: id || `sweep_${randomUUID().replaceAll('-', '').slice(0, 24)}`, at: t, day, thread_id, agent, missing: this.data.check?.missing || 0, links, rulesFlag: this.data.rules_flag || null })
+    // The doors that drew this card (issue 569); a card stored before doors existed was the Daily's.
+    card.doors = [door]
     // The "rules too loose" flag rides on one sweep card, then it is done.
     delete this.data.rules_flag
     for (const r of plan.park) { r.state = 'parked'; r.parked_at = t; r.updated_at = t }
@@ -433,6 +449,68 @@ export class AgentInboxStore {
     const card = (this.data.sweeps || []).find(c => (!thread || c.thread_id === thread) && (!agent || c.agent === agent)) || null
     // Only the newest card is live: an older card in another day's thread stays as it was.
     return card && card === this.data.sweeps[0] ? structuredClone(card) : null
+  }
+
+  /** A sweep asked for at one door (issue 569: Daily, an app such as Messenger, a typed or scheduled sweep). One
+   *  sweep event serves every door: a door that has not drawn the newest card yet, asking within SWEEP_SHARE_MS of
+   *  it, draws that same card, so surfacing, the age badge, parking and archiving happen once per event, never once
+   *  per door. The same door asking again (or any door later) is a new sweep. The Daily door gives the card its
+   *  thread when it draws a card an app door made. Returns `{ card, shared }`. */
+  drawSweep({ door = DAILY_DOOR, thread_id = '', agent = 'hermes', day = '', links = DEFAULT_LINKS, shareMs = SWEEP_SHARE_MS } = {}) {
+    const newest = Array.isArray(this.data.sweeps) ? this.data.sweeps[0] : null
+    const doors = newest ? (Array.isArray(newest.doors) ? newest.doors : [DAILY_DOOR]) : []
+    if (newest && !doors.includes(door) && this.now() - (newest.at || 0) < shareMs && (door !== DAILY_DOOR || !newest.thread_id || newest.thread_id === thread_id)) {
+      newest.doors = [...doors, door]
+      if (door === DAILY_DOOR && !newest.thread_id) Object.assign(newest, { thread_id, agent, day: day || newest.day })
+      this.#save()
+      return { card: structuredClone(newest), shared: true }
+    }
+    return { card: this.sweep({ thread_id, agent, day, links, door }), shared: false }
+  }
+
+  /** The stored cards one door drew, newest first. */
+  doorCards(door) {
+    return (this.data.sweeps || []).filter(c => (Array.isArray(c.doors) ? c.doors : [DAILY_DOOR]).includes(door)).map(c => structuredClone(c))
+  }
+
+  /** Whether an app door may answer this record (issue 569): it is a Waiting item on a card that door drew, and it
+   *  did not come from another app. */
+  doorMayAnswer(door, id) {
+    const record = RECORD_ID.test(String(id)) ? this.data.records[id] : null
+    if (!record) return false
+    const app = recordApp(record)
+    if (app && appDoor(app) !== door) return false
+    return this.doorCards(door).some(c => (c.waiting?.items || []).some(item => item.id === id))
+  }
+
+  /** An app door's state: `{ pings, pings_since }` (null when it never registered). */
+  door(door) { const d = this.data.doors?.[door]; return d ? { pings: d.pings === true, pings_since: d.pings_since || null } : null }
+
+  /** An app door asks for (or stops) urgent alert pings. Alerts delivered before it asked are never pinged to it. */
+  registerDoor(door, { pings = false } = {}) {
+    if (!door.startsWith('app:')) throw Object.assign(new Error('invalid door'), { status: 400 })
+    const doorsNow = this.data.doors && typeof this.data.doors === 'object' ? this.data.doors : {}
+    const current = doorsNow[door] || {}
+    const on = pings === true
+    const next = { ...current, pings: on, pings_since: on ? (current.pings === true && current.pings_since ? current.pings_since : this.now()) : null, pinged: Array.isArray(current.pinged) ? current.pinged : [] }
+    this.data.doors = { ...doorsNow, [door]: next }
+    this.#save()
+    return this.door(door)
+  }
+
+  /** The urgent alerts not yet pinged to this door, oldest first; each is handed out once per door, ever. The
+   *  urgency was decided once by the alert rules (issue 552): this only delivers what they already sent to Alerts. */
+  takePings(door) {
+    const d = this.data.doors?.[door]
+    if (!d?.pings) return []
+    const given = new Set(Array.isArray(d.pinged) ? d.pinged : [])
+    const fresh = Object.values(this.data.records)
+      .filter(r => r.kind === 'alert' && r.alert_delivered === true && (r.created_at || 0) >= (d.pings_since || 0) && this.now() - (r.created_at || 0) < PING_WINDOW_MS && !given.has(r.id))
+      .sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id))
+    if (!fresh.length) return []
+    d.pinged = [...given, ...fresh.map(r => r.id)].slice(-MAX_DOOR_PINGS)
+    this.#save()
+    return fresh.map(r => ({ id: r.id, title: r.title, ask: r.ask, severity: r.severity, link: r.link, at: r.created_at }))
   }
 
   sweepCard(id) { const card = (this.data.sweeps || []).find(c => c.id === id); return card ? structuredClone(card) : null }

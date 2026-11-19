@@ -1009,6 +1009,86 @@ export const serverChecks = {
   },
   // Issue 550: the signal sweep card. Built from the agent inbox, posted as the last row of today's Daily thread of
   // the main agent, and every tap posts that token's full resume message into the record's own thread (this kind's).
+  // Issue 569: an app (Messenger's Agent chat) is a second door to the one agent inbox. Its own app token (the
+  // delivery route's app-tokens/<id> file) opens capture, sweep, answer on its card and the door probe; a sweep from
+  // the Daily and then from the app is one sweep event (same card, each item seen once).
+  'agent-inbox-doors': async s => {
+    const tokens = join(s.root, 'os', 'app-tokens')
+    mkdirSync(tokens, { recursive: true })
+    const MESSENGER = `parity-messenger-${'m'.repeat(32)}`
+    writeFileSync(join(tokens, 'messenger'), `${MESSENGER}\n`)
+    const app = (method, body) => ({ method, headers: { Authorization: `Bearer ${MESSENGER}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
+    const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const line = value => `Synthetic reply\n[WIZARD_STATUS_V1]${JSON.stringify(value)}[/WIZARD_STATUS_V1]`
+    const record = async id => (await (await s.raw(`/wizard/v1/agent-inbox/${id}`)).json()).record
+    const until = async (read, want, label) => {
+      let last
+      for (let n = 0; n < 80; n++) { last = await read(); if (want(last)) return last; await new Promise(r => setTimeout(r, 25)) }
+      assert.fail(`${label}: ${JSON.stringify(last)}`)
+    }
+    // The door probe: on, with the sweep caps.
+    const probe = await s.raw('/wizard/v1/agent-inbox/doors', app('GET'))
+    assert.equal(probe.status, 200, await probe.clone().text())
+    assert.deepEqual(await probe.json(), { on: true, sweep_caps: { waiting: 7, done: 10 }, door: 'messenger', pings: false })
+    // Owner-only routes stay closed to the app credential.
+    for (const path of ['/wizard/v1/agent-inbox', '/wizard/v1/agent-inbox/rules', '/wizard/v1/agent-inbox/alert-log']) {
+      const refused = await s.raw(path, app('GET'))
+      assert.equal(refused.status, 403, `${path} refuses the app credential`)
+    }
+    assert.equal((await s.raw('/wizard/v1/agent-inbox', app('POST', { source: { app: 'wizard-mail', item_id: 'n1' }, text: 'Synthetic' }))).status, 403, 'an app captures only as itself')
+    // A note is one record (source app messenger), deduped on the note id.
+    const note = { source: { app: 'messenger', item_id: 'note_parity_1' }, text: 'Synthetic note: book the dentist next week' }
+    const made = await s.raw('/wizard/v1/agent-inbox', app('POST', note))
+    assert.equal(made.status, 201, await made.clone().text())
+    const noted = (await made.json()).record
+    assert.equal(noted.source, 'app:messenger/note_parity_1')
+    assert.equal(noted.worker, true)
+    const resent = await s.raw('/wizard/v1/agent-inbox', app('POST', { ...note, text: 'Synthetic note sent again' }))
+    assert.deepEqual([resent.status, (await resent.json()).record.id], [200, noted.id], 'a resend returns the same record')
+    if (s.kind === 'main') {
+      const worker = await until(async () => s.seen.find(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === noted.thread_id), Boolean, 'the note worker is admitted')
+      assert.equal(worker.headers['idempotency-key'], `wizard-inbox-${noted.id}`)
+      assert.ok(String(worker.body.instructions || '').includes('as a note in the messenger app'), 'the worker is told it is a background note')
+      assert.equal(s.sessions.get(noted.thread_id)?.hidden, true, 'the note worker thread is hidden')
+      const run = [...s.runs.values()].find(x => x.session_id === noted.thread_id)
+      Object.assign(run, { status: 'completed', updated_at: Date.now() / 1000, output: line({ state: 'done', ask: 'Synthetic dentist booked' }) })
+      assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
+      await until(() => record(noted.id), r => r.kind === 'result', 'the note worker finishes into the record')
+    } else {
+      // The main agent is not in this scene: the note waits on the owner, never lost (as the orb's dump).
+      await until(() => record(noted.id), r => r.state === 'new' && r.kind === 'needs_you', 'a note whose worker cannot start waits')
+    }
+    // A worker on this kind's thread asks; Daily sweeps first, then Messenger: one card, seen once.
+    const captured = await (await s.raw('/wizard/v1/agent-inbox', json('POST', { agent: s.id, thread_id: 'wizard_parity', title: 'Synthetic door ask', ask: 'Synthetic door ask' }))).json()
+    const id = captured.record.id
+    await admit(s, { input: 'Synthetic worker turn' })
+    const latestRun = [...s.runs.values()].at(-1)
+    Object.assign(latestRun, { status: 'completed', updated_at: Date.now() / 1000, output: line({ state: 'needs_you', ask: 'Synthetic door question. Reply yes or no',
+      options: { yes: 'Yes: go ahead with the synthetic door question.', no: 'No: leave the synthetic door question.' }, default_option: 'yes' }) })
+    assert.equal((await s.request(`/v1/runs/${latestRun.run_id}`)).status, 200)
+    await until(() => record(id), r => r.kind === 'needs_you', 'the worker asks')
+    assert.equal((await s.raw(`/wizard/v1/agent-inbox/${id}`, app('PATCH', { action: 'answer', option: 'yes' }))).status, 403, 'no answer before the door drew a card')
+    const daily = await s.raw('/wizard/v1/agent-inbox/sweep', json('POST', {}))
+    assert.equal(daily.status, 201, await daily.clone().text())
+    const dailyCard = (await daily.json()).card
+    const door = await s.raw('/wizard/v1/agent-inbox/sweep', app('POST', { door: 'messenger' }))
+    assert.equal(door.status, 200, await door.clone().text())
+    const doorBody = await door.json()
+    assert.equal(doorBody.shared, true, 'the second door draws the same sweep event')
+    const pick = c => ({ id: c.id, waiting: c.waiting.items.map(i => [i.id, i.seen]), done: c.done.items.map(i => i.id), running: c.running.count, later: c.later.count, parked: c.parked.count })
+    assert.deepEqual(pick(doorBody.card), pick(dailyCard), 'the same items and counts in both doors')
+    assert.ok(dailyCard.waiting.items.some(i => i.id === id && i.seen === 1))
+    assert.equal((await record(id)).surfaced_count, 1, 'seen once per sweep event, not once per door')
+    // An answer in Messenger resumes the same thread and shows answered on the Daily card.
+    const before = s.seen.length
+    const tapped = await s.raw(`/wizard/v1/agent-inbox/${id}`, app('PATCH', { action: 'answer', option: 'no' }))
+    assert.equal(tapped.status, 200, await tapped.clone().text())
+    const sent = await until(async () => s.seen.slice(before).filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === 'wizard_parity').at(-1), Boolean, 'the answer reaches the thread')
+    assert.ok(JSON.stringify(sent.body.input).includes('No: leave the synthetic door question.'), 'the full resume message is posted')
+    const owner = (await (await s.raw('/wizard/v1/agent-inbox/sweep')).json()).card
+    assert.deepEqual(owner.waiting.items.find(i => i.id === id), { ...owner.waiting.items.find(i => i.id === id), state: 'answered', answer: 'no' })
+    for (const r of s.runs.values()) if (r.status === 'running') r.status = 'completed'
+  },
   'agent-sweep': async s => {
     const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const line = value => `Synthetic reply\n[WIZARD_STATUS_V1]${JSON.stringify(value)}[/WIZARD_STATUS_V1]`
