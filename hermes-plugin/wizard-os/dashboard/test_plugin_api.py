@@ -33,7 +33,7 @@ import plugin_api as api
 # Issue 505 cases live in their own file; CI runs only this one.
 from test_claude_cooldown_recovery import RecoveryTests, StockHermesRehearsal  # noqa: F401,E402
 # Issue 545 (private first relay) cases live in their own file too.
-from test_private_first_api import PrivateFirstRelayTests  # noqa: F401,E402
+from test_private_first_api import GatewayCredentialTests, PrivateFirstRelayTests  # noqa: F401,E402
 
 PREFIX = "/api/plugins/wizard-os"
 MODEL = "gpt-6-luna"

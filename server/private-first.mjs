@@ -81,6 +81,9 @@ export function createPrivateFirst({ on, registry, agentsDir, mainOptions, setDe
 
   function state() {
     const kept = record()
+    // Decided as early as the switch is seen on (issue 575), not at the first hand-off: a provider image asks for the
+    // state before it registers anything, so a model it adds to the main Hermes later never makes a fresh box look old.
+    if (isOn() && typeof kept?.fresh !== 'boolean') serial(() => freshness()).catch(() => undefined)
     return {
       schema: PRIVATE_FIRST_SCHEMA, on: isOn(), standard_agent: MAIN_AGENT_ID, private_agent: privateAgentId(),
       // Off only on a fresh box whose private agent was set up and no Claude or ChatGPT sign-in has come yet.
