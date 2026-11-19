@@ -119,7 +119,10 @@ builder, never a second list. An app proves itself with its own app token, the f
   sent. Yes to all never covers `confirm` items.
 - `POST /wizard/v1/agent-inbox/events`: only with `source.app` set to the app itself.
 - `POST /wizard/v1/agent-inbox/doors { pings: true }` and `GET .../pings`: urgent alerts the rules already delivered
-  to Alerts (decided once, issue 552), handed to that door once each, starting from when it asked.
+  to Alerts (decided once, issue 552), starting from when the door asked. A door should read with `GET .../pings?keep=1`:
+  that read consumes nothing, the door stores each ping, then sends `POST .../pings { ack: [ids] }` (at most 500), and
+  only then is that alert never handed to it again, so a lost answer or a crash between the read and the store hands the
+  same ping out on the next read (issue 325). A plain `GET .../pings` still hands each ping out once, at the read.
 
 Every other inbox route answers 403 `owner_only` to an app token; `source.app` naming another app answers 403
 `wrong_app`.

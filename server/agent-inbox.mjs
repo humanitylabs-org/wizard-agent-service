@@ -501,19 +501,38 @@ export class AgentInboxStore {
     return this.door(door)
   }
 
-  /** The urgent alerts not yet pinged to this door, oldest first; each is handed out once per door, ever. The
-   *  urgency was decided once by the alert rules (issue 552): this only delivers what they already sent to Alerts. */
-  takePings(door) {
+  /** The urgent alerts this door has not acknowledged yet, oldest first. Reading them changes nothing: a door marks
+   *  each one delivered with `ackPings` only after it has stored it, so a crash or a lost answer between the read and
+   *  the store never loses an urgent alert (issue 325). The urgency was decided once by the alert rules (issue 552):
+   *  this only delivers what they already sent to Alerts. */
+  pendingPings(door) {
     const d = this.data.doors?.[door]
     if (!d?.pings) return []
     const given = new Set(Array.isArray(d.pinged) ? d.pinged : [])
-    const fresh = Object.values(this.data.records)
+    return Object.values(this.data.records)
       .filter(r => r.kind === 'alert' && r.alert_delivered === true && (r.created_at || 0) >= (d.pings_since || 0) && this.now() - (r.created_at || 0) < PING_WINDOW_MS && !given.has(r.id))
       .sort((a, b) => a.created_at - b.created_at || a.id.localeCompare(b.id))
-    if (!fresh.length) return []
-    d.pinged = [...given, ...fresh.map(r => r.id)].slice(-MAX_DOOR_PINGS)
+      .map(r => ({ id: r.id, title: r.title, ask: r.ask, severity: r.severity, link: r.link, at: r.created_at }))
+  }
+
+  /** A door says it has stored these pings: each is handed out once per door, ever. Ids that are not pending for the
+   *  door are ignored. Returns the ids it marked. */
+  ackPings(door, ids) {
+    const d = this.data.doors?.[door]
+    if (!d?.pings || !Array.isArray(ids)) return []
+    const pending = new Set(this.pendingPings(door).map(p => p.id))
+    const marked = [...new Set(ids.filter(id => typeof id === 'string' && pending.has(id)))]
+    if (!marked.length) return []
+    d.pinged = [...(Array.isArray(d.pinged) ? d.pinged : []), ...marked].slice(-MAX_DOOR_PINGS)
     this.#save()
-    return fresh.map(r => ({ id: r.id, title: r.title, ask: r.ask, severity: r.severity, link: r.link, at: r.created_at }))
+    return marked
+  }
+
+  /** Read and acknowledge in one step (the store-level shortcut for callers that keep the pings themselves). */
+  takePings(door) {
+    const fresh = this.pendingPings(door)
+    this.ackPings(door, fresh.map(p => p.id))
+    return fresh
   }
 
   sweepCard(id) { const card = (this.data.sweeps || []).find(c => c.id === id); return card ? structuredClone(card) : null }

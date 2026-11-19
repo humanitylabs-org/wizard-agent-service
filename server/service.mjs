@@ -6623,10 +6623,11 @@ function buildWizardServer(options, lifetime) {
         // Wizard-ux issue 1570: /open (POST: a hidden thread moves into the chat list) and /send (POST: a visible
         // thread moves into the background). Each tap is also one route example for the orb router.
         const moveRoute = !yesToAll && (one === 'open' || one === 'send') ? one : ''
-        // Issue 569: /doors (GET the door probe, POST an app door's ping choice) and /pings (GET an app door's alerts).
+        // Issue 569: /doors (GET the door probe, POST an app door's ping choice) and /pings (GET an app door's alerts;
+        // with ?keep=1 without consuming them, then POST { ack: [ids] } once the door has stored them, issue 325).
         const doorRoute = !yesToAll && (one === 'doors' || one === 'pings') ? one : ''
         const methods = yesToAll || moveRoute ? ['POST'] : alertRoute === 'rules' ? ['GET', 'PUT'] : alertRoute === 'events' ? ['POST'] : alertRoute ? ['GET']
-          : doorRoute === 'doors' ? ['GET', 'POST'] : doorRoute ? ['GET']
+          : doorRoute ? ['GET', 'POST']
           : sweepRoute || !one ? ['GET', 'POST'] : ['GET', 'PATCH']
         if (!methods.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: methods.join(', ') }); return }
         if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
@@ -6662,9 +6663,16 @@ function buildWizardServer(options, lifetime) {
             if (!door && request.method === 'POST') { sendJson(response, 403, { error: 'app_door_only' }); return }
             sendJson(response, 200, { on: true, sweep_caps: { waiting: WAITING_CAP, done: DONE_CAP }, ...(door ? { door: app, pings: registered?.pings === true } : {}) }, { 'Cache-Control': 'no-store' })
           } else if (doorRoute === 'pings') {
+            if (!door && request.method === 'POST') { sendJson(response, 403, { error: 'app_door_only' }); return }
             const target = door || appDoor(url.searchParams.get('door') || '')
             if (!target) { sendJson(response, 400, { error: 'invalid_request' }); return }
-            sendJson(response, 200, { pings: agentInbox.takePings(target) }, { 'Cache-Control': 'no-store' })
+            if (request.method === 'POST') {
+              if (!Array.isArray(input.ack) || input.ack.length > 500) { sendJson(response, 400, { error: 'invalid_request' }); return }
+              sendJson(response, 200, { acked: agentInbox.ackPings(target, input.ack) }, { 'Cache-Control': 'no-store' })
+            }
+            // ?keep=1: read without consuming, the door acks after its store (issue 325). A plain GET still hands each
+            // ping out once as it did before, so a door built on that contract keeps working.
+            else sendJson(response, 200, { pings: url.searchParams.get('keep') === '1' ? agentInbox.pendingPings(target) : agentInbox.takePings(target) }, { 'Cache-Control': 'no-store' })
           } else if (door && sweepRoute && request.method === 'GET') {
             const card = agentInbox.doorCards(door)[0]
             sendJson(response, 200, { card: card && card.id === agentInbox.latestSweep()?.id ? agentInbox.sweepView(card) : null }, { 'Cache-Control': 'no-store' })

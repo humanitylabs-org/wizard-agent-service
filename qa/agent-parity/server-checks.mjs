@@ -1030,6 +1030,18 @@ export const serverChecks = {
     const probe = await s.raw('/wizard/v1/agent-inbox/doors', app('GET'))
     assert.equal(probe.status, 200, await probe.clone().text())
     assert.deepEqual(await probe.json(), { on: true, sweep_caps: { waiting: 7, done: 10 }, door: 'messenger', pings: false })
+    // Pings (issue 325): a keep read consumes nothing; only the door's ack after its store does.
+    assert.equal((await (await s.raw('/wizard/v1/agent-inbox/doors', app('POST', { pings: true }))).json()).pings, true)
+    const paid = await s.raw('/wizard/v1/agent-inbox/events', json('POST', { agent: s.id, type: 'payment_failed', source: { app: 'wizard-money', item: 'p-door' }, title: 'Synthetic door payment failed' }))
+    assert.equal(paid.status, 201, await paid.clone().text())
+    const pingRead = async () => (await (await s.raw('/wizard/v1/agent-inbox/pings?keep=1', app('GET'))).json()).pings.map(p => p.id)
+    const firstRead = await pingRead()
+    assert.equal(firstRead.length, 1, 'the delivered alert is pending for the door')
+    assert.deepEqual(await pingRead(), firstRead, 'a read without an ack hands the same ping out again')
+    assert.equal((await s.raw('/wizard/v1/agent-inbox/pings', json('POST', { ack: firstRead }))).status, 403, 'only the door acks')
+    const acked = await s.raw('/wizard/v1/agent-inbox/pings', app('POST', { ack: firstRead }))
+    assert.deepEqual([acked.status, (await acked.json()).acked], [200, firstRead])
+    assert.deepEqual(await pingRead(), [], 'an acked ping never comes again')
     // Owner-only routes stay closed to the app credential.
     for (const path of ['/wizard/v1/agent-inbox', '/wizard/v1/agent-inbox/rules', '/wizard/v1/agent-inbox/alert-log']) {
       const refused = await s.raw(path, app('GET'))
