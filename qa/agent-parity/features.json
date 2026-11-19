@@ -1910,6 +1910,20 @@
       "policy_exemptions": []
     },
     {
+      "id": "compact-model-menu-families",
+      "description": "The compact model menu (tap the model label in the message box) opens on Fable, Opus, Sonnet, Astra and Sol for the main agent (wizard-ux issue 1636; Fable only when the catalogue has a Fable route, the newest one on its own provider, never a placeholder). A host-profile, container or restricted agent's own chats list exactly that agent's allowed models on its own route and never inherit the main agent's Fable row.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/composer-model-label.test.mjs: the real chat-models.js renders the main menu from a catalogue with and without claude-fable-5-2 (Fable row present and picking that route, or absent; default unchanged), then host-profile, container and restricted agent records whose rows must be only their own allowed models on their own provider. Source-executed fixture evidence, not live box or browser proof.",
+      "source_refs": [
+        "wizard-ux/web/core/chat-models.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/composer-model-label.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "multiline-composer-editability",
       "description": "A three-line mobile draft keeps every editing row selectable and Send reachable without the model control intercepting either target",
       "layer": "ux",
