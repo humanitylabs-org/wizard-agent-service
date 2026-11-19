@@ -56,8 +56,8 @@ import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigratio
 import { createSpaceFiling } from './thread-spaces.mjs'
 import { createChannelsSwitch, channelPart } from './channels-switch.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
-import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS } from './agent-inbox.mjs'
-import { isSweepPhrase, isScheduledSweep, withCardRow } from './agent-sweep.mjs'
+import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, appDoor, recordApp } from './agent-inbox.mjs'
+import { isSweepPhrase, isScheduledSweep, withCardRow, WAITING_CAP, DONE_CAP } from './agent-sweep.mjs'
 import { AlertRulesFile, createAlertGate, privateRouter } from './agent-alerts.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
@@ -109,7 +109,7 @@ import { AgentChatInputs } from './agent-chat-inputs.mjs'
 import { WIZARD_CHAT_MEDIA_INSTRUCTIONS } from './chat-presentation.mjs'
 import { createBrowserBoundary, passiveMediaPath } from './browser-boundary.mjs'
 import { agentIngressPathAllowed, agentPathAllowed, createPrincipalResolver, isAgentIngress, markAgentIngress, ownerLike, principalOf, sameSecret } from './principals.mjs'
-import { createAppBindings } from './app-bindings.mjs'
+import { createAppBindings, appForToken } from './app-bindings.mjs'
 import { createShareAgentRouting } from './share-agents.mjs'
 import { DEFAULT_PRIVATE_ACCESS_SOCKET, createPhoneSetup } from './phone-setup.mjs'
 import { readArchivedSessions } from './archived-sessions.mjs'
@@ -3889,8 +3889,10 @@ function buildWizardServer(options, lifetime) {
   const dumpRunNote = sessionId => {
     if (!sessionId || !agentInboxOn()) return ''
     const record = agentInbox.linked(MAIN_AGENT_ID, sessionId)
-    if (!record || record.source !== 'orb:dump' || record.state !== 'running') return ''
-    return 'Background task: the owner handed you this by voice and is not watching this thread; your reply is read later, if at all. '
+    // An app door's note (issue 569) is a background task the same way, left as a note in that app.
+    const app = record?.worker === true ? recordApp(record) : ''
+    if (!record || (record.source !== 'orb:dump' && !app) || record.state !== 'running') return ''
+    return `Background task: the owner handed you this ${app ? `as a note in the ${app} app` : 'by voice'} and is not watching this thread; your reply is read later, if at all. `
       + 'Do the whole task now without stopping to ask unless you must. End with a short reply: what you did and the result. '
       + 'If you need the owner, end with a needs_you status whose ask is one plain question, with a recommendation and short answer options.'
       + (record.deadline ? ` Deadline: ${record.deadline}.` : '')
@@ -3911,7 +3913,35 @@ function buildWizardServer(options, lifetime) {
       const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${agentQuery}`, { id: claim.sessionId, title: claim.title })
       if (!created.ok && created.status !== 409) throw inboxError(503, 'daily_thread_unavailable')
     }
-    return agentInbox.sweepView(agentInbox.sweep({ thread_id: claim.sessionId, agent: channel.agent, day: claim.day }))
+    return agentInbox.sweepView(agentInbox.drawSweep({ door: DAILY_DOOR, thread_id: claim.sessionId, agent: channel.agent, day: claim.day }).card)
+  }
+  // App doors (issue 569): an installed app's own app-scoped token (<wizard-os home>/app-tokens/<app id>, the
+  // delivery route's credential) opens a few inbox routes for that app only. '' = not an app credential.
+  const inboxAppOf = request => {
+    const header = String(request.headers.authorization || '')
+    const bearer = header.slice(0, 7).toLowerCase() === 'bearer ' ? header.slice(7).trim() : ''
+    return bearer ? appForToken(join(bridgeOsHome || wizardOsHome(), 'app-tokens'), bearer) : ''
+  }
+  // A note left in an app (Messenger's Agent chat) becomes one record and a hidden background worker, exactly like
+  // the orb's dump: same worker start, same retry, deduped on app + item id so a resend returns the same record.
+  const captureAppNote = (app, input) => {
+    const item = typeof input.source?.item_id === 'string' ? input.source.item_id.trim() : typeof input.source?.item === 'string' ? input.source.item.trim() : ''
+    if (!/^[A-Za-z0-9._:-]{1,128}$/u.test(item)) throw inboxError(400, 'invalid_item')
+    const words = String(input.text ?? input.ask ?? '').replace(/\s+/gu, ' ').trim().slice(0, 4000)
+    if (!words) throw inboxError(400, 'text_required')
+    const { record, created } = agentInbox.capture({
+      agent: MAIN_AGENT_ID, thread_id: mintDailyThreadId(), source: { app, item_id: item }, kind: 'note',
+      title: typeof input.title === 'string' && input.title.trim() ? input.title : words, ask: words,
+      deadline: input.deadline ?? null, privacy_class: 'private', link: input.link,
+      dedupe_hash: createHash('sha256').update(`${MAIN_AGENT_ID}\napp\n${app}\n${item}`).digest('hex').slice(0, 32),
+    }, { fields: { worker: true } })
+    const retry = created ? null : agentInbox.retryStart(record.id)
+    if (created || retry) {
+      const started = startDumpWorker(retry || record, words)
+      dumpRuns.set(record.id, started)
+      started.finally(() => dumpRuns.delete(record.id)).catch(() => undefined)
+    }
+    return { record: agentInbox.get(record.id) || record, created, ...(retry ? { restarted: true } : {}) }
   }
   // A tap on the card: that token's full resume message goes into the record's own thread as the owner's next turn,
   // through the same run admission every Service-made turn uses (queued behind a running turn, idempotent per tap).
@@ -6268,6 +6298,8 @@ function buildWizardServer(options, lifetime) {
         (request.method === 'POST' && /^\/wizard\/internal\/(?:agents|heavy|schedules|supervisor)\//u.test(url.pathname)
           && sameSecret(String(request.headers.authorization || '').replace(/^Bearer /u, ''), options.heavyToken))
         || (['/wizard/mcp', '/wizard/standard-chats/mcp', '/wizard/v1/agent-context'].includes(url.pathname) && Boolean(bridge?.agentFor(request)))
+        // An app's door to the agent inbox (issue 569) with its own app token; the route still checks its scope.
+        || (url.pathname.startsWith('/wizard/v1/agent-inbox') && agentInboxOn() && Boolean(inboxAppOf(request)))
       )
       // Passive owner media (<img>/<video>/<audio>, a download link) of a known attachment or saved file id.
       const mediaRequest = browserBoundary.enabled && passiveMediaPath(request.method, url.pathname)
@@ -6572,8 +6604,14 @@ function buildWizardServer(options, lifetime) {
       const inboxRoute = /^\/wizard\/v1\/agent-inbox(?:\/([^/]+))?(?:\/(yes-to-all))?$/u.exec(url.pathname)
       if (inboxRoute) {
         if (!agentInboxOn()) { sendJson(response, 404, { error: 'not_found' }); return }
-        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        // Issue 569: an installed app's own token makes the call that app's door (e.g. Messenger's Agent chat); it
+        // never counts as the owner, on any listener mode, and reaches only the door routes below.
+        const app = tailnetIngress || principalOf(request).kind === 'agent' ? '' : inboxAppOf(request)
+        const door = app ? appDoor(app) : ''
+        if (!door) {
+          if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+          if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        }
         const one = inboxRoute[1] ? decodeURIComponent(inboxRoute[1]) : ''
         const yesToAll = inboxRoute[2] === 'yes-to-all'
         // Issue 550: /sweep (GET the newest card, POST a sweep now) and /<card id>/yes-to-all (POST).
@@ -6585,10 +6623,18 @@ function buildWizardServer(options, lifetime) {
         // Wizard-ux issue 1570: /open (POST: a hidden thread moves into the chat list) and /send (POST: a visible
         // thread moves into the background). Each tap is also one route example for the orb router.
         const moveRoute = !yesToAll && (one === 'open' || one === 'send') ? one : ''
+        // Issue 569: /doors (GET the door probe, POST an app door's ping choice) and /pings (GET an app door's alerts).
+        const doorRoute = !yesToAll && (one === 'doors' || one === 'pings') ? one : ''
         const methods = yesToAll || moveRoute ? ['POST'] : alertRoute === 'rules' ? ['GET', 'PUT'] : alertRoute === 'events' ? ['POST'] : alertRoute ? ['GET']
+          : doorRoute === 'doors' ? ['GET', 'POST'] : doorRoute ? ['GET']
           : sweepRoute || !one ? ['GET', 'POST'] : ['GET', 'PATCH']
         if (!methods.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: methods.join(', ') }); return }
         if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        // An app door reaches capture (POST), sweep, answer / later on its own card's items, Yes to all on its own
+        // cards, events from itself, the door probe and its pings. Every other inbox route stays the owner's.
+        if (door && !((!one && request.method === 'POST') || sweepRoute || yesToAll || doorRoute || alertRoute === 'events' || (request.method === 'PATCH' && one && !alertRoute && !moveRoute))) {
+          sendJson(response, 403, { error: 'owner_only' }); return
+        }
         let input = {}
         if (request.method !== 'GET') {
           if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
@@ -6597,7 +6643,41 @@ function buildWizardServer(options, lifetime) {
         }
         const view = record => { const { run_sigs: _sigs, ...rest } = record; return rest }
         try {
-          if (moveRoute) {
+          // An app door captures and posts events only as itself (source.app is its own app id).
+          if (door && (!one || alertRoute === 'events') && (typeof input.source !== 'object' || !input.source || input.source.app !== app)) { sendJson(response, 403, { error: 'wrong_app' }); return }
+          if (door && request.method === 'PATCH') {
+            // Answer or Later only, and only on a Waiting item of a card this door drew that no other app sent.
+            if (input.action !== 'answer') { sendJson(response, 403, { error: 'owner_only' }); return }
+            const current = agentInbox.get(one)
+            const option = typeof input.option === 'string' ? input.option.trim().toLowerCase() : ''
+            // The same tap sent again (a retry) after it was taken answers as before and posts nothing.
+            const fromApp = current ? recordApp(current) : ''
+            const repeat = current?.state === 'answered' && current.answer === option && (!fromApp || appDoor(fromApp) === door)
+            const onCard = repeat && agentInbox.doorCards(door).some(card => (card.waiting?.items || []).some(item => item.id === one))
+            if (!onCard && !agentInbox.doorMayAnswer(door, one)) { sendJson(response, current ? 403 : 404, { error: current ? 'not_on_door_card' : 'not_found' }); return }
+          }
+          if (door && yesToAll && !agentInbox.doorCards(door).some(card => card.id === one)) { sendJson(response, 404, { error: 'not_found' }); return }
+          if (doorRoute === 'doors') {
+            const registered = door && request.method === 'POST' ? agentInbox.registerDoor(door, { pings: input.pings === true }) : door ? agentInbox.door(door) : null
+            if (!door && request.method === 'POST') { sendJson(response, 403, { error: 'app_door_only' }); return }
+            sendJson(response, 200, { on: true, sweep_caps: { waiting: WAITING_CAP, done: DONE_CAP }, ...(door ? { door: app, pings: registered?.pings === true } : {}) }, { 'Cache-Control': 'no-store' })
+          } else if (doorRoute === 'pings') {
+            const target = door || appDoor(url.searchParams.get('door') || '')
+            if (!target) { sendJson(response, 400, { error: 'invalid_request' }); return }
+            sendJson(response, 200, { pings: agentInbox.takePings(target) }, { 'Cache-Control': 'no-store' })
+          } else if (door && sweepRoute && request.method === 'GET') {
+            const card = agentInbox.doorCards(door)[0]
+            sendJson(response, 200, { card: card && card.id === agentInbox.latestSweep()?.id ? agentInbox.sweepView(card) : null }, { 'Cache-Control': 'no-store' })
+          } else if (door && sweepRoute) {
+            // An app door's sweep needs no Daily thread: the card comes back as JSON (and is the same card a Daily
+            // sweep in the same event shows).
+            if (input.door !== undefined && input.door !== app) { sendJson(response, 403, { error: 'wrong_app' }); return }
+            const drawn = agentInbox.drawSweep({ door, agent: MAIN_AGENT_ID, day: dayOf(Date.now(), dailyTimeZone()) })
+            sendJson(response, drawn.shared ? 200 : 201, { card: agentInbox.sweepView(drawn.card), shared: drawn.shared }, { 'Cache-Control': 'no-store' })
+          } else if (door && !one) {
+            const { record, created, restarted } = captureAppNote(app, input)
+            sendJson(response, created ? 201 : 200, { record: view(record), created, ...(restarted ? { restarted } : {}) }, { 'Cache-Control': 'no-store' })
+          } else if (moveRoute) {
             const moved = await moveInboxThread(moveRoute, input)
             sendJson(response, 200, { record: moved.record ? view(moved.record) : null, hidden: moved.hidden, example: Boolean(moved.example) }, { 'Cache-Control': 'no-store' })
           } else if (alertRoute === 'rules') {
@@ -6618,8 +6698,10 @@ function buildWizardServer(options, lifetime) {
             sendJson(response, 201, { card: await runSweep() }, { 'Cache-Control': 'no-store' })
           } else if (yesToAll) {
             // Only the Waiting items this card shows; never a confirm item, never one hidden by the cap.
-            const targets = agentInbox.yesToAll(one)
-            if (!targets) { sendJson(response, 404, { error: 'not_found' }); return }
+            const all = agentInbox.yesToAll(one)
+            if (!all) { sendJson(response, 404, { error: 'not_found' }); return }
+            // At an app door, never an item another app sent.
+            const targets = door ? all.filter(({ id }) => agentInbox.doorMayAnswer(door, id)) : all
             const answered = []
             for (const { id, option } of targets) {
               const done = await answerInboxRecord(id, option)

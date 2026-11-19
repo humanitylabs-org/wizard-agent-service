@@ -9,7 +9,7 @@
 // installer). An app never names an agent: the Service resolves the binding. A bound agent that is missing or down
 // fails the delivery loudly; there is no fallback to another agent.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
-import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
+import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { AgentError, MAIN_AGENT_ID } from './agents.mjs'
 
@@ -43,6 +43,24 @@ export function bindingDeclaration(app) {
 /** Session id for an app delivery thread: stable per (app, thread), never chosen by the app. */
 export function appThreadId(appId, thread) {
   return `wizard_app_${appId.replace(/[^A-Za-z0-9-]/gu, '-')}_${createHash('sha256').update(`${appId}\n${thread}`).digest('hex').slice(0, 20)}`
+}
+
+/** The installed app whose app-scoped token (<tokensDir>/<app_id>, the same files the delivery route checks) this
+ *  bearer is, or '' (issue 569: an app's door to the agent inbox). Every file is compared in fixed time. */
+export function appForToken(tokensDir, bearer) {
+  const supplied = Buffer.from(String(bearer || ''))
+  if (!tokensDir || supplied.length < 24) return ''
+  let names = []
+  try { names = readdirSync(tokensDir) } catch { return '' }
+  let found = ''
+  for (const name of names) {
+    if (!APP_ID_RE.test(name)) continue
+    let token = ''
+    try { token = readFileSync(join(tokensDir, name), 'utf8').trim() } catch { continue }
+    const expected = Buffer.from(token)
+    if (token.length >= 24 && expected.length === supplied.length && timingSafeEqual(expected, supplied) && !found) found = name
+  }
+  return found
 }
 
 export function createAppBindings({ osHome, registry, appsJsonPath, launcherPath = '', now = () => Date.now() }) {
