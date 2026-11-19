@@ -2289,6 +2289,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "chat-connector-models",
+      "description": "The Chats model menu (the label under the message box) lists the connected AI connectors' short lists for everyone (wizard-ux issue 1561; the wizard/connector-models switch is gone): Claude Opus, Sonnet, Haiku, Fable; ChatGPT Sol, Astra, Luna; Tinfoil GLM, Kimi, DeepSeek Flash (every deepseek-* id is one row). A disconnected connector's models leave the menu (a thread keeps its current model), an open menu repaints when a connector's sign-in changes, and picking a Tinfoil row routes the main chat to custom:wizard-tinfoil. Routed agents keep only their own allowed models.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/connector-models.test.mjs: the real chat-models.js and chat-power.js open the picker and pick the first row for main, host-profile, container and restricted windows (routed agents show only their own allowed model and route to it; main shows GLM, Kimi, DeepSeek Flash and routes to custom:wizard-tinfoil), plus the sign-out repaint. Browser: the qa.cjs harness on wizard-ux branch builder/1561-evidence (phone Nebula, synthetic box). Synthetic fixtures, not live provider proof.",
+      "source_refs": [
+        "wizard-ux/web/core/chat-models.js",
+        "wizard-ux/web/core/chat-power.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/connector-models.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "ai-lookup",
       "description": "Look up in the Chats selection menu explains selected words with a fast stateless model (claude-haiku-4-5, no tools, no history) in the context of their own message only, identically for main, host-profile, container and restricted agents; private agents, private threads and Incognito never reach a cloud model, decided from the session's pinned agent on the server, not the caller's agent field.",
       "layer": "ux",
