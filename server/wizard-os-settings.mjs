@@ -290,6 +290,10 @@ export function voiceRoutes(value) {
     return [{ words, open: route.open, ...(route.rest_param ? { rest_param: route.rest_param } : {}) }]
   })
 }
+const APP_PERMISSIONS = new Set(['geolocation'])
+export function appPermissions(value) {
+  return Array.isArray(value) ? [...new Set(value.filter(v => typeof v === 'string' && APP_PERMISSIONS.has(v)))] : []
+}
 export function readApps({ appsJsonPath, launcherPath }) {
   const out = []
   const seen = new Set()
@@ -320,6 +324,9 @@ export function readApps({ appsJsonPath, launcherPath }) {
       // made under an old id opening the renamed app (wizard-ux issue 1471). Only valid ids, never the app's own.
       ...(renamedFrom(app.renamed_from, id).length ? { renamed_from: renamedFrom(app.renamed_from, id) } : {}),
       provides: Array.isArray(app.provides) ? app.provides.filter(v => typeof v === 'string' && /^[a-z0-9][a-z0-9-]{0,63}$/.test(v)) : [],
+      // Browser powers the app declared (wizard.md permissions, written by the App Manager). The shell grants a frame
+      // only what is listed here (wizard-ux issue 1629). Only known powers pass; absent when the app declares none.
+      ...(appPermissions(app.permissions).length ? { permissions: appPermissions(app.permissions) } : {}),
       // The app's declared kind (wizard.md type) and store shelf: shells sort Apps / Agent apps / Connectors by them.
       // Only known values leave the box; anything else is omitted so the shell falls back to its own heuristics.
       ...(APP_TYPES.has(app.type) ? { type: app.type } : {}),

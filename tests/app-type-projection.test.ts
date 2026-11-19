@@ -26,3 +26,20 @@ test('declared app type and category survive the service projection; unknown val
     }
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+test('declared permissions pass on (geolocation only); absent when the app declares none', () => {
+  const root = mkdtempSync(join(tmpdir(), 'app-perm-'))
+  try {
+    const appsJsonPath = join(root, 'apps.json')
+    writeFileSync(appsJsonPath, JSON.stringify({ apps: [
+      { id: 'wizard-maps', name: 'Maps', view: { url: '/maps/' }, permissions: ['geolocation', 'geolocation', 'camera', 7] },
+      { id: 'money', name: 'Money', view: { url: '/money/' } },
+      { id: 'notes', name: 'Notes', view: { url: '/notes/' }, permissions: [] },
+      { id: 'odd', name: 'Odd', view: { url: '/odd/' }, permissions: 'geolocation' },
+      { id: 'cam', name: 'Cam', view: { url: '/cam/' }, permissions: ['camera', 'microphone'] },
+    ] }))
+    const apps = Object.fromEntries(readApps({ appsJsonPath, launcherPath: join(root, 'missing.json') }).apps.map((a: any) => [a.id, a]))
+    expect(apps['wizard-maps'].permissions).toEqual(['geolocation'])
+    for (const id of ['money', 'notes', 'odd', 'cam']) expect(Object.hasOwn(apps[id], 'permissions')).toBe(false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
