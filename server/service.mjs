@@ -3093,13 +3093,15 @@ function buildWizardServer(options, lifetime) {
   const privateFirstSwitchOn = createChannelsSwitch({ id: PRIVATE_FIRST_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.privateFirstTtlMs ?? 3000 })
   const privateFirstOn = () => channelPart(options.privateFirst, privateFirstSwitchOn)
   let privateFirst = null
-  // The private-first relay's credential (issue 575): the heavy-lane token where a box has one, else the main Hermes's
-  // own gateway key (no standard install sets WIZARD_HEAVY_TOKEN; every linked main Hermes holds its `wizard` MCP key).
-  // Another agent's key never matches.
-  const privateFirstCredential = (request) => {
+  // The main Hermes plugins' loopback credential (issues 575 and 577: private first, schedules, agent reads,
+  // supervisor): the heavy-lane token where a box has one, else the main Hermes's own gateway key (no standard install
+  // sets WIZARD_HEAVY_TOKEN; every linked main Hermes holds its `wizard` MCP key). Where a heavy-lane token is set, it
+  // is the only credential, as before. Another agent's key never matches.
+  const mainPluginCredential = (request) => {
     const supplied = String(request.headers.authorization || '').replace(/^Bearer /u, '')
-    return Boolean(supplied) && (sameSecret(supplied, String(options.heavyToken || ''))
-      || Boolean(bridge && bridge.agentFor(request) === GATEWAY_MAIN_AGENT))
+    if (!supplied) return false
+    if (options.heavyToken) return sameSecret(supplied, String(options.heavyToken))
+    return Boolean(bridge && bridge.agentFor(request) === GATEWAY_MAIN_AGENT)
   }
   const agents = options.agents !== false && agentsDir ? createAgentRegistry({
     privateFirstAgent: () => (privateFirst?.on() ? privateFirst.privateAgentId() : null),
@@ -6303,11 +6305,11 @@ function buildWizardServer(options, lifetime) {
       // Dedicated machine routes keep their own credentials and downstream route gates.
       // This exemption never grants an owner principal and is never available on Serve.
       const machineRequest = browserBoundary.enabled && !tailnetIngress && (
-        (request.method === 'POST' && /^\/wizard\/internal\/(?:agents|heavy|schedules|supervisor)\//u.test(url.pathname)
+        (request.method === 'POST' && url.pathname.startsWith('/wizard/internal/heavy/')
           && sameSecret(String(request.headers.authorization || '').replace(/^Bearer /u, ''), options.heavyToken))
         || (['/wizard/mcp', '/wizard/standard-chats/mcp', '/wizard/v1/agent-context'].includes(url.pathname) && Boolean(bridge?.agentFor(request)))
-        // Private first's relay (issue 575): the heavy token or the main Hermes's own gateway key, as the route checks.
-        || (request.method === 'POST' && url.pathname.startsWith('/wizard/internal/private-first/') && privateFirstCredential(request))
+        // The main Hermes plugins (issues 575 and 577): the heavy token or the main Hermes's own gateway key, as each route checks.
+        || (request.method === 'POST' && /^\/wizard\/internal\/(?:agents|schedules|supervisor|private-first)\//u.test(url.pathname) && mainPluginCredential(request))
         // An app's door to the agent inbox (issue 569) with its own app token; the route still checks its scope.
         || (url.pathname.startsWith('/wizard/v1/agent-inbox') && agentInboxOn() && Boolean(inboxAppOf(request)))
       )
@@ -7098,12 +7100,10 @@ function buildWizardServer(options, lifetime) {
         return
       }
       if (url.pathname.startsWith('/wizard/internal/supervisor/')) {
-        if (!supervisor || !options.heavyToken) { sendJson(response, 404, { error: 'Supervisor unavailable on this box' }); return }
+        if (!supervisor || (!options.heavyToken && !bridge)) { sendJson(response, 404, { error: 'Supervisor unavailable on this box' }); return }
         if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
-        const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
-        const token = String(options.heavyToken)
         if (isAgentIngress(request) || principal.kind === 'agent' || tailnetIngress || request.headers.origin || request.headers['sec-fetch-site']
-          || supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { sendJson(response, 403, { error: 'Supervisor access denied' }); return }
+          || !mainPluginCredential(request)) { sendJson(response, 403, { error: 'Supervisor access denied' }); return }
         try {
           const value = JSON.parse((await readBoundedBody(request, 128 * 1024)).toString('utf8'))
           if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('invalid body'), { status: 400 })
@@ -7115,12 +7115,11 @@ function buildWizardServer(options, lifetime) {
       if (url.pathname.startsWith('/wizard/internal/schedules/')) {
         // The main agent's schedule tools (Hermes plugin wizard-schedule). Same loopback token and
         // refusal rules as heavy work; the thread is the calling session, injected by the plugin (or today's Daily).
-        if (!scheduler || !options.heavyToken) { sendJson(response, 404, { error: 'not_found' }); return }
+        // Credential: the heavy-lane token or the main Hermes's own gateway key (issue 577).
+        if (!scheduler || (!options.heavyToken && !bridge)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
-        const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
-        const token = String(options.heavyToken)
         if (isAgentIngress(request) || principalOf(request).kind === 'agent' || request.headers.origin || request.headers['sec-fetch-site']
-          || supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { sendJson(response, 403, { error: 'schedule access denied' }); return }
+          || !mainPluginCredential(request)) { sendJson(response, 403, { error: 'schedule access denied' }); return }
         let value
         try { value = JSON.parse((await readBoundedBody(request, 64 * 1024)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid body' }); return }
         const sessionId = typeof value?.session_id === 'string' && /^[A-Za-z0-9._:-]{1,160}$/u.test(value.session_id) ? value.session_id : ''
@@ -7159,7 +7158,7 @@ function buildWizardServer(options, lifetime) {
         if (!privateFirst || (!options.heavyToken && !bridge)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
         if (isAgentIngress(request) || principalOf(request).kind === 'agent' || request.headers.origin || request.headers['sec-fetch-site']
-          || !privateFirstCredential(request)) { sendJson(response, 403, { error: 'private first access denied' }); return }
+          || !mainPluginCredential(request)) { sendJson(response, 403, { error: 'private first access denied' }); return }
         let value
         try { value = JSON.parse((await readBoundedBody(request, 16 * 1024)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid body' }); return }
         if (!value || typeof value !== 'object' || Array.isArray(value)) { sendJson(response, 400, { error: 'invalid body' }); return }
@@ -7179,12 +7178,11 @@ function buildWizardServer(options, lifetime) {
         // The main agent's read-only cross-agent tools (Hermes plugin wizard-agents): the same six
         // wizard_agents__* tools container agents get on /wizard/mcp, read as the main agent. Same loopback
         // token and refusal rules as schedules; the registry's live seals decide every read.
-        if (!bridge || !options.heavyToken) { sendJson(response, 404, { error: 'not_found' }); return }
+        // Credential: the heavy-lane token or the main Hermes's own gateway key (issue 577).
+        if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
         if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
-        const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
-        const token = String(options.heavyToken)
         if (isAgentIngress(request) || principalOf(request).kind === 'agent' || request.headers.origin || request.headers['sec-fetch-site']
-          || supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { sendJson(response, 403, { error: 'agent read denied' }); return }
+          || !mainPluginCredential(request)) { sendJson(response, 403, { error: 'agent read denied' }); return }
         const tool = `wizard_agents__${url.pathname.slice('/wizard/internal/agents/'.length)}`
         if (!SHARED_AGENT_TOOLS.includes(tool)) { sendJson(response, 404, { error: 'not_found' }); return }
         let value

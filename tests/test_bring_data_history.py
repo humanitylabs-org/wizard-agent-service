@@ -393,5 +393,57 @@ class HistoryTests(unittest.TestCase):
         self.assertEqual(bd.history_note(), '')
 
 
+class ScheduleServiceTests(unittest.TestCase):
+    """Issue 577: the history schedule import reaches the Service on a standard install (no WIZARD_HEAVY_*)."""
+    def setUp(self):
+        import http.server, threading
+        from unittest.mock import patch
+        self.calls = []
+        calls = self.calls
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)))
+                calls.append((self.path, self.headers.get('Authorization'), body.get('session_id')))
+                if self.path.endswith('/redirect'):
+                    self.send_response(302); self.send_header('Location', '/elsewhere'); self.end_headers(); return
+                self.send_response(200); self.send_header('Content-Type', 'application/json'); self.end_headers()
+                self.wfile.write(b'{"results": []}')
+            def log_message(self, *args): pass
+        self.server = http.server.HTTPServer(('127.0.0.1', 0), H)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.shutdown)
+        self.origin = 'http://127.0.0.1:%d' % self.server.server_port
+        self.config = {'mcp_servers': {'wizard': {'url': self.origin + '/wizard/mcp'}}}
+        cli, config = types.ModuleType('hermes_cli'), types.ModuleType('hermes_cli.config')
+        config.load_config_readonly = lambda: self.config
+        cli.config = config
+        scope = types.ModuleType('agent.secret_scope')
+        scope.get_secret = lambda name: os.environ.get(name)
+        for p in (patch.dict(sys.modules, {'hermes_cli': cli, 'hermes_cli.config': config, 'agent': types.ModuleType('agent'), 'agent.secret_scope': scope}),
+                  patch.dict(os.environ, {'WIZARD_MCP_TOKEN': 'gateway-key-0123456789abcdef'})):
+            p.start(); self.addCleanup(p.stop)
+        for name in ('WIZARD_HEAVY_ORIGIN', 'WIZARD_HEAVY_TOKEN'):
+            os.environ.pop(name, None)
+
+    def test_gateway_key_reaches_the_schedule_route(self):
+        self.assertEqual(bd._scheduler_call('import-history', {'jobs': []}), {'results': []})
+        self.assertEqual(self.calls, [('/wizard/internal/schedules/import-history', 'Bearer gateway-key-0123456789abcdef', 'wizard-importer')])
+
+    def test_heavy_pair_wins_and_nothing_means_unreachable(self):
+        os.environ.update(WIZARD_HEAVY_ORIGIN='http://127.0.0.1:8923', WIZARD_HEAVY_TOKEN='fixture-capability')
+        self.assertEqual(bd._schedule_service(), ('http://127.0.0.1:8923', 'fixture-capability'))
+        for name in ('WIZARD_HEAVY_ORIGIN', 'WIZARD_HEAVY_TOKEN', 'WIZARD_MCP_TOKEN'):
+            os.environ.pop(name, None)
+        with self.assertRaises(ValueError):
+            bd._scheduler_call('import-history', {})
+        self.assertEqual(self.calls, [])
+
+    def test_a_redirect_never_carries_the_key(self):
+        import urllib.error
+        with self.assertRaises(urllib.error.HTTPError):
+            bd._scheduler_call('redirect', {})
+        self.assertEqual(len(self.calls), 1)
+
+
 if __name__ == '__main__':
     unittest.main()

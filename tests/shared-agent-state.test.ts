@@ -191,4 +191,22 @@ describe('standard-agent shared state', () => {
       expect((await sealed.json()).isError).toBe(true)
     } finally { svc.closeAllConnections?.(); await new Promise(resolve => svc.close(resolve)) }
   })
+  it('a standard install (no heavy-lane token, issue 577): the main Hermes gateway key reads, another agent\'s key never does', async () => {
+    const f = fixture(); const a = await f.create('Source'); const b = await f.create('Other')
+    f.write(a.id, 'memories/MEMORY.md', 'gateway-memory-marker')
+    const main = 'fixture-main-gateway-key-0123456789abcdef'
+    const svc = createWizardServer({ upstreamOrigin: 'http://127.0.0.1:9', hermesKey: 'fixture-hermes', requireAccess: false, appsJsonPath: join(f.root, 'apps.json'), wizardOsHome: f.root, hermesHome: f.registry.stateHome('hermes'), agentRuntime: f.runtime, mcpToken: main, bridgeWatchMs: 0, bridgeWriteSkills: false, followThrough: false, bridgeLog: (line: string) => f.logs.push(line) })
+    try {
+      const origin = `http://127.0.0.1:${((await listen(svc)) as any).port}`
+      const call = (tool: string, body: any, auth: string, extra: any = {}) => fetch(`${origin}/wizard/internal/agents/${tool}`, { method: 'POST', headers: { Authorization: 'Bearer ' + auth, 'Content-Type': 'application/json', ...extra }, body: JSON.stringify(body) })
+      const ok = await call('memory_read', { agent: a.id }, main)
+      expect(ok.status).toBe(200)
+      expect(JSON.parse((await ok.json()).content[0].text).memory).toBe('gateway-memory-marker')
+      const other = readFileSync(join(f.root, 'agents', b.id, 'gateway.key'), 'utf8').trim()
+      expect((await call('memory_read', { agent: a.id }, other)).status).toBe(403)
+      expect((await call('memory_read', { agent: a.id }, 'wrong-token-wrong-token-wrong-token-xx')).status).toBe(403)
+      expect((await call('memory_read', { agent: a.id }, main, { Origin: 'https://evil.example' })).status).toBe(403)
+      expect((await call('memory_read', { agent: a.id }, main, { 'Sec-Fetch-Site': 'same-origin' })).status).toBe(403)
+    } finally { svc.closeAllConnections?.(); await new Promise(resolve => svc.close(resolve)) }
+  })
 })
