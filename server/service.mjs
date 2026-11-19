@@ -7144,12 +7144,15 @@ function buildWizardServer(options, lifetime) {
         // Private first (issue 545): the provider images ask through the wizard-os plugin on the main Hermes
         // dashboard (wizard-app-store images/PRIVATE_FIRST.md), which calls here with the same loopback token and
         // refusal rules as the schedule tools. Switch off: `on: false`, and every change is refused.
-        if (!privateFirst || !options.heavyToken) { sendJson(response, 404, { error: 'not_found' }); return }
+        // Credential: the heavy-lane token where a box has one, else the main Hermes's own gateway key (issue 575: no
+        // standard install sets WIZARD_HEAVY_TOKEN, but every linked main Hermes holds its `wizard` MCP key).
+        if (!privateFirst || (!options.heavyToken && !bridge)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
         const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
-        const token = String(options.heavyToken)
+        const credential = sameSecret(supplied, String(options.heavyToken || ''))
+          || Boolean(bridge && supplied && bridge.agentFor(request) === GATEWAY_MAIN_AGENT)
         if (isAgentIngress(request) || principalOf(request).kind === 'agent' || request.headers.origin || request.headers['sec-fetch-site']
-          || supplied.length !== token.length || !timingSafeEqual(Buffer.from(supplied), Buffer.from(token))) { sendJson(response, 403, { error: 'private first access denied' }); return }
+          || !credential) { sendJson(response, 403, { error: 'private first access denied' }); return }
         let value
         try { value = JSON.parse((await readBoundedBody(request, 16 * 1024)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid body' }); return }
         if (!value || typeof value !== 'object' || Array.isArray(value)) { sendJson(response, 400, { error: 'invalid body' }); return }

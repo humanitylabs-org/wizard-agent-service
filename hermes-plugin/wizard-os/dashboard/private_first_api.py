@@ -3,7 +3,8 @@
 Mounted by plugin_api.py under /api/plugins/wizard-os/private-first (stock dashboard login required). The Claude,
 ChatGPT and Tinfoil provider images ask here instead of reading the owner's Look file
 (wizard-app-store images/PRIVATE_FIRST.md). Each call goes to the Agent Service's loopback route
-/wizard/internal/private-first/<action> with the wizard-schedule plugin's origin and token. The Service owns the
+/wizard/internal/private-first/<action> with the wizard-schedule plugin's origin and token, or, where a box has none
+(every standard install, issue 575), with this Hermes's own `wizard` MCP origin and gateway key. The Service owns the
 switch and every decision; this file only relays, and applies a suggested model inside this Hermes when the
 Service says the standard agent has none.
 
@@ -28,6 +29,8 @@ router = APIRouter(prefix="/private-first")
 SCHEMA = "wizard.private-first/1"
 MAX_BODY = 16 * 1024
 _LOCAL = re.compile(r"http://(127\.0\.0\.1|localhost|\[::1\])(:\d{1,5})?")
+# The `wizard` MCP URL: http://wizard-agent-service:8787/wizard/mcp (fresh box) or http://127.0.0.1:<port>/wizard/mcp
+_GATEWAY = re.compile(r"(https?://[A-Za-z0-9.\-]+(?::\d{1,5})?|http://\[::1\](?::\d{1,5})?)/wizard/mcp/?")
 _log = logging.getLogger(__name__)
 
 
@@ -40,13 +43,39 @@ def _secret(name: str) -> str:
         return os.environ.get(name, "")
 
 
+def _gateway() -> tuple[str, str]:
+    """This Hermes's own `wizard` MCP entry: (Service origin, gateway key), or ('', '').
+
+    Every linked main Hermes has it (WAM agent_link on a fresh box, `wizard link` alongside), while no standard
+    install sets the heavy-lane secrets (issue 575). The key only goes to the origin Hermes already sends it to.
+    """
+    try:
+        from hermes_cli.config import load_config_readonly
+
+        server = ((load_config_readonly() or {}).get("mcp_servers") or {}).get("wizard") or {}
+        url = server.get("url") if isinstance(server, dict) else None
+    except Exception:  # noqa: BLE001 - outside Hermes, or no config yet
+        url = None
+    match = _GATEWAY.fullmatch(url) if isinstance(url, str) else None
+    token = _secret("WIZARD_MCP_TOKEN").strip()
+    return (match.group(1), token) if match and token else ("", "")
+
+
+def _service() -> tuple[str, str]:
+    """(origin, token) for the Service's loopback route: the heavy-lane pair where a box has one, else the gateway."""
+    origin, token = _secret("WIZARD_HEAVY_ORIGIN").rstrip("/"), _secret("WIZARD_HEAVY_TOKEN")
+    if _LOCAL.fullmatch(origin) and token:
+        return origin, token
+    return _gateway()
+
+
 def service_call(action: str, value: dict, timeout: float = 20) -> tuple[int, dict]:
     """POST the Agent Service's private-first route; (status, answer). Unreachable -> (0, {})."""
     from urllib.error import HTTPError
     from urllib.request import ProxyHandler, Request as UrlRequest, build_opener
 
-    origin, token = _secret("WIZARD_HEAVY_ORIGIN").rstrip("/"), _secret("WIZARD_HEAVY_TOKEN")
-    if not _LOCAL.fullmatch(origin) or not token:
+    origin, token = _service()
+    if not origin or not token:
         return 0, {}
     request = UrlRequest(origin + "/wizard/internal/private-first/" + action, method="POST",
                          data=json.dumps(value).encode(),
