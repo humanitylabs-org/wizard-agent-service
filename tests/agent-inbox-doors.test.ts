@@ -106,6 +106,26 @@ describe('one sweep event across doors (store)', () => {
     expect(() => again.registerDoor('daily', { pings: true })).toThrow()
   })
 
+  it('pings stay pending until the door acks them, so a crash between read and store never loses one (issue 325)', () => {
+    const d = home(), path = join(d, 'agent-inbox.json'), c = clock()
+    const s = new AgentInboxStore(path, { now: c.now, log: () => undefined })
+    const door = appDoor('messenger')
+    s.registerDoor(door, { pings: true })
+    s.captureAlertUnderCap('2026-11-19', 10, { thread_id: 'alert_a', title: 'Synthetic alert A', ask: 'Synthetic alert A', severity: 'urgent' })
+    const read = s.pendingPings(door)
+    expect(read.map((p: any) => p.title)).toEqual(['Synthetic alert A'])
+    // The door crashes before it stores the ping: a fresh store (restart) still hands it out.
+    const after = new AgentInboxStore(path, { now: c.now, log: () => undefined })
+    expect(after.pendingPings(door).map((p: any) => p.id)).toEqual([read[0].id])
+    // Stored now: the ack marks it, and it is never handed out again, also after a restart.
+    expect(after.ackPings(door, [read[0].id, read[0].id, 'rec_unknown', 7])).toEqual([read[0].id])
+    expect(after.pendingPings(door)).toEqual([])
+    expect(after.ackPings(door, [read[0].id])).toEqual([])
+    expect(new AgentInboxStore(path, { now: c.now, log: () => undefined }).pendingPings(door)).toEqual([])
+    // Another door's ack never touches this door, and a door that never asked acks nothing.
+    expect(after.ackPings(appDoor('wizard-mail'), [read[0].id])).toEqual([])
+  })
+
   it('appForToken names the app whose token file matches, and nothing for a short or unknown bearer', () => {
     const d = home(), dir = join(d, 'app-tokens')
     mkdirSync(dir)
@@ -262,6 +282,14 @@ describe('app doors over HTTP', () => {
     expect(store().list({ kind: 'alert' })).toHaveLength(1)
     const pings = await (await fetch(`${u}/pings`, get(MESSENGER))).json()
     expect(pings.pings.map((p: any) => p.title)).toEqual(['Synthetic urgent mail'])
+    // A read consumes nothing (issue 325): the door got no answer or crashed, so it reads the same ping again.
+    expect((await (await fetch(`${u}/pings`, get(MESSENGER))).json()).pings.map((p: any) => p.id)).toEqual([pings.pings[0].id])
+    // Only the door acks its pings; the owner, a bad body or a big list is refused.
+    expect((await fetch(`${u}/pings`, json('POST', { ack: [pings.pings[0].id] }))).status).toBe(403)
+    expect((await fetch(`${u}/pings`, json('POST', { ack: 'x' }, MESSENGER))).status).toBe(400)
+    expect((await fetch(`${u}/pings`, json('POST', { ack: Array(501).fill('x') }, MESSENGER))).status).toBe(400)
+    const ack = await fetch(`${u}/pings`, json('POST', { ack: [pings.pings[0].id] }, MESSENGER))
+    expect([ack.status, await ack.json()]).toEqual([200, { acked: [pings.pings[0].id] }])
     expect((await (await fetch(`${u}/pings`, get(MESSENGER))).json()).pings).toEqual([])
     // The same event posted again is the same record: no second alert, no second ping.
     expect((await fetch(`${u}/events`, json('POST', { type: 'mail', source: { app: 'wizard-mail', item: 'acct:1' }, sender: 'Boss <boss@example.com>', title: 'Synthetic urgent mail', ask: 'Synthetic' }, MAIL))).status).toBe(200)
