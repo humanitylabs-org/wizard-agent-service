@@ -1085,6 +1085,11 @@ export const serverChecks = {
     assert.equal(tapped.status, 200, await tapped.clone().text())
     const sent = await until(async () => s.seen.slice(before).filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === 'wizard_parity').at(-1), Boolean, 'the answer reaches the thread')
     assert.ok(JSON.stringify(sent.body.input).includes('No: leave the synthetic door question.'), 'the full resume message is posted')
+    // The same tap again (a retry) answers as before and posts nothing; another answer to an answered item is refused.
+    const retry = await s.raw(`/wizard/v1/agent-inbox/${id}`, app('PATCH', { action: 'answer', option: 'no' }))
+    assert.equal(retry.status, 200)
+    assert.equal((await retry.json()).run_id, undefined, 'a repeated tap posts nothing')
+    assert.equal((await s.raw(`/wizard/v1/agent-inbox/${id}`, app('PATCH', { action: 'answer', option: 'yes' }))).status, 403, 'an answered item is not answered again from the door')
     const owner = (await (await s.raw('/wizard/v1/agent-inbox/sweep')).json()).card
     assert.deepEqual(owner.waiting.items.find(i => i.id === id), { ...owner.waiting.items.find(i => i.id === id), state: 'answered', answer: 'no' })
     for (const r of s.runs.values()) if (r.status === 'running') r.status = 'completed'

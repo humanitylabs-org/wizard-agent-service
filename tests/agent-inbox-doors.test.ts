@@ -79,6 +79,9 @@ describe('one sweep event across doors (store)', () => {
     expect(s.doorMayAnswer(door, own.id)).toBe(true)
     expect(s.doorMayAnswer(door, mail.id)).toBe(false)
     expect(s.doorMayAnswer(appDoor('wizard-mail'), mail.id)).toBe(false) // Mail never drew a card
+    // Once it is no longer waiting (answered, parked, archived), a door never answers or reopens it again.
+    s.patch(own.id, { action: 'answer', option: 'yes' })
+    expect(s.doorMayAnswer(door, own.id)).toBe(false)
   })
 
   it('pings: only alerts delivered after the door asked, each once per door, and they survive a restart', () => {
@@ -228,6 +231,11 @@ describe('app doors over HTTP', () => {
     const snoozed = await fetch(`${u}/${later.id}`, json('PATCH', { action: 'answer', option: 'later' }, MESSENGER))
     expect([snoozed.status, (await snoozed.json()).record.state]).toEqual([200, 'new'])
     expect((await (await fetch(`${u}/sweep`)).json()).card.waiting.items.find((i: any) => i.id === later.id).state).toBe('new')
+    // Once archived (e.g. its worker finished), Later from the door cannot reopen it.
+    expect((await fetch(`${u}/${later.id}`, json('PATCH', { action: 'archive' }))).status).toBe(200)
+    const reopened = await fetch(`${u}/${later.id}`, json('PATCH', { action: 'answer', option: 'later' }, MESSENGER))
+    expect([reopened.status, (await reopened.json()).error]).toEqual([403, 'not_on_door_card'])
+    expect(store().get(later.id)?.state).toBe('archived')
     // Mail's record is on the card but not Messenger's to answer; other actions stay the owner's.
     const notMine = await fetch(`${u}/${mail.id}`, json('PATCH', { action: 'answer', option: 'yes' }, MESSENGER))
     expect([notMine.status, (await notMine.json()).error]).toEqual([403, 'not_on_door_card'])

@@ -3918,7 +3918,8 @@ function buildWizardServer(options, lifetime) {
   // App doors (issue 569): an installed app's own app-scoped token (<wizard-os home>/app-tokens/<app id>, the
   // delivery route's credential) opens a few inbox routes for that app only. '' = not an app credential.
   const inboxAppOf = request => {
-    const bearer = /^Bearer\s+(.+)$/iu.exec(String(request.headers.authorization || ''))?.[1]?.trim() || ''
+    const header = String(request.headers.authorization || '')
+    const bearer = header.slice(0, 7).toLowerCase() === 'bearer ' ? header.slice(7).trim() : ''
     return bearer ? appForToken(join(bridgeOsHome || wizardOsHome(), 'app-tokens'), bearer) : ''
   }
   // A note left in an app (Messenger's Agent chat) becomes one record and a hidden background worker, exactly like
@@ -6647,7 +6648,13 @@ function buildWizardServer(options, lifetime) {
           if (door && request.method === 'PATCH') {
             // Answer or Later only, and only on a Waiting item of a card this door drew that no other app sent.
             if (input.action !== 'answer') { sendJson(response, 403, { error: 'owner_only' }); return }
-            if (!agentInbox.doorMayAnswer(door, one)) { sendJson(response, agentInbox.get(one) ? 403 : 404, { error: agentInbox.get(one) ? 'not_on_door_card' : 'not_found' }); return }
+            const current = agentInbox.get(one)
+            const option = typeof input.option === 'string' ? input.option.trim().toLowerCase() : ''
+            // The same tap sent again (a retry) after it was taken answers as before and posts nothing.
+            const fromApp = current ? recordApp(current) : ''
+            const repeat = current?.state === 'answered' && current.answer === option && (!fromApp || appDoor(fromApp) === door)
+            const onCard = repeat && agentInbox.doorCards(door).some(card => (card.waiting?.items || []).some(item => item.id === one))
+            if (!onCard && !agentInbox.doorMayAnswer(door, one)) { sendJson(response, current ? 403 : 404, { error: current ? 'not_on_door_card' : 'not_found' }); return }
           }
           if (door && yesToAll && !agentInbox.doorCards(door).some(card => card.id === one)) { sendJson(response, 404, { error: 'not_found' }); return }
           if (doorRoute === 'doors') {

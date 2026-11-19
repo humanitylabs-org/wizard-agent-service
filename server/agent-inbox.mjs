@@ -473,13 +473,16 @@ export class AgentInboxStore {
     return (this.data.sweeps || []).filter(c => (Array.isArray(c.doors) ? c.doors : [DAILY_DOOR]).includes(door)).map(c => structuredClone(c))
   }
 
-  /** Whether an app door may answer this record (issue 569): it is a Waiting item on a card that door drew, and it
-   *  did not come from another app. */
+  /** Whether an app door may answer this record (issue 569): it is still a Waiting item, it is on a card that door
+   *  drew, and it did not come from another app. */
   doorMayAnswer(door, id) {
     const record = RECORD_ID.test(String(id)) ? this.data.records[id] : null
     if (!record) return false
     const app = recordApp(record)
     if (app && appDoor(app) !== door) return false
+    // Only while it is still waiting: an answered, finished, archived or parked item is never answered (or reopened
+    // by Later) again from an app door.
+    if (record.kind !== 'needs_you' || (record.state !== 'new' && record.state !== 'surfaced')) return false
     return this.doorCards(door).some(c => (c.waiting?.items || []).some(item => item.id === id))
   }
 
