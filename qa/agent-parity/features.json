@@ -1721,12 +1721,13 @@
     },
     {
       "id": "stream-resume",
-      "description": "A live reply resumes by seq after a dropped stream: no doubled words, offline waits for the network, a replay gap drops the partial text, never a second admission",
+      "description": "A live reply resumes by seq after a dropped stream: no doubled words, offline waits for the network, a replay gap drops the partial text, never a second admission. While it streams (wizard-ux issue 1546), a reader who scrolled up is never moved by any chunk, repaint or layout change, and ↓ Latest shows; only a thread already at the bottom follows the stream, for main and routed threads alike",
       "layer": "ux",
-      "how_to_test": "Run QA_GROUP=resume QA_KINDS=main,host-profile,container,restricted QA_UX_ROOT=<ux> QA_OUT=<fresh-output> QA_EXTERNAL_ROOT=<worker-root> node qa/agent-parity/browser.mjs (Linux also needs QA_CHROMIUM=<chrome> QA_PLAYWRIGHT=<playwright>). Per kind, the real shell sends one turn through the real Service; the synthetic runtime streams numbered frames (GET /v1/runs/<id>/events replays from the oldest retained frame; a model-locked turn's chat/stream is numbered and replayed by the Service's locked-run bridge). Every Service connection is cut mid-reply: the next read replays and the live bubble shows each word once. Offline, no stream read happens until the browser is back online, then it resumes at once. A replay that lost frames (past the 4000-frame retention, replay.truncated) drops the partial text and the transcript answer shows once. One admission throughout. Synthetic-runtime browser evidence, not live provider acceptance.",
+      "how_to_test": "Run QA_GROUP=resume QA_KINDS=main,host-profile,container,restricted QA_UX_ROOT=<ux> QA_OUT=<fresh-output> QA_EXTERNAL_ROOT=<worker-root> node qa/agent-parity/browser.mjs (Linux also needs QA_CHROMIUM=<chrome> QA_PLAYWRIGHT=<playwright>). Per kind, the real shell sends one turn through the real Service; the synthetic runtime streams numbered frames (GET /v1/runs/<id>/events replays from the oldest retained frame; a model-locked turn's chat/stream is numbered and replayed by the Service's locked-run bridge). Every Service connection is cut mid-reply: the next read replays and the live bubble shows each word once. Offline, no stream read happens until the browser is back online, then it resumes at once. A replay that lost frames (past the 4000-frame retention, replay.truncated) drops the partial text and the transcript answer shows once. One admission throughout. Synthetic-runtime browser evidence, not live provider acceptance. Issue 1546: in wizard-ux run node --test tests/thread-no-scroll-yank.test.mjs (the real chat-power reading place, box and document scrolling: a first reply with no latest-reply id, scrolled up, is not moved by any chunk, for main, host-profile, container and restricted thread rows sharing one id; a bottom place follows). wizard-ux tests/qa-stream-scroll-hold.cjs is the synthetic browser run (a main and a routed Claude thread; phone 412x915 browser and document scroll, desktop 1440x900 Classic and AI apps, Nebula and Grove; QA_FRESH=1 for a first reply; QA_EXPECT=broken for main). The scroll rule reads no agent or runtime field, so it is the same for every runtime kind. Synthetic browser evidence, not live box proof.",
       "source_refs": [
         "wizard-ux/web/live.js",
         "wizard-ux/web/core/chats.js",
+        "wizard-ux/web/core/chat-power.js",
         "server/run-event-log.mjs",
         "server/locked-run-bridge.mjs",
         "server/agents-http.mjs"
@@ -1734,6 +1735,7 @@
       "reference_tests": [
         "qa/agent-parity/browser.mjs",
         "wizard-ux/tests/run-streaming.test.mjs",
+        "wizard-ux/tests/thread-no-scroll-yank.test.mjs",
         "tests/run-event-log.node.mjs"
       ],
       "fixture": null,
