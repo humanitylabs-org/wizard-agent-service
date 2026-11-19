@@ -914,6 +914,18 @@ describe('windows, reminders and trickled agent work', () => {
     expect((await (await call('list', { session_id: 'wizard_a' })).json()).schedules).toHaveLength(1)
     expect((await call('list', { session_id: 'wizard_a' }, 'wrong-token-wrong-token-wrong-token-xx')).status).toBe(403)
     expect((await call('list', { session_id: 'wizard_a' }, key, { Origin: 'https://evil.example' })).status).toBe(403)
+    // A box with a heavy-lane token keeps it as the only credential: the gateway key is refused there.
+    const heavy = 'fixture-heavy-token-with-more-than-32-chars'
+    const both: any = createWizardServer({ upstreamOrigin: 'http://127.0.0.1:9', hermesKey: 'fixture-key', ownerProof: 'fixture-owner-proof-with-32-characters', requireAccess: false,
+      requireJoinedDelegationCapability: false, followThrough: false, wizardOsHome: process.env.WIZARD_OS_HOME, appsJsonPath, heavyToken: heavy,
+      mcpToken: key, bridgeWatchMs: 0, bridgeWriteSkills: false, bridgeLog: () => {},
+      schedulerStatePath: join(root, 'both-schedules.sqlite3'), schedulerNow: () => clock, schedulerTimezone: BKK })
+    servers.push(both)
+    const bothOrigin = `http://127.0.0.1:${(await listen(both)).port}`
+    const bothCall = (auth: string) => fetch(`${bothOrigin}/wizard/internal/schedules/list`, { method: 'POST',
+      headers: { Authorization: 'Bearer ' + auth, 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: 'wizard_a' }) })
+    expect((await bothCall(key)).status).toBe(403)
+    expect((await bothCall(heavy)).status).toBe(200)
   })
 
   it('lets the main agent schedule, list and cancel in its own thread over the loopback token only', async () => {

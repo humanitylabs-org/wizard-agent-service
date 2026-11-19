@@ -3095,11 +3095,13 @@ function buildWizardServer(options, lifetime) {
   let privateFirst = null
   // The main Hermes plugins' loopback credential (issues 575 and 577: private first, schedules, agent reads,
   // supervisor): the heavy-lane token where a box has one, else the main Hermes's own gateway key (no standard install
-  // sets WIZARD_HEAVY_TOKEN; every linked main Hermes holds its `wizard` MCP key). Another agent's key never matches.
+  // sets WIZARD_HEAVY_TOKEN; every linked main Hermes holds its `wizard` MCP key). Where a heavy-lane token is set, it
+  // is the only credential, as before. Another agent's key never matches.
   const mainPluginCredential = (request) => {
     const supplied = String(request.headers.authorization || '').replace(/^Bearer /u, '')
-    return Boolean(supplied) && (sameSecret(supplied, String(options.heavyToken || ''))
-      || Boolean(bridge && bridge.agentFor(request) === GATEWAY_MAIN_AGENT))
+    if (!supplied) return false
+    if (options.heavyToken) return sameSecret(supplied, String(options.heavyToken))
+    return Boolean(bridge && bridge.agentFor(request) === GATEWAY_MAIN_AGENT)
   }
   const agents = options.agents !== false && agentsDir ? createAgentRegistry({
     privateFirstAgent: () => (privateFirst?.on() ? privateFirst.privateAgentId() : null),
