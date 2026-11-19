@@ -72,7 +72,11 @@ def _service() -> tuple[str, str]:
 def service_call(action: str, value: dict, timeout: float = 20) -> tuple[int, dict]:
     """POST the Agent Service's private-first route; (status, answer). Unreachable -> (0, {})."""
     from urllib.error import HTTPError
-    from urllib.request import ProxyHandler, Request as UrlRequest, build_opener
+    from urllib.request import HTTPRedirectHandler, ProxyHandler, Request as UrlRequest, build_opener
+
+    class _NoRedirect(HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001 - a redirect never gets the key
+            return None
 
     origin, token = _service()
     if not origin or not token:
@@ -81,7 +85,7 @@ def service_call(action: str, value: dict, timeout: float = 20) -> tuple[int, di
                          data=json.dumps(value).encode(),
                          headers={"Content-Type": "application/json", "Authorization": "Bearer " + token})
     try:
-        with build_opener(ProxyHandler({})).open(request, timeout=timeout) as response:
+        with build_opener(ProxyHandler({}), _NoRedirect()).open(request, timeout=timeout) as response:
             return response.status, json.loads(response.read(64 * 1024) or b"{}")
     except HTTPError as error:
         try:

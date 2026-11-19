@@ -21,7 +21,7 @@ const APPS = [
   { id: 'meditate', name: 'Meditate', status: 'running', view: { url: '/meditate/' } },
 ]
 
-async function box({ on = true, mainModel = '', mainProvider = 'openai-codex', look, heavy = true, gateway = false }: { on?: boolean | null, mainModel?: string, mainProvider?: string, look?: boolean, heavy?: boolean, gateway?: boolean } = {}) {
+async function box({ on = true, mainModel = '', mainProvider = 'openai-codex', look, heavy = true, gateway = false, boundary = false }: { on?: boolean | null, mainModel?: string, mainProvider?: string, look?: boolean, heavy?: boolean, gateway?: boolean, boundary?: boolean } = {}) {
   const reached: { method: string, path: string, body: string }[] = []
   const state = { model: mainModel }
   const main = createServer((req, res) => {
@@ -55,6 +55,7 @@ async function box({ on = true, mainModel = '', mainProvider = 'openai-codex', l
   const applied: string[] = []
   const svc = createWizardServer({
     upstreamOrigin: `http://127.0.0.1:${mainAddress.port}`, hermesKey: 'fixture-key', requireAccess: false,
+    ...(boundary ? { browserBoundary: { enabled: true, token: 'a'.repeat(64) } } : {}),
     ...(gateway ? { agentBridge: true, mcpToken: GATEWAY_KEY, bridgeWriteSkills: false, bridgeLog: () => {} } : { agentBridge: false }),
     appsJsonPath: join(dir, 'apps.json'), settingsPath: join(dir, 'settings.json'), wizardOsHome: dir, ...(heavy ? { heavyToken: TOKEN } : {}),
     agentRuntime: { apply: async (id: string) => { applied.push(id); return { ok: true } }, start: async () => ({ ok: true }), stop: async () => ({ ok: true }) },
@@ -72,7 +73,7 @@ async function box({ on = true, mainModel = '', mainProvider = 'openai-codex', l
   const internal = (action: string, body: unknown = {}, token = TOKEN) => call('POST', `/wizard/internal/private-first/${action}`, body, { Authorization: `Bearer ${token}` })
   const agents = async () => (await call('GET', '/wizard/v1/agents')).json.agents as any[]
   const settings = () => JSON.parse(readFileSync(join(dir, 'settings.json'), 'utf8'))
-  return { dir, call, internal, agents, settings, reached, applied, state }
+  return { dir, call, internal, agents, settings, reached, applied, state, setProvider: (p: string) => { mainProvider = p } }
 }
 
 const TINFOIL = { provider: 'tinfoil', model: 'kimi-k3', models: ['kimi-k3', 'glm-5-3'] }
@@ -232,13 +233,34 @@ describe('private first (issue 545)', () => {
     expect((await none.internal('state', {}, GATEWAY_KEY)).status).toBe(404)
   })
 
-  it('a main model Tinfoil itself registered before the hand-off worked does not end the first run (issue 575)', async () => {
-    for (const provider of ['wizard-tinfoil', 'custom:wizard-tinfoil']) {
-      const b = await box({ mainModel: 'kimi-k3-1-pro', mainProvider: provider })
-      expect((await b.internal('private-agent', TINFOIL)).json).toMatchObject({ ok: true, agent: 'private' })
-      const list = await b.agents()
-      expect(list.find((a) => a.id === 'private')).toMatchObject({ is_default: true })
-      expect(list.find((a) => a.id === 'hermes')).toMatchObject({ hidden: true, is_default: false })
-    }
+  it('the browser boundary lets the relay through with either credential (issue 575)', async () => {
+    const b = await box({ heavy: false, gateway: true, boundary: true })
+    expect((await b.internal('state', {}, GATEWAY_KEY)).json).toMatchObject({ on: true })
+    expect((await b.internal('state', {}, 'wrong-token-0123456789abcdef-xxxxx')).status).toBe(401)
+    const heavy = await box({ boundary: true })
+    expect((await heavy.internal('state')).json).toMatchObject({ on: true })
+  })
+
+  it('freshness is decided when the state is first read, before a provider image registers anything (issue 575)', async () => {
+    const b = await box()
+    expect((await b.internal('state')).json).toMatchObject({ on: true, private_agent: null })
+    for (let i = 0; i < 50 && !existsSync(join(b.dir, 'agents', '.private-first.json')); i++) await new Promise((r) => setTimeout(r, 10))
+    expect(JSON.parse(readFileSync(join(b.dir, 'agents', '.private-first.json'), 'utf8')).fresh).toBe(true)
+    // An older Tinfoil, unable to reach the switch, set a main model in between: still the first run.
+    b.state.model = 'kimi-k3-1-pro'
+    b.setProvider('wizard-tinfoil')
+    expect((await b.internal('private-agent', TINFOIL)).json).toMatchObject({ ok: true, agent: 'private' })
+    const list = await b.agents()
+    expect(list.find((a) => a.id === 'private')).toMatchObject({ is_default: true })
+    expect(list.find((a) => a.id === 'hermes')).toMatchObject({ hidden: true, is_default: false })
+  })
+
+  it('an install that already chats on Tinfoil through the main Hermes is not migrated', async () => {
+    const b = await box({ mainModel: 'kimi-k3-1-pro', mainProvider: 'wizard-tinfoil' })
+    expect((await b.internal('private-agent', TINFOIL)).json).toMatchObject({ ok: true, agent: 'private' })
+    const list = await b.agents()
+    expect(list.find((a) => a.id === 'hermes')).toMatchObject({ is_default: true })
+    expect(list.find((a) => a.id === 'hermes').hidden).toBeFalsy()
+    expect(list.find((a) => a.id === 'private')).toMatchObject({ is_default: false, permissions: { wizard_apps: [] } })
   })
 })

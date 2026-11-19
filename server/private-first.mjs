@@ -17,12 +17,9 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { MAIN_AGENT_ID, isConfidentialProvider } from './agents.mjs'
-import { providerKey } from './main-provider-attach.mjs'
 
 export const PRIVATE_FIRST_SWITCH = 'wizard/private-first-setup'
 export const PRIVATE_FIRST_SCHEMA = 'wizard.private-first/1'
-/** The Tinfoil app's custom endpoint on the main Hermes (wizard-app-store images/wizard-tinfoil ENDPOINT_ID). */
-export const TINFOIL_MAIN_ENDPOINT = 'wizard-tinfoil'
 const SLUG_RE = /^[a-z0-9][a-z0-9._:-]{0,99}$/u
 const MODEL_RE = /^[A-Za-z0-9][A-Za-z0-9._:/@[\]-]{0,119}$/u
 
@@ -68,13 +65,6 @@ export function createPrivateFirst({ on, registry, agentsDir, mainOptions, setDe
   }
 
   /**
-   * A main model counts as the owner's own unless Tinfoil's main-agent registration set it (`wizard-tinfoil`, the
-   * custom endpoint the Tinfoil app adds while it can't reach this switch, issue 575): that box is still fresh, so
-   * Tinfoil's next hand-off moves it to the private agent.
-   */
-  const ownMainModel = (options) => Boolean(String(options.model ?? '').trim()) && providerKey(options.provider) !== TINFOIL_MAIN_ENDPOINT
-
-  /**
    * Fresh or not is decided once, at the first call with the switch on, and kept: a fresh box has no other agent,
    * no owner app choice for the main agent and no main model yet. Hermes unreachable: no decision (503, retried).
    */
@@ -84,13 +74,16 @@ export function createPrivateFirst({ on, registry, agentsDir, mainOptions, setDe
     let options = null
     try { options = await mainOptions() } catch { options = null }
     if (!options || typeof options !== 'object') throw refusal(503, 'main_agent_unavailable')
-    const fresh = !otherAgents().length && !existsSync(join(agentsDir, '.main-agent.json')) && !ownMainModel(options)
+    const fresh = !otherAgents().length && !existsSync(join(agentsDir, '.main-agent.json')) && !String(options.model ?? '').trim()
     save({ fresh, decided_at: Math.floor(Date.now() / 1000) })
     return fresh
   }
 
   function state() {
     const kept = record()
+    // Decided as early as the switch is seen on (issue 575), not at the first hand-off: a provider image asks for the
+    // state before it registers anything, so a model it adds to the main Hermes later never makes a fresh box look old.
+    if (isOn() && typeof kept?.fresh !== 'boolean') serial(() => freshness()).catch(() => undefined)
     return {
       schema: PRIVATE_FIRST_SCHEMA, on: isOn(), standard_agent: MAIN_AGENT_ID, private_agent: privateAgentId(),
       // Off only on a fresh box whose private agent was set up and no Claude or ChatGPT sign-in has come yet.

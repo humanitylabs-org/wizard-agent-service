@@ -3093,6 +3093,14 @@ function buildWizardServer(options, lifetime) {
   const privateFirstSwitchOn = createChannelsSwitch({ id: PRIVATE_FIRST_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.privateFirstTtlMs ?? 3000 })
   const privateFirstOn = () => channelPart(options.privateFirst, privateFirstSwitchOn)
   let privateFirst = null
+  // The private-first relay's credential (issue 575): the heavy-lane token where a box has one, else the main Hermes's
+  // own gateway key (no standard install sets WIZARD_HEAVY_TOKEN; every linked main Hermes holds its `wizard` MCP key).
+  // Another agent's key never matches.
+  const privateFirstCredential = (request) => {
+    const supplied = String(request.headers.authorization || '').replace(/^Bearer /u, '')
+    return Boolean(supplied) && (sameSecret(supplied, String(options.heavyToken || ''))
+      || Boolean(bridge && bridge.agentFor(request) === GATEWAY_MAIN_AGENT))
+  }
   const agents = options.agents !== false && agentsDir ? createAgentRegistry({
     privateFirstAgent: () => (privateFirst?.on() ? privateFirst.privateAgentId() : null),
     mainHome: options.hermesHome || process.env.HERMES_HOME || join(homedir(), '.hermes'),
@@ -6298,6 +6306,8 @@ function buildWizardServer(options, lifetime) {
         (request.method === 'POST' && /^\/wizard\/internal\/(?:agents|heavy|schedules|supervisor)\//u.test(url.pathname)
           && sameSecret(String(request.headers.authorization || '').replace(/^Bearer /u, ''), options.heavyToken))
         || (['/wizard/mcp', '/wizard/standard-chats/mcp', '/wizard/v1/agent-context'].includes(url.pathname) && Boolean(bridge?.agentFor(request)))
+        // Private first's relay (issue 575): the heavy token or the main Hermes's own gateway key, as the route checks.
+        || (request.method === 'POST' && url.pathname.startsWith('/wizard/internal/private-first/') && privateFirstCredential(request))
         // An app's door to the agent inbox (issue 569) with its own app token; the route still checks its scope.
         || (url.pathname.startsWith('/wizard/v1/agent-inbox') && agentInboxOn() && Boolean(inboxAppOf(request)))
       )
@@ -7148,11 +7158,8 @@ function buildWizardServer(options, lifetime) {
         // standard install sets WIZARD_HEAVY_TOKEN, but every linked main Hermes holds its `wizard` MCP key).
         if (!privateFirst || (!options.heavyToken && !bridge)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
-        const supplied = String(request.headers.authorization || '').replace(/^Bearer /, '')
-        const credential = sameSecret(supplied, String(options.heavyToken || ''))
-          || Boolean(bridge && supplied && bridge.agentFor(request) === GATEWAY_MAIN_AGENT)
         if (isAgentIngress(request) || principalOf(request).kind === 'agent' || request.headers.origin || request.headers['sec-fetch-site']
-          || !credential) { sendJson(response, 403, { error: 'private first access denied' }); return }
+          || !privateFirstCredential(request)) { sendJson(response, 403, { error: 'private first access denied' }); return }
         let value
         try { value = JSON.parse((await readBoundedBody(request, 16 * 1024)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid body' }); return }
         if (!value || typeof value !== 'object' || Array.isArray(value)) { sendJson(response, 400, { error: 'invalid body' }); return }

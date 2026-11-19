@@ -174,6 +174,32 @@ class GatewayCredentialTests(unittest.TestCase):
             self.assertEqual(pf._gateway(), ('', ''), url)
         self.assertEqual(self.service.calls, [])
 
+    def test_a_redirect_never_carries_the_key(self):
+        seen = []
+
+        class Redirect(BaseHTTPRequestHandler):
+            def log_message(self, format, *args):  # noqa: A002
+                pass
+
+            def do_GET(self):  # noqa: N802 - where a followed 302 would land
+                self.do_POST()
+
+            def do_POST(self):  # noqa: N802
+                seen.append((self.path, self.headers.get('Authorization')))
+                self.send_response(302 if self.path.startswith('/wizard/') else 200)
+                self.send_header('Location', '/elsewhere')
+                self.send_header('Content-Length', '2')
+                self.end_headers()
+                self.wfile.write(b'{}')
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Redirect)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.config = {'mcp_servers': {'wizard': {'url': f'http://127.0.0.1:{server.server_address[1]}/wizard/mcp'}}}
+        self.assertEqual(self.client.get(PREFIX).json(), {'schema': 'wizard.private-first/1', 'on': False})
+        self.assertEqual([path for path, _ in seen], ['/wizard/internal/private-first/state'])
+
     def test_the_fresh_box_url_names_the_service(self):
         self.config = {'mcp_servers': {'wizard': {'url': 'http://wizard-agent-service:8787/wizard/mcp'}}}
         self.assertEqual(pf._gateway(), ('http://wizard-agent-service:8787', 'gateway-key-0123456789abcdef'))
