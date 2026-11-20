@@ -1709,14 +1709,19 @@
     },
     {
       "id": "reading-position",
-      "description": "Open unread and already-read threads, scroll, receive updates and reopen",
+      "description": "Open unread and already-read threads, scroll, receive updates and reopen. Back into a thread (the link trail: header Back, system Back, Esc, or Send and go stepping back after a reply in the linked thread) restores the place he was reading mid-thread, also when a new reply landed there while he was away, and a thread left from the Daily view comes back in the Daily view (wizard-ux issues 1581 and 1653). His own send's bottom pin applies only to the thread it went to. Same for main and routed threads.",
       "layer": "ux",
-      "how_to_test": "Open unread and already-read threads, scroll, receive updates and reopen; verify correct unread anchor without stealing scroll.",
+      "how_to_test": "Open unread and already-read threads, scroll, receive updates and reopen; verify correct unread anchor without stealing scroll. Issue 1653: in wizard-ux run node --test tests/thread-link-back-place.test.mjs tests/thread-trail-daily-back.test.mjs (the real chat-power reading place and the real chats.js link trail with the Daily view). Browser: wizard-ux tests/qa-thread-link-back.cjs with QA_KINDS=read,unread,working,newreply,working-newreply,daily,routed and QA_ACTS=look,send,send-go (routed: a Claude agent's parent and linked thread with an agent-qualified link; phone 412x915 browser and document scroll, desktop 1440x900, Nebula and Grove; QA_WEB=<main>/web QA_EXPECT=broken for the baseline). The place rule reads no agent or runtime field. Synthetic browser evidence, not live box proof.",
       "source_refs": [
-        "wizard-ux/web/live.js"
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chat-power.js",
+        "wizard-ux/web/core/chats.js"
       ],
       "reference_tests": [
-        "wizard-ux/qa-chats-parity.cjs"
+        "wizard-ux/qa-chats-parity.cjs",
+        "wizard-ux/tests/thread-link-back-place.test.mjs",
+        "wizard-ux/tests/thread-trail-daily-back.test.mjs",
+        "wizard-ux/tests/qa-thread-link-back.cjs"
       ],
       "fixture": null,
       "policy_exemptions": []
