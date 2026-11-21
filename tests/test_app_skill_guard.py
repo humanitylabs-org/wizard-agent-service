@@ -51,6 +51,13 @@ class AppSkillGuardTests(unittest.TestCase):
         self.skill('video-app', 'video-editing')
         self.skill('wisdom-app', 'wisdom-editing')
         self.skill('wizard-job-files', 'wizard-job-files')
+        undo = plugin._app_skill_guard._undo
+        undo._reset_for_tests()
+        self.addCleanup(undo._reset_for_tests)
+        for name, value in (('WATCH_SECONDS', 0), ('CALL_GRACE_SECONDS', 0.01)):
+            patcher = patch.object(undo, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.ctx = Context()
         plugin.register(self.ctx)
 
@@ -133,6 +140,198 @@ class AppSkillGuardTests(unittest.TestCase):
         self.assertIsNone(self.call('terminal', command=f'diff {self.os_home}/store/skills/video-app/SKILL.md {self.skills}/video-app/SKILL.md'))
         self.assertIsNone(self.call('terminal', command='cat ~/.wizard-os/skills/video-app/SKILL.md'))
         self.assertIsNone(self.call('terminal', command='printf x > ~/.wizard-os/skills/wizard-job-files/SKILL.md'))
+
+    def test_execute_code_multi_line_writes_blocked(self):
+        # wizard-os issue 797: the path is built on one line and written on a later one.
+        snippets = [
+            "import os\np = os.path.expanduser('~/.wizard-os/skills/video-app/SKILL.md')\n"
+            "s = open(p).read()\ns = s.replace('a', 'b')\nopen(p, 'w').write(s)",
+            "from pathlib import Path\nhome = Path.home() / '.wizard-os'\nskill = home / 'skills' / 'video-app' / 'SKILL.md'\n"
+            "text = skill.read_text()\nskill.write_text(text + 'style')",
+            "import os\nroot = os.environ['WIZARD_OS_HOME']\np = os.path.join(root, 'skills', 'wisdom-app', 'SKILL.md')\n"
+            "with open(p, mode='a') as f:\n    f.write('x')",
+            f"import shutil\ndest = '{self.skills}/video-app/SKILL.md'\nshutil.copy('/tmp/new.md', dest)",
+            f"from pathlib import Path\nd = Path('{self.os_home}/store/skills/video-app')\nfor f in [d / 'SKILL.md']:\n    f.unlink()",
+            f"from pathlib import Path\np = Path('{self.skills}') / 'video-app' / 'SKILL.md'\nwith p.open('w') as f:\n    f.write('x')",
+            f"import subprocess\nsubprocess.run(['cp', '/tmp/a', '{self.skills}/video-app/SKILL.md'])",
+            "import subprocess\nsubprocess.run('printf x > ~/.wizard-os/skills/video-app/SKILL.md', shell=True)",
+            f"from hermes_tools import write_file\nbase = '{self.skills}'\nwrite_file(f'{{base}}/video-app/SKILL.md', 'x')",
+            f"from hermes_tools import patch\np = '{self.skills}/video-app/SKILL.md'\npatch(p, 'a', 'b')",
+            f"import os\nname = 'SKILL.md'\nos.replace('/tmp/x', '{self.skills}/video-app/' + name)",
+            f"p = '{self.skills}/video-app/SKILL.md'\nopen(file=p, mode='w').write('x')",
+            f"import os\np = '{self.skills}/video-app/SKILL.md'\nos.open(path=p, flags=os.O_WRONLY)",
+            f"import hermes_tools\np = '{self.skills}/video-app/SKILL.md'\nhermes_tools.write_file(p, 'x')",
+        ]
+        for code in snippets:
+            with self.subTest(code=code):
+                self.blocked('execute_code', code=code)
+
+    def test_execute_code_reads_and_other_writes_allowed(self):
+        allowed = [
+            f"from pathlib import Path\ntext = Path('{self.skills}/video-app/SKILL.md').read_text()\n"
+            "text = text.replace('a', 'b')\nPath('/tmp/draft.md').write_text(text)",
+            f"import shutil\nsrc = '{self.skills}/video-app/SKILL.md'\nshutil.copy(src, '/tmp/copy.md')",
+            f"p = '{self.skills}/video-app/SKILL.md'\nwith open(p) as f:\n    body = f.read()\n"
+            "open('/tmp/out.md', 'w').write(body)",
+            f"p = '{self.skills}/wizard-job-files/SKILL.md'\nopen(p, 'w').write('pointer')",
+            f"from hermes_tools import write_file\nwrite_file('/tmp/notes.md', 'see {self.skills}/video-app/SKILL.md')",
+            f"import subprocess\nsubprocess.run(['cat', '{self.skills}/video-app/SKILL.md'])",
+            "def broken(:\n    pass",
+            f"from pathlib import Path\nsrc = Path('{self.skills}/video-app/SKILL.md')\nPath('/tmp/link').symlink_to(src)",
+        ]
+        for code in allowed:
+            with self.subTest(code=code):
+                self.assertIsNone(self.call('execute_code', code=code))
+
+    def run_tool(self, tool, effect, **args):
+        """Drive the hooks the way Hermes does around one call; `effect` is what the tool does on disk."""
+        ids = {'task_id': 'synthetic', 'session_id': 's1', 'tool_call_id': f'call-{tool}'}
+        verdict = self.ctx.hooks['pre_tool_call'](tool_name=tool, args=args, **ids)
+        self.assertIsNone(verdict)
+        effect()
+        result = json.dumps({'status': 'success', 'output': 'wrote'})
+        self.ctx.hooks['post_tool_call'](tool_name=tool, args=args, result=result, **ids)
+        return self.ctx.hooks['transform_tool_result'](tool_name=tool, args=args, result=result, **ids)
+
+    def test_writes_the_text_check_cannot_spell_are_undone(self):
+        # wizard-os issue 797 tester cases: glob loop, os.walk, subprocess with computed path. Whatever ran, the files come back.
+        skill = self.skills / 'video-app/SKILL.md'
+        original = skill.read_bytes()
+        store = self.os_home / 'store/skills/video-app/SKILL.md'
+        store.parent.mkdir(parents=True)
+        store.write_text('store copy')
+        code = ("from pathlib import Path\nfor p in (Path.home() / '.wizard-os' / 'skills').glob('*/SKILL.md'):\n"
+                "    p.write_text('hacked')")
+
+        def edit():
+            skill.write_text('hacked')
+            store.unlink()
+            (self.skills / 'video-app/extra.md').write_text('new')
+            (self.skills / 'brand-new-app').mkdir()
+            (self.skills / 'brand-new-app/SKILL.md').write_text('new')
+        result = self.run_tool('execute_code', edit, code=code)
+        self.assertEqual(skill.read_bytes(), original)
+        self.assertEqual(store.read_text(), 'store copy')
+        self.assertFalse((self.skills / 'video-app/extra.md').exists())
+        self.assertFalse((self.skills / 'brand-new-app').exists())
+        payload = json.loads(result)
+        self.assertEqual(payload['output'], 'wrote')
+        self.assertIn('undid', payload['app_skill_guard'])
+        self.assertIn("app's source", payload['app_skill_guard'])
+
+        result = self.run_tool('terminal', lambda: skill.write_text('x'), command='python3 /tmp/tool.py')
+        self.assertEqual(skill.read_bytes(), original)
+        self.assertIn('undid', json.loads(result)['app_skill_guard'])
+
+    def bump_registry(self, version):
+        self.registry([{'id': 'video-app', 'skill': 'SKILL.md', 'version': version}])
+        st = (self.os_home / 'apps.json').stat()
+        os.utime(self.os_home / 'apps.json', ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+
+    def touch_registry(self):
+        st = (self.os_home / 'apps.json').stat()
+        os.utime(self.os_home / 'apps.json', ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+
+    def test_app_updates_routing_pointers_and_reads_are_kept(self):
+        skill = self.skills / 'video-app/SKILL.md'
+        pointer = self.skills / 'wizard-job-files/SKILL.md'
+
+        def wam_update():
+            skill.write_text('v2')
+            (self.skills / 'wisdom-app/SKILL.md').write_text('v2 too')
+            self.touch_registry()
+        self.assertIsNone(self.run_tool('terminal', wam_update, command='wam update video-app'))
+        self.assertEqual(skill.read_text(), 'v2')
+
+        def app_manager_update():  # e.g. the owner updates the app from the Store while the call runs
+            skill.write_text('v3')
+            self.bump_registry('3')
+        self.assertIsNone(self.run_tool('execute_code', app_manager_update, code='print(1)'))
+        self.assertEqual(skill.read_text(), 'v3')
+        self.assertIsNone(self.run_tool('write_file', lambda: pointer.write_text('route'), path=str(pointer),
+                                        content='route'))
+        self.assertEqual(pointer.read_text(), 'route')
+        self.assertIsNone(self.run_tool('execute_code', lambda: None, code='print(2)'))
+        hook = self.ctx.hooks['pre_tool_call']
+        self.assertIsNone(hook(tool_name='read_file', args={'path': str(skill)}, task_id='t'))
+        undo = plugin._app_skill_guard._undo
+        self.assertEqual(undo._calls, {})
+        # Outside any call, App Manager writes the skill and then apps.json: kept, never half-reverted.
+        skill.write_text('v4')
+        self.assertEqual(undo.tick(), [])
+        self.bump_registry('4')
+        self.assertEqual(undo.tick(), [])
+        self.assertEqual(skill.read_text(), 'v4')
+
+    def test_wam_words_registry_touches_and_background_writes_are_undone(self):
+        # wizard-os issue 797 tester round 2: none of these may keep an edit.
+        skill = self.skills / 'video-app/SKILL.md'
+        original = skill.read_bytes()
+        undo = plugin._app_skill_guard._undo
+        for tool, args in (('execute_code', {'code': "import subprocess\nsubprocess.run(['wam', 'list'])"}),
+                           ('execute_code', {'code': "print('I will not use wam for this')"}),
+                           ('terminal', {'command': 'wam list && python3 /tmp/edit.py'}),
+                           ('terminal', {'command': 'echo wam; python3 /tmp/edit.py'})):
+            with self.subTest(tool=tool, args=args):
+                result = self.run_tool(tool, lambda: skill.write_text('emoji edit'), **args)
+                self.assertEqual(skill.read_bytes(), original)
+                self.assertIn('undid', json.loads(result)['app_skill_guard'])
+
+        def touch_registry_too():
+            skill.write_text('emoji edit')
+            self.touch_registry()
+        result = self.run_tool('execute_code', touch_registry_too, code='x = 1')
+        self.assertEqual(skill.read_bytes(), original)
+        self.assertIn('undid', json.loads(result)['app_skill_guard'])
+
+        # A process the call left running writes after the call returned.
+        self.assertIsNone(self.run_tool('terminal', lambda: None, command='nohup python3 /tmp/late.py &'))
+        skill.write_text(skill.read_text() + 'late')
+        self.assertEqual(undo.tick(), [])            # first sighting: wait one tick
+        self.assertEqual(undo.tick(), [str(skill)])  # still there and unexplained: undone
+        self.assertEqual(skill.read_bytes(), original)
+        result = self.run_tool('execute_code', lambda: None, code='print(3)')
+        self.assertIn('undid', json.loads(result)['app_skill_guard'])  # the agent is told on its next call
+        # A late write the watcher has not seen yet is caught at the start of the next call.
+        skill.write_text('later')
+        self.run_tool('execute_code', lambda: None, code='print(4)')
+        self.assertEqual(skill.read_bytes(), original)
+
+    def test_a_huge_added_file_does_not_switch_the_backstop_off(self):
+        # Tester round 4: a 70 MB file pushed the tree over the copy limit and later edits stuck.
+        skill = self.skills / 'video-app/SKILL.md'
+        original = skill.read_bytes()
+        big = self.skills / 'video-app/big.bin'
+        undo = plugin._app_skill_guard._undo
+        with patch.object(undo, 'MAX_FILE_BYTES', 100), patch.object(undo, 'MAX_SNAPSHOT_BYTES', 1000):
+            result = self.run_tool('execute_code', lambda: big.write_bytes(b'x' * 5000), code='x = 1')
+            self.assertFalse(big.exists())
+            self.assertIn('undid', json.loads(result)['app_skill_guard'])
+
+            def both():
+                big.write_bytes(b'x' * 5000)
+                skill.write_text('HACKED after big')
+            self.run_tool('execute_code', both, code='x = 2')
+            self.assertFalse(big.exists())
+            self.assertEqual(skill.read_bytes(), original)
+            self.run_tool('execute_code', lambda: skill.write_text('again'), code='x = 3')
+            self.assertEqual(skill.read_bytes(), original)
+
+    def test_agent_loop_order_transform_before_post_still_tells_agent(self):
+        # In Hermes's agent loop transform_tool_result fires inside the call and post_tool_call after it.
+        skill = self.skills / 'video-app/SKILL.md'
+        original, mode = skill.read_bytes(), skill.stat().st_mode & 0o777
+        ids = {'task_id': 't', 'session_id': 's', 'tool_call_id': 'loop-1'}
+        args = {'code': 'print(1)'}
+        self.assertIsNone(self.ctx.hooks['pre_tool_call'](tool_name='execute_code', args=args, **ids))
+        skill.chmod(0o600)
+        skill.write_text('edited')
+        result = self.ctx.hooks['transform_tool_result'](tool_name='execute_code', args=args,
+                                                         result='{"status": "success"}', **ids)
+        self.ctx.hooks['post_tool_call'](tool_name='execute_code', args=args, result=result, **ids)
+        self.assertIn('undid', json.loads(result)['app_skill_guard'])
+        self.assertEqual(skill.read_bytes(), original)
+        self.assertEqual(skill.stat().st_mode & 0o777, mode)
 
     def test_reads_and_verification_with_redirects_allowed(self):
         # Oscar's review: these read-only and update/verify commands must pass.

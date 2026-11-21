@@ -16,8 +16,12 @@ import shlex
 
 try:
     from . import kernel
+    from .app_skill_code import code_write_target
+    from . import app_skill_undo as _undo
 except ImportError:  # plain-module loading, like the other plugin helpers
     import kernel  # type: ignore[no-redef]
+    from app_skill_code import code_write_target  # type: ignore[no-redef]
+    import app_skill_undo as _undo  # type: ignore[no-redef]
 
 # App Manager's wam/agent_link.py SKILLS_TARGET (read-only container bind mount).
 SKILLS_TARGET = Path('/opt/wizard-os/skills')
@@ -301,6 +305,11 @@ def pre_tool_call(tool_name: str = '', args=None, *, shadow_skills=None, **_kwar
                 path = _literal_skill_path(line)
                 if path:
                     return _block(f'a code write touching {path}')
+        # The path is usually built on one line and written on another (wizard-os issue 797).
+        path = code_write_target(code, _literal_skill_path, _shell_write_target,
+                                 str(Path.home()), str(kernel.os_home()))
+        if path:
+            return _block(f'a code write touching {path}')
     return None
 
 
@@ -310,6 +319,11 @@ def register(ctx) -> None:
         # ships in the product. Read through Hermes's plugin config namespace.
         shadows = (ctx.get_config('app_skill_guard.shadow_skills', default=[])
                    if hasattr(ctx, 'get_config') else [])
-        return pre_tool_call(tool_name, args, shadow_skills=shadows, **kwargs)
+        verdict = pre_tool_call(tool_name, args, shadow_skills=shadows, **kwargs)
+        if verdict is None:
+            # Backstop for writes the text check cannot spell: copy now, undo after the call (wizard-os issue 797).
+            _undo.before_call(tool_name, args, **kwargs)
+        return verdict
 
     ctx.register_hook('pre_tool_call', guard)
+    _undo.register(ctx)
