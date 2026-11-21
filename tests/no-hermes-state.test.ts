@@ -45,7 +45,7 @@ describe('no Hermes state fallback configured', () => {
     const wizard = createWizardServer({
       hermesKey: 'fixture-key', requireAccess: false, upstreamOrigin: origin, canonicalSessionListing: true,
       joinedDelegation: 'off', runQueueStatePath: join(home, 'queue', 'run-queue.sqlite3'),
-      hermesStatePath: '', helmDbPath: '',
+      hermesStatePath: '', helmDbPath: '', channelStore: false,
     })
     servers.push(wizard)
     await listen(wizard, '127.0.0.1', 0)
