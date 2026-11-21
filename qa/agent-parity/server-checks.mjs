@@ -1840,6 +1840,76 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     if (s.kind !== 'main') assert.notEqual(attention('wizard_parity_owed'), 'needs_you', `${s.kind}: routed kinds keep no saved-result Needs you`)
     assert.ok(!s.seen.some(r => r.path.endsWith('/runs') && r.method === 'POST' && /wizard_parity_(stopped|owed)/.test(JSON.stringify(r.body))), 'discovery never starts work')
   },
+  'background-continue': async s => {
+    // Issue 14: one-tap Continue for a background result that finished while Wizard was down (over two hours ago).
+    // Discovery starts nothing; one tap admits exactly one turn in the originating thread; a repeat tap replays it;
+    // an owner message sent meanwhile is kept and its thread is not offered. Main only: the saved-result scan reads
+    // the main Hermes, and routed kinds answer an explicit unsupported state instead of a silent nothing.
+    const at = Date.now() / 1000 - 3 * 3600
+    const batch = id => ({ id: 3, role: 'user', display_kind: 'async_delegation_complete', timestamp: at,
+      content: `[ASYNC DELEGATION BATCH COMPLETE — deleg_${id}]\nA background fan-out unit you dispatched earlier has finished.\n\n--- ✓ TASK 1/1: Synthetic check (status=completed, 9s) ---\nsynthetic finding ${id}` })
+    const thread = (id, extra = []) => s.sessions.set(id, { id, source: 'wizard-mobile', title: 'Synthetic helper', created_at: at - 200, messages: [
+      { id: 1, role: 'user', content: 'Check the synthetic routing in the background.', timestamp: at - 200 },
+      { id: 2, role: 'assistant', finish_reason: 'stop', timestamp: at - 190, content: 'Started a helper.\n[WIZARD_STATUS_V1]{"state":"working","ask":"Helper is checking","subject":"Parity QA"}[/WIZARD_STATUS_V1]' },
+      batch(id), ...extra] })
+    // The saved result sits past session 100 of the catalog, so discovery must walk every page.
+    for (let n = 0; n < 100; n++) s.sessions.set(`wizard_parity_fill_${n}`, { id: `wizard_parity_fill_${n}`, source: 'wizard-mobile', title: 'Filler', created_at: at - 500, messages: [{ id: 1, role: 'user', content: 'Filler', timestamp: at - 500 }] })
+    thread('wizard_parity_saved')
+    thread('wizard_parity_moved', [{ id: 4, role: 'user', content: 'Owner wrote meanwhile.', timestamp: at + 600 }])
+    const runsFor = id => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === id)
+    const list = async (query = '') => {
+      let listed
+      for (let n = 0; n < 400; n++) {
+        listed = await (await s.raw(`/wizard/background-results${query}`, { headers: s.ownerHeaders })).json()
+        if (listed.error || (!listed.scanning && listed.scan_complete)) return listed
+        await new Promise(r => setTimeout(r, 25))
+      }
+      return listed
+    }
+    const tap = (id, body) => s.raw(`/wizard/background-results/${id}/continue`, { method: 'POST', headers: { ...s.ownerHeaders, 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    if (s.kind !== 'main') {
+      const r = await s.raw(`/wizard/background-results?agent_id=${s.id}`, { headers: s.ownerHeaders })
+      assert.deepEqual([r.status, (await r.json()).error], [409, 'unsupported_action'], `${s.kind}: saved-result listing is an explicit unsupported state`)
+      const c = await tap(`bg_${'a'.repeat(32)}`, { session_id: 'wizard_parity_saved', agent_id: s.id })
+      assert.deepEqual([c.status, (await c.json()).error], [409, 'unsupported_action'], `${s.kind}: Continue is an explicit unsupported state`)
+      const rows = (await (await s.request('/api/sessions?limit=200')).json()).data
+      assert.ok(!rows.some(r => r.wizard_background_result), `${s.kind}: routed lists carry no saved-result row`)
+      assert.equal(runsFor('wizard_parity_saved').length, 0, `${s.kind}: nothing starts`)
+      return
+    }
+    let listed
+    for (let n = 0; n < 20; n++) {
+      listed = await list()
+      if (listed.results?.length) break
+      await new Promise(r => setTimeout(r, 100))
+    }
+    assert.deepEqual(listed.results.map(r => r.session_id), ['wizard_parity_saved'], 'only the untouched thread offers Continue (the moved-on one keeps the owner message)')
+    const [result] = listed.results
+    assert.deepEqual([result.state, result.action, result.agent_id], ['ready', 'Continue', 'hermes'])
+    assert.ok(listed.sessions.some(r => r.id === 'wizard_parity_saved' && r.wizard_attention?.state === 'needs_you'), 'the thread is discoverable even past the display window')
+    assert.equal((await (await s.raw('/wizard/hermes/api/sessions/wizard_parity_moved/messages?order=oldest', { headers: s.ownerHeaders })).json()).data.at(-1).content, 'Owner wrote meanwhile.', 'the owner message is kept')
+    await list(); await list()
+    assert.equal(runsFor('wizard_parity_saved').length + runsFor('wizard_parity_moved').length, 0, 'discovery never starts a model')
+    const wrong = await tap(result.id, { session_id: 'wizard_parity_moved' })
+    assert.equal(wrong.status, 409, `a valid result tapped for another thread is refused (${wrong.status})`)
+    assert.equal(runsFor('wizard_parity_moved').length + runsFor('wizard_parity_saved').length, 0, 'a refused tap starts nothing')
+    const first = await tap(result.id, { session_id: 'wizard_parity_saved' })
+    assert.equal(first.status, 202, `the tap is admitted (${first.status})`)
+    const run = await first.json()
+    const again = await tap(result.id, { session_id: 'wizard_parity_saved' })
+    assert.equal(again.status, 202); assert.equal(again.headers.get('idempotency-replayed'), 'true', 'a repeat tap replays')
+    assert.equal((await again.json()).run_id, run.run_id, 'a repeat tap is the same turn')
+    for (let n = 0; n < 200 && !runsFor('wizard_parity_saved').length; n++) await new Promise(r => setTimeout(r, 25))
+    await new Promise(r => setTimeout(r, 200))
+    const sentRuns = runsFor('wizard_parity_saved')
+    assert.equal(sentRuns.length, 1, 'exactly one turn in the originating thread')
+    assert.ok(String(sentRuns[0].body.input).includes('The owner pressed Continue') && String(sentRuns[0].body.input).includes('synthetic finding wizard_parity_saved'), 'the turn carries the saved findings')
+    assert.ok(!JSON.stringify(sentRuns[0].body).includes('_wizard_background_recovery'), 'the internal marker never reaches Hermes')
+    assert.equal(runsFor('wizard_parity_moved').length, 0, 'the moved-on thread never resumes')
+    const unknown = await tap(result.id.replace(/.$/, c => c === '0' ? '1' : '0'), { session_id: 'wizard_parity_saved' })
+    assert.equal(unknown.status, 409, 'an unknown result is refused')
+    assert.ok(!(await list()).results.some(r => r.session_id === 'wizard_parity_saved'), 'a continued result is no longer offered')
+  },
   'new-chat-unreachable-agent': async s => {
     // Issue 448: one unreachable optional agent (no sealed catalog) must not stop new chats on this agent.
     // Registered after the scene's own session-create, as running, with an upstream that refuses connections.
