@@ -136,6 +136,7 @@ describe('Wizard proxy capacity queue', () => {
     `)
     state.close()
     const wizard = createWizardServer({
+      channelStore: false,
     requireJoinedDelegationCapability: false,
       upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
       hermesKey: 'fixture-key',
@@ -349,6 +350,7 @@ describe('Wizard proxy capacity queue', () => {
     const directory = await mkdtemp(join(tmpdir(), 'wizard-operator-steering-'))
     temporaryDirectories.push(directory)
     const wizard = createWizardServer({
+      channelStore: false,
     requireJoinedDelegationCapability: false,
       upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
       hermesKey: 'fixture-key',
@@ -455,6 +457,7 @@ describe('Wizard proxy capacity queue', () => {
     const directory = await mkdtemp(join(tmpdir(), 'wizard-operator-queue-'))
     temporaryDirectories.push(directory)
     const wizard = createWizardServer({
+      channelStore: false,
     requireJoinedDelegationCapability: false,
       upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
       hermesKey: 'fixture-key',

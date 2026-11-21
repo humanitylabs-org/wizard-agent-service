@@ -241,9 +241,9 @@ describe('agent inbox HTTP and switch', () => {
   })
 
   it('issue 550: a sweep needs the Daily channel; the card route shapes are owner-only and strict', async () => {
-    const d = home(), u = await start(d, { agentInbox: true })
+    const d = home(), u = await start(d, { agentInbox: true, channelDaily: false })
     expect((await (await fetch(`${u}/sweep`)).json()).card).toBeNull()
-    // No Daily channel (Channels off): nowhere to post the card, nothing written.
+    // No Daily channel (the box turned Daily off): nowhere to post the card, nothing written.
     const refused = await fetch(`${u}/sweep`, json('POST', {}))
     expect([refused.status, (await refused.json()).error]).toEqual([409, 'daily_unavailable'])
     expect((await fetch(`${u}/sweep`, json('PATCH', {}))).status).toBe(405)

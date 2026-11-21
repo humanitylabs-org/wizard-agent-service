@@ -1,18 +1,17 @@
 # Chats channels: the Agent Service channel store (phase 2 of 3)
 
-Switch: `WIZARD_CHANNEL_STORE=1` (Agent Service env, option `channelStore`). Off by default. With it off,
-nothing here exists: the routes answer 404, no `channels.sqlite` is created, and `spaces` stays in
-`ui-preferences.json` exactly as before. Issue: humanitylabs-org/wizard-agent-service#440 (phase 1, the
-shell view: humanitylabs-org/wizard-ux#1254; phase 3, agent filing: issue 441).
+On for everyone (wizard-ux issue 1258). A box can still turn a part off with its env setting `0`
+(`WIZARD_CHANNEL_STORE=0` and the others below); with the store off, nothing here exists: the routes answer 404, no
+`channels.sqlite` is created, and `spaces` stays in `ui-preferences.json` exactly as before. Issue:
+humanitylabs-org/wizard-agent-service#440 (phase 1, the shell view: humanitylabs-org/wizard-ux#1254; phase 3, agent
+filing: issue 441).
 
-## One switch (wizard-ux issue 1358)
+## No switch (wizard-ux issues 1358 and 1258)
 
-Every Channels part here (the store, channel posts, agent filing, read marks) follows the owner's **Settings ›
-Try new features › Channels in Chats** switch (`wizard/chat-channels`) at runtime, with no restart: the Service
-reads it from the synced Look file `Pages/wizard-look/look.json` (`tweaks["wizard/chat-channels"].on`, at most every
-3 s; `server/channels-switch.mjs`). Turning it off goes back to Spaces with `channels.sqlite` kept, so turning it on
-again brings the same channels and memberships back. The `WIZARD_CHANNEL_*` env settings below still win when a box
-sets them: `1` forces that part on, `0` forces it off.
+Every Channels part here (the store, channel posts, agent filing, read marks, Daily) used to follow the owner's
+`wizard/chat-channels` switch in the Look file. Since wizard-ux issue 1258 that switch is gone and every part is on;
+an old value for it in `Pages/wizard-look/look.json` is ignored. The `WIZARD_CHANNEL_*` env settings below still win
+when a box sets them: `0` forces that part off.
 
 ## Store
 
@@ -27,7 +26,7 @@ sets them: `1` forces that part on, `0` forces it off.
 
 Limits: 200 channels per agent; memberships are not capped (the old file held about 790).
 
-## First boot with the switch on
+## First boot
 
 1. Copy `spaces` from `ui-preferences.json` once (ids, names, agents, order and creation times kept). A
    legacy thread listed in two Spaces of one agent stays in the first. Marked done in `meta`, so it never
@@ -37,7 +36,7 @@ Limits: 200 channels per agent; memberships are not capped (the old file held ab
 3. Drop main-agent memberships whose thread is no longer in Hermes' `state.db` (kept when it can't be read).
    Deleting a thread through the Service (main or routed) also removes its membership.
 
-`ui-preferences.json` is never rewritten, so turning the switch off shows the Spaces as they were before.
+`ui-preferences.json` is never rewritten, so a box that sets `WIZARD_CHANNEL_STORE=0` shows the Spaces as they were before.
 
 To check the migration against a real file, run it on a **copy** (it prints counts only):
 
@@ -71,13 +70,13 @@ applied to the store. The Spaces tools (`spaces_*`) and the status line's `space
 ## Chats list
 
 See `docs/chats-list-protocol.md`: rows gain `channel` and `firstRequest`, and `view=list&channel=<id>` is the
-channel feed. With `WIZARD_CHANNEL_FIRST_POSTS=1` (issue 446, off by default) every row of an owner-started thread
+channel feed. With channel posts (issue 446, on; `WIZARD_CHANNEL_FIRST_POSTS=0` turns them off) every row of an owner-started thread
 also carries the post itself: `firstRequest` from the whole first owner message and `firstAttachments`, its photos.
 
 ## Agent filing and Alerts (phase 3)
 
-Switch: `WIZARD_CHANNEL_AGENT_FILING=1` (Agent Service env, option `channelAgentFiling`), on top of
-`WIZARD_CHANNEL_STORE=1`. Off by default; with it off, phase 2 above is unchanged. Issue:
+On, with the channel store; `WIZARD_CHANNEL_AGENT_FILING=0` (option `channelAgentFiling`) turns it off, and
+phase 2 above is then unchanged. Issue:
 humanitylabs-org/wizard-agent-service#441.
 
 - **Status line `channel`.** `WIZARD_STATUS_V1` takes an optional `channel`: one exact channel id from the agent's
@@ -93,18 +92,17 @@ humanitylabs-org/wizard-agent-service#441.
   channel of the job's agent, otherwise into the main agent's Alerts channel. A routed agent's job with no channel stays
   unfiled. A job that posts into an existing thread never files or moves it, and later occurrences never re-file the
   chat, so an owner's move or unfile stands. A notification-delivery job's hidden thread is not filed.
-- **Per-job channel.** `POST/PATCH /wizard/v1/schedules` accept `channel` (a channel id or `null`) only with the
-  switch on; with it off the field is an unknown-field 400, as before.
+- **Per-job channel.** `POST/PATCH /wizard/v1/schedules` accept `channel` (a channel id or `null`) while agent filing
+  is on; with it off (`WIZARD_CHANNEL_AGENT_FILING=0`) the field is an unknown-field 400, as before.
 
-- **Agent posts.** With `WIZARD_CHANNEL_FIRST_POSTS=1` as well, a thread whose first message is the agent's (an
+- **Agent posts.** With channel posts on as well, a thread whose first message is the agent's (an
   alert) carries no `firstRequest` even after the owner replies, so the shell keeps showing the agent's post.
 
 Not changed here: a recurring job keeps its one chat (each run is a reply in it), as before.
 
 ## Read position (issue 471)
 
-Switch: `WIZARD_CHANNEL_READ_SYNC=1` (Agent Service env, option `channelReadSync`), on top of
-`WIZARD_CHANNEL_STORE=1`. Off by default; with it off the route is a 404 and the shell keeps its read position on
+On, with the channel store; `WIZARD_CHANNEL_READ_SYNC=0` (option `channelReadSync`) turns it off, and the route is then a 404 and the shell keeps its read position on
 each device only (wizard-ux issue 1316). Issue: humanitylabs-org/wizard-agent-service#471.
 
 - **What it holds.** One read watermark per shell key, in `channels.sqlite` table `read_marks`: the newest activity
@@ -122,8 +120,7 @@ each device only (wizard-ux issue 1316). Issue: humanitylabs-org/wizard-agent-se
 
 ## Daily channel (issue 527)
 
-Part of the Channels switch (`wizard/chat-channels`), like the parts above; `WIZARD_CHANNEL_DAILY=1` forces it on and
-`0` off (option `channelDaily`). Off: the routes below answer 404, nothing is seeded and `thread: 'daily'` is just a
+On, like the parts above; `WIZARD_CHANNEL_DAILY=0` turns it off (option `channelDaily`). Off: the routes below answer 404, nothing is seeded and `thread: 'daily'` is just a
 thread id, as before. Issue: humanitylabs-org/wizard-agent-service#527 (shell half: humanitylabs-org/wizard-ux#1469).
 
 One pinned channel per agent that holds **one real thread per day**, so the shell can show it as one continuous chat

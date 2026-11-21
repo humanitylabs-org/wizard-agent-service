@@ -52,7 +52,7 @@ async function startUpstream(joinSupported: boolean) {
 
 async function startWizard(upstreamOrigin: string) {
   const home = mkdtempSync(join(tmpdir(), 'join-capability-')); homes.push(home)
-  const wizard = createWizardServer({ upstreamOrigin, hermesKey: 'fixture-key', requireAccess: false, wizardOsHome: home, agentBridge: false })
+  const wizard = createWizardServer({ upstreamOrigin, hermesKey: 'fixture-key', requireAccess: false, wizardOsHome: home, agentBridge: false, channelStore: false })
   servers.push(wizard)
   const address = await listen(wizard)
   return `http://127.0.0.1:${(address as import('node:net').AddressInfo).port}`
