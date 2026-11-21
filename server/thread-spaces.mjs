@@ -43,9 +43,9 @@ export function createSpaceFiling(path, channels = null, { agentFiling = false, 
     : readUiPreferences(path).spaces.filter(s => spaceAgent(s) === agent).slice(0, 30).map(s => ({ id: s.id, name: s.name }))
   // Status lines repeat on every listing: write each (channel, subject) pair at most once per process.
   const learned = new Set()
-  const learnFrom = (agent, thread, subject) => {
+  const learnFrom = (agent, thread, subject, known = null) => {
     try {
-      const row = channels.memberOf?.(agent, thread)
+      const row = known || channels.memberOf?.(agent, thread)
       // Owner-filed only: migrated rows came from old Space filings, many made by the agent, so they would teach a
       // channel the very misfiles this guard exists to stop (Hermes chats in WizardOS Launch).
       if (!row || row.filed_by !== 'owner') return
@@ -69,12 +69,16 @@ export function createSpaceFiling(path, channels = null, { agentFiling = false, 
         if (typeof thread !== 'string' || !THREAD_ID.test(thread)) return false
         const subject = subjectKey(status?.subject || '')
         // Learn what belongs in a channel from the subjects of chats the owner put there.
-        if (subject) learnFrom(agent, thread, subject)
+        let member = null
+        try { member = channels.memberOf?.(agent, thread) || null } catch { /* unknown: the store decides below */ }
+        if (subject && member) learnFrom(agent, thread, subject, member)
         const id = normalizeSpaceId(status?.channel) || normalizeSpaceId(status?.space)
         if (!id) return false
+        // Already in a channel: filing never moves a chat, so a list rebuild stops here (issue 584).
+        if (member) return false
         try { if (scheduledThread(agent, thread)) return false } catch { return false }
         let target
-        try { target = channels.get(id) } catch { return false }
+        try { target = (channels.peek || channels.get)(id) } catch { return false }
         if (target.kind === ALERTS_KIND) return false
         if (!subjectFitsChannel(subject, target, (c, k) => channels.hasChannelSubject(c, k))) return false
         return channels.fileIfUnfiled(agent, thread, id, 'agent')

@@ -130,6 +130,8 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
       return { schema: CHANNELS_SCHEMA, sort: sort(), migratedAt: meta('spaces_migrated'), channels: rows }
     },
     get: id => view({ ...mustChannel(id), count: st.members.all(id).length }),
+    // The channel without its member count: per-row checks on a list build must not read every member (issue 584).
+    peek: id => view(mustChannel(id)),
     // `id` (an old shell's Space id) is a no-op when that channel exists, like ui-preferences' spaces add.
     create({ name, agent, reuseName = false, id: wanted } = {}) {
       if (!validChannelName(name)) fail(400, 'invalid_name')
