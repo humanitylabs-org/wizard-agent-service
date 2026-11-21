@@ -159,7 +159,8 @@ def code_write_target(code: str, path_hit: Callable[[str], str | None],
             if fname == 'open':
                 module = receiver is None or _name(receiver) in {'os', 'io', 'codecs'}
                 if module and _open_writes(node):
-                    targets = positional[:1]  # open(path, 'w'), os.open(path, os.O_WRONLY), io.open
+                    # open(path, 'w'), open(file=path, mode='w'), os.open(path=path, flags=os.O_WRONLY), io.open
+                    targets = positional[:1] + [kw.value for kw in node.keywords if kw.arg in {'file', 'path'}]
                 elif not module and _open_writes(ast.Call(func=node.func, args=[receiver] + positional,
                                                           keywords=node.keywords)):
                     targets = [receiver]  # Path(path).open('w')
@@ -169,9 +170,11 @@ def code_write_target(code: str, path_hit: Callable[[str], str | None],
                     targets = [receiver] + positional
             elif fname == 'replace' and _name(receiver) == 'os':
                 targets = positional
+            elif fname in {'symlink_to', 'hardlink_to'} and receiver is not None:
+                targets = [receiver]  # the link is created at the receiver; the argument is only its source
             elif fname in RECEIVER_WRITES and receiver is not None and _name(receiver) not in {'os', 'shutil'}:
                 targets = [receiver] + positional
-            elif fname in TOOL_WRITES and receiver is None:
+            elif fname in TOOL_WRITES and (receiver is None or _name(receiver) == 'hermes_tools'):
                 targets = positional[:1] + [kw.value for kw in node.keywords if kw.arg == 'path']
             elif fname in ALL_ARG_WRITES:
                 targets = positional + [kw.value for kw in node.keywords if kw.arg in {'path', 'src', 'dst'}]

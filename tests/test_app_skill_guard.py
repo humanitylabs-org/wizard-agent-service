@@ -158,6 +158,9 @@ class AppSkillGuardTests(unittest.TestCase):
             f"from hermes_tools import write_file\nbase = '{self.skills}'\nwrite_file(f'{{base}}/video-app/SKILL.md', 'x')",
             f"from hermes_tools import patch\np = '{self.skills}/video-app/SKILL.md'\npatch(p, 'a', 'b')",
             f"import os\nname = 'SKILL.md'\nos.replace('/tmp/x', '{self.skills}/video-app/' + name)",
+            f"p = '{self.skills}/video-app/SKILL.md'\nopen(file=p, mode='w').write('x')",
+            f"import os\np = '{self.skills}/video-app/SKILL.md'\nos.open(path=p, flags=os.O_WRONLY)",
+            f"import hermes_tools\np = '{self.skills}/video-app/SKILL.md'\nhermes_tools.write_file(p, 'x')",
         ]
         for code in snippets:
             with self.subTest(code=code):
@@ -174,6 +177,7 @@ class AppSkillGuardTests(unittest.TestCase):
             f"from hermes_tools import write_file\nwrite_file('/tmp/notes.md', 'see {self.skills}/video-app/SKILL.md')",
             f"import subprocess\nsubprocess.run(['cat', '{self.skills}/video-app/SKILL.md'])",
             "def broken(:\n    pass",
+            f"from pathlib import Path\nsrc = Path('{self.skills}/video-app/SKILL.md')\nPath('/tmp/link').symlink_to(src)",
         ]
         for code in allowed:
             with self.subTest(code=code):
