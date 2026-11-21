@@ -54,7 +54,7 @@ import { createChannelStore, channelRequest, fixedChannelKind, fixedChannelThrea
 import { dayOf, mintDailyThreadId, dailyTitle, openerOf, dailyRunNote, validDay, DAYS_PAGE, DAYS_PAGE_MAX } from './daily-channel.mjs'
 import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigration } from './channel-spaces.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
-import { createChannelsSwitch, channelPart } from './channels-switch.mjs'
+import { createChannelsSwitch, channelOn, channelPart } from './channels-switch.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, appDoor, recordApp } from './agent-inbox.mjs'
 import { isSweepPhrase, isScheduledSweep, withCardRow, WAITING_CAP, DONE_CAP } from './agent-sweep.mjs'
@@ -3233,11 +3233,9 @@ function buildWizardServer(options, lifetime) {
   // Spaces once, seeds Alerts, and drops main memberships whose thread is gone from state.db. ui-preferences.json
   // itself is never rewritten here.
   // Chats Channels posts (issue 446): list rows carry firstRequest + firstAttachments read from the first owner message.
-  // One Channels switch (wizard-ux issue 1358, channels-switch.mjs): every Channels part follows the owner's
-  // `wizard/chat-channels` switch in the synced Look file at runtime, no restart; WIZARD_CHANNEL_* env choices (the
-  // options) still win. Off: Spaces as before, with channels.sqlite kept for the next time it is on.
-  const channelsSwitchOn = createChannelsSwitch({ readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.channelsSwitchTtlMs ?? 3000 })
-  const channelFirstPostsOn = () => channelPart(options.channelFirstPosts, channelsSwitchOn)
+  // Channels are on for everyone (wizard-ux issue 1258, channels-switch.mjs): every Channels part is on unless a box's
+  // WIZARD_CHANNEL_* env choice (the options) sets it to 0.
+  const channelFirstPostsOn = () => channelOn(options.channelFirstPosts)
   let openedChannelStore = null, channelStoreFailedAt = -Infinity
   const openChannelStore = () => {
     if (openedChannelStore) return openedChannelStore
@@ -3260,21 +3258,21 @@ function buildWizardServer(options, lifetime) {
     return store
   }
   // The store while Channels are on (opened on first use), else null.
-  const channelStoreNow = () => channelPart(options.channelStore, channelsSwitchOn) ? openChannelStore() : null
+  const channelStoreNow = () => channelOn(options.channelStore) ? openChannelStore() : null
   // A store forced on by env opens at boot, as before.
   if (options.channelStore === true) openChannelStore()
   // Chats channels phase 3 (issue 441, needs the channel store): the status line's `channel` files a chat, titles
   // become post names, and a chat the scheduler opens (a reminder, a report, an agent's new chat) is filed into its
   // job's channel or, by default, the main agent's Alerts channel.
-  const channelAgentFilingOn = () => channelPart(options.channelAgentFiling, channelsSwitchOn) && !!channelStoreNow()
+  const channelAgentFilingOn = () => channelOn(options.channelAgentFiling) && !!channelStoreNow()
   // Channel read watermarks (issue 471, needs the channel store): the shell's per-channel read point, shared by the
   // owner's devices, forward only.
-  const channelReadSyncOn = () => channelPart(options.channelReadSync, channelsSwitchOn) && !!channelStoreNow()
+  const channelReadSyncOn = () => channelOn(options.channelReadSync) && !!channelStoreNow()
   // Daily channel (issue 527, needs the channel store): one pinned channel per agent holding one real thread per day
   // (the day starts at 05:00 in the owner's time zone). Seeded once for the main agent the first time it is on.
   let dailySeeded = false
   const channelDailyOn = () => {
-    if (!channelPart(options.channelDaily, channelsSwitchOn)) return false
+    if (!channelOn(options.channelDaily)) return false
     const store = channelStoreNow()
     if (!store) return false
     if (!dailySeeded) { try { store.seedDaily() } catch (error) { console.error(`[channels] Daily not seeded: ${String(error?.message || error).slice(0, 160)}`) } dailySeeded = true }

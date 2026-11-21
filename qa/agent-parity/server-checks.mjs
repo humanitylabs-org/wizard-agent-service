@@ -453,7 +453,8 @@ export const serverChecks = {
         const data = (await response.json()).data
         last = data
         const item = data.find(value => value.id === row.id)
-        if (item?.title === title) return data
+        // Channel posts are on for everyone (wizard-ux issue 1258): a routed row's first post can arrive one read later.
+        if (item?.title === title && 'firstRequest' in item) return data
         await new Promise(resolve => setTimeout(resolve, 25))
       }
       assert.fail(`${s.kind}: ${title} did not reach the projected list: ${JSON.stringify(last)}`)
@@ -712,7 +713,8 @@ export const serverChecks = {
     assert.ok(!JSON.stringify(found).includes('CONTENT_CANARY'))
     const created = (await tool('spaces_create', { name: 'Gateway Space' })).space
     assert.equal((await tool('spaces_create', { name: 'Gateway Space' })).space.id, created.id)
-    // wizard-ux issue 1580: with Channels off (classic Spaces) an agent's new Space keeps its name exactly as given.
+    // wizard-ux issue 1580: with Channels forced off on the box (WIZARD_CHANNEL_STORE=0, classic Spaces) an agent's new
+    // Space keeps its name exactly as given.
     const plain = (await tool('spaces_create', { name: 'Money' })).space
     assert.equal(plain.name, 'Money', `${s.kind}: no emoji added with Channels off`)
     await tool('spaces_delete', { space_id: plain.id })
@@ -1217,8 +1219,9 @@ export const serverChecks = {
       assert.equal((await latestCard()).id, lastCard, 'no card without an open Daily')
     }
   },
-  // wizard-ux issue 1358: one Channels switch. The owner's wizard/chat-channels switch in the synced Look file turns the
-  // channel store, read marks and list fields on and off at runtime through each runtime's real Service route.
+  // wizard-ux issue 1258: Channels are on for everyone (the wizard/chat-channels switch is gone). With no Look file, and
+  // with an old Look file that still says the switch is off, the channel store, read marks and list fields answer
+  // through each runtime's real Service route.
   'chats-channels-switch': async s => {
     const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/chat-channels': { on, at: Date.now() } } })) }
@@ -1235,11 +1238,11 @@ export const serverChecks = {
       }
       return last
     }
-    assert.equal((await s.raw('/wizard/v1/channels')).status, 404, 'Channels are off without the switch')
-    look(true)
-    const made = await s.raw('/wizard/v1/channels', json('POST', { name: 'Synthetic switch channel', agent: s.id })); assert.equal(made.status, 201, 'the switch opens the store with no restart')
+    assert.equal((await s.raw('/wizard/v1/channels')).status, 200, 'Channels are on with no Look file')
+    look(false)
+    const made = await s.raw('/wizard/v1/channels', json('POST', { name: 'Synthetic switch channel', agent: s.id })); assert.equal(made.status, 201, 'an old off value in the Look file is ignored')
     const own = await made.json()
-    // wizard-ux issue 1580: with the switch on, a channel the agent creates through its own gateway gets a fitting
+    // wizard-ux issue 1580: a channel the agent creates through its own gateway gets a fitting
     // emoji in front ("Money" -> "💰 Money"), is reused rather than made twice, and a name matching nothing stays as given.
     const tool = async (name, args) => {
       const r = await s.agentMcp('tools/call', { name, arguments: args }); assert.equal(r.status, 200, 'agent gateway authentication/transport')
@@ -1252,18 +1255,10 @@ export const serverChecks = {
     const stored = (await (await s.raw('/wizard/v1/channels')).json()).channels.find(c => c.id === money.id)
     assert.equal(stored?.agent, s.id, `${s.kind}: filed under the calling agent`)
     assert.equal((await s.raw('/wizard/v1/channels/membership', json('PUT', { sessionId: 'wizard_parity', channelId: own.id }))).status, 200)
-    assert.equal((await s.raw('/wizard/v1/channels/read')).status, 200, 'read marks come with the switch')
-    assert.equal((await item(x => x.channel === own.id))?.channel, own.id, 'list rows carry the channel while on')
-    look(false)
-    assert.equal((await s.raw('/wizard/v1/channels')).status, 404, 'off again: Spaces as before')
-    assert.equal((await s.raw('/wizard/v1/channels/read')).status, 404)
-    assert.equal((await item(x => !x.channel))?.channel, undefined, 'list rows lose the channel while off')
-    look(true)
-    assert.equal((await item(x => x.channel === own.id))?.channel, own.id, 'on again: the same membership is back')
-    // A thread deleted while Channels are off leaves the store too, so turning them on never brings it back.
-    look(false)
+    assert.equal((await s.raw('/wizard/v1/channels/read')).status, 200, 'read marks answer')
+    assert.equal((await item(x => x.channel === own.id))?.channel, own.id, 'list rows carry the channel')
+    // A deleted thread leaves the store too.
     assert.equal((await s.request('/api/sessions/wizard_parity', { method: 'DELETE' })).status, 200)
-    look(true)
     const after = (await (await s.raw('/wizard/v1/channels')).json()).channels.find(c => c.id === own.id)
     assert.equal(after?.count, 0, 'the deleted thread is no longer a member')
   },

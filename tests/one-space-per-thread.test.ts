@@ -15,7 +15,7 @@ afterEach(async () => { await Promise.all(servers.splice(0).map(s => new Promise
 const home = () => { const d = mkdtempSync(join(tmpdir(), 'one-space-')); dirs.push(d); return d }
 const space = (id: string, threads: string[] = [], agent?: string) => ({ id, name: id, threads, createdAt: '2026-10-29T00:00:00Z', ...(agent ? { agent } : {}) })
 async function start(d: string) {
-  const s = createWizardServer({ wizardOsHome: d, hermesKey: 'test', agentBridge: false, followThrough: false, requireAccess: false, runQueueStatePath: join(d, 'q.db'), runQueuePollIntervalMs: 0 })
+  const s = createWizardServer({ wizardOsHome: d, hermesKey: 'test', agentBridge: false, followThrough: false, requireAccess: false, runQueueStatePath: join(d, 'q.db'), runQueuePollIntervalMs: 0, channelStore: false })
   servers.push(s); const a: any = await listen(s); return `http://127.0.0.1:${a.port}/wizard/v1/ui-preferences`
 }
 const patch = (u: string, ops: any[]) => fetch(u, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ops }) })

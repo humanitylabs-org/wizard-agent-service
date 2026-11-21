@@ -39,9 +39,9 @@ describe('channel read marks: store', () => {
 })
 
 describe('channel read marks: HTTP', () => {
-  it('switch off (or store off): 404, nothing else changes', async () => {
-    expect((await fetch(await start(home(), { channelStore: true }))).status).toBe(404)
-    expect((await fetch(await start(home(), { channelReadSync: true }))).status).toBe(404)
+  it('forced off on the box (or store off): 404, nothing else changes', async () => {
+    expect((await fetch(await start(home(), { channelStore: true, channelReadSync: false }))).status).toBe(404)
+    expect((await fetch(await start(home(), { channelStore: false, channelReadSync: true }))).status).toBe(404)
   })
   it('switch on: one device writes, the other reads the same marks; older marks never move it back', async () => {
     const d = home(), u = await start(d, { channelStore: true, channelReadSync: true }), t = Date.now() - 60_000

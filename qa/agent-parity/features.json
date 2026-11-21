@@ -549,9 +549,9 @@
     },
     {
       "id": "chats-channels-switch",
-      "description": "One Channels switch (wizard-ux issue 1358): the owner's wizard/chat-channels switch in the synced Look file (Pages/wizard-look/look.json) turns the channel store, channel posts, agent filing and read marks on and off at runtime, with no restart. Off goes back to Spaces and keeps channels.sqlite, so on again brings the same channels and memberships back. WIZARD_CHANNEL_* env settings still win (1 on, 0 off).",
+      "description": "Channels on for everyone (wizard-ux issue 1258; the wizard/chat-channels switch of issue 1358 is removed): the channel store, channel posts, agent filing, read marks and Daily are on with no Look file, and an old off value for the switch in the synced Look file is ignored. Only a box's WIZARD_CHANNEL_* env setting 0 turns a part off (classic Spaces).",
       "layer": "server",
-      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile, container TCP, restricted Unix ingress) with no channel options and a Pages root: /wizard/v1/channels is 404 with no Look file; write the switch on and create this agent's channel, file the parity thread, read /channels/read and see the list row carry the channel; write it off and get 404 and rows without a channel; write it on and see the same membership. tests/channels-switch.test.ts covers the Look file reader, the env overrides, the scheduler field and migration once. Synthetic HTTP fixture evidence, not live box proof.",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile, container TCP, restricted Unix ingress) with no channel options and a Pages root: /wizard/v1/channels answers 200 with no Look file; write an old switch-off Look file, create this agent's channel, file the parity thread, read /channels/read and see the list row carry the channel; delete the thread and see it leave the channel. tests/channels-switch.test.ts covers on-by-default, the env 0 overrides, the scheduler field and migration once. Synthetic HTTP fixture evidence, not live box proof.",
       "source_refs": [
         "server/channels-switch.mjs",
         "server/service.mjs",

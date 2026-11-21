@@ -1,12 +1,14 @@
-// wizard-ux issue 1358: one Channels switch. The owner's `wizard/chat-channels` switch in the synced Look file turns
-// every Channels part of the service on and off at runtime (no restart); WIZARD_CHANNEL_* env choices still win.
+// wizard-ux issue 1258: Channels are on for everyone. The owner's old `wizard/chat-channels` switch (issue 1358) is
+// gone, an old value for it in the Look file is ignored, and only a box's WIZARD_CHANNEL_* env 0 turns a part off.
 import { afterEach, describe, expect, it } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createWizardServer, listen } from '../server/service.mjs'
 import { Scheduler } from '../server/scheduler.mjs'
-import { CHANNELS_SWITCH, channelPart, createChannelsSwitch, envChoice, lookSwitchOn } from '../server/channels-switch.mjs'
+import { channelOn, channelPart, envChoice, lookSwitchOn } from '../server/channels-switch.mjs'
+
+const CHANNELS_SWITCH = 'wizard/chat-channels'
 
 const servers: any[] = [], dirs: string[] = []
 afterEach(async () => { await Promise.all(servers.splice(0).map(s => new Promise<void>(r => s.close(r)))); dirs.splice(0).forEach(d => rmSync(d, { recursive: true, force: true })) })
@@ -18,7 +20,7 @@ async function start(d: string, extra: Record<string, unknown> = {}) {
     wizardOsHome: d, requireAccess: false, hermesKey: 'test', agentBridge: false, followThrough: false,
     runQueueStatePath: join(d, 'q.db'), runQueuePollIntervalMs: 0,
     pagesRoot: join(d, 'Pages'), pagesGitDir: join(d, 'pages-history.git'), pagesWatch: false,
-    channelsSwitchTtlMs: 0, ...extra,
+    ...extra,
   })
   servers.push(s); const a: any = await listen(s); return `http://127.0.0.1:${a.port}/wizard/v1`
 }
@@ -26,27 +28,17 @@ const json = (method: string, value: any) => ({ method, headers: { 'content-type
 const at = '2026-11-12T10:00:00.000Z'
 const spaces = [{ id: 'space-one', name: 'One', threads: ['wizard_a', 'wizard_b'], createdAt: at }]
 
-describe('channels switch: reading the Look file', () => {
-  it('is on only for a version 1 Look file with the switch on', () => {
-    expect(lookSwitchOn(look(true))).toBe(true)
-    expect(lookSwitchOn(look(false))).toBe(false)
-    expect(lookSwitchOn(look(null))).toBe(false)
-    expect(lookSwitchOn(JSON.stringify({ version: 2, tweaks: { [CHANNELS_SWITCH]: { on: true } } }))).toBe(false)
-    expect(lookSwitchOn('{not json')).toBe(false)
-    expect(lookSwitchOn(undefined)).toBe(false)
+describe('channels: on for everyone', () => {
+  it('the Look file reader still reads other switches by id', () => {
+    expect(lookSwitchOn(look(true), CHANNELS_SWITCH)).toBe(true)
+    expect(lookSwitchOn(look(false), CHANNELS_SWITCH)).toBe(false)
+    expect(lookSwitchOn('{not json', CHANNELS_SWITCH)).toBe(false)
   })
-  it('env 1 forces a part on, 0 forces it off, anything else follows the switch', () => {
+  it('a part is on unless env 0 forces it off', () => {
     expect([envChoice('1'), envChoice('0'), envChoice(undefined), envChoice('')]).toEqual([true, false, undefined, undefined])
+    expect([channelOn(true), channelOn(false), channelOn(undefined)]).toEqual([true, false, true])
+    // Other Look-file switches (private first, agent inbox) still follow the owner's choice.
     expect([channelPart(true, () => false), channelPart(false, () => true), channelPart(undefined, () => true), channelPart(undefined, () => false)]).toEqual([true, false, true, false])
-    expect(channelPart(undefined, () => { throw new Error('x') })).toBe(false)
-  })
-  it('reads the file at most once per ttl, and an unreadable file is off', () => {
-    let reads = 0, t = 0, text: any = look(true)
-    const on = createChannelsSwitch({ readLook: () => { reads++; if (text instanceof Error) throw text; return text }, now: () => t, ttlMs: 3000 })
-    expect(on()).toBe(true); text = look(false); t = 2999
-    expect([on(), reads]).toEqual([true, 1])
-    t = 3000; expect([on(), reads]).toEqual([false, 2])
-    text = new Error('gone'); t = 7000; expect(on()).toBe(false)
   })
   it('the scheduler takes the channel field only while the switch is on', () => {
     const d = home(); let on = false
@@ -56,50 +48,38 @@ describe('channels switch: reading the Look file', () => {
   })
 })
 
-describe('channels switch over HTTP', () => {
-  it('turns the store and read marks on and off at runtime, and keeps channels for the next time', async () => {
-    const d = home(); writeFileSync(join(d, 'ui-preferences.json'), JSON.stringify({ spaces })); setLook(d, null)
+describe('channels over HTTP', () => {
+  it('are on with no Look file and with an old switch-off Look file, and copy the Spaces once', async () => {
+    const d = home(); writeFileSync(join(d, 'ui-preferences.json'), JSON.stringify({ spaces })); setLook(d, false)
     const u = await start(d)
-    // Off: Spaces as before, no store file.
-    expect((await fetch(`${u}/channels`)).status).toBe(404)
-    expect((await fetch(`${u}/channels/read`)).status).toBe(404)
-    expect(existsSync(join(d, 'channels.sqlite'))).toBe(false)
-    // On, no restart: the store opens, copies the Spaces once, and read marks answer.
-    setLook(d, true)
     const listed = await (await fetch(`${u}/channels`)).json()
-    // The Daily channel (issue 527) is a part of the same switch: seeded on top, once.
+    // The Daily channel (issue 527) is on too: seeded on top, once.
     expect(listed.channels.map((c: any) => [c.id, c.count])).toEqual([['daily', 0], ['alerts', 0], ['space-one', 2]])
     expect((await fetch(`${u}/channels/read`)).status).toBe(200)
     const voice = await (await fetch(`${u}/channels`, json('POST', { name: 'Voice' }))).json()
     expect((await fetch(`${u}/channels/membership`, json('PUT', { sessionId: 'wizard_a', channelId: voice.id }))).status).toBe(200)
-    // Off again: today's behaviour, with the file's own Spaces untouched.
-    setLook(d, false)
-    expect((await fetch(`${u}/channels`)).status).toBe(404)
-    expect((await fetch(`${u}/channels/read`)).status).toBe(404)
-    expect((await (await fetch(`${u}/ui-preferences`)).json()).spaces).toEqual(spaces)
-    expect(existsSync(join(d, 'channels.sqlite'))).toBe(true)
-    // On again: the same channels and memberships, not migrated a second time.
+    // The file's own Spaces are never rewritten.
+    expect(JSON.parse(readFileSync(join(d, 'ui-preferences.json'), 'utf8')).spaces).toEqual(spaces)
+    // An old on value changes nothing either.
     setLook(d, true)
     const after = (await (await fetch(`${u}/channels`)).json()).channels
     expect(after.map((c: any) => [c.name, c.count])).toEqual([['Daily', 0], ['Alerts', 0], ['One', 1], ['Voice', 1]])
     expect((await (await fetch(`${u}/channels/membership?sessionId=wizard_a`)).json()).channel).toBe(voice.id)
   })
-  it('env choices still win over the switch', async () => {
-    const off = home(); setLook(off, true)
+  it('a box without a Look file has Channels', async () => {
+    const d = home()
+    const u = await start(d)
+    expect((await fetch(`${u}/channels`)).status).toBe(200)
+    expect(existsSync(join(d, 'channels.sqlite'))).toBe(true)
+  })
+  it('env 0 still turns a part off', async () => {
+    const off = home()
     const u1 = await start(off, { channelStore: false })
     expect((await fetch(`${u1}/channels`)).status).toBe(404)
     expect(existsSync(join(off, 'channels.sqlite'))).toBe(false)
-    const on = home(); setLook(on, false)
-    const u2 = await start(on, { channelStore: true })
-    expect((await fetch(`${u2}/channels`)).status).toBe(200)
     // Read marks follow their own choice: forced off here even though the store is on.
-    const u3 = await start(home(), { channelStore: true, channelReadSync: false })
+    const u3 = await start(home(), { channelReadSync: false })
+    expect((await fetch(`${u3}/channels`)).status).toBe(200)
     expect((await fetch(`${u3}/channels/read`)).status).toBe(404)
-  })
-  it('a box without a Look file stays off', async () => {
-    const d = home()
-    const u = await start(d)
-    expect((await fetch(`${u}/channels`)).status).toBe(404)
-    expect(existsSync(join(d, 'channels.sqlite'))).toBe(false)
   })
 })

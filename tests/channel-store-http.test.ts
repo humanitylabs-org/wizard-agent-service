@@ -9,7 +9,7 @@ const servers: any[] = [], dirs: string[] = []
 afterEach(async () => { await Promise.all(servers.splice(0).map(s => new Promise<void>(r => s.close(r)))); dirs.splice(0).forEach(d => rmSync(d, { recursive: true, force: true })) })
 const home = () => { const d = mkdtempSync(join(tmpdir(), 'channels-http-')); dirs.push(d); return d }
 async function start(d: string, channelStore: boolean, auth = false) {
-  const s = createWizardServer({ wizardOsHome: d, requireAccess: auth, ...(auth ? { accessVerifier: async () => null } : {}), hermesKey: 'test', agentBridge: false, followThrough: false, runQueueStatePath: join(d, 'q.db'), runQueuePollIntervalMs: 0, channelStore })
+  const s = createWizardServer({ wizardOsHome: d, requireAccess: auth, ...(auth ? { accessVerifier: async () => null } : {}), hermesKey: 'test', agentBridge: false, followThrough: false, runQueueStatePath: join(d, 'q.db'), runQueuePollIntervalMs: 0, channelStore, channelDaily: false })
   servers.push(s); const a: any = await listen(s); return `http://127.0.0.1:${a.port}/wizard/v1`
 }
 const json = (method: string, value: any, headers = {}) => ({ method, headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(value) })

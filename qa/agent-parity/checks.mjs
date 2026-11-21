@@ -14,7 +14,7 @@ const featureScenes = {
   'private-first-setup': kind => scene(kind, { privateFirst: true }),
   'graceful-restart-hold': kind => scene(kind, { gracefulRestart: true }),
   'file-store-inbox-import': kind => scene(kind, { mediaLegacyIds: true }),
-  'chats-channels': kind => scene(kind, { channelStore: true, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true }),
+  'chats-channels': kind => scene(kind, { channelStore: true, channelDaily: false, channelFirstPosts: false, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true }),
   'chats-read-marks': kind => scene(kind, { channelStore: true, channelReadSync: true }),
   'agent-inbox': kind => scene(kind, ({ root }) => ({ agentInbox: true, agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'orb-dump': kind => scene(kind, ({ root }) => ({ agentInbox: true, agentInboxStatePath: join(root, 'agent-inbox.json') })),
@@ -24,8 +24,8 @@ const featureScenes = {
   'agent-inbox-doors': kind => scene(kind, ({ root }) => ({ agentInbox: true, agentInboxStatePath: join(root, 'agent-inbox.json'), channelStore: true, channelDaily: true, dailyTimezone: 'UTC', schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),
   'scheduler-finished-runs': kind => scene(kind, ({ root }) => ({ schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),
   'chats-daily-channel': kind => scene(kind, ({ root }) => ({ channelStore: true, channelDaily: true, dailyTimezone: 'UTC', dailyNow: () => dailyClock.at ?? Date.now(), schedulerNow: () => dailyClock.at ?? Date.now(), schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false, heavyToken: dailyScheduleToken })),
-  'chats-channels-switch': kind => scene(kind, ({ root }) => ({ pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, channelsSwitchTtlMs: 0, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true, agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' })),
-  'chats-agent-filing': kind => scene(kind, ({ root }) => ({ channelStore: true, channelAgentFiling: true, channelFirstPosts: true, routedOwnerTurns: true, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true, schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),
+  'chats-channels-switch': kind => scene(kind, ({ root }) => ({ pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true, agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' })),
+  'chats-agent-filing': kind => scene(kind, ({ root }) => ({ channelStore: true, channelDaily: false, channelAgentFiling: true, channelFirstPosts: true, routedOwnerTurns: true, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true, schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),
   'chats-first-posts': kind => scene(kind, { channelFirstPosts: true, routedOwnerTurns: true, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true }),
   'owner-screenshot-turns': kind => scene(kind, { routedOwnerTurns: true, ownerScreenshotTurns: true }),
   'owner-turn-retry': kind => scene(kind, { routedOwnerTurns: true, ownerTurnRetry: true }),
@@ -258,7 +258,7 @@ export const dependencies = {
   'retry-input': ['idempotent-resend'],
 }
 export async function runCheck(kind, feature) {
-  const s = featureScenes[feature] ? await featureScenes[feature](kind) : await scene(kind, feature === 'supervisor-reporter' ? { supervisorParity: true } : feature === 'thread-follow-up-watchers' ? { followUpParity: true } : ['session-slim-index','session-body-search','archive-age'].includes(feature) ? {fixtureSearchIndex:true,canonicalSessionListing:true} : feature === 'chats-spaces' ? { agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' } : ['app-job-routing', 'agent-app-access', 'tools-list-cache-hints'].includes(feature) ? { agentBridge: true, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp', bridgeWatchMs: 0 } : {})
+  const s = featureScenes[feature] ? await featureScenes[feature](kind) : await scene(kind, feature === 'supervisor-reporter' ? { supervisorParity: true } : feature === 'thread-follow-up-watchers' ? { followUpParity: true } : ['session-slim-index','session-body-search','archive-age'].includes(feature) ? {fixtureSearchIndex:true,canonicalSessionListing:true} : feature === 'chats-spaces' ? { channelStore: false, agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' } : ['app-job-routing', 'agent-app-access', 'tools-list-cache-hints'].includes(feature) ? { agentBridge: true, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp', bridgeWatchMs: 0 } : {})
   try {
     if (feature !== 'session-create') await checks['session-create'](s)
     for (const dependency of dependencies[feature] || []) await checks[dependency](s)
