@@ -21,6 +21,18 @@ JOB_MAP_LINES = 12
 DEFAULT_FILES_ROOT = "~/runtipi/media"
 JOB_STAMP = ".wizard-jobs"
 SKIP_PROVIDES = {"shell", "agent-service", "agent"}
+# Everyday jobs whose owner words differ from the job id (wizard-os issue 800). Twin of JOB_ASKS in
+# server/agent-bridge.mjs: same text, same order.
+JOB_ASKS = {
+    "messaging": {
+        "ask": "to draft, write, reply to or message anyone (WhatsApp, LINE, Telegram, Instagram, Slack, Signal); "
+               "save it as a draft in the app, never only in chat",
+        "map": "messaging, drafting a message (save it as a draft there, never only in chat)",
+        "rule": "Draft a message = save it with the app's draft tool (a draft in an existing chat, or start one for a new "
+                "number, LINE ID or @username). Text in chat is not a draft.",
+        "tools": ["create_draft", "start_draft", "update_draft", "list_chats", "read_thread"],
+    },
+}
 _CTRL = re.compile(r"[\u0000-\u001f\u007f]")
 _WS = re.compile(r"\s+")
 _ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -104,6 +116,21 @@ def _jobs_of(apps: list[dict]) -> list[tuple[str, list[dict]]]:
     return sorted(by_job.items())
 
 
+def _map_jobs(apps: list[dict]) -> list[tuple[str, list[dict]]]:
+    jobs = _jobs_of(apps)
+    return [j for j in jobs if j[0] in JOB_ASKS] + [j for j in jobs if j[0] not in JOB_ASKS]
+
+
+def _job_tools(job: str, tools: list) -> list:
+    want = (JOB_ASKS.get(job) or {}).get("tools") or []
+
+    def rank(tool) -> int:
+        name = tool if isinstance(tool, str) else str((tool or {}).get("name") or "")
+        return next((i for i, w in enumerate(want) if name == w or name.endswith(f"_{w}")), len(want))
+
+    return sorted(tools, key=rank)
+
+
 def render_kernel(apps: list[dict] | None = None, harness: str = "hermes",
                   files_root: str = DEFAULT_FILES_ROOT, job_map: bool = False, skills_index: bool | None = None) -> str:
     """Twin of agent-bridge.mjs renderKernel: FIXED text, no per-app list unless job_map."""
@@ -131,8 +158,8 @@ def render_kernel(apps: list[dict] | None = None, harness: str = "hermes",
         "Save routing-only app-job skills.",
     ]
     if job_map or not pointers:
-        rows = [f"- {job_words(job)} -> " + ", ".join(f"{a['name']} (`{agent_tool_name(a['prefix'], '*', harness)}`)" for a in owners)
-                for job, owners in _jobs_of(apps)[:JOB_MAP_LINES]]
+        rows = [f"- {(JOB_ASKS.get(job) or {}).get('map') or job_words(job)} -> " + ", ".join(f"{a['name']} (`{agent_tool_name(a['prefix'], '*', harness)}`)" for a in owners)
+                for job, owners in _map_jobs(apps)[:JOB_MAP_LINES]]
         text += ["", "Jobs on this box:", *(rows or ["- (no apps installed yet)"])]
     return "\n".join(text)
 
@@ -158,10 +185,11 @@ def pointer_skills(apps: list[dict], harness: str = "hermes", tools: dict | None
     out = {}
     for job, owners in _jobs_of(apps):
         words = job_words(job)
+        ask = JOB_ASKS.get(job) or {}
         names = " or ".join(a["name"] for a in owners)
         lines = []
         for a in owners:
-            known = [_tool_entry(t) for t in (tools.get(a["id"]) or [])[:8]]
+            known = [_tool_entry(t) for t in _job_tools(job, tools.get(a["id"]) or [])[:8]]
             down = "" if a["status"] == "running" else f" It is {a['status']} right now: tell the owner (`wam doctor`)."
             how = (f"load its skill `{a['id']}` with skill_view first (it holds the app's workflow and model rules), "
                    "then call the tool whose purpose matches the request." if a["skill"]
@@ -176,11 +204,12 @@ def pointer_skills(apps: list[dict], harness: str = "hermes", tools: dict | None
         out[job_skill_name(job)] = "\n".join([
             "---",
             f"name: {job_skill_name(job)}",
-            f"description: Use when the owner asks for {words}. The installed {names} app does it; call its tools, never search files.",
+            f"description: Use when the owner asks {ask.get('ask') or f'for {words}'}. The installed {names} app does it; call its tools, never search files.",
             "---",
             "",
             f"# {words}",
             "",
+            *([ask["rule"], ""] if ask.get("rule") else []),
             *lines,
             "",
             f"Tools are on the `{MCP_SERVER_NAME}` MCP server.{tail} Paths are relative to the owner's Files root.",

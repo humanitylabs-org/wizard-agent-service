@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
+import { parse as parseYaml } from 'yaml'
 import { TITLE_INSTRUCTIONS } from '../../server/thread-titles.mjs'
 import { CLAUDE_MODEL_LIMIT_SAFE_ERROR } from '../../server/run-provider-failure.mjs'
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
@@ -2173,13 +2174,16 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     }
     const pointer = join(skills, 'wizard-job-short-form-video', 'SKILL.md')
     const parityQa = { id: 'parity-qa', name: 'Synthetic Parity App', view: '/parity/', agent_binding: true }
+    // wizard-os issue 800: "draft a message" must reach the messaging app (owner words in the pointer, first in the job map).
+    const chat = { id: 'parity-chat', name: 'Synthetic Chat', status: 'running', provides: ['messaging'], mcp: { url: 'http://127.0.0.1:9/mcp' } }
+    const chatPointer = join(skills, 'wizard-job-messaging', 'SKILL.md')
     if (s.kind !== 'main') {
       // The install picker ticks this standard agent for the new app (#58): its own list, nothing else.
       const file = join(osHome, 'agents', s.id, 'agent.json'), agent = JSON.parse(readFileSync(file, 'utf8'))
-      agent.permissions.wizard_apps = [...new Set([...(agent.permissions.wizard_apps || []), 'parity-video'])]
+      agent.permissions.wizard_apps = [...new Set([...(agent.permissions.wizard_apps || []), 'parity-video', 'parity-chat'])]
       writeFileSync(file, JSON.stringify(agent))
     }
-    install([parityQa, app]); await s.restart()
+    install([parityQa, app, chat]); await s.restart()
     const text = await kernel()
     // Inspect the real gateway handler's initialize output on EACH runtime transport,
     // not renderKernel() or a source-text assertion. Upstream Hermes remains synthetic.
@@ -2202,15 +2206,23 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
       assert.ok(existsSync(pointer), 'main agent gets the job pointer skill')
       assert.match(readFileSync(pointer, 'utf8'), /Synthetic Video: load its skill `parity-video` with skill_view first/u)
       assert.match(text, /wizard-job-<job> skill in your skills/u)
+      const drafting = readFileSync(chatPointer, 'utf8')
+      const front = parseYaml(drafting.split('---\n')[1])
+      assert.equal(front.name, 'wizard-job-messaging', 'messaging pointer front matter parses as YAML')
+      assert.match(front.description, /^Use when the owner asks to draft, write, reply to or message anyone .*never only in chat\./u, 'messaging pointer matches draft requests')
+      assert.ok(drafting.includes('Text in chat is not a draft.'), 'messaging pointer says chat text is not a draft')
     } else {
       // No pointer skills outside the main agent's index: the gateway tells this agent its own jobs instead.
       assert.doesNotMatch(text, /wizard-job-<job>/u)
       assert.match(text, /- short-form video -> Synthetic Video \(`mcp__wizard__parity_video__\*`\)/u)
+      const rows = text.split('\n').filter((l) => l.startsWith('- '))
+      assert.match(rows[0], /^- messaging, drafting a message \(save it as a draft there, never only in chat\) -> Synthetic Chat /u, `${s.kind}: messaging leads the job map`)
     }
     install([parityQa]); await s.restart()
     const after = await kernel()
     assertRules(after)
     assert.ok(!existsSync(join(skills, 'wizard-job-short-form-video')), 'uninstall removes the pointer')
+    assert.ok(!existsSync(chatPointer), 'uninstall removes the messaging pointer')
     assert.ok(!existsSync(join(skills, 'parity-video')), `${s.kind}: uninstall removes the copied app skill`)
     assert.doesNotMatch(after, /Synthetic Video/u)
   },

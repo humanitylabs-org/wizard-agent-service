@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { afterEach, describe, expect, it } from 'vitest'
+import { parse as parseYaml } from 'yaml'
 import { bridgeApps, createAgentBridge, createGatewayGrants, renderKernel, KERNEL_LIMIT, pointerSkills, writePointerSkills, writeAppSkills, appsDelta, renderDelta, ThreadAppSnapshots } from '../server/agent-bridge.mjs'
 import { createWizardServer, listen } from '../server/service.mjs'
 
@@ -125,6 +126,31 @@ describe('agent bridge: kernel', () => {
     expect(renderKernel([], { harness: 'generic' }).length).toBeLessThanOrEqual(KERNEL_LIMIT)
   })
 
+  it('a draft request reaches the messaging app: owner words, draft rule, draft tools first, never cut from the job map (wizard-os issue 800)', () => {
+    const messenger = app('messenger', 9, { provides: ['messaging'] })
+    const tools = { messenger: ['messenger_status', 'messenger_public_identity', 'messenger_get_attachment', 'messenger_agent_chat_inbox', 'messenger_agent_chat_ack', 'messenger_agent_chat_post', 'messenger_draft_feedback', 'messenger_read_thread', 'messenger_list_chats', 'messenger_start_draft', 'messenger_create_draft'] }
+    const skill = pointerSkills(bridgeApps({ apps: [messenger] }), { tools })['wizard-job-messaging']
+    const description = skill.split('\n').find((l) => l.startsWith('description: '))
+    expect(description).toMatch(/^description: Use when the owner asks to draft, write, reply to or message anyone \(WhatsApp, LINE, Telegram, Instagram, Slack, Signal\); save it as a draft in the app, never only in chat\./u)
+    // The front matter is valid YAML (a ': ' inside the plain scalar would make Hermes skip the skill).
+    const meta = parseYaml(skill.split('---\n')[1])
+    expect(meta.name).toBe('wizard-job-messaging')
+    expect(meta.description).toBe(description.slice('description: '.length))
+    expect(skill).toContain('Text in chat is not a draft.')
+    const listed = skill.split('\n').filter((l) => l.startsWith('  - `')).map((l) => l.match(/messenger__(\w+)`/u)[1])
+    expect(listed.slice(0, 4)).toEqual(['messenger_create_draft', 'messenger_start_draft', 'messenger_list_chats', 'messenger_read_thread'])
+    expect(listed).toHaveLength(8)
+    // Other jobs keep their plain wording and tool order.
+    expect(pointerSkills(bridgeApps({ apps: [app('hello-wizard', 1)] }))['wizard-job-diagnostics']).toContain('description: Use when the owner asks for diagnostics. ')
+    // 20 apps sort before messaging: the job map's 12-line cap no longer cuts it off.
+    const many = Array.from({ length: 20 }, (_, i) => app(`app-number-${String(i).padStart(2, '0')}`, 1000 + i, { provides: [`a-job-${i}`] }))
+    for (const opts of [{ jobMap: true }, { skillsIndex: false }, { harness: 'generic' }]) {
+      const rows = renderKernel(bridgeApps({ apps: [...many, messenger] }), opts).split('\n').filter((l) => l.startsWith('- '))
+      expect(rows).toHaveLength(12)
+      expect(rows[0]).toMatch(/^- messaging, drafting a message \(save it as a draft there, never only in chat\) -> Messenger \(`/u)
+    }
+  })
+
   it('writes one pointer skill per job, names real tools, and removes stale ones', () => {
     const dir = box([])
     const apps = bridgeApps({ apps: [app('hello-wizard', 1), app('transcriber', 2, { provides: ['transcription'], skill: '' })] })
@@ -219,6 +245,7 @@ describe('agent bridge: kernel', () => {
     const fixtures = [
       [app('hello-wizard', 1), app('transcriber', 2, { provides: ['transcription', 'speech-to-text-engine'], status: 'stopped' })],
       Array.from({ length: 20 }, (_, i) => app(`app-number-${String(i).padStart(2, '0')}`, 1000 + i, { provides: [`job-${i}`] })),
+      [...Array.from({ length: 14 }, (_, i) => app(`app-number-${String(i).padStart(2, '0')}`, 1000 + i, { provides: [`job-${i}`] })), app('messenger', 9, { provides: ['messaging'] })],
       [],
     ]
     const py = (code, reg) => execFileSync('python3', ['-c', `import sys,json; sys.path.insert(0, ${JSON.stringify(PLUGIN)}); import kernel; apps = kernel.bridge_apps(json.load(sys.stdin)); ${code}`], { input: JSON.stringify(reg) }).toString()
@@ -236,7 +263,7 @@ describe('agent bridge: kernel', () => {
       expect(noIndex).not.toContain('wizard-job-<job>')
       expect(noIndex).toContain('Jobs on this box:')
       expect(JSON.parse(py('print(json.dumps(kernel.pointer_skills(apps)))', reg))).toEqual(pointerSkills(bridgeApps(reg)))
-      const tools = Object.fromEntries(bridgeApps(reg).map((a) => [a.id, [{ name: 'run', description: 'Does it. Then more! And more.' }, { name: 'x', description: 'A'.repeat(140) }, 'bare']]))
+      const tools = Object.fromEntries(bridgeApps(reg).map((a) => [a.id, [{ name: 'run', description: 'Does it. Then more! And more.' }, { name: 'x', description: 'A'.repeat(140) }, 'bare', { name: `${a.prefix}_create_draft`, description: 'Saves a draft.' }, 'list_chats']]))
       expect(JSON.parse(py(`print(json.dumps(kernel.pointer_skills(apps, tools=${JSON.stringify(JSON.stringify(tools))} and json.loads(${JSON.stringify(JSON.stringify(tools))}))))`, reg))).toEqual(pointerSkills(bridgeApps(reg), { tools }))
     }
   })
