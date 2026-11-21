@@ -31,6 +31,18 @@ export const TOOLS_LIST_TTL_MS = 24 * 60 * 60 * 1000
 export const TOOLS_RECHECK_MS = [10_000, 30_000, 60_000, 120_000, 300_000]
 const TOOLS_RECHECK_TRIES = 12
 const SKIP_PROVIDES = new Set(['shell', 'agent-service', 'agent'])
+// Everyday jobs whose owner words differ from the job id (wizard-os issue 800: "draft a WhatsApp to ..." never matched
+// a pointer that said "messaging", so the agent wrote the draft into the chat). For these the pointer description
+// and rule say what the owner says, the job map lists them first (so its line cap never cuts them) and the tools that
+// do it come first in the pointer. Twin: JOB_ASKS in hermes-plugin/wizard-os/kernel.py.
+export const JOB_ASKS = {
+  messaging: {
+    ask: 'to draft, write, reply to or message anyone (WhatsApp, LINE, Telegram, Instagram, Slack, Signal): save it as a draft in the app, never only in chat',
+    map: 'messaging, drafting a message (save it as a draft there, never only in chat)',
+    rule: 'Draft a message = save it with the app\'s draft tool (a draft in an existing chat, or start one for a new number, LINE ID or @username). Text in chat is not a draft.',
+    tools: ['create_draft', 'start_draft', 'update_draft', 'list_chats', 'read_thread'],
+  },
+}
 
 function clean(value, max) {
   return typeof value === 'string' ? value.replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, max) : ''
@@ -104,6 +116,23 @@ function jobsOf(apps) {
   return [...byJob.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
 }
 
+/** Jobs for the job map: the everyday JOB_ASKS jobs first, then the rest in name order. */
+function mapJobs(apps) {
+  const jobs = jobsOf(apps)
+  return [...jobs.filter(([job]) => JOB_ASKS[job]), ...jobs.filter(([job]) => !JOB_ASKS[job])]
+}
+
+/** An app's tools with the ones that do an everyday job first (in JOB_ASKS order), the rest as listed. */
+function jobTools(job, list) {
+  const want = JOB_ASKS[job]?.tools || []
+  const rank = (t) => {
+    const name = typeof t === 'string' ? t : String(t?.name || '')
+    const i = want.findIndex((w) => name === w || name.endsWith(`_${w}`))
+    return i < 0 ? want.length : i
+  }
+  return list.map((t, i) => [rank(t), i, t]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2])
+}
+
 /**
  * The kernel (spec v2): FIXED and short, the same text on every box, with no per-app list. Discovery
  * happens through the wizard-job-* pointer skills in the agent's normal skills index. Keep this function
@@ -138,8 +167,8 @@ export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAUL
     'Save routing-only app-job skills.',
   ]
   if (jobMap || !pointers) {
-    const rows = jobsOf(apps).slice(0, JOB_MAP_LINES).map(([job, owners]) =>
-      `- ${jobWords(job)} -> ${owners.map((a) => `${a.name} (\`${agentToolName(a.prefix, '*', harness)}\`)`).join(', ')}`)
+    const rows = mapJobs(apps).slice(0, JOB_MAP_LINES).map(([job, owners]) =>
+      `- ${JOB_ASKS[job]?.map || jobWords(job)} -> ${owners.map((a) => `${a.name} (\`${agentToolName(a.prefix, '*', harness)}\`)`).join(', ')}`)
     text.push('', 'Jobs on this box:', ...(rows.length ? rows : ['- (no apps installed yet)']))
   }
   return text.join('\n')
@@ -181,7 +210,7 @@ export function pointerSkills(apps, { harness = 'hermes', tools = {} } = {}) {
     const words = jobWords(job)
     const names = owners.map((a) => a.name).join(' or ')
     const lines = owners.flatMap((a) => {
-      const known = (tools[a.id] || []).slice(0, 8).map(toolEntry)
+      const known = jobTools(job, tools[a.id] || []).slice(0, 8).map(toolEntry)
       const down = a.status === 'running' ? '' : ` It is ${a.status} right now: tell the owner (\`wam doctor\`).`
       const how = a.skill
         ? `load its skill \`${a.id}\` with skill_view first (it holds the app's workflow and model rules), then call the tool whose purpose matches the request.`
@@ -196,11 +225,12 @@ export function pointerSkills(apps, { harness = 'hermes', tools = {} } = {}) {
     out[jobSkillName(job)] = [
       '---',
       `name: ${jobSkillName(job)}`,
-      `description: Use when the owner asks for ${words}. The installed ${names} app does it; call its tools, never search files.`,
+      `description: Use when the owner asks ${JOB_ASKS[job]?.ask || `for ${words}`}. The installed ${names} app does it; call its tools, never search files.`,
       '---',
       '',
       `# ${words}`,
       '',
+      ...(JOB_ASKS[job]?.rule ? [JOB_ASKS[job].rule, ''] : []),
       ...lines,
       '',
       `Tools are on the \`${MCP_SERVER_NAME}\` MCP server.${harness === 'hermes' ? ' If one is not in your tool list, run it with tool_call and that exact name.' : ''} Paths are relative to the owner's Files root.`,
