@@ -98,7 +98,7 @@ import { createRestartGate, restartRequestRefusal } from './restart-gate.mjs'
 import { onboardingTools } from './onboarding.mjs'
 import { followUpThreadNote, followUpTool } from './follow-ups.mjs'
 import { agentReachOutTools, reachOutNote } from './agent-reach-out.mjs'
-import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, importAgentHistorySchedules, isSilentResult, isScheduleInput, projectFollowUps, scheduledRunEvents } from './scheduler.mjs'
+import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, importAgentHistorySchedules, isSilentResult, isScheduleInput, projectFollowUps, scheduledRunEvents, scheduledThreadOf } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { handleAgentNotesApi } from './agent-notes-http.mjs'
 import { createLookup } from './lookup.mjs'
@@ -3296,10 +3296,7 @@ function buildWizardServer(options, lifetime) {
     if (!channelAgentFilingOn()) return false
     // Chats only the scheduler mints (schedules, agent-opened chats, tips): known even after their job is deleted.
     if (/^wizard_(?:schedule|agent|tips)_/.test(thread)) return true
-    let jobs
-    try { jobs = scheduler ? scheduler.list() : [] } catch { return false } // scheduler is declared below; unset before boot ends
-    const want = agent === MAIN_AGENT_ID ? new Set(['main', MAIN_AGENT_ID]) : new Set([agent])
-    return jobs.some(job => job.createThread && job.thread === thread && want.has(job.agent))
+    try { return scheduledThreadOf(scheduler, agent, thread, MAIN_AGENT_ID) } catch { return false } // scheduler is declared below; unset before boot ends
   }
   // Filing follows the Channels switch at runtime: one filer per (store, agent filing) state, picked per call.
   const spaceFilings = new Map()

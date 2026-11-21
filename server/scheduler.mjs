@@ -225,6 +225,14 @@ function scheduleBaseInput(job) {
 // occurrence keeps the chat hidden, so the first thread-visible one (a fallback included) opens it.
 const opening = (db, job, deliver) => ({ ...(job.channel ? { channel: job.channel } : {}),
   ...(deliver === 'notification' || db.prepare("SELECT 1 FROM schedule_occurrences WHERE job_id=? AND COALESCE(json_extract(data,'$.deliver'),'')<>'notification' LIMIT 1").get(job.id) ? {} : { opensThread: true }) })
+// A chat a `createThread` job of this agent opened (main answers to both of its names). One Map lookup per chat
+// row, never a parse of the whole schedules table (issue 584).
+export function scheduledThreadOf(scheduler, agent, thread, mainId = 'hermes') {
+  if (!scheduler || typeof thread !== 'string') return false
+  const owners = scheduler.createdThreads().get(thread)
+  if (!owners) return false
+  return agent === mainId ? owners.has('main') || owners.has(mainId) : owners.has(agent)
+}
 export class Scheduler {
   get channels() { try { return this.channelsOn() === true } catch { return false } }
   // Daily channel (issue 527): `{on(), thread(agent, instant) -> {thread, title, channel} | null, isDaily(agent, channel)}`.
@@ -288,6 +296,21 @@ export class Scheduler {
     try { const result = fn(); this.db.exec('COMMIT'); return result } catch (error) { this.db.exec('ROLLBACK'); throw error }
   }
   list() { return this.db.prepare('SELECT data FROM schedules ORDER BY id').all().map(row => JSON.parse(row.data)) }
+  // Who owns each chat a `createThread` job opened: Map thread -> Set of job agents. List builds ask this once per
+  // chat row (issue 584), so it is built once and kept until a schedule write (ours, or another connection's commit
+  // seen through PRAGMA data_version); it never re-parses the whole table per row.
+  createdThreads() {
+    const version = `${this.scheduleWrites || 0}:${this.db.prepare('PRAGMA data_version').get().data_version}`
+    if (this.createdThreadIndex?.version === version) return this.createdThreadIndex.threads
+    const threads = new Map()
+    for (const job of this.list()) {
+      if (!job.createThread || typeof job.thread !== 'string' || !job.thread) continue
+      if (!threads.has(job.thread)) threads.set(job.thread, new Set())
+      threads.get(job.thread).add(job.agent)
+    }
+    this.createdThreadIndex = { version, threads }
+    return threads
+  }
   get(jobId) {
     const row = this.db.prepare('SELECT data FROM schedules WHERE id=?').get(jobId)
     if (!row) throw fail('schedule not found', 404)
@@ -402,7 +425,7 @@ export class Scheduler {
     })().finally(() => { this.refreshing = null })
     return this.refreshing
   }
-  save(job) { this.db.prepare('INSERT OR REPLACE INTO schedules VALUES (?, ?)').run(job.id, JSON.stringify(job)); return job }
+  save(job) { this.scheduleWrites = (this.scheduleWrites || 0) + 1; this.db.prepare('INSERT OR REPLACE INTO schedules VALUES (?, ?)').run(job.id, JSON.stringify(job)); return job }
   async checkReport(row, occurrence, run) {
     // Only reservations that actually included the reporter contract may be corrected.
     if (!['status', 'digest'].includes(occurrence.report) || ['remind', 'return'].includes(occurrence.kind) || run.status !== 'completed') return { run, pending: false }
@@ -534,6 +557,7 @@ export class Scheduler {
   delete(jobId) {
     this.transaction(() => {
       this.get(jobId)
+      this.scheduleWrites = (this.scheduleWrites || 0) + 1
       this.db.prepare('DELETE FROM schedules WHERE id=?').run(jobId)
       this.db.prepare('DELETE FROM schedule_occurrences WHERE job_id=? AND admitted=0').run(jobId)
     })
