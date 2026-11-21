@@ -1890,6 +1890,9 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.equal((await (await s.raw('/wizard/hermes/api/sessions/wizard_parity_moved/messages?order=oldest', { headers: s.ownerHeaders })).json()).data.at(-1).content, 'Owner wrote meanwhile.', 'the owner message is kept')
     await list(); await list()
     assert.equal(runsFor('wizard_parity_saved').length + runsFor('wizard_parity_moved').length, 0, 'discovery never starts a model')
+    const wrong = await tap(result.id, { session_id: 'wizard_parity_moved' })
+    assert.equal(wrong.status, 409, `a valid result tapped for another thread is refused (${wrong.status})`)
+    assert.equal(runsFor('wizard_parity_moved').length + runsFor('wizard_parity_saved').length, 0, 'a refused tap starts nothing')
     const first = await tap(result.id, { session_id: 'wizard_parity_saved' })
     assert.equal(first.status, 202, `the tap is admitted (${first.status})`)
     const run = await first.json()
@@ -1903,8 +1906,8 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.ok(String(sentRuns[0].body.input).includes('The owner pressed Continue') && String(sentRuns[0].body.input).includes('synthetic finding wizard_parity_saved'), 'the turn carries the saved findings')
     assert.ok(!JSON.stringify(sentRuns[0].body).includes('_wizard_background_recovery'), 'the internal marker never reaches Hermes')
     assert.equal(runsFor('wizard_parity_moved').length, 0, 'the moved-on thread never resumes')
-    const stale = await tap(result.id.replace(/.$/, c => c === '0' ? '1' : '0'), { session_id: 'wizard_parity_moved' })
-    assert.equal(stale.status, 409, 'a result that no longer matches its thread is refused')
+    const unknown = await tap(result.id.replace(/.$/, c => c === '0' ? '1' : '0'), { session_id: 'wizard_parity_saved' })
+    assert.equal(unknown.status, 409, 'an unknown result is refused')
     assert.ok(!(await list()).results.some(r => r.session_id === 'wizard_parity_saved'), 'a continued result is no longer offered')
   },
   'new-chat-unreachable-agent': async s => {
