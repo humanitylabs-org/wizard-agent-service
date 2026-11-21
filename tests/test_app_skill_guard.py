@@ -51,6 +51,13 @@ class AppSkillGuardTests(unittest.TestCase):
         self.skill('video-app', 'video-editing')
         self.skill('wisdom-app', 'wisdom-editing')
         self.skill('wizard-job-files', 'wizard-job-files')
+        undo = plugin._app_skill_guard._undo
+        undo._reset_for_tests()
+        self.addCleanup(undo._reset_for_tests)
+        for name, value in (('WATCH_SECONDS', 0), ('CALL_GRACE_SECONDS', 0.01)):
+            patcher = patch.object(undo, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.ctx = Context()
         plugin.register(self.ctx)
 
@@ -212,17 +219,29 @@ class AppSkillGuardTests(unittest.TestCase):
         self.assertEqual(skill.read_bytes(), original)
         self.assertIn('undid', json.loads(result)['app_skill_guard'])
 
+    def bump_registry(self, version):
+        self.registry([{'id': 'video-app', 'skill': 'SKILL.md', 'version': version}])
+        st = (self.os_home / 'apps.json').stat()
+        os.utime(self.os_home / 'apps.json', ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+
+    def touch_registry(self):
+        st = (self.os_home / 'apps.json').stat()
+        os.utime(self.os_home / 'apps.json', ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+
     def test_app_updates_routing_pointers_and_reads_are_kept(self):
         skill = self.skills / 'video-app/SKILL.md'
         pointer = self.skills / 'wizard-job-files/SKILL.md'
-        self.assertIsNone(self.run_tool('terminal', lambda: skill.write_text('v2'), command='wam update video-app'))
+
+        def wam_update():
+            skill.write_text('v2')
+            (self.skills / 'wisdom-app/SKILL.md').write_text('v2 too')
+            self.touch_registry()
+        self.assertIsNone(self.run_tool('terminal', wam_update, command='wam update video-app'))
         self.assertEqual(skill.read_text(), 'v2')
 
-        def app_manager_update():
+        def app_manager_update():  # e.g. the owner updates the app from the Store while the call runs
             skill.write_text('v3')
-            self.registry([{'id': 'video-app', 'skill': 'SKILL.md', 'version': '3'}])
-            st = (self.os_home / 'apps.json').stat()
-            os.utime(self.os_home / 'apps.json', ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+            self.bump_registry('3')
         self.assertIsNone(self.run_tool('execute_code', app_manager_update, code='print(1)'))
         self.assertEqual(skill.read_text(), 'v3')
         self.assertIsNone(self.run_tool('write_file', lambda: pointer.write_text('route'), path=str(pointer),
@@ -231,7 +250,64 @@ class AppSkillGuardTests(unittest.TestCase):
         self.assertIsNone(self.run_tool('execute_code', lambda: None, code='print(2)'))
         hook = self.ctx.hooks['pre_tool_call']
         self.assertIsNone(hook(tool_name='read_file', args={'path': str(skill)}, task_id='t'))
-        self.assertEqual(plugin._app_skill_guard._undo._pending, {})
+        undo = plugin._app_skill_guard._undo
+        self.assertEqual(undo._calls, {})
+        # Outside any call, App Manager writes the skill and then apps.json: kept, never half-reverted.
+        skill.write_text('v4')
+        self.assertEqual(undo.tick(), [])
+        self.bump_registry('4')
+        self.assertEqual(undo.tick(), [])
+        self.assertEqual(skill.read_text(), 'v4')
+
+    def test_wam_words_registry_touches_and_background_writes_are_undone(self):
+        # #797 tester round 2: none of these may keep an edit.
+        skill = self.skills / 'video-app/SKILL.md'
+        original = skill.read_bytes()
+        undo = plugin._app_skill_guard._undo
+        for tool, args in (('execute_code', {'code': "import subprocess\nsubprocess.run(['wam', 'list'])"}),
+                           ('execute_code', {'code': "print('I will not use wam for this')"}),
+                           ('terminal', {'command': 'wam list && python3 /tmp/edit.py'}),
+                           ('terminal', {'command': 'echo wam; python3 /tmp/edit.py'})):
+            with self.subTest(tool=tool, args=args):
+                result = self.run_tool(tool, lambda: skill.write_text('emoji edit'), **args)
+                self.assertEqual(skill.read_bytes(), original)
+                self.assertIn('undid', json.loads(result)['app_skill_guard'])
+
+        def touch_registry_too():
+            skill.write_text('emoji edit')
+            self.touch_registry()
+        result = self.run_tool('execute_code', touch_registry_too, code='x = 1')
+        self.assertEqual(skill.read_bytes(), original)
+        self.assertIn('undid', json.loads(result)['app_skill_guard'])
+
+        # A process the call left running writes after the call returned.
+        self.assertIsNone(self.run_tool('terminal', lambda: None, command='nohup python3 /tmp/late.py &'))
+        skill.write_text(skill.read_text() + 'late')
+        self.assertEqual(undo.tick(), [])            # first sighting: wait one tick
+        self.assertEqual(undo.tick(), [str(skill)])  # still there and unexplained: undone
+        self.assertEqual(skill.read_bytes(), original)
+        result = self.run_tool('execute_code', lambda: None, code='print(3)')
+        self.assertIn('undid', json.loads(result)['app_skill_guard'])  # the agent is told on its next call
+        # A late write the watcher has not seen yet is caught at the start of the next call.
+        skill.write_text('later')
+        self.run_tool('execute_code', lambda: None, code='print(4)')
+        self.assertEqual(skill.read_bytes(), original)
+
+    def test_agent_loop_order_transform_before_post_still_tells_agent(self):
+        # In Hermes's agent loop transform_tool_result fires inside the call and post_tool_call after it.
+        skill = self.skills / 'video-app/SKILL.md'
+        original, mode = skill.read_bytes(), skill.stat().st_mode & 0o777
+        ids = {'task_id': 't', 'session_id': 's', 'tool_call_id': 'loop-1'}
+        args = {'code': 'print(1)'}
+        self.assertIsNone(self.ctx.hooks['pre_tool_call'](tool_name='execute_code', args=args, **ids))
+        skill.chmod(0o600)
+        skill.write_text('edited')
+        result = self.ctx.hooks['transform_tool_result'](tool_name='execute_code', args=args,
+                                                         result='{"status": "success"}', **ids)
+        self.ctx.hooks['post_tool_call'](tool_name='execute_code', args=args, result=result, **ids)
+        self.assertIn('undid', json.loads(result)['app_skill_guard'])
+        self.assertEqual(skill.read_bytes(), original)
+        self.assertEqual(skill.stat().st_mode & 0o777, mode)
 
     def test_reads_and_verification_with_redirects_allowed(self):
         # Oscar's review: these read-only and update/verify commands must pass.

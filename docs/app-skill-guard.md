@@ -33,17 +33,28 @@ from disk, so the product contains no fixed app list. App source files and
 ## Undo backstop (any path)
 
 Reading the call's text cannot catch every path (a glob loop, `os.walk`, a
-computed name, a program the guard does not know). So for every call of a tool
-that can write files (`execute_code`, `terminal`, `write_file`, `patch`,
-`process`, `skill_manage`) that the text check let through,
-`app_skill_undo.py` copies the installed app skill files first and, in
-`post_tool_call`, puts back anything changed or deleted and removes anything
-added. The tool result then carries an `app_skill_guard` note saying the edit
-was undone and how to make it through the app's release instead. Kept as-is:
-calls that run App Manager (`wam ...`), calls during which App Manager rewrote
-`apps.json` (an install or update), and `wizard-job-*` routing pointers. Not
-seen: later writes by a process the call left running in the background. Skills
-trees over 64 MB are not copied (logged, fails open).
+computed name, a program the guard does not know). `app_skill_undo.py` does not
+read the code: it keeps a copy of the installed app skill files and puts any
+change back (changed or deleted files restored, mode included; added files
+removed):
+
+- at the end of every call of a tool that can write files (`execute_code`,
+  `terminal`, `write_file`, `patch`, `process`, `skill_manage`) that the text
+  check let through; the tool result carries an `app_skill_guard` note saying
+  the edit was undone and how to make it through the app's release instead;
+- every 3 seconds from a background watcher, and at the start of the next
+  writing call, so a process a call left running cannot change them later; the
+  next tool result carries that note.
+
+Only App Manager changes them. It writes `skills/<app>/SKILL.md` and then
+`apps.json`, so outside tool calls a change that comes with an `apps.json`
+rewrite is kept, and an unexplained one is undone only when it is still there a
+tick later (a half-finished App Manager write is never reverted). Inside a call
+a change is kept only for apps whose `apps.json` entry changed (an install or
+update happening meanwhile), or when the call is a terminal command that really
+runs `wam` and rewrites `apps.json`. Mentioning `wam`, or touching `apps.json`
+without changing an app's entry, keeps nothing. `wizard-job-*` routing pointers
+are not watched. Skills trees over 64 MB are not copied (logged, fails open).
 
 A blocked call explains the durable route: edit the app's source, follow its
 review/release process, update installs, and verify the installed skill matches.
