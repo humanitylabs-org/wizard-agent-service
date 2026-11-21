@@ -70,13 +70,13 @@ applied to the store. The Spaces tools (`spaces_*`) and the status line's `space
 ## Chats list
 
 See `docs/chats-list-protocol.md`: rows gain `channel` and `firstRequest`, and `view=list&channel=<id>` is the
-channel feed. With `WIZARD_CHANNEL_FIRST_POSTS=1` (issue 446, off by default) every row of an owner-started thread
+channel feed. With channel posts (issue 446, on; `WIZARD_CHANNEL_FIRST_POSTS=0` turns them off) every row of an owner-started thread
 also carries the post itself: `firstRequest` from the whole first owner message and `firstAttachments`, its photos.
 
 ## Agent filing and Alerts (phase 3)
 
-Switch: `WIZARD_CHANNEL_AGENT_FILING=1` (Agent Service env, option `channelAgentFiling`), on top of
-`WIZARD_CHANNEL_STORE=1`. Off by default; with it off, phase 2 above is unchanged. Issue:
+On, with the channel store; `WIZARD_CHANNEL_AGENT_FILING=0` (option `channelAgentFiling`) turns it off, and
+phase 2 above is then unchanged. Issue:
 humanitylabs-org/wizard-agent-service#441.
 
 - **Status line `channel`.** `WIZARD_STATUS_V1` takes an optional `channel`: one exact channel id from the agent's
@@ -95,15 +95,14 @@ humanitylabs-org/wizard-agent-service#441.
 - **Per-job channel.** `POST/PATCH /wizard/v1/schedules` accept `channel` (a channel id or `null`) while agent filing
   is on; with it off (`WIZARD_CHANNEL_AGENT_FILING=0`) the field is an unknown-field 400, as before.
 
-- **Agent posts.** With `WIZARD_CHANNEL_FIRST_POSTS=1` as well, a thread whose first message is the agent's (an
+- **Agent posts.** With channel posts on as well, a thread whose first message is the agent's (an
   alert) carries no `firstRequest` even after the owner replies, so the shell keeps showing the agent's post.
 
 Not changed here: a recurring job keeps its one chat (each run is a reply in it), as before.
 
 ## Read position (issue 471)
 
-Switch: `WIZARD_CHANNEL_READ_SYNC=1` (Agent Service env, option `channelReadSync`), on top of
-`WIZARD_CHANNEL_STORE=1`. Off by default; with it off the route is a 404 and the shell keeps its read position on
+On, with the channel store; `WIZARD_CHANNEL_READ_SYNC=0` (option `channelReadSync`) turns it off, and the route is then a 404 and the shell keeps its read position on
 each device only (wizard-ux issue 1316). Issue: humanitylabs-org/wizard-agent-service#471.
 
 - **What it holds.** One read watermark per shell key, in `channels.sqlite` table `read_marks`: the newest activity
