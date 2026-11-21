@@ -119,11 +119,16 @@ describe('import old Wizard Uploads into the built-in store (issue 423)', () => 
     const data = Buffer.from('across disks')
     f.add(1, 'far.bin', 'application/octet-stream', data)
     f.db.close()
-    const link = () => { throw Object.assign(new Error('cross-device'), { code: 'EXDEV' }) }
+    // EPERM: a destination that cannot hard link at all (exFAT), so the copy is never linked either.
+    mkdirSync(join(f.media, 'Inbox', '2025-11-01'), { recursive: true })
+    writeFileSync(join(f.media, 'Inbox', '2025-11-01', 'far.bin'), 'someone else')
+    const link = () => { throw Object.assign(new Error('no links here'), { code: 'EPERM' }) }
     const result = f.run(false, { link })
     expect(result.counts).toMatchObject({ imported: 1, linked: 0, copied: 1, copied_bytes: data.length })
     const rel = JSON.parse(readFileSync(f.indexPath, 'utf8')).files[0].rel
+    expect(rel).toBe('Inbox/2025-11-01/far (2).bin')
     expect(readFileSync(join(f.media, rel)).equals(data)).toBe(true)
+    expect(readFileSync(join(f.media, 'Inbox', '2025-11-01', 'far.bin'), 'utf8')).toBe('someone else')
     expect(tree(f.media).some((name) => name.endsWith('.part'))).toBe(false)
   })
 
@@ -135,12 +140,14 @@ describe('import old Wizard Uploads into the built-in store (issue 423)', () => 
     writeFileSync(outside, 'secret')
     f.add(2, 'ok.txt', 'text/plain', Buffer.from('ok'))
     f.db.close()
-    const store = createMediaFiles({ mediaRoot: f.media, agentRoot: '/files', indexPath: f.indexPath })
+    const store = createMediaFiles({ mediaRoot: f.media, agentRoot: '/files', indexPath: f.indexPath, now: () => new Date('2026-11-20T10:00:00Z') })
     const fresh = store.save(Buffer.from('new upload'), { filename: 'new.txt', mime: 'text/plain' })
     const result = f.run()
     expect(result.counts).toMatchObject({ imported: 1, invalid: 1 })
     const ids = JSON.parse(readFileSync(f.indexPath, 'utf8')).files.map((r: { id: string }) => r.id)
-    expect(ids).toEqual([fresh.id, id(2)])
+    // Imported history goes before the newer upload, so the files list still shows the new one first.
+    expect(ids).toEqual([id(2), fresh.id])
+    expect(store.list(1).map((r: { id: string }) => r.id)).toEqual([fresh.id])
   })
 
   it('reads dates and command-line paths the way the Service does', () => {

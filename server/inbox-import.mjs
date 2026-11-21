@@ -6,7 +6,7 @@
 // agent's old `trusted_path`s keep working. A dry run reports the same counts and writes nothing.
 //
 // The store only serves the imported ids with WIZARD_MEDIA_LEGACY_IDS=1 (option mediaLegacyIds).
-import { copyFileSync, existsSync, linkSync, mkdirSync, realpathSync, statSync, unlinkSync } from 'node:fs'
+import { copyFileSync, existsSync, linkSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync } from 'node:fs'
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { cleanName, createMediaFiles, LEGACY_ID } from './media-files.mjs'
@@ -100,15 +100,18 @@ export function importInboxUploads({ inboxDbPath, blobRoot = '', mediaRoot, inde
             continue
           }
           if (!NO_LINK.has(error?.code)) throw error
-          // No hard link possible (another disk, exFAT): copy beside the target, then claim the name.
+          // No hard link possible (another disk, exFAT): copy beside the target, then claim a free name with a
+          // checked rename (the destination may not link either, so never link the copy).
           const part = join(root, dir, `.import-${id}.part`)
           copyFileSync(source, part)
           try {
             for (let m = n; !rel; m += 1) {
               const name2 = m === 1 ? name : `${stem} (${m})${extname(name)}`
-              try { linkSync(part, join(root, dir, name2)); rel = join(dir, name2) } catch (inner) { if (inner?.code !== 'EEXIST') throw inner }
+              if (existsSync(join(root, dir, name2))) continue
+              renameSync(part, join(root, dir, name2))
+              rel = join(dir, name2)
             }
-          } finally { try { unlinkSync(part) } catch { /* already gone */ } }
+          } finally { try { unlinkSync(part) } catch { /* moved into place */ } }
           counts.copied += 1
           counts.copied_bytes += bytes
         }

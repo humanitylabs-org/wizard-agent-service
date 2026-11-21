@@ -150,7 +150,19 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
       const files = load()
       const seen = new Set(files.map((item) => item?.id))
       const fresh = records.filter((item) => item && typeof item.id === 'string' && !seen.has(item.id) && seen.add(item.id))
-      if (fresh.length) save([...files, ...fresh])
+      if (!fresh.length) return 0
+      // Merge by date, so imported history sits before newer uploads: list() shows the last records as the
+      // newest, and duplicate detection takes the first copy as the oldest. Listed records keep their order.
+      const at = (item) => { const time = Date.parse(item?.created_at); return Number.isFinite(time) ? time : Infinity }
+      const incoming = [...fresh].sort((a, b) => at(a) - at(b))
+      const merged = []
+      let next = 0
+      for (const item of files) {
+        while (next < incoming.length && at(incoming[next]) < at(item)) merged.push(incoming[next++])
+        merged.push(item)
+      }
+      merged.push(...incoming.slice(next))
+      save(merged)
       return fresh.length
     },
     // Resumable uploads (server/uploads.mjs) stage on this filesystem and hand the finished file over
