@@ -142,7 +142,7 @@ class AppSkillGuardTests(unittest.TestCase):
         self.assertIsNone(self.call('terminal', command='printf x > ~/.wizard-os/skills/wizard-job-files/SKILL.md'))
 
     def test_execute_code_multi_line_writes_blocked(self):
-        # #797: the path is built on one line and written on a later one.
+        # wizard-os issue 797: the path is built on one line and written on a later one.
         snippets = [
             "import os\np = os.path.expanduser('~/.wizard-os/skills/video-app/SKILL.md')\n"
             "s = open(p).read()\ns = s.replace('a', 'b')\nopen(p, 'w').write(s)",
@@ -190,7 +190,7 @@ class AppSkillGuardTests(unittest.TestCase):
         return self.ctx.hooks['transform_tool_result'](tool_name=tool, args=args, result=result, **ids)
 
     def test_writes_the_text_check_cannot_spell_are_undone(self):
-        # #797 tester cases: glob loop, os.walk, subprocess with computed path. Whatever ran, the files come back.
+        # wizard-os issue 797 tester cases: glob loop, os.walk, subprocess with computed path. Whatever ran, the files come back.
         skill = self.skills / 'video-app/SKILL.md'
         original = skill.read_bytes()
         store = self.os_home / 'store/skills/video-app/SKILL.md'
@@ -260,7 +260,7 @@ class AppSkillGuardTests(unittest.TestCase):
         self.assertEqual(skill.read_text(), 'v4')
 
     def test_wam_words_registry_touches_and_background_writes_are_undone(self):
-        # #797 tester round 2: none of these may keep an edit.
+        # wizard-os issue 797 tester round 2: none of these may keep an edit.
         skill = self.skills / 'video-app/SKILL.md'
         original = skill.read_bytes()
         undo = plugin._app_skill_guard._undo

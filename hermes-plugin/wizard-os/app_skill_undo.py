@@ -1,4 +1,4 @@
-"""Keep installed app skill files exactly as App Manager wrote them (#797).
+"""Keep installed app skill files exactly as App Manager wrote them (wizard-os issue 797).
 
 The pre-call guard (app_skill_guard) reads a call's text, so a path it cannot
 spell (a glob loop, os.walk, a computed name, another program) gets through.

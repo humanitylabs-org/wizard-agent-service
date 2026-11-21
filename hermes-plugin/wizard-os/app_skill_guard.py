@@ -305,7 +305,7 @@ def pre_tool_call(tool_name: str = '', args=None, *, shadow_skills=None, **_kwar
                 path = _literal_skill_path(line)
                 if path:
                     return _block(f'a code write touching {path}')
-        # The path is usually built on one line and written on another (#797).
+        # The path is usually built on one line and written on another (wizard-os issue 797).
         path = code_write_target(code, _literal_skill_path, _shell_write_target,
                                  str(Path.home()), str(kernel.os_home()))
         if path:
@@ -321,7 +321,7 @@ def register(ctx) -> None:
                    if hasattr(ctx, 'get_config') else [])
         verdict = pre_tool_call(tool_name, args, shadow_skills=shadows, **kwargs)
         if verdict is None:
-            # Backstop for writes the text check cannot spell: copy now, undo after the call (#797).
+            # Backstop for writes the text check cannot spell: copy now, undo after the call (wizard-os issue 797).
             _undo.before_call(tool_name, args, **kwargs)
         return verdict
 
