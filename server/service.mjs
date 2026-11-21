@@ -131,14 +131,16 @@ const WIZARD_AGENT_IMAGE_LIMIT = 5 * 1024 * 1024
 // Non-image files the agent sends with MEDIA: (APKs, PDFs, archives, audio, video).
 const WIZARD_AGENT_FILE_LIMIT = 256 * 1024 * 1024
 // Same suffixes Helm shares (_SHARED_FILE_MIMES), minus images, which keep their magic-byte path.
+// Bare types (issue 586): the type travels on to the phone (file card label, native save/share, Android downloads),
+// and a type with parameters (`; charset=utf-8`) matches no app there.
 const AGENT_FILE_MIMES = new Map(Object.entries({
   '.apk': 'application/vnd.android.package-archive',
   '.pdf': 'application/pdf',
   '.zip': 'application/zip',
-  '.md': 'text/markdown; charset=utf-8',
-  '.txt': 'text/plain; charset=utf-8',
-  '.csv': 'text/csv; charset=utf-8',
-  '.json': 'application/json; charset=utf-8',
+  '.md': 'text/markdown',
+  '.txt': 'text/plain',
+  '.csv': 'text/csv',
+  '.json': 'application/json',
   '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
   '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
   '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
@@ -151,6 +153,16 @@ const AGENT_FILE_MIMES = new Map(Object.entries({
   '.mov': 'video/quicktime',
 }))
 const AGENT_FILE_MIME_SET = new Set(AGENT_FILE_MIMES.values())
+// Files saved before issue 586 carry `; charset=utf-8` in their metadata: read them as the bare type.
+const bareMime = mime => String(mime ?? '').split(';', 1)[0].trim().toLowerCase()
+// What GET /wizard/attachments/:id sends for an agent file (issue 586). A Markdown file goes out as plain text, as the
+// Files and Pages routes already serve .md: phones have an app for text/plain, almost none for text/markdown, so the
+// saved or downloaded file opens. A download carries the bare type the phone hands to other apps; only text shown in
+// place says it is UTF-8.
+function agentFileServedType(artifact, inline) {
+  const type = isMarkdownDownload(artifact.name, artifact.mime) ? 'text/plain' : artifact.mime
+  return inline && /^text\//.test(type) ? `${type}; charset=utf-8` : type
+}
 const AGENT_MEDIA_LINE = /^\s*MEDIA:[ \t]*(\/[^\r\n]+?)\s*$/gm
 const AGENT_IMAGE_REFERENCE_LINE = /^\s*@image:(?:`([^`\r\n]+)`|"([^"\r\n]+)"|'([^'\r\n]+)'|([^\r\n]+))\s*$/gm
 const AGENT_ARTIFACT_ID = /^[0-9a-f]{32}$/
@@ -2358,6 +2370,7 @@ function readAgentArtifact(id, artifactDir) {
   if (!artifactDir || !AGENT_ARTIFACT_ID.test(id)) return null
   try {
     const metadata = JSON.parse(readFileSync(resolve(artifactDir, `${id}.json`), 'utf8'))
+    if (['file', 'audio', 'video'].includes(metadata.kind)) metadata.mime = bareMime(metadata.mime)
     const contentPath = resolve(artifactDir, `${id}.bin`)
     const details = statSync(contentPath)
     if (metadata.id !== id || metadata.bytes !== details.size || details.size < 1) return null
@@ -7505,7 +7518,7 @@ function buildWizardServer(options, lifetime) {
           const canonicalType = String(artifact.mime).split(';', 1)[0].trim().toLowerCase()
           const inline = PASSIVE_INLINE_MIME.has(canonicalType) && !isMarkdownDownload(artifact.name, artifact.mime)
           const headers = {
-            'Content-Type': artifact.mime,
+            'Content-Type': artifact.kind === 'image' ? artifact.mime : agentFileServedType(artifact, inline),
             'Content-Disposition': contentDisposition(inline ? 'inline' : 'attachment', artifact.name),
             'Accept-Ranges': 'bytes',
             // Artifact ids are the content's own hash: the bytes behind an id never change.
