@@ -30,6 +30,21 @@ available in the container. Folder names and frontmatter aliases are discovered
 from disk, so the product contains no fixed app list. App source files and
 `wizard-job-*` routing-only pointer skills remain writable.
 
+## Undo backstop (any path)
+
+Reading the call's text cannot catch every path (a glob loop, `os.walk`, a
+computed name, a program the guard does not know). So for every call of a tool
+that can write files (`execute_code`, `terminal`, `write_file`, `patch`,
+`process`, `skill_manage`) that the text check let through,
+`app_skill_undo.py` copies the installed app skill files first and, in
+`post_tool_call`, puts back anything changed or deleted and removes anything
+added. The tool result then carries an `app_skill_guard` note saying the edit
+was undone and how to make it through the app's release instead. Kept as-is:
+calls that run App Manager (`wam ...`), calls during which App Manager rewrote
+`apps.json` (an install or update), and `wizard-job-*` routing pointers. Not
+seen: later writes by a process the call left running in the background. Skills
+trees over 64 MB are not copied (logged, fails open).
+
 A blocked call explains the durable route: edit the app's source, follow its
 review/release process, update installs, and verify the installed skill matches.
 The guard never merges, releases, updates installs or rewrites skills itself.

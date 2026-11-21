@@ -17,9 +17,11 @@ import shlex
 try:
     from . import kernel
     from .app_skill_code import code_write_target
+    from . import app_skill_undo as _undo
 except ImportError:  # plain-module loading, like the other plugin helpers
     import kernel  # type: ignore[no-redef]
     from app_skill_code import code_write_target  # type: ignore[no-redef]
+    import app_skill_undo as _undo  # type: ignore[no-redef]
 
 # App Manager's wam/agent_link.py SKILLS_TARGET (read-only container bind mount).
 SKILLS_TARGET = Path('/opt/wizard-os/skills')
@@ -317,6 +319,11 @@ def register(ctx) -> None:
         # ships in the product. Read through Hermes's plugin config namespace.
         shadows = (ctx.get_config('app_skill_guard.shadow_skills', default=[])
                    if hasattr(ctx, 'get_config') else [])
-        return pre_tool_call(tool_name, args, shadow_skills=shadows, **kwargs)
+        verdict = pre_tool_call(tool_name, args, shadow_skills=shadows, **kwargs)
+        if verdict is None:
+            # Backstop for writes the text check cannot spell: copy now, undo after the call (#797).
+            _undo.before_call(tool_name, args, **kwargs)
+        return verdict
 
     ctx.register_hook('pre_tool_call', guard)
+    _undo.register(ctx)

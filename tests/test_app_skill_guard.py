@@ -172,6 +172,67 @@ class AppSkillGuardTests(unittest.TestCase):
             with self.subTest(code=code):
                 self.assertIsNone(self.call('execute_code', code=code))
 
+    def run_tool(self, tool, effect, **args):
+        """Drive the hooks the way Hermes does around one call; `effect` is what the tool does on disk."""
+        ids = {'task_id': 'synthetic', 'session_id': 's1', 'tool_call_id': f'call-{tool}'}
+        verdict = self.ctx.hooks['pre_tool_call'](tool_name=tool, args=args, **ids)
+        self.assertIsNone(verdict)
+        effect()
+        result = json.dumps({'status': 'success', 'output': 'wrote'})
+        self.ctx.hooks['post_tool_call'](tool_name=tool, args=args, result=result, **ids)
+        return self.ctx.hooks['transform_tool_result'](tool_name=tool, args=args, result=result, **ids)
+
+    def test_writes_the_text_check_cannot_spell_are_undone(self):
+        # #797 tester cases: glob loop, os.walk, subprocess with computed path. Whatever ran, the files come back.
+        skill = self.skills / 'video-app/SKILL.md'
+        original = skill.read_bytes()
+        store = self.os_home / 'store/skills/video-app/SKILL.md'
+        store.parent.mkdir(parents=True)
+        store.write_text('store copy')
+        code = ("from pathlib import Path\nfor p in (Path.home() / '.wizard-os' / 'skills').glob('*/SKILL.md'):\n"
+                "    p.write_text('hacked')")
+
+        def edit():
+            skill.write_text('hacked')
+            store.unlink()
+            (self.skills / 'video-app/extra.md').write_text('new')
+            (self.skills / 'brand-new-app').mkdir()
+            (self.skills / 'brand-new-app/SKILL.md').write_text('new')
+        result = self.run_tool('execute_code', edit, code=code)
+        self.assertEqual(skill.read_bytes(), original)
+        self.assertEqual(store.read_text(), 'store copy')
+        self.assertFalse((self.skills / 'video-app/extra.md').exists())
+        self.assertFalse((self.skills / 'brand-new-app').exists())
+        payload = json.loads(result)
+        self.assertEqual(payload['output'], 'wrote')
+        self.assertIn('undid', payload['app_skill_guard'])
+        self.assertIn("app's source", payload['app_skill_guard'])
+
+        result = self.run_tool('terminal', lambda: skill.write_text('x'), command='python3 /tmp/tool.py')
+        self.assertEqual(skill.read_bytes(), original)
+        self.assertIn('undid', json.loads(result)['app_skill_guard'])
+
+    def test_app_updates_routing_pointers_and_reads_are_kept(self):
+        skill = self.skills / 'video-app/SKILL.md'
+        pointer = self.skills / 'wizard-job-files/SKILL.md'
+        self.assertIsNone(self.run_tool('terminal', lambda: skill.write_text('v2'), command='wam update video-app'))
+        self.assertEqual(skill.read_text(), 'v2')
+
+        def app_manager_update():
+            skill.write_text('v3')
+            self.registry([{'id': 'video-app', 'skill': 'SKILL.md', 'version': '3'}])
+            st = (self.os_home / 'apps.json').stat()
+            os.utime(self.os_home / 'apps.json', ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+        self.assertIsNone(self.run_tool('execute_code', app_manager_update, code='print(1)'))
+        self.assertEqual(skill.read_text(), 'v3')
+        self.assertIsNone(self.run_tool('write_file', lambda: pointer.write_text('route'), path=str(pointer),
+                                        content='route'))
+        self.assertEqual(pointer.read_text(), 'route')
+        self.assertIsNone(self.run_tool('execute_code', lambda: None, code='print(2)'))
+        hook = self.ctx.hooks['pre_tool_call']
+        self.assertIsNone(hook(tool_name='read_file', args={'path': str(skill)}, task_id='t'))
+        self.assertEqual(plugin._app_skill_guard._undo._pending, {})
+
     def test_reads_and_verification_with_redirects_allowed(self):
         # Oscar's review: these read-only and update/verify commands must pass.
         allowed = [f'cat {self.skills}/video-app/SKILL.md 2>/dev/null',
