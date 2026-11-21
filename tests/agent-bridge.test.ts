@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { afterEach, describe, expect, it } from 'vitest'
+import { parse as parseYaml } from 'yaml'
 import { bridgeApps, createAgentBridge, createGatewayGrants, renderKernel, KERNEL_LIMIT, pointerSkills, writePointerSkills, writeAppSkills, appsDelta, renderDelta, ThreadAppSnapshots } from '../server/agent-bridge.mjs'
 import { createWizardServer, listen } from '../server/service.mjs'
 
