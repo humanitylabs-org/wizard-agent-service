@@ -134,6 +134,44 @@ class AppSkillGuardTests(unittest.TestCase):
         self.assertIsNone(self.call('terminal', command='cat ~/.wizard-os/skills/video-app/SKILL.md'))
         self.assertIsNone(self.call('terminal', command='printf x > ~/.wizard-os/skills/wizard-job-files/SKILL.md'))
 
+    def test_execute_code_multi_line_writes_blocked(self):
+        # #797: the path is built on one line and written on a later one.
+        snippets = [
+            "import os\np = os.path.expanduser('~/.wizard-os/skills/video-app/SKILL.md')\n"
+            "s = open(p).read()\ns = s.replace('a', 'b')\nopen(p, 'w').write(s)",
+            "from pathlib import Path\nhome = Path.home() / '.wizard-os'\nskill = home / 'skills' / 'video-app' / 'SKILL.md'\n"
+            "text = skill.read_text()\nskill.write_text(text + 'style')",
+            "import os\nroot = os.environ['WIZARD_OS_HOME']\np = os.path.join(root, 'skills', 'wisdom-app', 'SKILL.md')\n"
+            "with open(p, mode='a') as f:\n    f.write('x')",
+            f"import shutil\ndest = '{self.skills}/video-app/SKILL.md'\nshutil.copy('/tmp/new.md', dest)",
+            f"from pathlib import Path\nd = Path('{self.os_home}/store/skills/video-app')\nfor f in [d / 'SKILL.md']:\n    f.unlink()",
+            f"from pathlib import Path\np = Path('{self.skills}') / 'video-app' / 'SKILL.md'\nwith p.open('w') as f:\n    f.write('x')",
+            f"import subprocess\nsubprocess.run(['cp', '/tmp/a', '{self.skills}/video-app/SKILL.md'])",
+            "import subprocess\nsubprocess.run('printf x > ~/.wizard-os/skills/video-app/SKILL.md', shell=True)",
+            f"from hermes_tools import write_file\nbase = '{self.skills}'\nwrite_file(f'{{base}}/video-app/SKILL.md', 'x')",
+            f"from hermes_tools import patch\np = '{self.skills}/video-app/SKILL.md'\npatch(p, 'a', 'b')",
+            f"import os\nname = 'SKILL.md'\nos.replace('/tmp/x', '{self.skills}/video-app/' + name)",
+        ]
+        for code in snippets:
+            with self.subTest(code=code):
+                self.blocked('execute_code', code=code)
+
+    def test_execute_code_reads_and_other_writes_allowed(self):
+        allowed = [
+            f"from pathlib import Path\ntext = Path('{self.skills}/video-app/SKILL.md').read_text()\n"
+            "text = text.replace('a', 'b')\nPath('/tmp/draft.md').write_text(text)",
+            f"import shutil\nsrc = '{self.skills}/video-app/SKILL.md'\nshutil.copy(src, '/tmp/copy.md')",
+            f"p = '{self.skills}/video-app/SKILL.md'\nwith open(p) as f:\n    body = f.read()\n"
+            "open('/tmp/out.md', 'w').write(body)",
+            f"p = '{self.skills}/wizard-job-files/SKILL.md'\nopen(p, 'w').write('pointer')",
+            f"from hermes_tools import write_file\nwrite_file('/tmp/notes.md', 'see {self.skills}/video-app/SKILL.md')",
+            f"import subprocess\nsubprocess.run(['cat', '{self.skills}/video-app/SKILL.md'])",
+            "def broken(:\n    pass",
+        ]
+        for code in allowed:
+            with self.subTest(code=code):
+                self.assertIsNone(self.call('execute_code', code=code))
+
     def test_reads_and_verification_with_redirects_allowed(self):
         # Oscar's review: these read-only and update/verify commands must pass.
         allowed = [f'cat {self.skills}/video-app/SKILL.md 2>/dev/null',

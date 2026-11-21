@@ -14,6 +14,13 @@ writes.
 - `write_file` and `patch` edits inside the installed `skills` and `store/skills`
   directories, including apply-patch file headers and resolved symlink paths.
 - Literal `terminal` / `execute_code` writes mentioning those directories.
+- `execute_code` Python that builds the path on one line and writes it later
+  (`app_skill_code.py`): simple assignments are followed, `Path.home()`, `~`,
+  `$HOME` and `$WIZARD_OS_HOME` are resolved, and `open(..., 'w')`, pathlib
+  writes, `os` / `shutil` writes and copies, `subprocess` / `os.system` shell
+  commands and the `hermes_tools` `write_file` / `patch` / `terminal` helpers
+  are checked against their target. Reading a skill and writing the text
+  elsewhere stays allowed.
 
 The guard uses the plugin's existing `kernel.os_home()` and
 `kernel.read_registry()`: `WIZARD_OS_HOME`, otherwise `~/.wizard-os`.
