@@ -1691,6 +1691,20 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     const document = await s.raw(`/wizard/attachments/${s.mediaItems[1].id}`)
     assert.ok(document.headers.get('content-type').startsWith('text/plain'))
     assert.ok(document.headers.get('content-disposition').includes('synthetic.txt'))
+    // Issue 586: a .md the agent sends from cache/images opens on a phone: the card names it Markdown with a bare
+    // type, and the download is plain text (phones have an app for that), never `text/markdown; charset=utf-8`.
+    mkdirSync(join(s.agentHome, 'cache', 'images'), { recursive: true })
+    writeFileSync(join(s.agentHome, 'cache', 'images', 'parity-triage.md'), '# PARITY_MARKDOWN\n\n- one\n', { mode: 0o664 })
+    const mdPath = s.media.png.startsWith('/opt/data/') ? '/opt/data/cache/images/parity-triage.md' : join(s.agentHome, 'cache', 'images', 'parity-triage.md')
+    s.sessions.get('wizard_parity').messages.push({ id: 'markdown-reply', role: 'assistant', timestamp: Date.now() / 1000, content: `The triage list.\nMEDIA:${mdPath}\nDone.` })
+    const mdRow = (await history(s)).find(m => m.id === 'markdown-reply')
+    assert.ok(!mdRow.content.includes('unavailable'), 'the .md becomes a file card on every runtime')
+    const [mdItem] = envelope(mdRow.content)
+    assert.equal(mdItem.mime, 'text/markdown'); assert.equal(mdItem.kind, 'file'); assert.equal(mdItem.name, 'parity-triage.md')
+    const md = await s.raw(`/wizard/attachments/${mdItem.id}`)
+    assert.equal(md.status, 200); assert.equal(md.headers.get('content-type'), 'text/plain')
+    assert.ok(md.headers.get('content-disposition').startsWith('attachment'))
+    assert.equal(await md.text(), '# PARITY_MARKDOWN\n\n- one\n')
   },
   'main-provider-attach': async s => {
     // Issue 428: with the switch on, only the main agent's picker is narrowed to the providers attached to it, and

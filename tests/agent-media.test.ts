@@ -14,6 +14,10 @@ const source = join(sourceRoot, 'poster.png')
 const secondSource = join(sourceRoot, 'second.png')
 const apkSource = join(sourceRoot, 'wizard-os-0.6.3.apk')
 // A zip local-file header plus padding: big enough to exceed the 5 MB image cap.
+const mdSource = join(sourceRoot, 'show-and-tell-triage.md')
+const markdown = '# Show and tell triage\n\n- Calendar: drag events\n- Notes: ünïcode stays UTF-8\n'
+const legacyMarkdown = Buffer.from('# Saved before the fix\n')
+const legacyId = createHash('sha256').update(legacyMarkdown).digest('hex').slice(0, 32)
 const apk = Buffer.concat([Buffer.from('PK\x03\x04', 'binary'), Buffer.alloc(6 * 1024 * 1024, 7)])
 let upstream: ReturnType<typeof createServer>
 let wizard: ReturnType<typeof createWizardServer>
@@ -24,6 +28,11 @@ beforeAll(async () => {
   writeFileSync(source, png)
   writeFileSync(secondSource, Buffer.concat([png, Buffer.from([0])]))
   writeFileSync(apkSource, apk)
+  writeFileSync(mdSource, markdown, { mode: 0o664 })
+  // An agent .md registered before issue 586: its metadata still says `text/markdown; charset=utf-8`.
+  mkdirSync(artifactDir, { recursive: true })
+  writeFileSync(join(artifactDir, `${legacyId}.bin`), legacyMarkdown)
+  writeFileSync(join(artifactDir, `${legacyId}.json`), JSON.stringify({ id: legacyId, name: 'old-notes.md', mime: 'text/markdown; charset=utf-8', kind: 'file', bytes: legacyMarkdown.length, sha256: createHash('sha256').update(legacyMarkdown).digest('hex') }))
   upstream = createServer((request, response) => {
     response.setHeader('Content-Type', 'application/json')
     if (request.url?.includes('/messages')) {
@@ -33,6 +42,7 @@ beforeAll(async () => {
         { id: 'positioned', role: 'assistant', content: `First layout.\nMEDIA:${source}\nSecond layout.\nMEDIA:${secondSource}\nChoose either.\nMEDIA:${source}\nMEDIA:${apkSource}`, timestamp: 10 },
         { id: 'file-first', role: 'assistant', content: `Download first.\nMEDIA:${apkSource}\nThen screenshot.\nMEDIA:${source}`, timestamp: 12 },
         { id: 'literal', role: 'assistant', content: `Example only:\n\`\`\`text\nMEDIA:/example/screenshot.png\n\`\`\``, timestamp: 11 },
+        { id: 'assistant-md', role: 'assistant', content: `The triage list.\n\nMEDIA:${mdSource}\n\nDone.`, timestamp: 14 },
         { id: 'assistant-apk', role: 'assistant', content: `Latest build.\n\nMEDIA:${apkSource}\n\nInstall it over the old copy.`, timestamp: 8 },
         { id: 'assistant-spaced', role: 'assistant', content: `Spaced tag.\n\nMEDIA: ${source}  \n\nEnd.`, timestamp: 13 },
         { id: 'assistant-missing', role: 'assistant', content: `Here it is.\n\nMEDIA:${join(sourceRoot, 'gone.pdf')}`, timestamp: 9 },
@@ -150,6 +160,34 @@ describe('agent image delivery', () => {
     expect(part.status).toBe(206)
     expect(part.headers.get('content-range')).toBe(`bytes 0-3/${apk.length}`)
     expect(Buffer.from(await part.arrayBuffer()).toString('binary')).toBe('PK\x03\x04')
+  })
+
+  // Issue 586: a .md the agent sends must open or save on a phone. Its card says MARKDOWN (no `; charset=utf-8` in the
+  // type the shell shows and hands to native save/share), and the download is plain text, which every phone can open.
+  it('a MEDIA Markdown file becomes a card whose download opens as plain text', async () => {
+    const payload = await (await fetch(`${base}/wizard/hermes/api/sessions/chat/messages?order=latest`)).json() as { data: Array<{ id: string; content: string }> }
+    const content = payload.data.find((message) => message.id === 'assistant-md')?.content ?? ''
+    expect(content).not.toContain('unavailable')
+    const items = JSON.parse(content.match(/<helm_attachments>([\s\S]*?)<\/helm_attachments>/)?.[1] ?? '{"items":[]}').items
+    expect(items).toHaveLength(1)
+    expect(items[0]).toMatchObject({ name: 'show-and-tell-triage.md', mime: 'text/markdown', kind: 'file', bytes: Buffer.byteLength(markdown) })
+    const file = await fetch(`${base}/wizard/attachments/${items[0].id}`)
+    expect(file.status).toBe(200)
+    expect(file.headers.get('content-type')).toBe('text/plain')
+    expect(file.headers.get('content-disposition')).toContain('attachment; filename="show-and-tell-triage.md"')
+    expect(file.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(await file.text()).toBe(markdown)
+    const head = await fetch(`${base}/wizard/attachments/${items[0].id}`, { method: 'HEAD' })
+    expect(head.status).toBe(200)
+    expect(head.headers.get('content-type')).toBe('text/plain')
+  })
+
+  it('a Markdown file saved before the fix still opens the same way', async () => {
+    const file = await fetch(`${base}/wizard/attachments/${legacyId}`)
+    expect(file.status).toBe(200)
+    expect(file.headers.get('content-type')).toBe('text/plain')
+    expect(file.headers.get('content-disposition')).toContain('attachment; filename="old-notes.md"')
+    expect(Buffer.from(await file.arrayBuffer()).equals(legacyMarkdown)).toBe(true)
   })
 
   it('leaves a visible line when a MEDIA file cannot be shown', async () => {
