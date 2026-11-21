@@ -13,6 +13,7 @@ const featureScenes = {
   'main-provider-attach': kind => scene(kind, { mainProviderAttach: true }),
   'private-first-setup': kind => scene(kind, { privateFirst: true }),
   'graceful-restart-hold': kind => scene(kind, { gracefulRestart: true }),
+  'file-store-inbox-import': kind => scene(kind, { mediaLegacyIds: true }),
   'chats-channels': kind => scene(kind, { channelStore: true, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true }),
   'chats-read-marks': kind => scene(kind, { channelStore: true, channelReadSync: true }),
   'agent-inbox': kind => scene(kind, ({ root }) => ({ agentInbox: true, agentInboxStatePath: join(root, 'agent-inbox.json') })),
