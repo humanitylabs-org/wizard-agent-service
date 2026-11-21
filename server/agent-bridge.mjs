@@ -37,7 +37,7 @@ const SKIP_PROVIDES = new Set(['shell', 'agent-service', 'agent'])
 // do it come first in the pointer. Twin: JOB_ASKS in hermes-plugin/wizard-os/kernel.py.
 export const JOB_ASKS = {
   messaging: {
-    ask: 'to draft, write, reply to or message anyone (WhatsApp, LINE, Telegram, Instagram, Slack, Signal): save it as a draft in the app, never only in chat',
+    ask: 'to draft, write, reply to or message anyone (WhatsApp, LINE, Telegram, Instagram, Slack, Signal); save it as a draft in the app, never only in chat',
     map: 'messaging, drafting a message (save it as a draft there, never only in chat)',
     rule: 'Draft a message = save it with the app\'s draft tool (a draft in an existing chat, or start one for a new number, LINE ID or @username). Text in chat is not a draft.',
     tools: ['create_draft', 'start_draft', 'update_draft', 'list_chats', 'read_thread'],

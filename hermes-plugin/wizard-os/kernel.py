@@ -25,7 +25,7 @@ SKIP_PROVIDES = {"shell", "agent-service", "agent"}
 # server/agent-bridge.mjs: same text, same order.
 JOB_ASKS = {
     "messaging": {
-        "ask": "to draft, write, reply to or message anyone (WhatsApp, LINE, Telegram, Instagram, Slack, Signal): "
+        "ask": "to draft, write, reply to or message anyone (WhatsApp, LINE, Telegram, Instagram, Slack, Signal); "
                "save it as a draft in the app, never only in chat",
         "map": "messaging, drafting a message (save it as a draft there, never only in chat)",
         "rule": "Draft a message = save it with the app's draft tool (a draft in an existing chat, or start one for a new "

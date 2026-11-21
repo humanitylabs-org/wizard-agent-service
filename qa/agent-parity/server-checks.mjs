@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import assert from 'node:assert/strict'
+import { parse as parseYaml } from 'yaml'
 import { TITLE_INSTRUCTIONS } from '../../server/thread-titles.mjs'
 import { CLAUDE_MODEL_LIMIT_SAFE_ERROR } from '../../server/run-provider-failure.mjs'
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
@@ -2206,7 +2207,9 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
       assert.match(readFileSync(pointer, 'utf8'), /Synthetic Video: load its skill `parity-video` with skill_view first/u)
       assert.match(text, /wizard-job-<job> skill in your skills/u)
       const drafting = readFileSync(chatPointer, 'utf8')
-      assert.match(drafting, /description: Use when the owner asks to draft, write, reply to or message anyone .*never only in chat\./u, 'messaging pointer matches draft requests')
+      const front = parseYaml(drafting.split('---\n')[1])
+      assert.equal(front.name, 'wizard-job-messaging', 'messaging pointer front matter parses as YAML')
+      assert.match(front.description, /^Use when the owner asks to draft, write, reply to or message anyone .*never only in chat\./u, 'messaging pointer matches draft requests')
       assert.ok(drafting.includes('Text in chat is not a draft.'), 'messaging pointer says chat text is not a draft')
     } else {
       // No pointer skills outside the main agent's index: the gateway tells this agent its own jobs instead.

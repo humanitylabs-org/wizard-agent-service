@@ -130,7 +130,11 @@ describe('agent bridge: kernel', () => {
     const tools = { messenger: ['messenger_status', 'messenger_public_identity', 'messenger_get_attachment', 'messenger_agent_chat_inbox', 'messenger_agent_chat_ack', 'messenger_agent_chat_post', 'messenger_draft_feedback', 'messenger_read_thread', 'messenger_list_chats', 'messenger_start_draft', 'messenger_create_draft'] }
     const skill = pointerSkills(bridgeApps({ apps: [messenger] }), { tools })['wizard-job-messaging']
     const description = skill.split('\n').find((l) => l.startsWith('description: '))
-    expect(description).toMatch(/^description: Use when the owner asks to draft, write, reply to or message anyone \(WhatsApp, LINE, Telegram, Instagram, Slack, Signal\): save it as a draft in the app, never only in chat\./u)
+    expect(description).toMatch(/^description: Use when the owner asks to draft, write, reply to or message anyone \(WhatsApp, LINE, Telegram, Instagram, Slack, Signal\); save it as a draft in the app, never only in chat\./u)
+    // The front matter is valid YAML (a ': ' inside the plain scalar would make Hermes skip the skill).
+    const meta = parseYaml(skill.split('---\n')[1])
+    expect(meta.name).toBe('wizard-job-messaging')
+    expect(meta.description).toBe(description.slice('description: '.length))
     expect(skill).toContain('Text in chat is not a draft.')
     const listed = skill.split('\n').filter((l) => l.startsWith('  - `')).map((l) => l.match(/messenger__(\w+)`/u)[1])
     expect(listed.slice(0, 4)).toEqual(['messenger_create_draft', 'messenger_start_draft', 'messenger_list_chats', 'messenger_read_thread'])
