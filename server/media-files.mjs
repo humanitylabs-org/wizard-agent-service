@@ -16,13 +16,17 @@ import { createReadStream, existsSync, linkSync, mkdirSync, readFileSync, rename
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 
 const ID = /^wf_[0-9a-f]{32}$/
+// Ids of files imported from the old Wizard Uploads service (issue 423). They are only accepted when the
+// store is built with `legacyIds` (switch WIZARD_MEDIA_LEGACY_IDS, off by default).
+export const LEGACY_ID = /^drop_[0-9a-f]{32}$/
 
-function cleanName(value) {
+export function cleanName(value) {
   const name = basename(String(value || 'file')).replace(/[\u0000-\u001f\u007f/\\]/gu, '_').replace(/^\.+/u, '_').trim()
   return (name || 'file').slice(0, 200)
 }
 
-export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => new Date() }) {
+export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => new Date(), legacyIds = false }) {
+  const known = (id) => ID.test(String(id)) || (legacyIds === true && LEGACY_ID.test(String(id)))
   const root = resolve(String(mediaRoot))
   const agent = resolve(String(agentRoot || mediaRoot))
   if (root === sep || agent === sep) throw new Error('media root must be narrower than /')
@@ -88,14 +92,14 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
       return load().slice(-limit).reverse().map((record) => publicRecord(record))
     },
     get(id, trusted = false) {
-      if (!ID.test(String(id))) return null
+      if (!known(id)) return null
       const record = find(id)
       if (!record) return null
       try { if (!statSync(hostPath(record)).isFile()) return null } catch { return null }
       return publicRecord(record, trusted)
     },
     open(id, range = null) {
-      if (!ID.test(String(id))) return null
+      if (!known(id)) return null
       const record = find(id)
       if (!record) return null
       const path = hostPath(record)
@@ -133,6 +137,21 @@ export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => 
       }
       save([...files, record])
       return publicRecord(record)
+    },
+    // The import of old Wizard Uploads files (server/inbox-import.mjs) asks for any id, switch or not, and
+    // appends its records in one write; ids already in the index are skipped, so a re-run adds nothing.
+    record(id) {
+      return find(String(id))
+    },
+    rels() {
+      return new Set(load().map((item) => relOf(item ?? {})))
+    },
+    importRecords(records) {
+      const files = load()
+      const seen = new Set(files.map((item) => item?.id))
+      const fresh = records.filter((item) => item && typeof item.id === 'string' && !seen.has(item.id) && seen.add(item.id))
+      if (fresh.length) save([...files, ...fresh])
+      return fresh.length
     },
     // Resumable uploads (server/uploads.mjs) stage on this filesystem and hand the finished file over
     // here: it is linked into Inbox/<date>/<name> (never overwriting) and indexed, without reading it

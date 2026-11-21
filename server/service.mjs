@@ -3715,7 +3715,7 @@ function buildWizardServer(options, lifetime) {
   // Wizard Inbox service is configured.
   let chatPhotos = null
   const mediaFiles = !inboxToken && options.mediaRoot
-    ? createMediaFiles({ mediaRoot: options.mediaRoot, agentRoot: options.mediaAgentRoot, indexPath: options.mediaIndexPath })
+    ? createMediaFiles({ mediaRoot: options.mediaRoot, agentRoot: options.mediaAgentRoot, indexPath: options.mediaIndexPath, legacyIds: options.mediaLegacyIds === true })
     : null
   if (inboxToken && !inboxTrustedRoots.length) throw new Error('Wizard Inbox trusted root is required')
   const agentArtifactDir = options.agentArtifactDir ? resolve(String(options.agentArtifactDir)) : ''

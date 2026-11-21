@@ -11,6 +11,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { post, png, scene } from './fixture.mjs'
 import { PRESETS } from '../../server/agents.mjs'
 import { createChannelStore } from '../../server/channel-store.mjs'
+import { importInboxUploads } from '../../server/inbox-import.mjs'
 import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, CONCISE_REPLY_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWNED_OPEN_WORK_INSTRUCTIONS } from '../../server/thread-status.mjs'
 
@@ -1954,6 +1955,39 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     const body = sent(s), text = typeof body.input === 'string' ? body.input : body.input[0].content[0].text
     assert.ok(text.includes('trusted_path') && !text.includes('placement_error'), 'the agent still resolves the first file')
     if (['container', 'restricted'].includes(s.kind)) assert.deepEqual(Buffer.from(s.placed.at(-1).payload.data_base64, 'base64'), firstBytes)
+  },
+  // Issue 423: old Wizard Uploads files (drop_ ids) adopted by the one-time import open from their chat chips, ranges
+  // included, and resolve for the agent on every kind; a dry run writes nothing and a second run adds nothing.
+  'file-store-inbox-import': async s => {
+    const data = join(s.root, 'old-wizard-inbox'), blobs = join(data, 'blobs', 'ab')
+    mkdirSync(blobs, { recursive: true })
+    const dbPath = join(data, 'inbox.sqlite3'), db = new DatabaseSync(dbPath)
+    db.exec(`CREATE TABLE drops (id TEXT PRIMARY KEY, upload_id TEXT, device_id TEXT, filename TEXT, mime TEXT, bytes INTEGER,
+      sha256 TEXT, note TEXT, duplicate_of TEXT, blob_path TEXT, created_at REAL)`)
+    const image = png, voice = Buffer.from('PARITY_OLD_VOICE_NOTE_BYTES')
+    const old = [[`drop_${'1'.repeat(32)}`, 'old-photo.png', 'image/png', image], [`drop_${'2'.repeat(32)}`, 'old-voice.m4a', 'audio/mp4', voice]]
+    for (const [id, filename, mime, bytes] of old) {
+      const hash = createHash('sha256').update(bytes).digest('hex'), blob = join(blobs, hash)
+      writeFileSync(blob, bytes)
+      db.prepare('INSERT INTO drops (id, filename, mime, bytes, sha256, blob_path, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)').run(id, filename, mime, bytes.length, hash, `blobs/ab/${hash}`, 1_762_000_000)
+    }
+    db.close()
+    const run = dryRun => importInboxUploads({ inboxDbPath: dbPath, mediaRoot: join(s.root, 'files'), indexPath: join(s.root, 'media.json'), dryRun })
+    const listed = () => existsSync(join(s.root, 'media.json')) ? JSON.parse(readFileSync(join(s.root, 'media.json'))).files.length : 0
+    const before = listed()
+    assert.equal(run(true).counts.imported, 2); assert.equal(listed(), before, 'a dry run writes nothing')
+    assert.deepEqual([run(false).counts.imported, run(false).counts.already_present], [2, 2], 'a second run adds nothing')
+    assert.equal(listed(), before + 2)
+    const photo = await s.raw(`/wizard/files/${old[0][0]}/content`)
+    assert.equal(photo.status, 200); assert.ok(photo.headers.get('content-type').startsWith('image/png'))
+    assert.deepEqual(Buffer.from(await photo.arrayBuffer()), image)
+    const part = await s.raw(`/wizard/files/${old[1][0]}/content`, { headers: { Range: 'bytes=6-' } })
+    assert.equal(part.status, 206); assert.equal(part.headers.get('content-range'), `bytes 6-${voice.length - 1}/${voice.length}`)
+    assert.deepEqual(Buffer.from(await part.arrayBuffer()), voice.subarray(6))
+    await admit(s, { input: 'Look at the old photo again', wizard_file_ids: [old[0][0]] })
+    const body = sent(s), text = typeof body.input === 'string' ? body.input : body.input[0].content[0].text
+    assert.ok(text.includes('trusted_path') && !text.includes('placement_error'), 'the agent resolves the old photo')
+    if (['container', 'restricted'].includes(s.kind)) assert.deepEqual(Buffer.from(s.placed.at(-1).payload.data_base64, 'base64'), image)
   },
   'read-receipts': async s => {
     const now = Date.now(), record = { agent_id: s.id, session_id: 'wizard_parity', updatedAt: new Date(now).toISOString(), previewFingerprint: 'synthetic', messageCount: 2, status: 'completed', seenAt: now }
