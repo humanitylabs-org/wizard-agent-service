@@ -46,7 +46,8 @@ except ImportError:  # plain-module loading, like the other plugin helpers
 logger = logging.getLogger(__name__)
 
 WRITING_TOOLS = {'execute_code', 'terminal', 'write_file', 'patch', 'process', 'process_manage', 'skill_manage'}
-MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
+MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024   # bytes copied for the first baseline
+MAX_FILE_BYTES = 4 * 1024 * 1024        # larger files are watched by signature (added ones removed)
 WATCH_SECONDS = 3.0          # 0 disables the background watcher (tests drive tick() directly)
 CALL_GRACE_SECONDS = 1.0     # an unexplained change at the end of a call waits this long for apps.json
 SEGMENT_RE = re.compile(r'\|\||&&|[;\n|&()]')
@@ -110,8 +111,10 @@ def _sigs() -> dict[str, tuple]:
     return out
 
 
-def _files() -> dict[str, tuple] | None:
-    out, budget = {}, MAX_SNAPSHOT_BYTES
+def _files(budget: int | None = None) -> dict[str, tuple] | None:
+    """Every watched file. Files over MAX_FILE_BYTES are kept by signature only (an added one is still removed);
+    `budget` caps the bytes copied for the first baseline, later scans never give up."""
+    out = {}
     for root in _roots():
         for path in _walk(root):
             if _is_temp(path):
@@ -121,9 +124,13 @@ def _files() -> dict[str, tuple] | None:
                     out[str(path)] = ('link', os.readlink(path), 0)
                 elif path.is_file():
                     st = path.stat()
-                    budget -= st.st_size
-                    if budget < 0:
-                        return None
+                    if st.st_size > MAX_FILE_BYTES:
+                        out[str(path)] = ('big', (st.st_size, st.st_mtime_ns, st.st_ino), st.st_mode & 0o7777)
+                        continue
+                    if budget is not None:
+                        budget -= st.st_size
+                        if budget < 0:
+                            return None
                     out[str(path)] = ('file', path.read_bytes(), st.st_mode & 0o7777)
             except OSError:
                 continue
@@ -158,7 +165,7 @@ def _app_of(path: str) -> str:
 def _baseline() -> bool:
     if _state:
         return True
-    files = _files()
+    files = _files(MAX_SNAPSHOT_BYTES)
     if files is None:
         logger.warning('app-skill undo: installed skills exceed %d bytes, not copied', MAX_SNAPSHOT_BYTES)
         return False
@@ -186,6 +193,10 @@ def _put_back(path: str, saved) -> bool:
             return True
         target.parent.mkdir(parents=True, exist_ok=True)
         kind, data, mode = saved
+        if kind == 'big':
+            logger.warning('app-skill undo: %s is over %d bytes and was not copied, cannot restore it', path,
+                           MAX_FILE_BYTES)
+            return False
         tmp = target.with_name(f'.{target.name}.wizard-undo')
         tmp.unlink(missing_ok=True)
         if kind == 'link':

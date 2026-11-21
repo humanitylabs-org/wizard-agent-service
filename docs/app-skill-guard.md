@@ -54,7 +54,7 @@ a change is kept only for apps whose `apps.json` entry changed (an install or
 update happening meanwhile), or when the call is a terminal command that really
 runs `wam` and rewrites `apps.json`. Mentioning `wam`, or touching `apps.json`
 without changing an app's entry, keeps nothing. `wizard-job-*` routing pointers
-are not watched. Skills trees over 64 MB are not copied (logged, fails open).
+are not watched. Files over 4 MB are watched by size and time only (an added one is removed; a changed one is logged, not restored), and a skills tree that already holds over 64 MB when the first call runs is not copied (logged, fails open).
 
 A blocked call explains the durable route: edit the app's source, follow its
 review/release process, update installs, and verify the installed skill matches.

@@ -297,6 +297,26 @@ class AppSkillGuardTests(unittest.TestCase):
         self.run_tool('execute_code', lambda: None, code='print(4)')
         self.assertEqual(skill.read_bytes(), original)
 
+    def test_a_huge_added_file_does_not_switch_the_backstop_off(self):
+        # Tester round 4: a 70 MB file pushed the tree over the copy limit and later edits stuck.
+        skill = self.skills / 'video-app/SKILL.md'
+        original = skill.read_bytes()
+        big = self.skills / 'video-app/big.bin'
+        undo = plugin._app_skill_guard._undo
+        with patch.object(undo, 'MAX_FILE_BYTES', 100), patch.object(undo, 'MAX_SNAPSHOT_BYTES', 1000):
+            result = self.run_tool('execute_code', lambda: big.write_bytes(b'x' * 5000), code='x = 1')
+            self.assertFalse(big.exists())
+            self.assertIn('undid', json.loads(result)['app_skill_guard'])
+
+            def both():
+                big.write_bytes(b'x' * 5000)
+                skill.write_text('HACKED after big')
+            self.run_tool('execute_code', both, code='x = 2')
+            self.assertFalse(big.exists())
+            self.assertEqual(skill.read_bytes(), original)
+            self.run_tool('execute_code', lambda: skill.write_text('again'), code='x = 3')
+            self.assertEqual(skill.read_bytes(), original)
+
     def test_agent_loop_order_transform_before_post_still_tells_agent(self):
         # In Hermes's agent loop transform_tool_result fires inside the call and post_tool_call after it.
         skill = self.skills / 'video-app/SKILL.md'
