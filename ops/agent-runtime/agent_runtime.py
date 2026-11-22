@@ -29,6 +29,7 @@ import hashlib
 import fcntl
 from contextlib import contextmanager
 import hmac
+import io
 import ipaddress
 import json
 import os
@@ -38,6 +39,7 @@ import shlex
 import signal
 import stat
 import subprocess
+import tarfile
 import importlib.util
 import sys
 import threading
@@ -150,10 +152,44 @@ def container_for(project: str, service: str) -> str:
 
 # ---------------------------------------------------------------- agent folder
 
+TINFOIL_CONNECTION = "private/connection.json"   # where the Tinfoil app keeps the owner's saved key, in its data volume
+
+
+def tinfoil_key_from_volume(volume: str) -> str:
+    """The API key the owner saved in the Tinfoil app, read from its data volume (issue 582).
+
+    A standard install has no hand-written key file: the key lives only in the Tinfoil app's named volume (mode 0600,
+    unreadable to the box owner on the host). Copy that one file out of the container that mounts the volume, read on
+    every apply so a replaced key is picked up. Never logs or returns anything but the key."""
+    try:
+        found = docker(["ps", "-a", "--filter", f"volume={volume}", "--format", "{{.ID}}"], timeout=30, check=False)
+        for cid in (found.stdout or "").split():
+            seen = docker(["inspect", "--format", "{{json .Mounts}}", cid], timeout=30, check=False)
+            mounts = json.loads(seen.stdout or "[]") if seen.returncode == 0 else []
+            dest = next((m.get("Destination") for m in mounts or [] if m.get("Name") == volume and m.get("Destination")), "")
+            if not dest:
+                continue
+            run = subprocess.run(docker_cmd(["cp", f"{cid}:{dest.rstrip('/')}/{TINFOIL_CONNECTION}", "-"]),
+                                 capture_output=True, timeout=30)
+            if run.returncode:
+                continue
+            with tarfile.open(fileobj=io.BytesIO(run.stdout)) as tar:
+                member = next((m for m in tar.getmembers() if m.isfile()), None)
+                data = tar.extractfile(member).read() if member else b""
+            key = (json.loads(data or b"{}") or {}).get("key")
+            if isinstance(key, str) and key.strip():
+                return key.strip()
+    except (OSError, ValueError, TypeError, AttributeError, tarfile.TarError, subprocess.TimeoutExpired, RuntimeFailure):
+        pass
+    sys.stderr.write(f"[agent-runtime] no saved Tinfoil key found in volume {volume}\n")
+    return ""
+
+
 class Agents:
-    def __init__(self, root: Path, tinfoil_key_file: Path | None):
+    def __init__(self, root: Path, tinfoil_key_file: Path | None, tinfoil_key_volume: str = ""):
         self.root = root.resolve()
         self.tinfoil_key_file = tinfoil_key_file
+        self.tinfoil_key_volume = tinfoil_key_volume
 
     def read(self, agent_id: str) -> dict:
         if not ID_RE.match(agent_id) or agent_id == "hermes":
@@ -173,18 +209,19 @@ class Agents:
         return self.root / agent_id / "home"
 
     def tinfoil_key(self) -> str:
-        if not self.tinfoil_key_file:
-            return ""
-        try:
-            text = self.tinfoil_key_file.read_text()
-        except OSError:
-            return ""
-        for line in text.splitlines():   # a bare key, or an env file with TINFOIL_API_KEY=
-            line = line.strip()
-            if line.startswith("TINFOIL_API_KEY="):
-                return line.split("=", 1)[1].strip().strip("'\"")
-            if line and "=" not in line and not line.startswith("#"):
-                return line
+        if self.tinfoil_key_file:
+            try:
+                text = self.tinfoil_key_file.read_text()
+            except OSError:
+                text = ""
+            for line in text.splitlines():   # a bare key, or an env file with TINFOIL_API_KEY=
+                line = line.strip()
+                if line.startswith("TINFOIL_API_KEY="):
+                    return line.split("=", 1)[1].strip().strip("'\"")
+                if line and "=" not in line and not line.startswith("#"):
+                    return line
+        if self.tinfoil_key_volume:   # a standard install: the key the owner saved in the Tinfoil app
+            return tinfoil_key_from_volume(self.tinfoil_key_volume)
         return ""
 
     def managed(self, agent_id: str) -> Path:
@@ -1667,6 +1704,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--wam", type=Path, help="wizard-app-manager checkout (runtipi driver)")
     ap.add_argument("--home-mount", choices=["alongside", "stock"], default="alongside")
     ap.add_argument("--tinfoil-key-file", type=Path)
+    ap.add_argument("--tinfoil-key-volume", default="",
+                    help="read the Tinfoil key the owner saved in the Tinfoil app from this Docker volume (issue 582)")
     ap.add_argument("--image", default=DEFAULT_IMAGE)
     ap.add_argument("--proxy-image", default=DEFAULT_PROXY_IMAGE)
     ap.add_argument("--main-container", default="", help="main Hermes container name (enables deliveries to the main agent)")
@@ -1680,7 +1719,7 @@ def main(argv: list[str] | None = None) -> int:
     token = args.token_file.read_text().strip()
     if len(token) < 24:
         raise SystemExit("token file must hold a random token of at least 24 characters")
-    agents = Agents(args.agents_dir, args.tinfoil_key_file)
+    agents = Agents(args.agents_dir, args.tinfoil_key_file, args.tinfoil_key_volume)
     if args.driver == "runtipi":
         if not args.wam:
             raise SystemExit("--wam is required for the runtipi driver")
