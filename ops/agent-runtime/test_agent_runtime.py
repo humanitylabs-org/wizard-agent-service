@@ -511,6 +511,44 @@ class UnixSocketListenerTest(unittest.TestCase):
                 ar.UnixHTTPServer(path, ar.make_handler("t" * 32, ar.Agents(Path(d), None), object()))
             self.assertEqual(path.read_text(), "not a socket")
 
+    def test_a_live_socket_is_never_taken_over(self):
+        import threading
+        with tempfile.TemporaryDirectory() as d:
+            sock = Path(d) / "runtime.sock"
+            handler = ar.make_handler("t" * 32, ar.Agents(Path(d), None), object())
+            first, _ = ar.serve(7795, sock, handler)
+            threading.Thread(target=first.serve_forever, daemon=True).start()
+            try:
+                # a second, overlapping helper must refuse rather than unlink the live listener's socket
+                with self.assertRaises(OSError):
+                    ar.UnixHTTPServer(sock, handler)
+                status, _ = self.request(sock, "GET", "/healthz", "t" * 32)
+                self.assertEqual(status, 200)
+            finally:
+                first.shutdown()
+                first.server_close()
+
+    def test_shutdown_leaves_a_newer_helpers_socket(self):
+        import threading
+        with tempfile.TemporaryDirectory() as d:
+            sock = Path(d) / "runtime.sock"
+            handler = ar.make_handler("t" * 32, ar.Agents(Path(d), None), object())
+            old, _ = ar.serve(7795, sock, handler)
+            old.socket.close()
+            sock.rename(Path(d) / "old.sock")   # the old listener went away (kept, so its inode is never reused)
+            # and a newer helper bound the same path
+            new, _ = ar.serve(7795, sock, handler)
+            threading.Thread(target=new.serve_forever, daemon=True).start()
+            try:
+                old.server_close()   # the old instance's late shutdown
+                self.assertTrue(sock.exists())
+                status, _ = self.request(sock, "GET", "/healthz", "t" * 32)
+                self.assertEqual(status, 200)
+            finally:
+                new.shutdown()
+                new.server_close()
+            self.assertFalse(sock.exists())
+
     def test_without_socket_it_stays_on_loopback(self):
         server, where = ar.serve(0, None, ar.make_handler("t" * 32, ar.Agents(Path("/nonexistent"), None), object()))
         try:

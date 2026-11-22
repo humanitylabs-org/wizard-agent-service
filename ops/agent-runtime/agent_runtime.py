@@ -44,6 +44,8 @@ import threading
 import time
 from offline_index import snapshot as index_snapshot
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import errno
+import socket
 import socketserver
 from pathlib import Path
 import hermes_lock
@@ -1607,12 +1609,17 @@ class UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer)
         path = Path(path)
         try:
             if stat.S_ISSOCK(path.lstat().st_mode):
+                if socket_answers(path):
+                    # another helper still listens here (an overlapping restart): never take its socket away
+                    raise OSError(errno.EADDRINUSE, f"a runtime helper already listens on {path}")
                 path.unlink()   # a stale socket from an earlier run; never remove anything else
         except FileNotFoundError:
             pass
         self.path = path
         super().__init__(str(path), handler)
         os.chmod(path, 0o666)
+        st = path.lstat()
+        self.ident = (st.st_dev, st.st_ino)
 
     def get_request(self):
         request, _ = super().get_request()
@@ -1621,10 +1628,25 @@ class UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer)
     def server_close(self):
         super().server_close()
         try:
-            if stat.S_ISSOCK(self.path.lstat().st_mode):
+            st = self.path.lstat()
+            # only our own socket: a newer helper may have bound this path since
+            if stat.S_ISSOCK(st.st_mode) and (st.st_dev, st.st_ino) == self.ident:
                 self.path.unlink()
         except OSError:
             pass
+
+
+def socket_answers(path: Path) -> bool:
+    """True when something accepts connections on the Unix socket at path (a live listener, not a stale file)."""
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(1)
+    try:
+        probe.connect(str(path))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
 
 
 def serve(port: int, socket_path: Path | None, handler):
