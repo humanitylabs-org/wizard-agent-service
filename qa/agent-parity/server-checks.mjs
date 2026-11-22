@@ -1656,7 +1656,51 @@ export const serverChecks = {
       assert.ok(!content.includes('unavailable'), `${rel} is not unavailable on ${s.kind}`)
       assert.deepEqual(envelope(content).map(item => item.name), [basename(rel)], `${rel} is a file card on ${s.kind}`)
     })
-    assert.deepEqual(envelope(rows.find(m => m.id === 'rule-bare').content), [], 'a bare path in the text is not sent')
+    // Issue 581: on routed kinds a bare path into the agent's own home is shown as a card too; main is unchanged.
+    assert.deepEqual(envelope(rows.find(m => m.id === 'rule-bare').content).map(item => item.name), routed ? [basename(places[0])] : [], 'a bare path is a card only for routed kinds')
+  },
+  'media-inline-path': async s => {
+    // Issue 581: a routed agent's reply that names a file in its own home as a plain path (no MEDIA line) shows the
+    // same card a MEDIA line gives; a folder, a missing or unsupported file, or an agent with files: none reads
+    // "[file: <name> not sent: ask the agent to send it]". Never the raw path, never a bare "[private attachment]".
+    if (s.kind === 'main') return
+    const files = { 'cache/images/inline-report.png': png, 'work/ranked/inline-candidates.csv': 'rank,name\n1,a\n', 'work/ranked/inline-tool.exe': 'MZ' }
+    for (const [rel, bytes] of Object.entries(files)) {
+      mkdirSync(join(s.agentHome, dirname(rel)), { recursive: true })
+      writeFileSync(join(s.agentHome, rel), bytes)
+    }
+    mkdirSync(join(s.agentHome, 'transcripts'), { recursive: true })
+    const visible = rel => ['container', 'restricted'].includes(s.kind) ? `/opt/data/${rel}` : join(s.agentHome, rel)
+    const row = s.sessions.get('wizard_parity')
+    const said = {
+      'inline-png': `Chart: \`${visible('cache/images/inline-report.png')}\``,
+      'inline-csv': `All 232 ranked candidates at \`${visible('work/ranked/inline-candidates.csv')}\`, transcripts alongside.`,
+      'inline-dir': `Transcripts in \`${visible('transcripts')}\``,
+      'inline-gone': `Saved to \`${visible('work/ranked/inline-gone.csv')}\``,
+      'inline-exe': `Built \`${visible('work/ranked/inline-tool.exe')}\``,
+    }
+    Object.entries(said).forEach(([id, content], i) => row.messages.push({ id, role: 'assistant', timestamp: Date.now() / 1000 + i, content }))
+    const cards = { 'inline-png': ['inline-report.png'], 'inline-csv': ['inline-candidates.csv'] }
+    let rows = await history(s)
+    // A restricted home is mirrored in the background on the first read; the next open shows the cards.
+    for (let n = 0; n < 20 && Object.keys(cards).some(id => !envelope(rows.find(m => m.id === id).content).length); n++) {
+      await new Promise(done => setTimeout(done, 100)); rows = await history(s)
+    }
+    const raw = [s.agentHome, '/opt/data', '[private attachment]']
+    for (const id of Object.keys(said)) {
+      const content = rows.find(m => m.id === id).content
+      for (const text of raw) assert.ok(!content.includes(text), `${id} on ${s.kind} shows no ${text}`)
+      assert.deepEqual(envelope(content).map(item => item.name), cards[id] ?? [], `${id} cards on ${s.kind}`)
+    }
+    assert.ok(rows.find(m => m.id === 'inline-csv').content.startsWith('All 232 ranked candidates at `inline-candidates.csv`, transcripts alongside.'))
+    assert.equal(rows.find(m => m.id === 'inline-dir').content, 'Transcripts in [file: transcripts not sent: ask the agent to send it]')
+    assert.equal(rows.find(m => m.id === 'inline-gone').content, 'Saved to [file: inline-gone.csv not sent: ask the agent to send it]')
+    assert.equal(rows.find(m => m.id === 'inline-exe').content, 'Built [file: inline-tool.exe not sent: ask the agent to send it]')
+    // An agent with files: none sends nothing this way.
+    const file = join(s.root, 'os', 'agents', s.id, 'agent.json'), agent = JSON.parse(readFileSync(file, 'utf8'))
+    agent.permissions.files = 'none'; writeFileSync(file, JSON.stringify(agent)); await s.restart()
+    row.messages.push({ id: 'inline-none', role: 'assistant', timestamp: Date.now() / 1000 + 9, content: `At \`${visible('work/ranked/inline-candidates.csv')}\`` })
+    assert.equal((await history(s)).find(m => m.id === 'inline-none').content, 'At [file: inline-candidates.csv not sent: ask the agent to send it]')
   },
   'bring-my-data': async s => {
     // The owner drops exports into Files through the Service; the wizard-os bring_data tool, run with THIS runtime's

@@ -1324,7 +1324,7 @@
       "id": "media-folder-rule",
       "description": "A file in each folder the kind's one file-sending rule names becomes a file card (issue 580)",
       "layer": "server",
-      "how_to_test": "Write files where the run instructions say files may be sent (routed kinds: the home root, an own nested folder and cache/images, through /opt/data for container and restricted; main: cache/images and cache/audio), push assistant rows with MEDIA lines and a row with a bare path, open the thread and assert every MEDIA file is a file card (never unavailable) and the bare path sends nothing, on every runtime.",
+      "how_to_test": "Write files where the run instructions say files may be sent (routed kinds: the home root, an own nested folder and cache/images, through /opt/data for container and restricted; main: cache/images and cache/audio), push assistant rows with MEDIA lines and a row with a bare path, open the thread and assert every MEDIA file is a file card (never unavailable) on every runtime; the bare path is a card on routed kinds (issue 581) and sends nothing on main.",
       "source_refs": [
         "server/chat-presentation.mjs",
         "server/agents-http.mjs",
@@ -1334,6 +1334,21 @@
         "tests/routed-media-rule.test.ts"
       ],
       "fixture": "media-folder-rule",
+      "policy_exemptions": []
+    },
+    {
+      "id": "media-inline-path",
+      "description": "A file in a routed agent's own home written as a plain path becomes a file card, anything else a 'not sent' line (issue 581)",
+      "layer": "server",
+      "how_to_test": "Write a picture, a CSV and an unsupported file in the agent's home (through /opt/data for container and restricted), push assistant rows naming each, a folder and a missing file as plain backticked paths, open the thread and assert the picture and CSV are file cards with only their names in the text, the rest read '[file: <name> not sent: ask the agent to send it]', no row shows the raw path or '[private attachment]', and with permissions.files none the CSV is not sent; main is unchanged.",
+      "source_refs": [
+        "server/service.mjs",
+        "server/private-file-projection.mjs"
+      ],
+      "reference_tests": [
+        "tests/routed-inline-paths.test.ts"
+      ],
+      "fixture": "media-inline-path",
       "policy_exemptions": []
     },
     {

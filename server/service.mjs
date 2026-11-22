@@ -2413,6 +2413,115 @@ export function routedMediaPaths(result, containerRoot = '/opt/data') {
   return [...found]
 }
 
+// Issue 581: a routed agent sometimes writes a file in its own home as a plain path instead of a MEDIA line. The
+// path was then redacted to a bare "[private attachment]" label, a dead end for the owner. Now a path into the
+// agent's own home that a MEDIA line would have sent becomes the same file card (right after the line naming it,
+// with only the file name left in the text); anything else (a folder, a missing or unsupported file, an agent
+// with files: none) reads "[file: <name> not sent: ask the agent to send it]". The raw path never stays.
+const INLINE_PATH_TAIL = `[^\\s"'<>\\x60\\]\\)},;]*`
+const INLINE_PATH_END = `(?=$|[\\s"'<>\\x60\\]\\)},;])`
+const INLINE_PATH_TRAILING = /[.:!?]+$/u
+const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+// A path alone in backticks may hold spaces (`/opt/data/work/my file.csv`); a bare one ends at whitespace.
+const inlinePathPattern = (named) => {
+  const roots = `(?:${named.map(escapeRegExp).join('|')})`
+  return new RegExp(`\\x60(${roots}(?:/[^\\x60\\n]*)?)\\x60|(${roots}(?:/${INLINE_PATH_TAIL})?)${INLINE_PATH_END}`, 'g')
+}
+const bareInlinePathPattern = (named) => new RegExp(`(?:${named.map(escapeRegExp).join('|')})(?:/${INLINE_PATH_TAIL})?${INLINE_PATH_END}`, 'g')
+const inlineFileName = (path) => basename(String(path).replace(/\/+$/u, '')).replace(/[\\/\p{Cc}\[\]]/gu, '_').trim().slice(-120) || 'file'
+export const notSentFileLine = (path) => `[file: ${inlineFileName(path)} not sent: ask the agent to send it]`
+const insideRoot = (path, root) => path === root || path.startsWith(`${root}/`)
+const inlineNamedRoots = ({ home, containerRoot = '' }) => [...new Set([containerRoot, home].filter(value => typeof value === 'string' && value.length > 1))].sort((a, b) => b.length - a.length)
+const withoutFences = (text) => text.replace(/```[^\n]*\n[\s\S]*?```/g, '')
+
+// Visit the strings projectAgentMedia projects: assistant content/text and run output/response fields.
+function visitAssistantText(payload, project) {
+  const visit = (value, assistant = false) => {
+    if (Array.isArray(value)) { for (const item of value) visit(item, assistant); return }
+    if (!value || typeof value !== 'object') return
+    const role = typeof value.role === 'string' ? value.role.toLowerCase() : ''
+    const assistantValue = assistant || role === 'assistant'
+    for (const [key, child] of Object.entries(value)) {
+      const text = key === 'output' || key === 'response' || assistantValue && (key === 'content' || key === 'text')
+      if (typeof child === 'string' && text && role !== 'user') value[key] = project(child)
+      else visit(child, assistantValue)
+    }
+  }
+  visit(payload)
+}
+
+/** Container paths (/opt/data/...) an assistant wrote as plain text, for the restricted-home mirror. */
+export function routedInlinePaths(result, containerRoot = '/opt/data', { skip = [], limit = 200 } = {}) {
+  if (!containerRoot) return []
+  const found = new Set()
+  let payload
+  try { payload = JSON.parse(Buffer.isBuffer(result) ? result.toString('utf8') : String(result)) } catch { return [] }
+  const add = (written) => {
+    const path = resolve(written.replace(INLINE_PATH_TRAILING, ''))
+    if (found.size < limit && path.startsWith(`${containerRoot}/`) && !skip.some(root => insideRoot(path, root))) found.add(path)
+  }
+  visitAssistantText(payload, (text) => {
+    for (const match of withoutFences(text).matchAll(inlinePathPattern([containerRoot]))) {
+      if (match[2]) { add(match[2]); continue }
+      add(match[1])
+      // A backticked span with spaces may also be a command naming a path; its bare paths count too.
+      if (/\s/u.test(match[1])) for (const bare of match[1].matchAll(bareInlinePathPattern([containerRoot]))) add(bare[0])
+    }
+    return text
+  })
+  return [...found]
+}
+
+export function projectRoutedInlinePaths(result, { home, artifactDir, containerRoot = '', mirror = '' }, { filesAllowed = true, skip = [] } = {}) {
+  const named = inlineNamedRoots({ home, containerRoot })
+  if (!named.length || !artifactDir) return result
+  let readable = true
+  try { accessSync(home, fsConstants.R_OK | fsConstants.X_OK) } catch { readable = false }
+  const roots = canonicalArtifactRoots([readable || !mirror ? home : mirror])
+  const aliases = containerRoot && roots.length ? [[containerRoot, roots[0]]] : []
+  let payload
+  try { payload = JSON.parse(result.toString('utf8')) } catch { return result }
+  const pattern = inlinePathPattern(named)
+  const lookup = (path) => {
+    if (!filesAllowed || !roots.length) return null
+    return registerAgentArtifact(path, artifactDir, roots, aliases, true)
+      ?? registerAgentFile(path, artifactDir, roots, aliases)
+      ?? recallAgentSend(path, artifactDir, roots, aliases)
+  }
+  const projectText = (value) => {
+    if (!named.some(root => value.includes(root))) return value
+    const fences = []
+    const masked = value.replace(/```[^\n]*\n[\s\S]*?```/g, block => `\u0000inline-fence-${fences.push(block) - 1}\u0000`)
+    const shown = new Set([...masked.matchAll(/"id":"([0-9a-f]{32})"/g)].map(match => match[1]))
+    const lines = masked.split('\n').map((line) => {
+      const cards = []
+      const show = (written, wrapped, { quiet = false } = {}) => {
+        const trailing = wrapped ? '' : written.match(INLINE_PATH_TRAILING)?.[0] ?? ''
+        const path = trailing ? written.slice(0, -trailing.length) : written
+        // The owner-readable inbox and notes folders keep their own labels (agentReadablePaths).
+        if (skip.some(root => insideRoot(path, root))) return null
+        const local = resolve(path)
+        const artifact = named.some(root => insideRoot(local, root) && local !== root) ? lookup(local) : null
+        if (!artifact) return quiet ? null : `${notSentFileLine(path)}${trailing}`
+        if (!shown.has(artifact.id)) { shown.add(artifact.id); cards.push(artifact) }
+        return `${wrapped ? `\`${artifact.name}\`` : artifact.name}${trailing}`
+      }
+      const bare = bareInlinePathPattern(named)
+      const text = line.replace(pattern, (match, wrapped, plain) => {
+        if (plain) return show(plain, false) ?? match
+        // A backticked span with spaces is a file name with spaces only when that file exists; otherwise it may be
+        // a command or a sentence, so each bare path inside it is shown on its own and the backticks stay.
+        if (!/\s/u.test(wrapped)) return show(wrapped, true) ?? match
+        return show(wrapped, true, { quiet: true }) ?? `\`${wrapped.replace(bare, path => show(path, false) ?? path)}\``
+      })
+      return text + cards.map(item => `\n\n<helm_attachments>${JSON.stringify({ items: [item], inline: item.kind === 'image' })}</helm_attachments>\n\n`).join('')
+    })
+    return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim().replace(/\u0000inline-fence-(\d+)\u0000/g, (_, i) => fences[Number(i)])
+  }
+  visitAssistantText(payload, projectText)
+  return Buffer.from(JSON.stringify(payload))
+}
+
 export function projectAgentMedia(result, artifactDir, artifactRoots, aliases = [], imageResolver = null, scoped = false) {
   if (!artifactDir || !artifactRoots.length) return result
   let payload
@@ -3198,12 +3307,20 @@ function buildWizardServer(options, lifetime) {
     if (agent.runtime?.kind === 'container') return { home: join(agents.agentsDir, agent.id, 'home'), artifactDir, containerRoot: '/opt/data', mirror: join(artifactDir, 'mirror') }
     return null
   }
+  // The inbox and notes folders the owner may read keep their own labels (private-file-projection.mjs).
+  const routedReadableRoots = (agent) => agentReadablePaths(agent, join(agents.agentsDir, agent.id, 'home')).map(entry => entry.root)
   // Sandboxed homes are unreadable to this service: copy each named file out through the runtime, as the agent's uid.
   const mirrorMisses = new Map()
   const mirrorRoutedAgentMedia = async (result, agent, media) => {
     if (!media?.mirror || !agentRuntime?.fetch || agent.permissions?.files === 'none') return
     try { accessSync(media.home, fsConstants.R_OK | fsConstants.X_OK); return } catch { /* sandboxed */ }
-    for (const path of routedMediaPaths(result, media.containerRoot)) {
+    // Paths written as text (issue 581) come newest first, and at most 20 are fetched per read, so a long history of
+    // old, missing or already-copied paths never crowds out the latest reply's file.
+    const inline = routedInlinePaths(result, media.containerRoot, { skip: routedReadableRoots(agent) }).reverse()
+    const named = new Set([...routedMediaPaths(result, media.containerRoot), ...inline])
+    const inlineOnly = new Set(inline.filter(path => !routedMediaPaths(result, media.containerRoot).includes(path)))
+    let inlineFetches = 0
+    for (const path of named) {
       const relative = path.slice(media.containerRoot.length + 1)
       const target = resolve(media.mirror, relative)
       if (!target.startsWith(`${media.mirror}${sep}`)) continue
@@ -3211,6 +3328,7 @@ function buildWizardServer(options, lifetime) {
       try { if (Date.now() - statSync(target).mtimeMs < ROUTED_MIRROR_FRESH_MS) continue } catch { /* not mirrored yet */ }
       const key = `${agent.id}\0${path}`
       if (Date.now() - (mirrorMisses.get(key) ?? 0) < 60_000) continue
+      if (inlineOnly.has(path) && ++inlineFetches > 20) continue
       try {
         const got = await agentRuntime.fetch(agent.id, { path })
         const bytes = Buffer.from(String(got?.data_base64 ?? ''), 'base64')
@@ -3463,6 +3581,8 @@ function buildWizardServer(options, lifetime) {
         if (media.mirror) mkdirSync(media.mirror, { recursive: true, mode: 0o700 })
         await mirrorRoutedAgentMedia(result, agent, media)
         result = projectRoutedAgentMedia(result, media)
+        // Issue 581: a file in the agent's home written as a plain path becomes a card or a "not sent" line.
+        result = projectRoutedInlinePaths(result, media, { filesAllowed: agent.permissions?.files !== 'none', skip: routedReadableRoots(agent) })
       }
       // Routed agents have a host-side home and the runtime mounts it at /opt/data.
       // Shared inbox roots still apply when a note mentions a main-agent attachment.

@@ -313,7 +313,8 @@ describe('agents registry and API', () => {
     expect(response.status).toBe(200)
     const text = JSON.stringify(await response.json())
     expect(text).toContain('The handoff is at Private notes › for-review/2026-01-02-synthetic.md')
-    expect(text).toContain('Also Private notes › index.md, [private attachment: brief.pdf] and [private attachment]')
+    // Issue 581: another home path is never shown raw; config.yaml is no sendable file type, so it reads "not sent".
+    expect(text).toContain('Also Private notes › index.md, [private attachment: brief.pdf] and [file: config.yaml not sent: ask the agent to send it]')
     expect(text).not.toContain('/opt/data')
     expect(text).not.toContain(host)
   })
