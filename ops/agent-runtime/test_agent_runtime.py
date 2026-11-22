@@ -720,6 +720,39 @@ class RuntipiOverrideMergeTest(unittest.TestCase):
             driver._override(agent, rt)   # idempotent, and the read-back check passes on YAML too
             self.assertEqual(modules["wam.network"].load_yaml(state["dockerCompose"]), doc)
 
+    def test_a_recipe_that_already_has_the_search_service_does_not_get_it_twice(self):
+        # Issue 582 tester: the override repeated the search service a fresh package's recipe already has, and
+        # Runtipi refused the app ("security_opt items at 0 and 1 are equal").
+        modules, _ = self.fake_wam()
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(sys.modules, modules):
+            home = Path(d) / "agents" / "private" / "home"; home.mkdir(parents=True)
+            driver = object.__new__(ar.RuntipiDriver)
+            driver.home_mount = "alongside"; driver.proxy_image = ar.DEFAULT_PROXY_IMAGE
+            driver.agents = ar.Agents(Path(d) / "agents", None)
+            driver.cli = mock.Mock(); driver.cli.Config.return_value.runtipi_root = Path(d) / "runtipi"
+            agent = {"id": "private", "privacy": "private", "model": {"provider": "tinfoil"},
+                     "runtime": {"app_id": "agent-private", "kind": "container", "port": 7801}}
+            main, _ = ar.service_names(agent)
+            recipe = Path(d) / "runtipi" / "apps" / ar.STORE / "agent-private" / "docker-compose.yml"
+            recipe.parent.mkdir(parents=True)
+            recipe.write_text(ar.compose_doc(agent, image="stock", proxy_image=ar.DEFAULT_PROXY_IMAGE,
+                                             home_source="/stock", uid=1000, gid=1000, ports=False))
+            state = {"dockerCompose": "", "appEnv": ""}
+            def req(method, path, payload=None):
+                if method == "PUT":
+                    state.update(payload)
+                return dict(state)
+            rt = mock.Mock(); rt.req.side_effect = req
+            driver._override(agent, rt)
+            doc = json.loads(state["dockerCompose"])
+            self.assertNotIn(f"{main}-search", doc["services"])
+            self.assertNotIn("depends_on", doc["services"][main])
+            self.assertEqual(doc["services"][main]["volumes"], [f"{home}:/opt/data"])
+            recipe.unlink()   # a legacy (or unreadable) recipe still gets the service added, as before
+            state.update({"dockerCompose": "", "appEnv": ""})
+            driver._override(agent, rt)
+            self.assertIn(f"{main}-search", json.loads(state["dockerCompose"])["services"])
+
     def test_a_tinfoil_connection_json_works_as_the_key_file(self):
         with tempfile.TemporaryDirectory() as d:
             f = Path(d) / "connection.json"; f.write_text(json.dumps({"key": "tk-json", "authenticated": True}))
