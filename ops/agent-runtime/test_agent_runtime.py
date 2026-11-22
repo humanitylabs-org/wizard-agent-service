@@ -696,6 +696,26 @@ class RuntipiFirstInstallTest(unittest.TestCase):
             driver.apply(agent)
         self.assertEqual(order, ['install','override','stop'])
 
+    def test_a_failed_override_on_a_fresh_install_stops_the_new_app(self):
+        # Codex review: a running fresh install must not keep the package's stock home when the override fails.
+        from unittest.mock import Mock
+        driver=object.__new__(ar.RuntipiDriver)
+        agent={'id':'private','runtime':{'app_id':'agent-private'},'model':{'provider':'tinfoil'}}
+        order=[]
+        driver.agents=Mock(); driver.agents.add_provider_keys=lambda a: None
+        rt=Mock(); driver.cli=Mock(); driver.cli.Config.return_value.runtipi.return_value=rt
+        driver._installed=lambda rt_, a: 'install' in order
+        driver._install=lambda a: (order.append('install'), {'id':'x','urn':'u','status':'running'})[1]
+        def override(a, rt_):
+            order.append('override'); raise ar.RuntimeFailure('search_override_conflict')
+        driver._override=override
+        driver.stop=lambda a: (order.append('stop'), {'ok':True,'status':'stopped'})[1]
+        driver.start=lambda a: (order.append('start'), {'ok':True,'status':'running'})[1]
+        with self.assertRaises(ar.RuntimeFailure) as caught:
+            driver.apply(agent)
+        self.assertEqual(caught.exception.code, 'search_override_conflict')
+        self.assertEqual(order, ['install','override','stop'])
+
 
 class RuntipiOverrideMergeTest(unittest.TestCase):
     """Issue 582: a fresh agent's override already holds wam's YAML network block; merge into it, never replace it."""

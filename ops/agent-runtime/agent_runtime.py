@@ -959,7 +959,16 @@ class RuntipiDriver:
             except SystemExit as error:
                 sys.stderr.write(f"[agent-runtime] wam install refused: {str(error)[:300]}\n")
                 raise RuntimeFailure("install_refused") from None
-            self._override(agent, rt)
+            try:
+                self._override(agent, rt)
+            except Exception:
+                # Never leave the fresh app running on the package's stock home while the apply reads as failed.
+                if result.get("status") == "running":
+                    try:
+                        self.stop(agent)
+                    except Exception as error:  # noqa: BLE001  (best effort; the override failure is the answer)
+                        sys.stderr.write(f"[agent-runtime] stop after a failed override failed: {str(error)[:200]}\n")
+                raise
             if result.get("status") == "running":
                 self._stopped(agent)
             started = self.start(agent)
