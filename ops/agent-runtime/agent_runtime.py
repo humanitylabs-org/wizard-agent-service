@@ -873,16 +873,21 @@ class RuntipiDriver:
     def apply(self, agent: dict) -> dict:
         self.agents.add_provider_keys(agent)
         rt = self.cli.Config().runtipi()
-        self._override(agent, rt)
         if not self._installed(rt, agent):
+            # Runtipi keeps an owner override only for an app it knows: PUT /user-config before the first install
+            # answers 404 APP_ERROR_APP_NOT_FOUND (issue 582, a fresh box's first private agent). Install first, then
+            # write the override and restart once so the agent runs with it.
             try:
                 result = self._install(agent)
             except SystemExit as error:
                 sys.stderr.write(f"[agent-runtime] wam install refused: {str(error)[:300]}\n")
                 raise RuntimeFailure("install_refused") from None
-            if result.get("status") == "stopped":
-                return self.start(agent)
-            return {"ok": True, "driver": "runtipi", "install": {k: result.get(k) for k in ("id", "urn", "status")}}
+            self._override(agent, rt)
+            if result.get("status") == "running":
+                self.stop(agent)
+            started = self.start(agent)
+            return {**started, "driver": "runtipi", "install": {k: result.get(k) for k in ("id", "urn", "status")}}
+        self._override(agent, rt)
         self.stop(agent)
         return self.start(agent)
 

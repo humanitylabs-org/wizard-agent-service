@@ -644,5 +644,34 @@ class TinfoilKeyFromVolumeTest(unittest.TestCase):
         self.assertIn('"--tinfoil-key-volume"', Path(ar.__file__).read_text())
 
 
+class RuntipiFirstInstallTest(unittest.TestCase):
+    def test_a_fresh_agent_is_installed_before_its_override_is_written(self):
+        # Issue 582: Runtipi answers 404 APP_ERROR_APP_NOT_FOUND for /user-config of an app it has not installed.
+        from unittest.mock import Mock
+        driver=object.__new__(ar.RuntipiDriver)
+        agent={'id':'private','runtime':{'app_id':'agent-private'},'model':{'provider':'tinfoil'}}
+        order=[]
+        driver.agents=Mock(); driver.agents.add_provider_keys=lambda a: None
+        rt=Mock(); driver.cli=Mock(); driver.cli.Config.return_value.runtipi.return_value=rt
+        driver._installed=lambda rt_, a: 'install' in order
+        driver._install=lambda a: (order.append('install'), {'id':'x','urn':'u','status':'running'})[1]
+        def override(a, rt_):
+            assert 'install' in order, 'override written before the app exists'
+            order.append('override')
+        driver._override=override
+        driver.stop=lambda a: order.append('stop')
+        driver.start=lambda a: (order.append('start'), {'ok':True,'status':'running'})[1]
+        result=driver.apply(agent)
+        self.assertEqual(order, ['install','override','stop','start'])
+        self.assertEqual((result['ok'], result['status'], result['install']['status']), (True,'running','running'))
+        order.clear(); order.append('install')   # installed: override, then restart, as before
+        driver.apply(agent)
+        self.assertEqual(order, ['install','override','stop','start'])
+        order.clear()
+        driver._install=lambda a: (order.append('install'), {'id':'x','urn':'u','status':'stopped'})[1]
+        driver.apply(agent)
+        self.assertEqual(order, ['install','override','start'])
+
+
 if __name__ == "__main__":
     unittest.main()
