@@ -4,7 +4,7 @@ import { parse as parseYaml } from 'yaml'
 import { TITLE_INSTRUCTIONS } from '../../server/thread-titles.mjs'
 import { CLAUDE_MODEL_LIMIT_SAFE_ERROR } from '../../server/run-provider-failure.mjs'
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, utimesSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { execFileSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
@@ -1631,6 +1631,32 @@ export const serverChecks = {
     assert.deepEqual(envelope(later), [first])
     const r = await s.raw(`/wizard/attachments/${first.id}`); assert.equal(r.status, 200)
     assert.deepEqual(Buffer.from(await r.arrayBuffer()), bytes)
+  },
+  'media-folder-rule': async s => {
+    // Issue 580: each kind is told one folder rule; a file in each folder that rule names becomes a file card.
+    // Routed kinds: anywhere in the agent's own home (restricted homes are read through the runtime mirror).
+    // Main: its cache folders. A path only written in the text is never sent.
+    const routed = s.kind !== 'main'
+    const places = routed ? ['rule-root.md', 'work/ranked/rule-candidates.csv', 'cache/images/rule-chart.png'] : ['cache/images/rule-chart.png', 'cache/audio/rule-note.mp3']
+    for (const rel of places) {
+      mkdirSync(join(s.agentHome, dirname(rel)), { recursive: true })
+      writeFileSync(join(s.agentHome, rel), rel.endsWith('.png') ? png : `synthetic ${rel}\n`)
+    }
+    const visible = rel => ['container', 'restricted'].includes(s.kind) ? `/opt/data/${rel}` : join(s.agentHome, rel)
+    const row = s.sessions.get('wizard_parity')
+    places.forEach((rel, i) => row.messages.push({ id: `rule-${i}`, role: 'assistant', timestamp: Date.now() / 1000 + i, content: `Synthetic file ${i}\nMEDIA:${visible(rel)}` }))
+    row.messages.push({ id: 'rule-bare', role: 'assistant', timestamp: Date.now() / 1000 + 9, content: `Synthetic list at \`${visible(places[0])}\`` })
+    let rows = await history(s)
+    // A restricted home is mirrored in the background on the first read; the next open shows the cards.
+    for (let n = 0; n < 20 && places.some((_, i) => !envelope(rows.find(m => m.id === `rule-${i}`).content).length); n++) {
+      await new Promise(done => setTimeout(done, 100)); rows = await history(s)
+    }
+    places.forEach((rel, i) => {
+      const content = rows.find(m => m.id === `rule-${i}`).content
+      assert.ok(!content.includes('unavailable'), `${rel} is not unavailable on ${s.kind}`)
+      assert.deepEqual(envelope(content).map(item => item.name), [basename(rel)], `${rel} is a file card on ${s.kind}`)
+    })
+    assert.deepEqual(envelope(rows.find(m => m.id === 'rule-bare').content), [], 'a bare path in the text is not sent')
   },
   'bring-my-data': async s => {
     // The owner drops exports into Files through the Service; the wizard-os bring_data tool, run with THIS runtime's

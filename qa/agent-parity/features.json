@@ -1048,13 +1048,15 @@
       "id": "media-contract",
       "description": "Inspect run instructions for the shared MEDIA delivery syntax and status-line contract. This alone does not prove media rendering",
       "layer": "server",
-      "how_to_test": "Inspect run instructions for the shared MEDIA delivery syntax, the non-image file-card contract (types, 256 MB, cache/images placement) and the status-line contract. This alone does not prove media rendering.",
+      "how_to_test": "Inspect run instructions for the shared MEDIA delivery syntax, the non-image file-card contract (types, 256 MB), exactly one folder rule per kind (main: cache/images placement; routed kinds: anywhere in their own home, a bare path is not sent, issue 580) and the status-line contract. This alone does not prove media rendering.",
       "source_refs": [
-        "server/chat-presentation.mjs"
+        "server/chat-presentation.mjs",
+        "server/agents-http.mjs"
       ],
       "reference_tests": [
         "tests/markdown-hint.test.ts",
-        "tests/owner-file-handoff.test.ts"
+        "tests/owner-file-handoff.test.ts",
+        "tests/routed-media-rule.test.ts"
       ],
       "fixture": "media-contract",
       "policy_exemptions": []
@@ -1316,6 +1318,22 @@
         "tests/sent-files-pruned.test.ts"
       ],
       "fixture": "sent-media-pruned",
+      "policy_exemptions": []
+    },
+    {
+      "id": "media-folder-rule",
+      "description": "A file in each folder the kind's one file-sending rule names becomes a file card (issue 580)",
+      "layer": "server",
+      "how_to_test": "Write files where the run instructions say files may be sent (routed kinds: the home root, an own nested folder and cache/images, through /opt/data for container and restricted; main: cache/images and cache/audio), push assistant rows with MEDIA lines and a row with a bare path, open the thread and assert every MEDIA file is a file card (never unavailable) and the bare path sends nothing, on every runtime.",
+      "source_refs": [
+        "server/chat-presentation.mjs",
+        "server/agents-http.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/routed-media-rule.test.ts"
+      ],
+      "fixture": "media-folder-rule",
       "policy_exemptions": []
     },
     {

@@ -245,8 +245,16 @@ export const checks = {
     const r = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Synthetic media request' })); assert.equal(r.status, 202)
     const sent = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).at(-1).body
     assert.ok(sent.instructions.includes('MEDIA:/absolute/path'), 'every agent must know how Wizard renders delivery media')
-    for (const piece of ['PDF', 'up to 256 MB', 'the 5 MB limit is for images only', 'copy it into your own cache/images first', 'non-image files are not intercepted'])
+    for (const piece of ['PDF', 'up to 256 MB', 'the 5 MB limit is for images only', 'non-image files are not intercepted'])
       assert.ok(sent.instructions.includes(piece), `every agent kind is told the file-card contract: ${piece}`)
+    // One folder rule per kind (issue 580): main's cache folders, a routed agent's whole own home.
+    assert.equal(sent.instructions.match(/only when the file sits/g)?.length, 1, 'exactly one file folder rule')
+    if (s.kind === 'main') assert.ok(sent.instructions.includes('copy it into your own cache/images first'))
+    else {
+      assert.ok(sent.instructions.includes('inside your own home folder'), 'routed agents may send any file in their own home')
+      assert.ok(!/cache\/(?:images|audio|videos|screenshots)/.test(sent.instructions), 'routed agents get no contradicting cache-folder rule')
+      assert.ok(sent.instructions.includes('a path written in your text, even in backticks, is not sent'))
+    }
     assert.ok(sent.instructions.includes('WIZARD_STATUS_V1'))
   },
 }
