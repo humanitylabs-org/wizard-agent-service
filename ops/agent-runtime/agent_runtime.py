@@ -214,6 +214,14 @@ class Agents:
                 text = self.tinfoil_key_file.read_text()
             except OSError:
                 text = ""
+            if text.lstrip().startswith("{"):   # the Tinfoil app's own connection.json (issue 582)
+                try:
+                    key = (json.loads(text) or {}).get("key")
+                except (ValueError, AttributeError):
+                    key = None
+                if isinstance(key, str) and key.strip():
+                    return key.strip()
+                text = ""
             for line in text.splitlines():   # a bare key, or an env file with TINFOIL_API_KEY=
                 line = line.strip()
                 if line.startswith("TINFOIL_API_KEY="):
@@ -721,6 +729,36 @@ def verify_vendored(runtime_dir: Path) -> None:
             raise SystemExit(f"restricted runtime: {name} differs from the reviewed revision")
 
 
+def _override_codec(text: str):
+    """How to read and write an app's Runtipi override: JSON as this helper writes it, or wam's tag-preserving YAML
+    (issue 582: wam writes `networks: !override` there before a fresh agent's first install)."""
+    def jloads(t):
+        return json.loads(t)
+    def jdumps(d):
+        return json.dumps(d, indent=2) + "\n"
+    stripped = text.strip()
+    if not stripped or stripped.startswith("{"):
+        try:
+            if stripped:
+                json.loads(stripped)
+            return jloads, jdumps
+        except ValueError:
+            pass
+    try:
+        from wam.network import load_yaml, dump_yaml   # noqa: PLC0415  (on sys.path via --wam; never edited here)
+    except ImportError:
+        def refuse(t):
+            raise ValueError("override is not JSON and wam's YAML reader is not available")
+        return refuse, jdumps
+
+    def yloads(t):
+        doc = load_yaml(t)
+        if doc is None:
+            return {"services": {}}
+        return doc
+    return yloads, dump_yaml
+
+
 class RuntipiDriver:
     """Local candidate through the real App Manager path (wizard-os-platform-contracts: host-dogfood-operations,
     'installing an unpublished local candidate'): same safety check, store layout, Runtipi install, apps.json."""
@@ -766,45 +804,62 @@ class RuntipiDriver:
             doc["services"][f"{main}-search"] = private_search_service(agent, self.proxy_image)
             doc["services"].setdefault(main, {})["depends_on"] = [f"{main}-search"]
         if doc["services"]:
-            payload = {"dockerCompose": json.dumps(doc, indent=2) + "\n", "appEnv": ""}
-            if wants_private_search(agent):
-                # Do not silently erase an owner override. The legacy renderer
-                # emits JSON; non-JSON custom YAML needs explicit review.
-                before = rt.req("GET", f"/user-config/{self.urn(agent)}")
-                try:
-                    merged = json.loads(before.get("dockerCompose") or '{"services":{}}')
-                    if not isinstance(merged, dict) or not isinstance(merged.get("services", {}), dict):
+            # Merge into the app's override, never replace it: wam keeps its own blocks there (e.g. the app
+            # network's `networks: !override`, YAML with compose tags), and the owner may have lines of his own.
+            before = rt.req("GET", f"/user-config/{self.urn(agent)}") or {}
+            text = before.get("dockerCompose") or ""
+            loads, dumps = _override_codec(text)
+            try:
+                merged = loads(text) if text.strip() else {"services": {}}
+                if not isinstance(merged, dict) or not isinstance(merged.get("services") or {}, dict):
+                    raise ValueError()
+                services = merged.get("services")
+                if services is None:
+                    services = merged["services"] = {}
+                search_name = f"{main}-search"
+                if search_name in services and search_name in doc["services"] and services[search_name] != doc["services"][search_name]:
+                    raise ValueError()
+                for name, changes in doc["services"].items():
+                    target = services.setdefault(name, {})
+                    if target is None:
+                        target = services[name] = {}
+                    if not isinstance(target, dict):
                         raise ValueError()
-                    services = merged.setdefault("services", {})
-                    search_name = f"{main}-search"
-                    if search_name in services and services[search_name] != doc["services"][search_name]:
-                        raise ValueError()
-                    for name, changes in doc["services"].items():
-                        target = services.setdefault(name, {})
-                        for field, value in changes.items():
-                            if field == "depends_on":
-                                old = target.get(field, [])
-                                if isinstance(old, dict):
-                                    target[field] = {**old, **{item: {"condition": "service_started"} for item in value}}
-                                elif isinstance(old, list):
-                                    target[field] = list(dict.fromkeys(old + value))
-                                else:
-                                    raise ValueError()
-                            elif field == "environment":
-                                target[field] = {**target.get(field, {}), **value}
+                    for field, value in changes.items():
+                        if field == "depends_on":
+                            old = target.get(field, [])
+                            if isinstance(old, dict):
+                                target[field] = {**old, **{item: {"condition": "service_started"} for item in value}}
+                            elif isinstance(old, list):
+                                target[field] = list(dict.fromkeys(old + value))
                             else:
-                                target[field] = value
-                except (ValueError, TypeError, AttributeError):
-                    raise RuntimeFailure("search_override_conflict") from None
-                env = (before.get("appEnv") or "").rstrip("\n")
-                payload = {"dockerCompose": json.dumps(merged, indent=2) + "\n", "appEnv": env + "\n" if env else ""}
+                                raise ValueError()
+                        elif field == "environment":
+                            old = target.get(field) or {}
+                            if not isinstance(old, dict):
+                                raise ValueError()
+                            target[field] = {**old, **value}
+                        elif field == "volumes":
+                            old = target.get(field) or []
+                            if not isinstance(old, list):
+                                raise ValueError()
+                            # our home mount replaces any earlier mount on the same target (/opt/data)
+                            dests = {str(v).split(":")[1] for v in value if ":" in str(v)}
+                            kept = [v for v in old if not (isinstance(v, str) and ":" in v and v.split(":")[1] in dests)]
+                            target[field] = kept + [v for v in value if v not in kept]
+                        else:
+                            target[field] = value
+            except (ValueError, TypeError, AttributeError, IndexError):
+                raise RuntimeFailure("search_override_conflict") from None
+            env = (before.get("appEnv") or "").rstrip("\n")
+            payload = {"dockerCompose": dumps(merged), "appEnv": env + "\n" if env else ""}
             rt.req("PUT", f"/user-config/{self.urn(agent)}", payload)
             if wants_private_search(agent):
                 # Runtipi stores each field with an extra trailing newline, so
                 # verify the parsed override and the env text, not raw bytes.
                 after = rt.req("GET", f"/user-config/{self.urn(agent)}")
                 try:
-                    same = (json.loads(after.get("dockerCompose") or "") == merged
+                    same = (loads(after.get("dockerCompose") or "") == merged
                             and (after.get("appEnv") or "").rstrip("\n") == payload["appEnv"].rstrip("\n"))
                 except ValueError:
                     same = False

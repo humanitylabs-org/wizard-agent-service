@@ -673,5 +673,60 @@ class RuntipiFirstInstallTest(unittest.TestCase):
         self.assertEqual(order, ['install','override','start'])
 
 
+class RuntipiOverrideMergeTest(unittest.TestCase):
+    """Issue 582: a fresh agent's override already holds wam's YAML network block; merge into it, never replace it."""
+
+    def fake_wam(self):
+        import types, yaml
+        class Tagged:
+            def __init__(self, tag, value): self.tag, self.value = tag, value
+            def __eq__(self, other): return isinstance(other, Tagged) and (self.tag, self.value) == (other.tag, other.value)
+        class L(yaml.SafeLoader): pass
+        class D(yaml.SafeDumper): pass
+        L.add_multi_constructor("!", lambda l, tag, n: Tagged("!" + tag, l.construct_sequence(n, deep=True)
+                                                           if isinstance(n, yaml.SequenceNode) else l.construct_mapping(n, deep=True)))
+        D.add_representer(Tagged, lambda d, v: (lambda node: (setattr(node, "tag", v.tag), node)[1])(d.represent_data(v.value)))
+        net = types.ModuleType("wam.network")
+        net.load_yaml = lambda t: yaml.load(t, Loader=L)
+        net.dump_yaml = lambda d: yaml.dump(d, Dumper=D, sort_keys=False)
+        pkg = types.ModuleType("wam"); pkg.network = net
+        return {"wam": pkg, "wam.network": net}, Tagged
+
+    def test_wam_yaml_network_block_is_kept_and_the_home_and_search_are_added(self):
+        modules, Tagged = self.fake_wam()
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(sys.modules, modules):
+            home = Path(d) / "private" / "home"; home.mkdir(parents=True)
+            driver = object.__new__(ar.RuntipiDriver)
+            driver.home_mount = "alongside"; driver.proxy_image = ar.DEFAULT_PROXY_IMAGE
+            driver.agents = ar.Agents(Path(d), None)
+            agent = {"id": "private", "privacy": "private", "model": {"provider": "tinfoil"},
+                     "runtime": {"app_id": "agent-private", "kind": "container", "port": 7801}}
+            main, _ = ar.service_names(agent)
+            state = {"dockerCompose": f"services:\n  {main}:\n    networks: !override\n    - wizard-app-agent-private\n"
+                                      f"    volumes:\n    - /stock/home:/opt/data\n", "appEnv": ""}
+            def req(method, path, payload=None):
+                if method == "PUT":
+                    state.update({k: v + "\n" for k, v in payload.items()})
+                return dict(state)
+            rt = mock.Mock(); rt.req.side_effect = req
+            driver._override(agent, rt)
+            doc = modules["wam.network"].load_yaml(state["dockerCompose"])
+            svc = doc["services"][main]
+            self.assertEqual(svc["networks"], Tagged("!override", ["wizard-app-agent-private"]))
+            self.assertEqual(svc["volumes"], [f"{home}:/opt/data"])   # the agent's own home replaces the stock one
+            self.assertEqual(svc["environment"]["HERMES_UID"], str(home.stat().st_uid))
+            self.assertIn(f"{main}-search", doc["services"])
+            self.assertIn("networks: !override", state["dockerCompose"])
+            driver._override(agent, rt)   # idempotent, and the read-back check passes on YAML too
+            self.assertEqual(modules["wam.network"].load_yaml(state["dockerCompose"]), doc)
+
+    def test_a_tinfoil_connection_json_works_as_the_key_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "connection.json"; f.write_text(json.dumps({"key": "tk-json", "authenticated": True}))
+            self.assertEqual(ar.Agents(Path(d), f).tinfoil_key(), "tk-json")
+            f.write_text("{}")
+            self.assertEqual(ar.Agents(Path(d), f).tinfoil_key(), "")
+
+
 if __name__ == "__main__":
     unittest.main()
