@@ -464,6 +464,62 @@ class RootlessDockerTest(unittest.TestCase):
                 self.assertEqual(run.call_args.args[0], ['sg', 'docker', '-c', 'docker info'])
 
 
+class UnixSocketListenerTest(unittest.TestCase):
+    """--socket (issue 582): the same API on a Unix socket, 0666, token still required, stale socket replaced."""
+
+    def request(self, path, method, url, token=None):
+        import http.client
+        conn = http.client.HTTPConnection("localhost")
+        conn.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        conn.sock.connect(str(path))
+        conn.request(method, url, headers={"Authorization": f"Bearer {token}"} if token else {})
+        r = conn.getresponse()
+        body = r.read()
+        conn.close()
+        return r.status, body
+
+    def test_socket_serves_the_api_with_the_token(self):
+        import os
+        import stat as st
+        import threading
+        with tempfile.TemporaryDirectory() as d:
+            sock = Path(d) / "runtime.sock"
+            sock_dir_probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            sock_dir_probe.bind(str(sock))   # a stale socket left by an earlier run
+            sock_dir_probe.close()
+            agents = ar.Agents(Path(d) / "agents", None)
+            (Path(d) / "agents").mkdir()
+            server, where = ar.serve(7795, sock, ar.make_handler("t" * 32, agents, object()))
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                self.assertEqual(where, f"unix:{sock}")
+                self.assertEqual(st.S_IMODE(os.stat(sock).st_mode), 0o666)
+                status, body = self.request(sock, "GET", "/healthz", "t" * 32)
+                self.assertEqual(status, 200, body)
+                status, _ = self.request(sock, "POST", "/agents/a/start", "wrong-token-wrong-token-wrong")
+                self.assertEqual(status, 401)
+            finally:
+                server.shutdown()
+                server.server_close()
+            self.assertFalse(sock.exists())
+
+    def test_socket_never_replaces_a_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "runtime.sock"
+            path.write_text("not a socket")
+            with self.assertRaises(OSError):
+                ar.UnixHTTPServer(path, ar.make_handler("t" * 32, ar.Agents(Path(d), None), object()))
+            self.assertEqual(path.read_text(), "not a socket")
+
+    def test_without_socket_it_stays_on_loopback(self):
+        server, where = ar.serve(0, None, ar.make_handler("t" * 32, ar.Agents(Path("/nonexistent"), None), object()))
+        try:
+            self.assertEqual(server.server_address[0], "127.0.0.1")
+            self.assertTrue(where.startswith("127.0.0.1:"))
+        finally:
+            server.server_close()
+
+
 def _load_place_stream_tests():
     # CI runs only this file: pull in the streamed-placement tests (issue 464) from their own module.
     import importlib.util

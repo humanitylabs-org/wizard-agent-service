@@ -11,16 +11,16 @@
 //   suggests its model only when it has none. The private agent's model, providers and apps are never touched.
 // - Apps installed later start on the default private agent only (agents.mjs syncApps, option privateFirstAgent).
 // - The main-agent provider attach protection (issue 428) is on (service.mjs mainProviderAttachOn).
-// No agent runtime on the box (issue 582: no standard install has the host runtime helper yet): private first can't
-// make its agent, so it answers off with `reason: runtime_unavailable` and refuses the hand-off. The provider images
-// then use the main agent, as with the switch off, and move over on their next start once a runtime is there.
+// No agent runtime on the box yet (issue 582): private first stays on (DECISIONS 115: Tinfoil never lands on the
+// standard agent), names `reason: runtime_unavailable` in its state, refuses the hand-off with a 503 before writing
+// anything and logs it. Freshness is kept as it was, so the box moves over by itself once its runtime is there (the
+// App Manager installs it: `wam agent-runtime`).
 // Existing installs are not migrated: a box that already has agents, an owner app choice for the main agent or a
 // main model the first time this runs gets only what it asks for (a private Tinfoil agent, the provider attached),
 // never a new default, new app lists or new bindings.
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { MAIN_AGENT_ID, isConfidentialProvider } from './agents.mjs'
-import { providerKey } from './main-provider-attach.mjs'
 
 export const PRIVATE_FIRST_SWITCH = 'wizard/private-first-setup'
 export const PRIVATE_FIRST_SCHEMA = 'wizard.private-first/1'
@@ -57,7 +57,7 @@ export function createPrivateFirst({ on, registry, agentsDir, mainOptions, setDe
   const noRuntime = (what) => {
     if (toldNoRuntime && what === 'state') return
     toldNoRuntime = true
-    log(`${what}: switch on, but this box has no agent runtime (WIZARD_AGENT_RUNTIME_URL/TOKEN unset), so private first answers off and the main agent is used`)
+    log(`${what}: switch on, but this box has no agent runtime yet (WIZARD_AGENT_RUNTIME_URL/TOKEN unset), so the private agent can't be made; it is made once the runtime is there`)
   }
   // One change at a time: the provider images call on every start, and two images can start together.
   let chain = Promise.resolve()
@@ -101,7 +101,7 @@ export function createPrivateFirst({ on, registry, agentsDir, mainOptions, setDe
     const ready = switchOn && hasRuntime()
     if (switchOn && !ready) noRuntime('state')
     return {
-      schema: PRIVATE_FIRST_SCHEMA, on: ready, ...(switchOn && !ready ? { reason: 'runtime_unavailable' } : {}),
+      schema: PRIVATE_FIRST_SCHEMA, on: switchOn, ...(switchOn && !ready ? { reason: 'runtime_unavailable' } : {}),
       standard_agent: MAIN_AGENT_ID, private_agent: privateAgentId(),
       // Off only on a fresh box whose private agent was set up and no Claude or ChatGPT sign-in has come yet.
       standard_on: !(privateAgentId() && kept?.fresh === true && kept?.standard_on !== true),
@@ -120,18 +120,7 @@ export function createPrivateFirst({ on, registry, agentsDir, mainOptions, setDe
         noRuntime('private agent refused')
         throw refusal(503, 'runtime_unavailable', 'this box has no agent runtime')
       }
-      let fresh = await freshness()
-      if (fresh) {
-        // While private first answered off (issue 582) a Claude or ChatGPT sign-in went to the main agent without
-        // telling this module: a main model on any provider but Tinfoil's own means the box already runs on it.
-        let options = null
-        try { options = await mainOptions() } catch { options = null }
-        const current = providerKey(options?.provider)
-        if (String(options?.model ?? '').trim() && current && current !== 'wizard-tinfoil' && !isConfidentialProvider(current)) {
-          save({ fresh: false })
-          fresh = false
-        }
-      }
+      const fresh = await freshness()
       if (!fresh) {
         // Not migrated: an existing box keeps its default and app lists. Its oldest private agent on this provider
         // answers; with none, a plain private agent is added (the private preset's own app rules apply).
