@@ -961,12 +961,20 @@ class RuntipiDriver:
                 raise RuntimeFailure("install_refused") from None
             self._override(agent, rt)
             if result.get("status") == "running":
-                self.stop(agent)
+                self._stopped(agent)
             started = self.start(agent)
             return {**started, "driver": "runtipi", "install": {k: result.get(k) for k in ("id", "urn", "status")}}
         self._override(agent, rt)
-        self.stop(agent)
+        self._stopped(agent)
         return self.start(agent)
+
+    def _stopped(self, agent: dict) -> None:
+        """Stop before a restart, and fail when it did not stop: Runtipi refuses a lifecycle job it can't validate
+        (issue 582, a bad override) and the old container keeps running, so a start right after would report the
+        stale agent as running and the new override would never take effect."""
+        stopped = self.stop(agent)
+        if stopped.get("status") != "stopped":
+            raise RuntimeFailure(f"stop_{stopped.get('status') or 'unknown'}"[:60])
 
     def start(self, agent: dict) -> dict:
         self.agents.add_provider_keys(agent)

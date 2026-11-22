@@ -659,7 +659,7 @@ class RuntipiFirstInstallTest(unittest.TestCase):
             assert 'install' in order, 'override written before the app exists'
             order.append('override')
         driver._override=override
-        driver.stop=lambda a: order.append('stop')
+        driver.stop=lambda a: (order.append('stop'), {'ok':True,'status':'stopped'})[1]
         driver.start=lambda a: (order.append('start'), {'ok':True,'status':'running'})[1]
         result=driver.apply(agent)
         self.assertEqual(order, ['install','override','stop','start'])
@@ -671,6 +671,30 @@ class RuntipiFirstInstallTest(unittest.TestCase):
         driver._install=lambda a: (order.append('install'), {'id':'x','urn':'u','status':'stopped'})[1]
         driver.apply(agent)
         self.assertEqual(order, ['install','override','start'])
+
+    def test_a_restart_that_does_not_stop_fails_instead_of_reporting_the_old_container(self):
+        # Issue 582 tester: Runtipi refused the stop (invalid override), the old container kept running, and the
+        # start right after answered 'running', so apply returned 200 with the override never applied.
+        from unittest.mock import Mock
+        driver=object.__new__(ar.RuntipiDriver)
+        agent={'id':'private','runtime':{'app_id':'agent-private'},'model':{'provider':'tinfoil'}}
+        order=[]
+        driver.agents=Mock(); driver.agents.add_provider_keys=lambda a: None
+        rt=Mock(); driver.cli=Mock(); driver.cli.Config.return_value.runtipi.return_value=rt
+        driver._override=lambda a, rt_: order.append('override')
+        driver.stop=lambda a: (order.append('stop'), {'ok':False,'status':'running'})[1]
+        driver.start=lambda a: (order.append('start'), {'ok':True,'status':'running'})[1]
+        driver._installed=lambda rt_, a: True
+        with self.assertRaises(ar.RuntimeFailure) as caught:
+            driver.apply(agent)
+        self.assertEqual(caught.exception.code, 'stop_running')
+        self.assertEqual(order, ['override','stop'])
+        order.clear()
+        driver._installed=lambda rt_, a: 'install' in order
+        driver._install=lambda a: (order.append('install'), {'id':'x','urn':'u','status':'running'})[1]
+        with self.assertRaises(ar.RuntimeFailure):
+            driver.apply(agent)
+        self.assertEqual(order, ['install','override','stop'])
 
 
 class RuntipiOverrideMergeTest(unittest.TestCase):
@@ -776,7 +800,7 @@ class RuntipiFirstInstallRetryTest(unittest.TestCase):
             return out
         driver._install = install
         driver._override = lambda a, rt: order.append("override")
-        driver.stop = lambda a: order.append("stop")
+        driver.stop = lambda a: (order.append("stop"), {"ok": True, "status": "stopped"})[1]
         driver.start = lambda a: (order.append("start"), {"ok": True, "status": "running"})[1]
         return driver, order
 
