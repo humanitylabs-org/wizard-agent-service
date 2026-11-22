@@ -644,5 +644,200 @@ class TinfoilKeyFromVolumeTest(unittest.TestCase):
         self.assertIn('"--tinfoil-key-volume"', Path(ar.__file__).read_text())
 
 
+class RuntipiFirstInstallTest(unittest.TestCase):
+    def test_a_fresh_agent_is_installed_before_its_override_is_written(self):
+        # Issue 582: Runtipi answers 404 APP_ERROR_APP_NOT_FOUND for /user-config of an app it has not installed.
+        from unittest.mock import Mock
+        driver=object.__new__(ar.RuntipiDriver)
+        agent={'id':'private','runtime':{'app_id':'agent-private'},'model':{'provider':'tinfoil'}}
+        order=[]
+        driver.agents=Mock(); driver.agents.add_provider_keys=lambda a: None
+        rt=Mock(); driver.cli=Mock(); driver.cli.Config.return_value.runtipi.return_value=rt
+        driver._installed=lambda rt_, a: 'install' in order
+        driver._install=lambda a: (order.append('install'), {'id':'x','urn':'u','status':'running'})[1]
+        def override(a, rt_):
+            assert 'install' in order, 'override written before the app exists'
+            order.append('override')
+        driver._override=override
+        driver.stop=lambda a: (order.append('stop'), {'ok':True,'status':'stopped'})[1]
+        driver.start=lambda a: (order.append('start'), {'ok':True,'status':'running'})[1]
+        result=driver.apply(agent)
+        self.assertEqual(order, ['install','override','stop','start'])
+        self.assertEqual((result['ok'], result['status'], result['install']['status']), (True,'running','running'))
+        order.clear(); order.append('install')   # installed: override, then restart, as before
+        driver.apply(agent)
+        self.assertEqual(order, ['install','override','stop','start'])
+        order.clear()
+        driver._install=lambda a: (order.append('install'), {'id':'x','urn':'u','status':'stopped'})[1]
+        driver.apply(agent)
+        self.assertEqual(order, ['install','override','start'])
+
+    def test_a_restart_that_does_not_stop_fails_instead_of_reporting_the_old_container(self):
+        # Issue 582 tester: Runtipi refused the stop (invalid override), the old container kept running, and the
+        # start right after answered 'running', so apply returned 200 with the override never applied.
+        from unittest.mock import Mock
+        driver=object.__new__(ar.RuntipiDriver)
+        agent={'id':'private','runtime':{'app_id':'agent-private'},'model':{'provider':'tinfoil'}}
+        order=[]
+        driver.agents=Mock(); driver.agents.add_provider_keys=lambda a: None
+        rt=Mock(); driver.cli=Mock(); driver.cli.Config.return_value.runtipi.return_value=rt
+        driver._override=lambda a, rt_: order.append('override')
+        driver.stop=lambda a: (order.append('stop'), {'ok':False,'status':'running'})[1]
+        driver.start=lambda a: (order.append('start'), {'ok':True,'status':'running'})[1]
+        driver._installed=lambda rt_, a: True
+        with self.assertRaises(ar.RuntimeFailure) as caught:
+            driver.apply(agent)
+        self.assertEqual(caught.exception.code, 'stop_running')
+        self.assertEqual(order, ['override','stop'])
+        order.clear()
+        driver._installed=lambda rt_, a: 'install' in order
+        driver._install=lambda a: (order.append('install'), {'id':'x','urn':'u','status':'running'})[1]
+        with self.assertRaises(ar.RuntimeFailure):
+            driver.apply(agent)
+        self.assertEqual(order, ['install','override','stop'])
+
+    def test_a_failed_override_on_a_fresh_install_stops_the_new_app(self):
+        # Codex review: a running fresh install must not keep the package's stock home when the override fails.
+        from unittest.mock import Mock
+        driver=object.__new__(ar.RuntipiDriver)
+        agent={'id':'private','runtime':{'app_id':'agent-private'},'model':{'provider':'tinfoil'}}
+        order=[]
+        driver.agents=Mock(); driver.agents.add_provider_keys=lambda a: None
+        rt=Mock(); driver.cli=Mock(); driver.cli.Config.return_value.runtipi.return_value=rt
+        driver._installed=lambda rt_, a: 'install' in order
+        driver._install=lambda a: (order.append('install'), {'id':'x','urn':'u','status':'running'})[1]
+        def override(a, rt_):
+            order.append('override'); raise ar.RuntimeFailure('search_override_conflict')
+        driver._override=override
+        driver.stop=lambda a: (order.append('stop'), {'ok':True,'status':'stopped'})[1]
+        driver.start=lambda a: (order.append('start'), {'ok':True,'status':'running'})[1]
+        with self.assertRaises(ar.RuntimeFailure) as caught:
+            driver.apply(agent)
+        self.assertEqual(caught.exception.code, 'search_override_conflict')
+        self.assertEqual(order, ['install','override','stop'])
+
+
+class RuntipiOverrideMergeTest(unittest.TestCase):
+    """Issue 582: a fresh agent's override already holds wam's YAML network block; merge into it, never replace it."""
+
+    def fake_wam(self):
+        import types, yaml
+        class Tagged:
+            def __init__(self, tag, value): self.tag, self.value = tag, value
+            def __eq__(self, other): return isinstance(other, Tagged) and (self.tag, self.value) == (other.tag, other.value)
+        class L(yaml.SafeLoader): pass
+        class D(yaml.SafeDumper): pass
+        L.add_multi_constructor("!", lambda l, tag, n: Tagged("!" + tag, l.construct_sequence(n, deep=True)
+                                                           if isinstance(n, yaml.SequenceNode) else l.construct_mapping(n, deep=True)))
+        D.add_representer(Tagged, lambda d, v: (lambda node: (setattr(node, "tag", v.tag), node)[1])(d.represent_data(v.value)))
+        net = types.ModuleType("wam.network")
+        net.load_yaml = lambda t: yaml.load(t, Loader=L)
+        net.dump_yaml = lambda d: yaml.dump(d, Dumper=D, sort_keys=False)
+        pkg = types.ModuleType("wam"); pkg.network = net
+        return {"wam": pkg, "wam.network": net}, Tagged
+
+    def test_wam_yaml_network_block_is_kept_and_the_home_and_search_are_added(self):
+        modules, Tagged = self.fake_wam()
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(sys.modules, modules):
+            home = Path(d) / "private" / "home"; home.mkdir(parents=True)
+            driver = object.__new__(ar.RuntipiDriver)
+            driver.home_mount = "alongside"; driver.proxy_image = ar.DEFAULT_PROXY_IMAGE
+            driver.agents = ar.Agents(Path(d), None)
+            agent = {"id": "private", "privacy": "private", "model": {"provider": "tinfoil"},
+                     "runtime": {"app_id": "agent-private", "kind": "container", "port": 7801}}
+            main, _ = ar.service_names(agent)
+            state = {"dockerCompose": f"services:\n  {main}:\n    networks: !override\n    - wizard-app-agent-private\n"
+                                      f"    volumes:\n    - /stock/home:/opt/data\n", "appEnv": ""}
+            def req(method, path, payload=None):
+                if method == "PUT":
+                    state.update({k: v + "\n" for k, v in payload.items()})
+                return dict(state)
+            rt = mock.Mock(); rt.req.side_effect = req
+            driver._override(agent, rt)
+            doc = modules["wam.network"].load_yaml(state["dockerCompose"])
+            svc = doc["services"][main]
+            self.assertEqual(svc["networks"], Tagged("!override", ["wizard-app-agent-private"]))
+            self.assertEqual(svc["volumes"], [f"{home}:/opt/data"])   # the agent's own home replaces the stock one
+            self.assertEqual(svc["environment"]["HERMES_UID"], str(home.stat().st_uid))
+            self.assertIn(f"{main}-search", doc["services"])
+            self.assertIn("networks: !override", state["dockerCompose"])
+            driver._override(agent, rt)   # idempotent, and the read-back check passes on YAML too
+            self.assertEqual(modules["wam.network"].load_yaml(state["dockerCompose"]), doc)
+
+    def test_a_recipe_that_already_has_the_search_service_does_not_get_it_twice(self):
+        # Issue 582 tester: the override repeated the search service a fresh package's recipe already has, and
+        # Runtipi refused the app ("security_opt items at 0 and 1 are equal").
+        modules, _ = self.fake_wam()
+        with tempfile.TemporaryDirectory() as d, mock.patch.dict(sys.modules, modules):
+            home = Path(d) / "agents" / "private" / "home"; home.mkdir(parents=True)
+            driver = object.__new__(ar.RuntipiDriver)
+            driver.home_mount = "alongside"; driver.proxy_image = ar.DEFAULT_PROXY_IMAGE
+            driver.agents = ar.Agents(Path(d) / "agents", None)
+            driver.cli = mock.Mock(); driver.cli.Config.return_value.runtipi_root = Path(d) / "runtipi"
+            agent = {"id": "private", "privacy": "private", "model": {"provider": "tinfoil"},
+                     "runtime": {"app_id": "agent-private", "kind": "container", "port": 7801}}
+            main, _ = ar.service_names(agent)
+            recipe = Path(d) / "runtipi" / "apps" / ar.STORE / "agent-private" / "docker-compose.yml"
+            recipe.parent.mkdir(parents=True)
+            recipe.write_text(ar.compose_doc(agent, image="stock", proxy_image=ar.DEFAULT_PROXY_IMAGE,
+                                             home_source="/stock", uid=1000, gid=1000, ports=False))
+            state = {"dockerCompose": "", "appEnv": ""}
+            def req(method, path, payload=None):
+                if method == "PUT":
+                    state.update(payload)
+                return dict(state)
+            rt = mock.Mock(); rt.req.side_effect = req
+            driver._override(agent, rt)
+            doc = json.loads(state["dockerCompose"])
+            self.assertNotIn(f"{main}-search", doc["services"])
+            self.assertNotIn("depends_on", doc["services"][main])
+            self.assertEqual(doc["services"][main]["volumes"], [f"{home}:/opt/data"])
+            recipe.unlink()   # a legacy (or unreadable) recipe still gets the service added, as before
+            state.update({"dockerCompose": "", "appEnv": ""})
+            driver._override(agent, rt)
+            self.assertIn(f"{main}-search", json.loads(state["dockerCompose"])["services"])
+
+    def test_a_tinfoil_connection_json_works_as_the_key_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "connection.json"; f.write_text(json.dumps({"key": "tk-json", "authenticated": True}))
+            self.assertEqual(ar.Agents(Path(d), f).tinfoil_key(), "tk-json")
+            f.write_text("{}")
+            self.assertEqual(ar.Agents(Path(d), f).tinfoil_key(), "")
+
+
+class RuntipiFirstInstallRetryTest(unittest.TestCase):
+    def driver(self, outcomes):
+        driver = object.__new__(ar.RuntipiDriver)
+        order = []
+        driver.agents = mock.Mock(); driver.agents.add_provider_keys = lambda a: None
+        driver.cli = mock.Mock(); driver.cli.Config.return_value.runtipi.return_value = mock.Mock()
+        driver._installed = lambda rt, a: False
+        def install(a):
+            order.append("install")
+            out = outcomes.pop(0)
+            if isinstance(out, Exception):
+                raise out
+            return out
+        driver._install = install
+        driver._override = lambda a, rt: order.append("override")
+        driver.stop = lambda a: (order.append("stop"), {"ok": True, "status": "stopped"})[1]
+        driver.start = lambda a: (order.append("start"), {"ok": True, "status": "running"})[1]
+        return driver, order
+
+    def test_a_first_install_that_ends_missing_is_tried_once_more(self):
+        agent = {"id": "private", "runtime": {"app_id": "agent-private"}}
+        driver, order = self.driver([ar.RuntimeFailure("install_missing"), {"id": "x", "urn": "u", "status": "running"}])
+        self.assertTrue(driver.apply(agent)["ok"])
+        self.assertEqual(order, ["install", "install", "override", "stop", "start"])
+        driver, order = self.driver([ar.RuntimeFailure("install_missing"), ar.RuntimeFailure("install_missing")])
+        with self.assertRaises(ar.RuntimeFailure):
+            driver.apply(agent)
+        self.assertEqual(order, ["install", "install"])
+        driver, order = self.driver([ar.RuntimeFailure("docker_failed")])
+        with self.assertRaises(ar.RuntimeFailure):
+            driver.apply(agent)
+        self.assertEqual(order, ["install"])
+
+
 if __name__ == "__main__":
     unittest.main()
