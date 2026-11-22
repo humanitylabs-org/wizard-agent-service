@@ -7,7 +7,8 @@
 // The Service never touches Docker: a runtime driver (agent-runtime helper on the host, see ops/agent-runtime)
 // installs, starts and stops the container.
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
+import { request as httpRequest } from 'node:http'
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto'
 import { readSettings } from './wizard-os-settings.mjs'
 import { fetchAgentIngress } from './agent-ingress.mjs'
@@ -1527,9 +1528,46 @@ function runtimeError(error) {
   return /^[a-z0-9_.:-]{1,80}$/iu.test(text) ? text : 'runtime_failed'
 }
 
+/**
+ * A fetch over a Unix socket, enough for the runtime client (issue 582): a standard install's Service runs in
+ * Runtipi's network, so the App Manager mounts the helper's socket into it instead of opening a TCP port. Answers
+ * expose ok, status and json(); a body may be a string or a Node stream (large attachments are streamed).
+ */
+export function unixSocketFetch(socketPath) {
+  return (target, init = {}) => new Promise((resolveFetch, rejectFetch) => {
+    const url = new URL(String(target))
+    const headers = { ...(init.headers || {}), Host: 'localhost' }
+    if (typeof init.body === 'string' && !Object.keys(headers).some((k) => k.toLowerCase() === 'content-length')) {
+      headers['Content-Length'] = String(Buffer.byteLength(init.body))
+    }
+    const request = httpRequest({ socketPath, method: init.method || 'GET', path: `${url.pathname}${url.search}`, headers, signal: init.signal }, (response) => {
+      const chunks = []
+      response.on('data', (chunk) => chunks.push(chunk))
+      response.on('error', rejectFetch)
+      response.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8')
+        const status = response.statusCode || 0
+        resolveFetch({ ok: status >= 200 && status < 300, status, json: async () => JSON.parse(text), text: async () => text })
+      })
+    })
+    request.on('error', rejectFetch)
+    const body = init.body
+    if (body && typeof body.pipe === 'function') {
+      body.on('error', (error) => request.destroy(error))
+      body.pipe(request)
+    } else request.end(body ?? undefined)
+  })
+}
+
 /** HTTP client for the host agent-runtime helper (ops/agent-runtime). Bounded symbolic errors only. */
 export function createRuntimeClient({ url, token, fetchImpl = fetch, timeoutMs = 600_000 }) {
-  const base = new URL(String(url))
+  // unix:<absolute socket path> (issue 582): the helper's --socket listener, mounted into the Service's container.
+  const socketPath = /^unix:(\/[^\0]+)$/u.exec(String(url))?.[1]
+  if (socketPath) {
+    if (!isAbsolute(socketPath) || socketPath.split('/').includes('..')) throw new Error('agent runtime socket must be an absolute path')
+    fetchImpl = unixSocketFetch(socketPath)
+  }
+  const base = new URL(socketPath ? 'http://localhost/' : String(url))
   if (base.protocol !== 'http:' || !['127.0.0.1', 'localhost', '::1', '[::1]'].includes(base.hostname) && !/^[a-z][a-z0-9-]*$/u.test(base.hostname)) {
     throw new Error('agent runtime must be a loopback or box-network http address')
   }

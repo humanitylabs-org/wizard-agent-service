@@ -255,14 +255,14 @@ describe('private first (issue 545)', () => {
     expect(list.find((a) => a.id === 'hermes')).toMatchObject({ hidden: true, is_default: false })
   })
 
-  it('no agent runtime (issue 582): answers off with the reason, refuses the hand-off and says so in the log', async () => {
+  it('no agent runtime (issue 582): stays on with the reason, refuses the hand-off and says so in the log', async () => {
     const lines: string[] = []
     const write = process.stdout.write.bind(process.stdout)
     process.stdout.write = ((chunk: any, ...rest: any[]) => { lines.push(String(chunk)); return write(chunk, ...rest) }) as any
     try {
       const b = await box({ runtime: false })
-      expect((await b.internal('state')).json).toMatchObject({ schema: 'wizard.private-first/1', on: false, reason: 'runtime_unavailable', private_agent: null })
-      expect((await b.call('GET', '/wizard/v1/private-first')).json).toMatchObject({ on: false, reason: 'runtime_unavailable' })
+      expect((await b.internal('state')).json).toMatchObject({ schema: 'wizard.private-first/1', on: true, reason: 'runtime_unavailable', private_agent: null })
+      expect((await b.call('GET', '/wizard/v1/private-first')).json).toMatchObject({ on: true, reason: 'runtime_unavailable' })
       const refused = await b.internal('private-agent', TINFOIL)
       expect(refused.status).toBe(503)
       expect(refused.json).toEqual({ ok: false, error: 'runtime_unavailable' })
@@ -277,11 +277,11 @@ describe('private first (issue 545)', () => {
     } finally { process.stdout.write = write as any }
   })
 
-  it('a runtime added later: Tinfoil, which used the main agent meanwhile, moves over as the first run (issue 582)', async () => {
+  it('a runtime added later: the saved Tinfoil key moves the box over as the first run (issue 582)', async () => {
     const before = await box({ runtime: false })
     await before.internal('state')
     for (let i = 0; i < 50 && !existsSync(join(before.dir, 'agents', '.private-first.json')); i++) await new Promise((r) => setTimeout(r, 10))
-    // Tinfoil fell back to the main-agent registration (make_default on a fresh agent).
+    // An older Tinfoil that could not read private first set the main model in between: still the first run.
     const b = await box({ reuse: before.dir, mainModel: 'kimi-k3-1-pro', mainProvider: 'custom:wizard-tinfoil' })
     expect((await b.internal('state')).json).toMatchObject({ on: true, private_agent: null })
     expect((await b.internal('state')).json.reason).toBeUndefined()
@@ -292,18 +292,18 @@ describe('private first (issue 545)', () => {
     expect((await b.internal('state')).json).toMatchObject({ on: true, private_agent: 'private', standard_on: false })
   })
 
-  it('a runtime added later after Claude was connected meanwhile: the standard agent stays the box\'s agent (issue 582)', async () => {
+  it('a runtime added later never loses private first, whatever model the main agent got meanwhile (issue 582)', async () => {
     const before = await box({ runtime: false })
     await before.internal('state')
     for (let i = 0; i < 50 && !existsSync(join(before.dir, 'agents', '.private-first.json')); i++) await new Promise((r) => setTimeout(r, 10))
-    // The Claude image saw private first off and set the main model itself, never calling standard-agent.
+    // Something set a main model on another provider without going through private first: the box was decided
+    // fresh while it waited for its runtime, and it stays the first run.
     const b = await box({ reuse: before.dir, mainModel: 'claude-opus-5-5', mainProvider: 'anthropic' })
-    expect((await b.internal('private-agent', TINFOIL)).json).toMatchObject({ ok: true, agent: 'private' })
+    expect((await b.internal('private-agent', TINFOIL)).json).toMatchObject({ ok: true, agent: 'private', created: true })
     const list = await b.agents()
-    expect(list.find((a) => a.id === 'hermes')).toMatchObject({ is_default: true })
-    expect(list.find((a) => a.id === 'hermes').hidden).toBeFalsy()
-    expect(list.find((a) => a.id === 'private')).toMatchObject({ is_default: false, permissions: { wizard_apps: [] } })
-    expect(JSON.parse(readFileSync(join(b.dir, 'agents', '.private-first.json'), 'utf8')).fresh).toBe(false)
+    expect(list.find((a) => a.id === 'private')).toMatchObject({ is_default: true })
+    expect(list.find((a) => a.id === 'hermes')).toMatchObject({ hidden: true, is_default: false })
+    expect(JSON.parse(readFileSync(join(b.dir, 'agents', '.private-first.json'), 'utf8')).fresh).toBe(true)
   })
 
   it('an install that already chats on Tinfoil through the main Hermes is not migrated', async () => {

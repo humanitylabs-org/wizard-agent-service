@@ -44,6 +44,9 @@ import threading
 import time
 from offline_index import snapshot as index_snapshot
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import errno
+import socket
+import socketserver
 from pathlib import Path
 import hermes_lock
 from incognito_runtime import IncognitoManager
@@ -1595,11 +1598,70 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
     return Handler
 
 
+class UnixHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
+    """The same HTTP API on a Unix socket (issue 582): a standard install's Agent Service runs in Runtipi's network and
+    can't reach the host's loopback, so the App Manager mounts this socket's folder into it instead of opening a TCP
+    port. The bearer token is still required; the socket is 0666 so the Service's container user can connect."""
+    daemon_threads = True
+    allow_reuse_address = False
+
+    def __init__(self, path: Path, handler):
+        path = Path(path)
+        try:
+            if stat.S_ISSOCK(path.lstat().st_mode):
+                if socket_answers(path):
+                    # another helper still listens here (an overlapping restart): never take its socket away
+                    raise OSError(errno.EADDRINUSE, f"a runtime helper already listens on {path}")
+                path.unlink()   # a stale socket from an earlier run; never remove anything else
+        except FileNotFoundError:
+            pass
+        self.path = path
+        super().__init__(str(path), handler)
+        os.chmod(path, 0o666)
+        st = path.lstat()
+        self.ident = (st.st_dev, st.st_ino)
+
+    def get_request(self):
+        request, _ = super().get_request()
+        return request, ("unix", 0)   # BaseHTTPRequestHandler expects a (host, port) pair
+
+    def server_close(self):
+        super().server_close()
+        try:
+            st = self.path.lstat()
+            # only our own socket: a newer helper may have bound this path since
+            if stat.S_ISSOCK(st.st_mode) and (st.st_dev, st.st_ino) == self.ident:
+                self.path.unlink()
+        except OSError:
+            pass
+
+
+def socket_answers(path: Path) -> bool:
+    """True when something accepts connections on the Unix socket at path (a live listener, not a stale file)."""
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(1)
+    try:
+        probe.connect(str(path))
+        return True
+    except OSError:
+        return False
+    finally:
+        probe.close()
+
+
+def serve(port: int, socket_path: Path | None, handler):
+    """The listener: a Unix socket when given (and then no TCP port at all), else 127.0.0.1:<port>."""
+    if socket_path:
+        return UnixHTTPServer(socket_path, handler), f"unix:{socket_path}"
+    return ThreadingHTTPServer(("127.0.0.1", port), handler), f"127.0.0.1:{port}"
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--agents-dir", required=True, type=Path)
     ap.add_argument("--token-file", type=Path)
     ap.add_argument("--port", type=int, default=7795)
+    ap.add_argument("--socket", type=Path, help="listen on this Unix socket instead of 127.0.0.1:<port> (issue 582)")
     ap.add_argument("--incognito-owner", help="scope orphan cleanup to this helper instance label")
     ap.add_argument("--driver", choices=["runtipi", "compose"], default="runtipi")
     ap.add_argument("--wam", type=Path, help="wizard-app-manager checkout (runtipi driver)")
@@ -1636,8 +1698,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit(0)
     previous = signal.signal(signal.SIGTERM, terminate)
     try:
-        server = ThreadingHTTPServer(("127.0.0.1", args.port), handler)
-        sys.stderr.write(f"[agent-runtime] {args.driver} driver on 127.0.0.1:{args.port}, agents in {agents.root}\n")
+        server, where = serve(args.port, args.socket, handler)
+        sys.stderr.write(f"[agent-runtime] {args.driver} driver on {where}, agents in {agents.root}\n")
         server.serve_forever()
     finally:
         incognito.close()
