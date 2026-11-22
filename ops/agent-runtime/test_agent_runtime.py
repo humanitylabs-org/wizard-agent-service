@@ -584,5 +584,65 @@ def _load_private_search_tests():
 PrivateSearchTests = _load_private_search_tests()
 
 
+class TinfoilKeyFromVolumeTest(unittest.TestCase):
+    """Issue 582: a standard install's helper reads the key the owner saved in the Tinfoil app, from its volume."""
+
+    def tar_of(self, data: bytes) -> bytes:
+        import io, tarfile
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tar:
+            info = tarfile.TarInfo("connection.json"); info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+        return buf.getvalue()
+
+    def run_with(self, connection: bytes | None, mounts=None):
+        mounts = mounts if mounts is not None else [{"Name": "wizard-tinfoil-private-data", "Destination": "/data"}]
+        calls = []
+        def fake_docker(args, **kw):
+            calls.append(args)
+            if args[0] == "ps":
+                return type("R", (), {"stdout": "abc123\n", "returncode": 0})()
+            return type("R", (), {"stdout": json.dumps(mounts), "returncode": 0})()
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            if connection is None:
+                return type("R", (), {"stdout": b"", "returncode": 1})()
+            return type("R", (), {"stdout": self.tar_of(connection), "returncode": 0})()
+        with mock.patch.object(ar, "docker", fake_docker), mock.patch.object(ar.subprocess, "run", fake_run), \
+                mock.patch.object(ar, "docker_cmd", lambda a: ["docker", *a]):
+            return ar.Agents(Path("/nonexistent"), None, "wizard-tinfoil-private-data").tinfoil_key(), calls
+
+    def test_reads_the_saved_key_from_the_tinfoil_volume(self):
+        key, calls = self.run_with(json.dumps({"key": "tk-synthetic", "authenticated": True}).encode())
+        self.assertEqual(key, "tk-synthetic")
+        self.assertIn(["docker", "cp", "abc123:/data/private/connection.json", "-"], calls)
+        self.assertIn(["ps", "-a", "--filter", "volume=wizard-tinfoil-private-data", "--format", "{{.ID}}"], calls)
+
+    def test_no_saved_key_or_no_container_gives_no_key(self):
+        self.assertEqual(self.run_with(None)[0], "")
+        self.assertEqual(self.run_with(b"{}")[0], "")
+        self.assertEqual(self.run_with(b"not json")[0], "")
+        self.assertEqual(self.run_with(b'{"key":"x"}', mounts=[{"Name": "other", "Destination": "/data"}])[0], "")
+
+    def test_a_key_file_still_wins_and_no_source_means_provider_not_configured(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "k.env"; f.write_text("TINFOIL_API_KEY=from-file\n")
+            with mock.patch.object(ar, "tinfoil_key_from_volume", lambda v: "from-volume"):
+                self.assertEqual(ar.Agents(Path(d), f, "vol").tinfoil_key(), "from-file")
+                self.assertEqual(ar.Agents(Path(d), None, "vol").tinfoil_key(), "from-volume")
+            self.assertEqual(ar.Agents(Path(d), None).tinfoil_key(), "")
+            home = Path(d) / "a" / "home"; home.mkdir(parents=True); (home / ".env").write_text("A=1\n")
+            agent = {"id": "a", "model": {"provider": "tinfoil"}}
+            with mock.patch.object(ar, "tinfoil_key_from_volume", lambda v: "tk-vol"):
+                ar.Agents(Path(d), None, "vol").add_provider_keys(agent)
+            self.assertIn("TINFOIL_API_KEY=tk-vol", (home / ".env").read_text())
+            with self.assertRaises(ar.RuntimeFailure) as raised:
+                ar.Agents(Path(d), None).add_provider_keys(agent)
+            self.assertEqual(raised.exception.code, "provider_not_configured")
+
+    def test_the_flag_is_accepted(self):
+        self.assertIn('"--tinfoil-key-volume"', Path(ar.__file__).read_text())
+
+
 if __name__ == "__main__":
     unittest.main()
