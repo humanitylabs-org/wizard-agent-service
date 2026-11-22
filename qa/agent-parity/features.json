@@ -1321,6 +1321,22 @@
       "policy_exemptions": []
     },
     {
+      "id": "media-folder-rule",
+      "description": "A file in each folder the kind's one file-sending rule names becomes a file card (issue 580)",
+      "layer": "server",
+      "how_to_test": "Write files where the run instructions say files may be sent (routed kinds: the home root, an own nested folder and cache/images, through /opt/data for container and restricted; main: cache/images and cache/audio), push assistant rows with MEDIA lines and a row with a bare path, open the thread and assert every MEDIA file is a file card (never unavailable) and the bare path sends nothing, on every runtime.",
+      "source_refs": [
+        "server/chat-presentation.mjs",
+        "server/agents-http.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/routed-media-rule.test.ts"
+      ],
+      "fixture": "media-folder-rule",
+      "policy_exemptions": []
+    },
+    {
       "id": "working-context",
       "description": "The wizard-work-progress plugin adds the Working milestone contract to Wizard turns without it showing in chat history",
       "layer": "server",
