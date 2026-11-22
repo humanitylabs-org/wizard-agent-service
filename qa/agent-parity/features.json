@@ -1048,13 +1048,15 @@
       "id": "media-contract",
       "description": "Inspect run instructions for the shared MEDIA delivery syntax and status-line contract. This alone does not prove media rendering",
       "layer": "server",
-      "how_to_test": "Inspect run instructions for the shared MEDIA delivery syntax, the non-image file-card contract (types, 256 MB, cache/images placement) and the status-line contract. This alone does not prove media rendering.",
+      "how_to_test": "Inspect run instructions for the shared MEDIA delivery syntax, the non-image file-card contract (types, 256 MB), exactly one folder rule per kind (main: cache/images placement; routed kinds: anywhere in their own home, a bare path is not sent, issue 580) and the status-line contract. This alone does not prove media rendering.",
       "source_refs": [
-        "server/chat-presentation.mjs"
+        "server/chat-presentation.mjs",
+        "server/agents-http.mjs"
       ],
       "reference_tests": [
         "tests/markdown-hint.test.ts",
-        "tests/owner-file-handoff.test.ts"
+        "tests/owner-file-handoff.test.ts",
+        "tests/routed-media-rule.test.ts"
       ],
       "fixture": "media-contract",
       "policy_exemptions": []
