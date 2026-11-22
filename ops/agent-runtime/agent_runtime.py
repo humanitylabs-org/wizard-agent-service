@@ -933,7 +933,15 @@ class RuntipiDriver:
             # answers 404 APP_ERROR_APP_NOT_FOUND (issue 582, a fresh box's first private agent). Install first, then
             # write the override and restart once so the agent runs with it.
             try:
-                result = self._install(agent)
+                try:
+                    result = self._install(agent)
+                except RuntimeFailure as failure:
+                    # A fresh box's first agent install can end with Runtipi dropping the app ("network ... not
+                    # found" while wam's app network is still being made, issue 582); the second attempt installs.
+                    if failure.code != "install_missing" or self._installed(rt, agent):
+                        raise
+                    sys.stderr.write("[agent-runtime] first install of the agent app ended missing; trying once more\n")
+                    result = self._install(agent)
             except SystemExit as error:
                 sys.stderr.write(f"[agent-runtime] wam install refused: {str(error)[:300]}\n")
                 raise RuntimeFailure("install_refused") from None

@@ -728,5 +728,39 @@ class RuntipiOverrideMergeTest(unittest.TestCase):
             self.assertEqual(ar.Agents(Path(d), f).tinfoil_key(), "")
 
 
+class RuntipiFirstInstallRetryTest(unittest.TestCase):
+    def driver(self, outcomes):
+        driver = object.__new__(ar.RuntipiDriver)
+        order = []
+        driver.agents = mock.Mock(); driver.agents.add_provider_keys = lambda a: None
+        driver.cli = mock.Mock(); driver.cli.Config.return_value.runtipi.return_value = mock.Mock()
+        driver._installed = lambda rt, a: False
+        def install(a):
+            order.append("install")
+            out = outcomes.pop(0)
+            if isinstance(out, Exception):
+                raise out
+            return out
+        driver._install = install
+        driver._override = lambda a, rt: order.append("override")
+        driver.stop = lambda a: order.append("stop")
+        driver.start = lambda a: (order.append("start"), {"ok": True, "status": "running"})[1]
+        return driver, order
+
+    def test_a_first_install_that_ends_missing_is_tried_once_more(self):
+        agent = {"id": "private", "runtime": {"app_id": "agent-private"}}
+        driver, order = self.driver([ar.RuntimeFailure("install_missing"), {"id": "x", "urn": "u", "status": "running"}])
+        self.assertTrue(driver.apply(agent)["ok"])
+        self.assertEqual(order, ["install", "install", "override", "stop", "start"])
+        driver, order = self.driver([ar.RuntimeFailure("install_missing"), ar.RuntimeFailure("install_missing")])
+        with self.assertRaises(ar.RuntimeFailure):
+            driver.apply(agent)
+        self.assertEqual(order, ["install", "install"])
+        driver, order = self.driver([ar.RuntimeFailure("docker_failed")])
+        with self.assertRaises(ar.RuntimeFailure):
+            driver.apply(agent)
+        self.assertEqual(order, ["install"])
+
+
 if __name__ == "__main__":
     unittest.main()
