@@ -21,7 +21,7 @@ const APPS = [
   { id: 'meditate', name: 'Meditate', status: 'running', view: { url: '/meditate/' } },
 ]
 
-async function box({ on = true, mainModel = '', mainProvider = 'openai-codex', look, heavy = true, gateway = false, boundary = false }: { on?: boolean | null, mainModel?: string, mainProvider?: string, look?: boolean, heavy?: boolean, gateway?: boolean, boundary?: boolean } = {}) {
+async function box({ on = true, mainModel = '', mainProvider = 'openai-codex', look, heavy = true, gateway = false, boundary = false, runtime = true, reuse = '' }: { on?: boolean | null, mainModel?: string, mainProvider?: string, look?: boolean, heavy?: boolean, gateway?: boolean, boundary?: boolean, runtime?: boolean, reuse?: string } = {}) {
   const reached: { method: string, path: string, body: string }[] = []
   const state = { model: mainModel }
   const main = createServer((req, res) => {
@@ -45,7 +45,7 @@ async function box({ on = true, mainModel = '', mainProvider = 'openai-codex', l
   })
   servers.push(main)
   const mainAddress = await listen(main) as import('node:net').AddressInfo
-  const dir = mkdtempSync(join(tmpdir(), 'private-first-'))
+  const dir = reuse || mkdtempSync(join(tmpdir(), 'private-first-'))
   mkdirSync(join(dir, 'agents'), { recursive: true })
   writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps: APPS }))
   if (look !== undefined) {
@@ -58,7 +58,7 @@ async function box({ on = true, mainModel = '', mainProvider = 'openai-codex', l
     ...(boundary ? { browserBoundary: { enabled: true, token: 'a'.repeat(64) } } : {}),
     ...(gateway ? { agentBridge: true, mcpToken: GATEWAY_KEY, bridgeWriteSkills: false, bridgeLog: () => {} } : { agentBridge: false }),
     appsJsonPath: join(dir, 'apps.json'), settingsPath: join(dir, 'settings.json'), wizardOsHome: dir, ...(heavy ? { heavyToken: TOKEN } : {}),
-    agentRuntime: { apply: async (id: string) => { applied.push(id); return { ok: true } }, start: async () => ({ ok: true }), stop: async () => ({ ok: true }) },
+    ...(runtime ? { agentRuntime: { apply: async (id: string) => { applied.push(id); return { ok: true } }, start: async () => ({ ok: true }), stop: async () => ({ ok: true }) } } : {}),
     followThrough: false, agentBasePort: 47890, runQueue: false,
     pagesRoot: join(dir, 'Pages'), pagesGitDir: join(dir, 'pages-history.git'), pagesWatch: false, privateFirstTtlMs: 0,
     ...(on === null ? {} : { privateFirst: on }),
@@ -253,6 +253,57 @@ describe('private first (issue 545)', () => {
     const list = await b.agents()
     expect(list.find((a) => a.id === 'private')).toMatchObject({ is_default: true })
     expect(list.find((a) => a.id === 'hermes')).toMatchObject({ hidden: true, is_default: false })
+  })
+
+  it('no agent runtime (issue 582): answers off with the reason, refuses the hand-off and says so in the log', async () => {
+    const lines: string[] = []
+    const write = process.stdout.write.bind(process.stdout)
+    process.stdout.write = ((chunk: any, ...rest: any[]) => { lines.push(String(chunk)); return write(chunk, ...rest) }) as any
+    try {
+      const b = await box({ runtime: false })
+      expect((await b.internal('state')).json).toMatchObject({ schema: 'wizard.private-first/1', on: false, reason: 'runtime_unavailable', private_agent: null })
+      expect((await b.call('GET', '/wizard/v1/private-first')).json).toMatchObject({ on: false, reason: 'runtime_unavailable' })
+      const refused = await b.internal('private-agent', TINFOIL)
+      expect(refused.status).toBe(503)
+      expect(refused.json).toEqual({ ok: false, error: 'runtime_unavailable' })
+      expect((await b.agents()).map((a) => a.id)).toEqual(['hermes'])
+      expect((await b.agents()).find((a) => a.id === 'hermes').hidden).toBeFalsy()
+      expect(existsSync(join(b.dir, 'agents', 'private'))).toBe(false)
+      expect(lines.some((l) => l.startsWith('[private-first] private agent refused: switch on, but this box has no agent runtime'))).toBe(true)
+      expect(lines.some((l) => l.startsWith('[private-first] state: switch on, but this box has no agent runtime'))).toBe(true)
+      // Still decided as a first run, so the box moves over once a runtime is there.
+      for (let i = 0; i < 50 && !existsSync(join(b.dir, 'agents', '.private-first.json')); i++) await new Promise((r) => setTimeout(r, 10))
+      expect(JSON.parse(readFileSync(join(b.dir, 'agents', '.private-first.json'), 'utf8')).fresh).toBe(true)
+    } finally { process.stdout.write = write as any }
+  })
+
+  it('a runtime added later: Tinfoil, which used the main agent meanwhile, moves over as the first run (issue 582)', async () => {
+    const before = await box({ runtime: false })
+    await before.internal('state')
+    for (let i = 0; i < 50 && !existsSync(join(before.dir, 'agents', '.private-first.json')); i++) await new Promise((r) => setTimeout(r, 10))
+    // Tinfoil fell back to the main-agent registration (make_default on a fresh agent).
+    const b = await box({ reuse: before.dir, mainModel: 'kimi-k3-1-pro', mainProvider: 'custom:wizard-tinfoil' })
+    expect((await b.internal('state')).json).toMatchObject({ on: true, private_agent: null })
+    expect((await b.internal('state')).json.reason).toBeUndefined()
+    expect((await b.internal('private-agent', TINFOIL)).json).toMatchObject({ ok: true, agent: 'private', created: true })
+    const list = await b.agents()
+    expect(list.find((a) => a.id === 'private')).toMatchObject({ is_default: true })
+    expect(list.find((a) => a.id === 'hermes')).toMatchObject({ hidden: true })
+    expect((await b.internal('state')).json).toMatchObject({ on: true, private_agent: 'private', standard_on: false })
+  })
+
+  it('a runtime added later after Claude was connected meanwhile: the standard agent stays the box\'s agent (issue 582)', async () => {
+    const before = await box({ runtime: false })
+    await before.internal('state')
+    for (let i = 0; i < 50 && !existsSync(join(before.dir, 'agents', '.private-first.json')); i++) await new Promise((r) => setTimeout(r, 10))
+    // The Claude image saw private first off and set the main model itself, never calling standard-agent.
+    const b = await box({ reuse: before.dir, mainModel: 'claude-opus-5-5', mainProvider: 'anthropic' })
+    expect((await b.internal('private-agent', TINFOIL)).json).toMatchObject({ ok: true, agent: 'private' })
+    const list = await b.agents()
+    expect(list.find((a) => a.id === 'hermes')).toMatchObject({ is_default: true })
+    expect(list.find((a) => a.id === 'hermes').hidden).toBeFalsy()
+    expect(list.find((a) => a.id === 'private')).toMatchObject({ is_default: false, permissions: { wizard_apps: [] } })
+    expect(JSON.parse(readFileSync(join(b.dir, 'agents', '.private-first.json'), 'utf8')).fresh).toBe(false)
   })
 
   it('an install that already chats on Tinfoil through the main Hermes is not migrated', async () => {

@@ -3170,6 +3170,8 @@ function buildWizardServer(options, lifetime) {
     on: privateFirstOn, registry: agents, agentsDir,
     mainOptions: () => hermesJson('/api/model/options'),
     bindings: () => appBindings, attach: () => mainProviderAttachStore,
+    // Issue 582: with no runtime helper configured the private agent can't be made, so private first answers off.
+    runtime: () => Boolean(agentRuntime),
     log: line => process.stdout.write(`[private-first] ${line}\n`),
     // The owner's default agent (settings.json agents.default_agent_id), written the way PUT /wizard/v1/settings does.
     setDefaultAgent: (id) => {
