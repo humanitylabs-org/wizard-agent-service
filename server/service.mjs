@@ -2422,11 +2422,17 @@ const INLINE_PATH_TAIL = `[^\\s"'<>\\x60\\]\\)},;]*`
 const INLINE_PATH_END = `(?=$|[\\s"'<>\\x60\\]\\)},;])`
 const INLINE_PATH_TRAILING = /[.:!?]+$/u
 const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-const inlinePathPattern = (named) => new RegExp(`(\\x60?)((?:${named.map(escapeRegExp).join('|')})(?:/${INLINE_PATH_TAIL})?)${INLINE_PATH_END}(\\x60?)`, 'g')
+// A path alone in backticks may hold spaces (`/opt/data/work/my file.csv`); a bare one ends at whitespace.
+const inlinePathPattern = (named) => {
+  const roots = `(?:${named.map(escapeRegExp).join('|')})`
+  return new RegExp(`\\x60(${roots}(?:/[^\\x60\\n]*)?)\\x60|(${roots}(?:/${INLINE_PATH_TAIL})?)${INLINE_PATH_END}`, 'g')
+}
+const bareInlinePathPattern = (named) => new RegExp(`(?:${named.map(escapeRegExp).join('|')})(?:/${INLINE_PATH_TAIL})?${INLINE_PATH_END}`, 'g')
 const inlineFileName = (path) => basename(String(path).replace(/\/+$/u, '')).replace(/[\\/\p{Cc}\[\]]/gu, '_').trim().slice(-120) || 'file'
 export const notSentFileLine = (path) => `[file: ${inlineFileName(path)} not sent: ask the agent to send it]`
 const insideRoot = (path, root) => path === root || path.startsWith(`${root}/`)
 const inlineNamedRoots = ({ home, containerRoot = '' }) => [...new Set([containerRoot, home].filter(value => typeof value === 'string' && value.length > 1))].sort((a, b) => b.length - a.length)
+const withoutFences = (text) => text.replace(/```[^\n]*\n[\s\S]*?```/g, '')
 
 // Visit the strings projectAgentMedia projects: assistant content/text and run output/response fields.
 function visitAssistantText(payload, project) {
@@ -2445,16 +2451,21 @@ function visitAssistantText(payload, project) {
 }
 
 /** Container paths (/opt/data/...) an assistant wrote as plain text, for the restricted-home mirror. */
-export function routedInlinePaths(result, containerRoot = '/opt/data', { skip = [], limit = 20 } = {}) {
+export function routedInlinePaths(result, containerRoot = '/opt/data', { skip = [], limit = 200 } = {}) {
   if (!containerRoot) return []
   const found = new Set()
   let payload
   try { payload = JSON.parse(Buffer.isBuffer(result) ? result.toString('utf8') : String(result)) } catch { return [] }
-  const pattern = inlinePathPattern([containerRoot])
+  const add = (written) => {
+    const path = resolve(written.replace(INLINE_PATH_TRAILING, ''))
+    if (found.size < limit && path.startsWith(`${containerRoot}/`) && !skip.some(root => insideRoot(path, root))) found.add(path)
+  }
   visitAssistantText(payload, (text) => {
-    for (const match of text.replace(/```[^\n]*\n[\s\S]*?```/g, '').matchAll(pattern)) {
-      const path = resolve(match[2].replace(INLINE_PATH_TRAILING, ''))
-      if (found.size < limit && path.startsWith(`${containerRoot}/`) && !skip.some(root => insideRoot(path, root))) found.add(path)
+    for (const match of withoutFences(text).matchAll(inlinePathPattern([containerRoot]))) {
+      if (match[2]) { add(match[2]); continue }
+      add(match[1])
+      // A backticked span with spaces may also be a command naming a path; its bare paths count too.
+      if (/\s/u.test(match[1])) for (const bare of match[1].matchAll(bareInlinePathPattern([containerRoot]))) add(bare[0])
     }
     return text
   })
@@ -2484,20 +2495,24 @@ export function projectRoutedInlinePaths(result, { home, artifactDir, containerR
     const shown = new Set([...masked.matchAll(/"id":"([0-9a-f]{32})"/g)].map(match => match[1]))
     const lines = masked.split('\n').map((line) => {
       const cards = []
-      const text = line.replace(pattern, (match, open, raw, close) => {
-        const trailing = raw.match(INLINE_PATH_TRAILING)?.[0] ?? ''
-        const written = trailing ? raw.slice(0, -trailing.length) : raw
+      const show = (written, wrapped, { quiet = false } = {}) => {
+        const trailing = wrapped ? '' : written.match(INLINE_PATH_TRAILING)?.[0] ?? ''
+        const path = trailing ? written.slice(0, -trailing.length) : written
         // The owner-readable inbox and notes folders keep their own labels (agentReadablePaths).
-        if (skip.some(root => insideRoot(written, root))) return match
-        // A path written alone in backticks loses them along with the path; any other backtick stays.
-        const wrapped = Boolean(open && close)
-        const lead = wrapped ? '' : open
-        const outside = `${trailing}${wrapped ? '' : close}`
-        const path = resolve(written)
-        const artifact = named.some(root => insideRoot(path, root) && path !== root) ? lookup(path) : null
-        if (!artifact) return `${lead}${notSentFileLine(written)}${outside}`
+        if (skip.some(root => insideRoot(path, root))) return null
+        const local = resolve(path)
+        const artifact = named.some(root => insideRoot(local, root) && local !== root) ? lookup(local) : null
+        if (!artifact) return quiet ? null : `${notSentFileLine(path)}${trailing}`
         if (!shown.has(artifact.id)) { shown.add(artifact.id); cards.push(artifact) }
-        return `${lead}${wrapped ? `\`${artifact.name}\`` : artifact.name}${outside}`
+        return `${wrapped ? `\`${artifact.name}\`` : artifact.name}${trailing}`
+      }
+      const bare = bareInlinePathPattern(named)
+      const text = line.replace(pattern, (match, wrapped, plain) => {
+        if (plain) return show(plain, false) ?? match
+        // A backticked span with spaces is a file name with spaces only when that file exists; otherwise it may be
+        // a command or a sentence, so each bare path inside it is shown on its own and the backticks stay.
+        if (!/\s/u.test(wrapped)) return show(wrapped, true) ?? match
+        return show(wrapped, true, { quiet: true }) ?? `\`${wrapped.replace(bare, path => show(path, false) ?? path)}\``
       })
       return text + cards.map(item => `\n\n<helm_attachments>${JSON.stringify({ items: [item], inline: item.kind === 'image' })}</helm_attachments>\n\n`).join('')
     })
@@ -3299,7 +3314,12 @@ function buildWizardServer(options, lifetime) {
   const mirrorRoutedAgentMedia = async (result, agent, media) => {
     if (!media?.mirror || !agentRuntime?.fetch || agent.permissions?.files === 'none') return
     try { accessSync(media.home, fsConstants.R_OK | fsConstants.X_OK); return } catch { /* sandboxed */ }
-    const named = new Set([...routedMediaPaths(result, media.containerRoot), ...routedInlinePaths(result, media.containerRoot, { skip: routedReadableRoots(agent) })])
+    // Paths written as text (issue 581) come newest first, and at most 20 are fetched per read, so a long history of
+    // old, missing or already-copied paths never crowds out the latest reply's file.
+    const inline = routedInlinePaths(result, media.containerRoot, { skip: routedReadableRoots(agent) }).reverse()
+    const named = new Set([...routedMediaPaths(result, media.containerRoot), ...inline])
+    const inlineOnly = new Set(inline.filter(path => !routedMediaPaths(result, media.containerRoot).includes(path)))
+    let inlineFetches = 0
     for (const path of named) {
       const relative = path.slice(media.containerRoot.length + 1)
       const target = resolve(media.mirror, relative)
@@ -3308,6 +3328,7 @@ function buildWizardServer(options, lifetime) {
       try { if (Date.now() - statSync(target).mtimeMs < ROUTED_MIRROR_FRESH_MS) continue } catch { /* not mirrored yet */ }
       const key = `${agent.id}\0${path}`
       if (Date.now() - (mirrorMisses.get(key) ?? 0) < 60_000) continue
+      if (inlineOnly.has(path) && ++inlineFetches > 20) continue
       try {
         const got = await agentRuntime.fetch(agent.id, { path })
         const bytes = Buffer.from(String(got?.data_base64 ?? ''), 'base64')

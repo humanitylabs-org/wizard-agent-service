@@ -65,6 +65,17 @@ for (const kind of ['container', 'profile'] as const) {
       expect(items(content)).toHaveLength(1)
     })
 
+    it('a file name with spaces in backticks is one path; a command in backticks keeps its words', () => {
+      const { root, home, show } = box(kind)
+      writeFileSync(join(home, 'work/ranked/my file.csv'), 'a\n')
+      const spaced = show(`Here: \`${root}/work/ranked/my file.csv\` done.`)
+      expect(items(spaced).map((i: any) => i.name)).toEqual(['my file.csv'])
+      expect(spaced.split('\n')[0]).toBe('Here: `my file.csv` done.')
+      const command = show(`Run \`head ${root}/work/ranked/candidates.csv -n 3\``)
+      expect(command.split('\n')[0]).toBe('Run `head candidates.csv -n 3`')
+      expect(items(command).map((i: any) => i.name)).toEqual(['candidates.csv'])
+    })
+
     it('a file already sent with MEDIA gets no second card', () => {
       const { root, show } = box(kind)
       const content = show(`See \`${root}/work/ranked/candidates.csv\`\nMEDIA:${root}/work/ranked/candidates.csv`)
@@ -107,6 +118,7 @@ describe('restricted homes are read through the mirror', () => {
     const text = 'At `/opt/data/work/a.csv`, and /opt/data/cache/images/b.png. Inbox /opt/data/inbox/2026-11-20/x.pdf\n```\n/opt/data/c.md\n```'
     expect(routedInlinePaths(payload(text), '/opt/data', { skip: ['/opt/data/inbox'] })).toEqual(['/opt/data/work/a.csv', '/opt/data/cache/images/b.png'])
     expect(routedInlinePaths(payload(text, 'user'), '/opt/data')).toEqual([])
+    expect(routedInlinePaths(payload('See `/opt/data/work/my file.csv`'), '/opt/data')).toContain('/opt/data/work/my file.csv')
   })
 
   it('an unreadable home resolves the path from the mirror copy', () => {
