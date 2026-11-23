@@ -20,7 +20,7 @@
 // never a new default, new app lists or new bindings.
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { MAIN_AGENT_ID, isConfidentialProvider } from './agents.mjs'
+import { MAIN_AGENT_ID, isConfidentialProvider, isStandardOnlyApp } from './agents.mjs'
 
 export const PRIVATE_FIRST_SWITCH = 'wizard/private-first-setup'
 export const PRIVATE_FIRST_SCHEMA = 'wizard.private-first/1'
@@ -133,12 +133,16 @@ export function createPrivateFirst({ on, registry, agentsDir, mainOptions, setDe
       const asked = [body?.model, ...(Array.isArray(body?.models) ? body.models : [])].filter((m) => typeof m === 'string' && known.includes(m))
       const allowed = [...new Set(asked.length ? asked : [known[0]])]
       const apps = fresh ? (await registry.agentOptions()) : null
+      // Every installed app but the Claude and ChatGPT connection apps: those only ever serve the standard agent
+      // (issue 598). agentOptions entries carry no provides line, so ask the registry.
+      const standardOnly = registry.standardOnlyApps?.() ?? new Set()
+      const ids = (list) => list.map((app) => app.id).filter((id) => !standardOnly.has(id))
       const { agent } = await registry.create({
         label: 'Private',
         permissions: {
           preset: 'private',
           // First run: the private agent is the box's agent, so it gets every installed app (spec section 10).
-          ...(fresh ? { wizard_apps: apps.wizard_apps.map((app) => app.id), agent_apps: apps.agent_apps.map((app) => app.id) } : {}),
+          ...(fresh ? { wizard_apps: ids(apps.wizard_apps), agent_apps: ids(apps.agent_apps) } : {}),
         },
         model: { provider, model: allowed[0], allowed_models: allowed, fallback: false },
       })

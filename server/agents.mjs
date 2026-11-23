@@ -115,6 +115,11 @@ export const PRIVATE_DEFAULT_SLOTS = Object.freeze(['transcript-redaction'])
 export const PRIVATE_DATA_SLOTS = Object.freeze(['meeting-transcripts', 'meeting-recording', ...PRIVATE_DEFAULT_SLOTS])
 export const isPrivateApp = (app) => app?.privacy === 'private'
   || (Array.isArray(app?.provides) && app.provides.some((slot) => PRIVATE_DATA_SLOTS.includes(slot)))
+// Issue 598 (DECISIONS 115, spec/AGENTS.md section 10): Claude and ChatGPT only ever run on the standard agent. Their
+// connection apps (an AI connection with no private inference) are never granted to a private agent, so it can't
+// reach a non-confidential provider through their tools. Tinfoil provides private inference and stays allowed.
+export const isStandardOnlyApp = (app) => Array.isArray(app?.provides) && app.provides.includes('ai-connection')
+  && !app.provides.includes('private-inference') && !app.private_inference
 export const DEFAULT_APPEARANCE = { private: { glyph: 'lock', hue: 160 }, standard: { glyph: 'spark', hue: 265 } }
 const GLYPH_RE = /^[a-z][a-z0-9-]{0,23}$/u
 
@@ -223,6 +228,14 @@ export function normalizePermissions(base, patch = {}) {
     out.other_agents = patch.other_agents
   }
   return out
+}
+
+/** Refuses a private agent's app list that names a standard-only connection app it didn't already have (issue 598). */
+function assertNoStandardOnlyApps(agent, standardOnly, before = null) {
+  if (agent.privacy !== 'private' || !standardOnly.size) return
+  const had = before ? agentAppIds(before) : new Set()
+  const named = [...agentAppIds(agent)].find((id) => standardOnly.has(id) && !had.has(id))
+  if (named) fail(409, 'standard_only_app', 'agent.standard_only_app', `${named} connects Claude or ChatGPT, which only the standard agent uses`)
 }
 
 /** The private preset's walls hold whatever the owner adjusts, unless they downgrade the agent on purpose. */
@@ -588,6 +601,7 @@ export function createAgentRegistry(options = {}) {
     // update). Recorded classifications start with this release: an older seen file adopts today's classes without
     // revoking anything, since its grants cannot be told apart from explicit ticks.
     const privateNow = privateApps()
+    const standardOnly = standardOnlyApps()
     const seenPrivate = seenFile?.schema === 1 && Array.isArray(seenFile.private) ? new Set(listIds(seenFile.private)) : null
     const turnedPrivate = seenPrivate ? current.filter((id) => seen.has(id) && privateNow.has(id) && !seenPrivate.has(id)) : []
     try {
@@ -601,7 +615,7 @@ export function createAgentRegistry(options = {}) {
           const agent = readRaw(id)
           if (!agent || agent.imported || ["profile", "external"].includes(agent.runtime.kind) || agent.runtime?.admission === 'importing') continue
           if (agent.privacy !== 'private') continue
-          const joining = id === firstPrivate ? fresh : fresh.filter((app) => privateFresh.has(app))
+          const joining = (id === firstPrivate ? fresh : fresh.filter((app) => privateFresh.has(app))).filter((app) => !standardOnly.has(app))
           if (!joining.length) continue
           const next = structuredClone(agent)
           for (const app of joining) if (!agentAppIds(next).has(app)) next.permissions[kinds.get(app)].push(app)
@@ -644,6 +658,18 @@ export function createAgentRegistry(options = {}) {
           writeJsonAtomic(mainPath, { ...stored, wizard_apps: listIds(stored.wizard_apps).filter((app) => !turned.has(app)), agent_apps: listIds(stored.agent_apps).filter((app) => !turned.has(app)) })
         }
         queueMicrotask(appsChanged)
+      }
+      if (standardOnly.size) {
+        // Issue 598: a private agent granted a Claude or ChatGPT connection app (by the private-first hand-off or app
+        // sync before the fix) loses it. Through update(): the gateway change needs a harness restart.
+        for (const id of folderIds()) {
+          const agent = readRaw(id)
+          if (!agent || agent.privacy !== 'private' || agent.imported || ['profile', 'external'].includes(agent.runtime.kind) || agent.runtime?.admission === 'importing') continue
+          if (![...agentAppIds(agent)].some((app) => standardOnly.has(app))) continue
+          const wizard_apps = listIds(agent.permissions.wizard_apps).filter((app) => !standardOnly.has(app))
+          const agent_apps = listIds(agent.permissions.agent_apps).filter((app) => !standardOnly.has(app))
+          queueMicrotask(() => { update(id, { permissions: { wizard_apps, agent_apps } }).catch(() => undefined) })
+        }
       }
       const privateList = current.filter((id) => privateNow.has(id))
       if (fresh.length || seenFile?.schema !== 1 || current.length !== seen.size || current.some((id) => !seen.has(id))
@@ -873,6 +899,12 @@ export function createAgentRegistry(options = {}) {
     return new Set((Array.isArray(apps) ? apps : []).filter(isPrivateApp).map((app) => app.id))
   }
 
+  /** Installed Claude/ChatGPT connection apps (issue 598): never granted to a private agent. */
+  function standardOnlyApps() {
+    const apps = readJson(appsJsonPath)?.apps
+    return new Set((Array.isArray(apps) ? apps : []).filter(isStandardOnlyApp).map((app) => app.id))
+  }
+
   function installedApps() {
     const apps = readJson(appsJsonPath)?.apps
     const wizardApps = []
@@ -1084,6 +1116,7 @@ export function createAgentRegistry(options = {}) {
     // an explicit false from the client wins.
     if (agent.privacy === 'private' && overrides?.read_standard_chats === undefined && standardUrlFor(agent)) agent.permissions.read_standard_chats = true
     assertPrivateWalls(agent)
+    assertNoStandardOnlyApps(agent, standardOnlyApps())
     assertStandardTransport(agent)
     assertIsolationSupports(agent)
     mkdirSync(folder(id), { recursive: false, mode: 0o700 })
@@ -1198,6 +1231,7 @@ export function createAgentRegistry(options = {}) {
       }
     }
     assertPrivateWalls(next)
+    assertNoStandardOnlyApps(next, standardOnlyApps(), agent)
     assertStandardTransport(next)
     assertIsolationSupports(next)
     // An unchanged update still re-applies a config an older release wrote (e.g. a new vision helper).
@@ -1508,7 +1542,7 @@ export function createAgentRegistry(options = {}) {
       if (agent.runtime.kind === 'profile') return options.mainHome ? join(options.mainHome, 'profiles', agent.runtime.profile) : ''
       return join(folder(id), 'home')
     },
-    agentsDir, list, read, status, upstream, fetchAgent, apiKey, agentOptions, providers, create, update, setRunning,
+    agentsDir, list, read, status, upstream, fetchAgent, apiKey, agentOptions, standardOnlyApps, providers, create, update, setRunning,
     credentialValues: () => [...new Set([...folderIds(), ...appRuntimes().map(a => a.id)])].flatMap(id => [apiKey(id),gatewayKey(id)]).filter(Boolean),
     catalogContains, refreshCatalog, observeSessions,
     pinnedAgent, pinnedAgents, pin, runAgents, latestThreadRun: (agentId, sessionId) => [...runs.values()].flat().filter(row => row.agent_id === agentId && row.session_id === sessionId).at(-1), runAgent: runId => { const ids = runAgents(runId); if (ids.length > 1) fail(409, 'ambiguous_thread', 'agent.ambiguous_thread'); return ids[0] ?? '' }, noteRun, defaultAgentId, canStartAgent,
