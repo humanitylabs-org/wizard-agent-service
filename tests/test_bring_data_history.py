@@ -540,6 +540,7 @@ class LargeHistoryTests(unittest.TestCase):
         chats = list((self.files / 'Imported/Hermes/Chats').rglob('*.md'))
         self.assertEqual(len(chats), 7)
         self.assertTrue((self.files / 'Imported/Hermes/Index.md').is_file())
+        self.assertEqual(bd.history_note(), bd.HISTORY_NOTE)  # the kept chats are marked as older History
         call('undo', import_id=scan['import_id'])
         self.assertEqual(list((self.files / 'Imported/Hermes/Chats').rglob('*.md')), [])
 

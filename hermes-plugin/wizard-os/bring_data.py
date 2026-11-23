@@ -1432,9 +1432,10 @@ def archive(args: dict) -> dict:
                 written += 1
                 mine.append(f"{label}/{rel}")
         except BaseException:
-            if mine:  # a stop part-way keeps what came in, and Undo still finds it
+            if mine:  # a stop part-way keeps what came in, Undo still finds it, and History says it is older
                 _record(import_id, source=_source_field(path), kind=kind, archived_chats=written,
-                        files=sorted(set(_registry().get(import_id, {}).get("files", [])) | set(mine)))
+                        files=sorted(set(_registry().get(import_id, {}).get("files", [])) | set(mine)),
+                        **({"history_done": True} if history else {}))
                 _rebuild_index(root, label)
             raise
     finally:
