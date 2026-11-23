@@ -1970,7 +1970,10 @@ def _undo_fact_memory(import_id: str, entry: dict) -> bool:
     owner has not changed it since."""
     if entry.get("fact_memory_was") is None or not _holographic_on():
         return False
-    if any(v.get("facts_added") for k, v in _registry().items() if k != import_id):
+    still = [k for k, v in _registry().items() if k != import_id and v.get("facts_added")]
+    if still:  # another import's facts still need it: that import now owns putting it back
+        if not any(_registry()[k].get("fact_memory_was") is not None for k in still):
+            _record(still[0], fact_memory_was=entry["fact_memory_was"])
         return False
     io = _config_io()
     if io is None:

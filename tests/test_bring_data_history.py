@@ -311,6 +311,20 @@ class HistoryTests(unittest.TestCase):
         self.assertTrue(undone['fact_memory_off'])
         self.assertFalse(bd._holographic_on())
 
+    def test_undoing_the_import_that_turned_it_on_hands_the_undo_to_the_next(self):
+        self.fake_hermes_config('model:\n  default: x\n')
+        backup_zip(self.base)
+        first, _ = self.bring_all()
+        backup_zip(self.base, 'second.zip')
+        second = self.scan('second.zip')
+        self.assertNotEqual(second['import_id'], first['import_id'])
+        call('import', import_id=second['import_id'], facts=True)
+        bd._record(second['import_id'], facts_added=['still here'])  # its own facts, whatever the first left
+        self.assertFalse(call('undo', import_id=first['import_id'])['fact_memory_off'])
+        self.assertTrue(bd._holographic_on())                           # the second import's facts still need it
+        self.assertTrue(call('undo', import_id=second['import_id'])['fact_memory_off'])
+        self.assertFalse(bd._holographic_on())
+
     def test_an_owner_chosen_memory_stays_and_the_result_says_why(self):
         config = self.fake_hermes_config('memory:\n  provider: honcho\n')
         backup_zip(self.base)
