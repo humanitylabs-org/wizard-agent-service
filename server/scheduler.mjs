@@ -746,22 +746,28 @@ export function projectFollowUps(result, scheduler, { agent = '' } = {}) {
   if (!scheduler || !/^[a-z][a-z0-9-]{0,30}$/.test(agent)) return result
   try {
     const payload = JSON.parse(result.toString('utf8'))
-    const rows = ['data', 'sessions', 'items'].map(key => payload[key]).find(Array.isArray)
-    if (!rows) return result
-    const byThread = new Map()
-    for (const job of scheduler.list()) {
-      if (job.kind !== 'watch' || !job.enabled || !job.thread || job.agent !== agent) continue
-      const list = byThread.get(job.thread) || []
-      list.push(scheduler.project(job)); byThread.set(job.thread, list)
-    }
-    for (const row of rows) {
-      const jobs = byThread.get(row?.id || row?.session_id)
-      if (!jobs?.length) continue
-      const next = jobs.map(job => job.nextRun).filter(Boolean).sort()[0] || null
-      row.wizard_follow_up = { active: true, count: jobs.length, names: jobs.map(job => job.name).slice(0, 3), ...(next ? { nextRun: next } : {}) }
-    }
-    return Buffer.from(JSON.stringify(payload))
+    return projectFollowUpsPayload(payload, scheduler, { agent }) ? Buffer.from(JSON.stringify(payload)) : result
   } catch { return result }
+}
+
+/** projectFollowUps on a parsed payload, rows changed in place. False when the payload has no rows to project. */
+export function projectFollowUpsPayload(payload, scheduler, { agent = '' } = {}) {
+  if (!scheduler || !/^[a-z][a-z0-9-]{0,30}$/.test(agent)) return false
+  const rows = ['data', 'sessions', 'items'].map(key => payload?.[key]).find(Array.isArray)
+  if (!rows) return false
+  const byThread = new Map()
+  for (const job of scheduler.list()) {
+    if (job.kind !== 'watch' || !job.enabled || !job.thread || job.agent !== agent) continue
+    const list = byThread.get(job.thread) || []
+    list.push(scheduler.project(job)); byThread.set(job.thread, list)
+  }
+  for (const row of rows) {
+    const jobs = byThread.get(row?.id || row?.session_id)
+    if (!jobs?.length) continue
+    const next = jobs.map(job => job.nextRun).filter(Boolean).sort()[0] || null
+    row.wizard_follow_up = { active: true, count: jobs.length, names: jobs.map(job => job.name).slice(0, 3), ...(next ? { nextRun: next } : {}) }
+  }
+  return true
 }
 
 const HERMES_DELIVERY_NOTE = 'Wizard delivery (overrides any conflicting delivery instructions above): '
