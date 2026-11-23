@@ -65,6 +65,11 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 
+try:
+    import fcntl
+except ImportError:  # not on Linux: no cross-process mark, an import is never taken for stopped
+    fcntl = None
+
 TOOL_NAME = "wizard_bring_data"
 SOURCES = {"chatgpt": "ChatGPT", "claude": "Claude", "claude-code": "Claude Code", "hermes": "Hermes"}
 IMPORT_DIR = "Imported"
@@ -1203,12 +1208,160 @@ def _record(import_id: str, **fields) -> dict:
         return dict(fields)
     if "source" in fields:
         fields["source"] = _source_field(fields["source"]) if not isinstance(fields["source"], str) else fields["source"]
+    return _update(import_id, lambda entry: entry.update(fields))
+
+
+def _update(import_id: str, change) -> dict:
+    """Read, change and save one entry under a lock: the list is also read (and settled) while an import runs."""
+    _state_dir().mkdir(parents=True, exist_ok=True)
+    with open(_state_dir() / "imports.json.lock", "a", encoding="utf-8") as lock:
+        _lock(lock, True)
+        reg = _registry()
+        entry = reg.get(import_id, {})
+        change(entry)
+        reg[import_id] = entry
+        _save_registry(reg)
+        return entry
+
+
+# An import that dies hard (the out-of-memory killer, a restart) runs no error handler, so it must leave its trace
+# BEFORE it works: ``running/<import id>.files`` is held with a lock while the import runs and lists, one line each,
+# the files it wrote. A file whose lock is free belongs to an import that stopped: the next read of the imports
+# list marks that import failed (with the reason and what did come in) and hands its files to Undo (issue 15).
+STOPPED = ("It stopped part way: your agent restarted before it finished, often because it ran out of memory. "
+           "Undo removes what came in, or tap it again to bring in the rest.")
+_JOURNALS: dict = {}  # (state dir, import id) -> [open file, depth], this process's running imports
+
+
+def _journal_path(import_id: str) -> Path:
+    return _state_dir() / "running" / f"{import_id}.files"
+
+
+def _lock(handle, wait: bool) -> bool:
+    if fcntl is None:
+        return True
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        return True
+    except BlockingIOError:
+        return False
+
+
+@contextmanager
+def _running(import_id: str):
+    """Mark ``import_id`` as running for as long as the block runs (also across processes, through the lock)."""
+    if read_only():
+        yield
+        return
+    key = (str(_state_dir()), import_id)
+    if key in _JOURNALS:  # an archive inside run_import: one journal
+        _JOURNALS[key][1] += 1
+        try:
+            yield
+        finally:
+            _JOURNALS[key][1] -= 1
+        return
+    path = _journal_path(import_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, "a", encoding="utf-8")
+    _lock(handle, True)
+    _JOURNALS[key] = [handle, 1]
+    try:
+        yield
+    finally:
+        _JOURNALS.pop(key, None)
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        handle.close()
+
+
+def _wrote(import_id: str, rel: str) -> None:
+    """One file this running import wrote, kept even if the process is killed the next moment."""
+    item = _JOURNALS.get((str(_state_dir()), import_id))
+    if item:
+        item[0].write(rel + "\n")
+        item[0].flush()
+
+
+def _is_running(import_id: str) -> bool:
+    path = _journal_path(import_id)
+    if (str(_state_dir()), import_id) in _JOURNALS:
+        return True
+    if fcntl is None or not path.is_file():
+        return False
+    try:
+        with open(path, "a", encoding="utf-8") as handle:
+            return not _lock(handle, False)
+    except OSError:
+        return False
+
+
+def _settle_stopped() -> None:
+    """Turn every import that stopped without finishing into a failed one: its written files go to the entry (so
+    Undo removes them) and it says why. Imports still running (their lock is held) are left alone."""
+    if read_only() or fcntl is None:
+        return
+    folder = _state_dir() / "running"
+    stopped = {}
+    for path in sorted(folder.glob("*.files")) if folder.is_dir() else []:
+        import_id = path.name[:-len(".files")]
+        if (str(_state_dir()), import_id) in _JOURNALS:
+            continue
+        try:
+            with open(path, "r+", encoding="utf-8") as handle:
+                if not _lock(handle, False):
+                    continue
+                stopped[import_id] = [line for line in handle.read().splitlines() if line.strip()]
+                path.unlink()
+        except OSError:
+            continue
     reg = _registry()
-    entry = reg.get(import_id, {})
-    entry.update(fields)
-    reg[import_id] = entry
-    _save_registry(reg)
-    return entry
+    for import_id, entry in reg.items():  # a start with no end and no journal (removed by hand): stopped too
+        if (entry.get("import_started_at") and not entry.get("import_failed_at") and import_id not in stopped
+                and (entry.get("imported_at") or 0) < entry["import_started_at"] and not _is_running(import_id)):
+            stopped[import_id] = []
+    for import_id, files in stopped.items():
+        if import_id not in reg:
+            continue
+
+        def failed(entry, files=files):
+            chats = [f for f in files if "/Chats/" in f]
+            entry.update(files=sorted(set(entry.get("files") or []) | set(files)), import_failed_at=int(time.time()),
+                         import_error=STOPPED)
+            if chats:
+                entry["archived_chats"] = max(len(chats), entry.get("archived_chats") or 0)
+        _update(import_id, failed)
+    for import_id in stopped:
+        label = SOURCES.get((reg.get(import_id) or {}).get("kind"), "")
+        root = files_root() / IMPORT_DIR / label if label else None
+        if root and root.is_dir():
+            try:
+                _rebuild_index(root, label)
+            except OSError:
+                pass
+
+
+def _state_of(import_id: str, entry: dict) -> tuple[str, str]:
+    """imported | partly | failed | importing | scanned (looked at in a preview, never brought in), and why."""
+    if _is_running(import_id):
+        return "importing", ""
+    if entry.get("import_failed_at"):
+        return "failed", entry.get("import_error") or STOPPED
+    errors = entry.get("import_errors") or {}
+    if errors:
+        why = " ".join(f"{PART_NAMES.get(k, k)}: {v}" for k, v in errors.items())
+        return ("failed" if set(errors) >= set(entry.get("import_parts") or errors) else "partly"), why
+    if entry.get("imported_at") or entry.get("archived_at"):
+        return "imported", ""
+    if entry.get("archived_chats"):  # an older engine's archive that stopped part way
+        return "failed", STOPPED
+    return "scanned", ""
+
+
+PART_NAMES = {"chats": "Chats", "skills": "Skills", "personality": "Personality", "facts": "Facts",
+              "about": "What I know about you", "schedules": "Scheduled jobs"}
 
 
 def _lookup(args: dict) -> tuple[Path, str]:
@@ -1409,6 +1562,11 @@ def archive(args: dict) -> dict:
     _writable()
     path, import_id = _lookup(args)
     history = args.get("history") is True
+    with _running(import_id):
+        return _archive(args, path, import_id, history)
+
+
+def _archive(args: dict, path, import_id: str, history: bool) -> dict:
     kind, data, src, _p = load(path)
     src.close()
     try:
@@ -1428,15 +1586,20 @@ def archive(args: dict) -> dict:
                 target = root / rel
                 if not _within(target, root):
                     continue
+                _wrote(import_id, f"{label}/{rel}")  # before the write: a kill mid-write still leaves no orphan
                 _atomic_write(target, _chat_markdown(chat, label, history))
                 written += 1
                 mine.append(f"{label}/{rel}")
-        except BaseException:
+        except BaseException as error:
+            alone = _JOURNALS.get((str(_state_dir()), import_id), [None, 1])[1] <= 1  # run_import records its own
+            failed = {"import_failed_at": int(time.time()), "import_error": _why(error)} if alone else {}
             if mine:  # a stop part-way keeps what came in, Undo still finds it, and History says it is older
                 _record(import_id, source=_source_field(path), kind=kind, archived_chats=written,
                         files=sorted(set(_registry().get(import_id, {}).get("files", [])) | set(mine)),
-                        **({"history_done": True} if history else {}))
+                        **({"history_done": True} if history else {}), **failed)
                 _rebuild_index(root, label)
+            elif failed:
+                _record(import_id, **failed)
             raise
     finally:
         _close_chats(data)
@@ -2114,17 +2277,34 @@ def run_import(args: dict) -> dict:
                                                   "text": about.get("text") or ""})))
     if not steps:
         raise ValueError("Choose at least one thing to bring in.")
-    for name, step in steps:
+    with _running(import_id):  # from here a hard stop is seen on the next read of the list (issue 15)
+        _record(import_id, import_started_at=int(time.time()), import_parts=[name for name, _s in steps], via="importer",
+                import_failed_at=None, import_error=None, import_errors=None)
         try:
-            done[name] = step()
-            if isinstance(done[name], dict) and done[name].get("file_error"):
-                errors[name] = done[name]["file_error"]
-        except (ValueError, OSError, ImportError, zipfile.BadZipFile, json.JSONDecodeError, sqlite3.DatabaseError) as error:
-            errors[name] = _plain(error)
-    made = (done.get("chats", {}).get("chats_written"), done.get("skills", {}).get("documents"),
-            done.get("facts", {}).get("facts_added"), done.get("schedules", {}).get("created")) if history else ()
-    _record(import_id, imported_at=int(time.time()), via="importer", **({"history_done": True} if any(made) else {}))
+            for name, step in steps:
+                try:
+                    done[name] = step()
+                    if isinstance(done[name], dict) and done[name].get("file_error"):
+                        errors[name] = done[name]["file_error"]
+                except (ValueError, OSError, ImportError, zipfile.BadZipFile, json.JSONDecodeError,
+                        sqlite3.DatabaseError) as error:
+                    errors[name] = _plain(error)
+        except BaseException as error:  # anything else (out of memory, a stop): the list says it failed, and why
+            _record(import_id, import_failed_at=int(time.time()), import_error=_why(error), import_errors=errors or None)
+            raise
+        made = (done.get("chats", {}).get("chats_written"), done.get("skills", {}).get("documents"),
+                done.get("facts", {}).get("facts_added"), done.get("schedules", {}).get("created")) if history else ()
+        _record(import_id, imported_at=int(time.time()), via="importer", import_errors=errors or None,
+                **({"history_done": True} if any(made) else {}))
     return {"import_id": import_id, "done": done, "errors": errors}
+
+
+def _why(error: BaseException) -> str:
+    if isinstance(error, MemoryError):
+        return "Your agent ran out of memory part way. Undo removes what came in, or tap it again to bring in the rest."
+    if isinstance(error, Exception) and str(error):
+        return _plain(error)
+    return STOPPED
 
 
 def _home_candidates() -> list[Path]:
@@ -2335,6 +2515,9 @@ def undo(args: dict) -> dict:
     they are still exactly as it left them. A chat-flow import leaves memory and About me.md to the owner."""
     _writable()
     import_id = str(args.get("import_id") or "")
+    if _is_running(import_id):
+        raise ValueError("That import is still running. Undo it once it has finished.")
+    _settle_stopped()
     reg = _registry()
     entry = reg.get(import_id)
     if not entry:
@@ -2474,8 +2657,9 @@ def _hand_backup_to_later(import_id: str, key: str, info: dict) -> bool:
 
 
 def status(_args: dict) -> dict:
+    _settle_stopped()
     reg = _registry()
-    return {"imports": [{"import_id": k, **{f: v.get(f) for f in (
+    return {"imports": [{"import_id": k, **dict(zip(("state", "error"), _state_of(k, v))), **{f: v.get(f) for f in (
         "kind", "source", "scanned_at", "archived_at", "chats", "archived_chats", "imported_at", "via")},
         "label": SOURCES.get(v.get("kind"), ""), "skills_installed": len(v.get("skills_installed") or []),
         "memories_added": len(v.get("memory_added") or []), "personality": bool(v.get("soul")),
@@ -2638,6 +2822,11 @@ def skill_documents(args: dict) -> dict:
     when a task needs one, the agent reads it and writes its own WizardOS version."""
     _writable()
     path, import_id = _lookup(args)
+    with _running(import_id):
+        return _skill_documents(args, path, import_id)
+
+
+def _skill_documents(args: dict, path, import_id: str) -> dict:
     wanted = args.get("names")
     kind, data, src, prefix = load(path, with_sessions=False)
     try:
@@ -2671,6 +2860,7 @@ def skill_documents(args: dict) -> dict:
             target = root / rel
             if not _within(target, folder):
                 continue
+            _wrote(import_id, f"{label}/{rel}")
             _atomic_write(target, "\n".join(doc))
             written.append(skill["name"])
             mine.append(f"{label}/{rel}")

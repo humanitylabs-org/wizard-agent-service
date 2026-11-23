@@ -10,8 +10,10 @@ import os
 import random
 import sqlite3
 import string
+import subprocess
 import sys
 import tempfile
+import time
 import types
 import unittest
 import zipfile
@@ -640,6 +642,119 @@ class LargeHistoryTests(unittest.TestCase):
         if use is not None:  # Linux: (in use, limit), both positive
             self.assertGreater(use[1], 0)
             self.assertGreaterEqual(use[0], 0)
+
+
+CHILD = """
+import importlib.util, json, os, sys, time
+spec = importlib.util.spec_from_file_location('bd_child', sys.argv[1])
+bd = importlib.util.module_from_spec(spec); spec.loader.exec_module(bd)
+stop_at, how = int(sys.argv[3]), sys.argv[4]
+real = bd._memory_check
+def check(what, done):
+    if what == 'import' and done >= stop_at:
+        if how == 'kill':
+            os._exit(137)  # like the out-of-memory killer: no handler, no finally
+        time.sleep(60)
+    return real(what, done)
+bd._memory_check = check
+print(bd.handle_app('import', {'import_id': sys.argv[2], 'chats': True}))
+"""
+
+
+class StoppedImportTests(unittest.TestCase):
+    """wizard-importer issue 15: an import that dies part way (out of memory) sat in the list like the ones that worked,
+    with imported_at null and its written chats recorded nowhere. Now the list says it failed, why, and what came in,
+    and Undo removes what came in."""
+    setUp, tearDown, scan = HistoryTests.setUp, HistoryTests.tearDown, HistoryTests.scan
+
+    def child(self, import_id, stop_at, how):
+        return subprocess.Popen([sys.executable, '-c', CHILD, str(ROOT / 'hermes-plugin/wizard-os/bring_data.py'),
+                                 import_id, str(stop_at), how], env=dict(os.environ), stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True)
+
+    def entry(self, import_id):
+        out = call('status')
+        self.assertTrue(out['success'], out)
+        return next(i for i in out['imports'] if i['import_id'] == import_id)
+
+    def chats(self):
+        return sorted((self.files / 'Imported/Hermes/Chats').rglob('*.md'))
+
+    def test_an_import_killed_part_way_is_marked_failed_and_undo_removes_what_came_in(self):
+        big_history_zip(self.base, sessions=12, per=2, size=50)
+        scan = self.scan('big-backup.zip')
+        self.assertEqual(self.entry(scan['import_id'])['state'], 'scanned')  # looked at, never brought in
+        proc = self.child(scan['import_id'], 3, 'kill')
+        proc.communicate(timeout=60)
+        self.assertEqual(proc.returncode, 137)
+        self.assertEqual(len(self.chats()), 3)
+        got = self.entry(scan['import_id'])
+        self.assertEqual(got['state'], 'failed')
+        self.assertIn('stopped part way', got['error'])
+        self.assertIn('out of memory', got['error'])
+        self.assertIsNone(got['imported_at'])
+        self.assertEqual(got['archived_chats'], 3)
+        self.assertEqual(self.entry(scan['import_id'])['state'], 'failed')  # stays so on every later read
+        self.assertEqual(list((self.home / 'cache/bring-data/running').glob('*.files')), [])
+        undone = call('undo', import_id=scan['import_id'])
+        self.assertTrue(undone['success'], undone)
+        self.assertEqual(undone['removed_files'], 3)
+        self.assertEqual(self.chats(), [])
+        self.assertEqual(call('status')['imports'], [])
+
+    def test_a_running_import_reads_importing_and_failed_once_it_is_gone(self):
+        big_history_zip(self.base, sessions=12, per=2, size=50)
+        scan = self.scan('big-backup.zip')
+        proc = self.child(scan['import_id'], 2, 'hang')
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        journal = self.home / 'cache/bring-data/running' / f"{scan['import_id']}.files"
+        for _ in range(300):
+            if journal.is_file() and len(journal.read_text().splitlines()) >= 2:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.entry(scan['import_id'])['state'], 'importing')
+        self.assertTrue(journal.is_file())  # a read never touches a running import
+        self.assertFalse(call('undo', import_id=scan['import_id'])['success'])
+        proc.kill()
+        proc.communicate(timeout=30)
+        got = self.entry(scan['import_id'])
+        self.assertEqual((got['state'], got['archived_chats']), ('failed', 2))
+
+    def test_states_for_a_whole_import_a_partly_failed_one_and_one_where_every_part_failed(self):
+        big_history_zip(self.base, sessions=3, per=2, size=50)
+        scan = self.scan('big-backup.zip')
+        done = call('import', import_id=scan['import_id'], chats=True)
+        self.assertEqual(done['errors'], {})
+        self.assertEqual((self.entry(scan['import_id'])['state'], self.entry(scan['import_id'])['error']), ('imported', ''))
+
+        def broken(_args):
+            raise ValueError('The disk is full.')
+        real = bd.history_facts
+        bd.history_facts = broken
+        self.addCleanup(setattr, bd, 'history_facts', real)
+        call('import', import_id=scan['import_id'], chats=True, facts=True)
+        got = self.entry(scan['import_id'])
+        self.assertEqual(got['state'], 'partly')
+        self.assertIn('Facts: The disk is full.', got['error'])
+        call('import', import_id=scan['import_id'], facts=True)
+        self.assertEqual(self.entry(scan['import_id'])['state'], 'failed')
+        call('import', import_id=scan['import_id'], chats=True)  # a later run that works clears the mark
+        self.assertEqual(self.entry(scan['import_id'])['state'], 'imported')
+
+    def test_running_out_of_memory_in_python_is_marked_with_that_reason(self):
+        big_history_zip(self.base, sessions=3, per=2, size=50)
+        scan = self.scan('big-backup.zip')
+
+        def boom(_args):
+            raise MemoryError()
+        real = bd.archive
+        bd.archive = boom
+        self.addCleanup(setattr, bd, 'archive', real)
+        with self.assertRaises(MemoryError):
+            bd.run_import({'import_id': scan['import_id'], 'chats': True})
+        got = self.entry(scan['import_id'])
+        self.assertEqual(got['state'], 'failed')
+        self.assertIn('ran out of memory', got['error'])
 
 
 if __name__ == '__main__':
