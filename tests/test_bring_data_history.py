@@ -445,5 +445,119 @@ class ScheduleServiceTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
 
 
+
+def big_history_zip(base: Path, sessions=200, per=10, size=4000, name='big-backup.zip') -> tuple[Path, int]:
+    """A backup zip whose state.db holds many chats (issue wizard-importer 13: a 1.7 GB history ran out of memory)."""
+    home = base / ('src-' + name)
+    (home / 'memories').mkdir(parents=True)
+    (home / 'memories/USER.md').write_text('Owner is Sam.\n', 'utf-8')
+    con = sqlite3.connect(home / 'state.db')
+    con.executescript('''
+      CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT NOT NULL, title TEXT, parent_session_id TEXT, started_at REAL NOT NULL);
+      CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, content TEXT, timestamp REAL);
+      CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
+    ''')
+    rng = random.Random(13)
+    total = 0
+    for s in range(sessions):
+        sid = f's{s:05d}'
+        con.execute('INSERT INTO sessions VALUES (?,?,?,NULL,?)', (sid, 'telegram', f'Chat {s}', 1750000000 + s * 3600))
+        rows = []
+        for m in range(per):
+            text = ''.join(rng.choice(string.ascii_lowercase + '  ') for _ in range(size))
+            rows.append((sid, 'user' if m % 2 == 0 else 'assistant', text, 1750000000 + s * 3600 + m))
+            total += len(text)
+        con.executemany('INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)', rows)
+    con.commit()
+    con.close()
+    target = base / 'media/Inbox' / name
+    with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for path in sorted(home.rglob('*')):
+            if path.is_file():
+                zf.write(path, path.relative_to(home).as_posix())
+    return target, total
+
+
+class LargeHistoryTests(unittest.TestCase):
+    """wizard-importer issue 13: a large history is read and written chat by chat, so memory doesn't grow with it,
+    and if the agent still runs low on memory the scan or import stops and says so instead of being killed."""
+    setUp, tearDown, scan = HistoryTests.setUp, HistoryTests.tearDown, HistoryTests.scan
+
+    def peak(self, fn):
+        import gc
+        import tracemalloc
+        gc.collect()
+        tracemalloc.start()
+        try:
+            out = fn()
+            return out, tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+
+    def test_memory_does_not_grow_with_the_history(self):
+        _, text = big_history_zip(self.base, sessions=400)  # 400 chats, 16 MB of messages
+        scan, scan_peak = self.peak(lambda: self.scan('big-backup.zip'))
+        self.assertTrue(scan['success'], scan)
+        self.assertEqual(scan['counts']['chats'], 400)
+        self.assertEqual(scan['counts']['messages'], 4000)
+        done, import_peak = self.peak(lambda: call('import', import_id=scan['import_id'], chats=True))
+        self.assertTrue(done['success'], done)
+        self.assertEqual(done['errors'], {})
+        self.assertEqual(done['done']['chats']['chats_written'], 400)
+        self.assertEqual(len(list((self.files / 'Imported/Hermes/Chats').rglob('*.md'))), 400)
+        # Before: the whole history was held at once (twice over in an import: as read and scrubbed), a peak of
+        # 20 MB (scan) and 35 MB (import) here; chat by chat it stays near 5 MB whatever the history's size.
+        self.assertLess(scan_peak, text / 2, scan_peak)
+        self.assertLess(import_peak, text / 2, import_peak)
+
+    def test_no_temp_copy_of_the_database_is_left_behind(self):
+        big_history_zip(self.base, sessions=5)
+        before = set(Path(tempfile.gettempdir()).glob('bring-db-*'))
+        scan = self.scan('big-backup.zip')
+        call('import', import_id=scan['import_id'], chats=True)
+        self.assertEqual(set(Path(tempfile.gettempdir()).glob('bring-db-*')), before)
+
+    def low_memory_after(self, checks):
+        seen = []
+
+        def use():
+            seen.append(1)
+            return (95, 100) if len(seen) > checks else (10, 100)
+        real = bd._memory_use
+        bd._memory_use = use
+        self.addCleanup(setattr, bd, '_memory_use', real)
+
+    def test_import_that_runs_low_on_memory_stops_plainly_and_keeps_what_came_in(self):
+        big_history_zip(self.base, sessions=20, per=2, size=50)
+        scan = self.scan('big-backup.zip')
+        self.assertTrue(scan['success'], scan)
+        self.low_memory_after(7)
+        done = call('import', import_id=scan['import_id'], chats=True, facts=True)
+        self.assertTrue(done['success'], done)
+        self.assertIn('ran low on memory', done['errors']['chats'])
+        self.assertIn('stopped after 7 chats', done['errors']['chats'])
+        self.assertIn('so far are kept', done['errors']['chats'])
+        chats = list((self.files / 'Imported/Hermes/Chats').rglob('*.md'))
+        self.assertEqual(len(chats), 7)
+        self.assertTrue((self.files / 'Imported/Hermes/Index.md').is_file())
+        self.assertEqual(bd.history_note(), bd.HISTORY_NOTE)  # the kept chats are marked as older History
+        call('undo', import_id=scan['import_id'])
+        self.assertEqual(list((self.files / 'Imported/Hermes/Chats').rglob('*.md')), [])
+
+    def test_scan_that_runs_low_on_memory_says_so(self):
+        big_history_zip(self.base, sessions=20, per=2, size=50)
+        self.low_memory_after(3)
+        out = self.scan('big-backup.zip')
+        self.assertFalse(out['success'])
+        self.assertIn('ran low on memory', out['error'])
+        self.assertIn('scan stopped after 3 chats', out['error'])
+
+    def test_memory_use_reads_a_number(self):
+        use = bd._memory_use()
+        if use is not None:  # Linux: (in use, limit), both positive
+            self.assertGreater(use[1], 0)
+            self.assertGreaterEqual(use[0], 0)
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -804,29 +804,108 @@ def _split_memory(text: str) -> list[str]:
     return [e.strip() for e in re.split(r"\n\s*§\s*\n|^\s*§\s*$", text, flags=re.M) if e.strip()]
 
 
-def _hermes_sessions(src: Source, prefix: str) -> list[dict]:
-    name = prefix + "state.db"
-    if name not in src.names():
-        return []
-    path, temporary = src.local_copy(name, MAX_DB)
-    chats = []
-    try:
-        # A live Hermes home is being written while we read: open read-only WITH locking (never
-        # ``immutable``, which can read torn pages of a changing database).
-        con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=30)
+class HermesChats:
+    """The chats of a Hermes ``state.db``, read one session at a time each time they are iterated.
+
+    A big history (a 1.7 GB state.db: 8,802 chats, 145k messages) held as one list ran the agent out of memory,
+    so scan and archive walk it chat by chat and memory stays flat whatever its size. A zip member is copied once
+    to a private temp file, removed by ``close()``; a folder's state.db is read in place."""
+
+    _path, _temporary = None, False
+
+    def __init__(self, src: Source, name: str):
+        self._path, self._temporary = src.local_copy(name, MAX_DB)
+
+    def __iter__(self):
+        if self._path is None:
+            return
         try:
-            chats = _read_sessions(con)
+            # A live Hermes home is being written while we read: open read-only WITH locking (never
+            # ``immutable``, which can read torn pages of a changing database).
+            con = sqlite3.connect(f"file:{self._path}?mode=ro", uri=True, timeout=30)
+        except sqlite3.DatabaseError:
+            return
+        try:
+            yield from _read_sessions(con)
+        except sqlite3.DatabaseError:
+            return
         finally:
             con.close()
-    except sqlite3.DatabaseError:
-        return chats
-    finally:
-        if temporary:
+
+    def close(self) -> None:
+        path, self._path = self._path, None
+        if path is not None and self._temporary:
             try:
                 os.unlink(path)
             except OSError:
                 pass
-    return chats
+
+    def __del__(self):
+        self.close()
+
+
+def _close_chats(data: dict) -> None:
+    close = getattr(data.get("chats"), "close", None)
+    if close:
+        close()
+
+
+class LowMemory(ValueError):
+    """The agent is close to its memory limit: stop with a plain answer instead of being killed."""
+
+
+MEMORY_STOP = 0.9  # share of the agent's memory limit in use at which a scan or import stops
+
+
+def _memory_use() -> tuple[int, int] | None:
+    """(bytes in use, limit) for this agent's container (cgroup v2 or v1), else the machine; None if unknown.
+    Only memory the kernel can't drop counts (anonymous memory), never the file cache that writing chats fills."""
+    def read(path):
+        try:
+            return Path(path).read_text().strip()
+        except OSError:
+            return None
+
+    def stat(path, *keys):
+        values = dict(line.split()[:2] for line in (read(path) or "").splitlines() if len(line.split()) >= 2)
+        return next((int(values[k]) for k in keys if values.get(k, "").isdigit()), None)
+
+    meminfo = {}
+    for line in (read("/proc/meminfo") or "").splitlines():
+        key, _, value = line.partition(":")
+        if value.split() and value.split()[0].isdigit():
+            meminfo[key] = int(value.split()[0]) * 1024
+    total = meminfo.get("MemTotal")
+    limit = read("/sys/fs/cgroup/memory.max")
+    if limit and limit.isdigit() and (not total or int(limit) < total):
+        used = stat("/sys/fs/cgroup/memory.stat", "anon")
+        if used is not None:
+            return used, int(limit)
+    limit = read("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+    if limit and limit.isdigit() and total and int(limit) < total:
+        used = stat("/sys/fs/cgroup/memory/memory.stat", "total_rss", "rss")
+        if used is not None:
+            return used, int(limit)
+    if total and "MemAvailable" in meminfo:
+        return total - meminfo["MemAvailable"], total
+    return None
+
+
+def _memory_check(what: str, done: int) -> None:
+    """Called between chats: a scan or import that would push the agent over its memory limit stops and says so."""
+    use = _memory_use()
+    if use and use[1] and use[0] > use[1] * MEMORY_STOP:
+        gib = 1024 ** 3
+        kept = " The chats that came in so far are kept." if what == "import" and done else ""
+        raise LowMemory(f"Your agent ran low on memory ({use[0] / gib:.1f} of {use[1] / gib:.1f} GB in use), so the "
+                        f"{what} stopped after {done} chats.{kept} Close other work on your agent and try again.")
+
+
+def _hermes_sessions(src: Source, prefix: str):
+    name = prefix + "state.db"
+    if name not in src.names():
+        return []
+    return HermesChats(src, name)
 
 
 _MACHINE = re.compile(r"<memory-context>.*?</memory-context>|\[WIZARD_STATUS_V1\].*?\[/WIZARD_STATUS_V1\]", re.S)
@@ -845,11 +924,12 @@ def _block_text(content: str) -> str:
     return text
 
 
-def _read_sessions(con) -> list[dict]:
+def _read_sessions(con):
+    """Yield each chat in turn (only one chat's messages are held at a time)."""
     scols = {r[1] for r in con.execute("PRAGMA table_info(sessions)")}
     mcols = {r[1] for r in con.execute("PRAGMA table_info(messages)")}
     if not {"id", "started_at"} <= scols or not {"session_id", "role", "content"} <= mcols:
-        return []
+        return
     conds = (["parent_session_id IS NULL"] if "parent_session_id" in scols else []) + \
         (["(source IS NULL OR source != 'cron')"] if "source" in scols else [])  # cron runs are no chats
     where = ("WHERE " + " AND ".join(conds)) if conds else ""
@@ -857,7 +937,6 @@ def _read_sessions(con) -> list[dict]:
     source = "source" if "source" in scols else "NULL"
     order = "timestamp, id" if "timestamp" in mcols else "id"
     stamp = "timestamp" if "timestamp" in mcols else "NULL"
-    chats = []
     sessions = con.execute(f"SELECT id, {title}, {source}, started_at FROM sessions {where} ORDER BY started_at").fetchall()
     try:  # each chat's message count (a covering index: a fraction of a second), so time left follows the work
         weights = dict(con.execute("SELECT session_id, COUNT(*) FROM messages GROUP BY session_id").fetchall())
@@ -873,19 +952,18 @@ def _read_sessions(con) -> list[dict]:
             continue
         messages = []
         try:
-            rows = con.execute(f"SELECT role, content, {stamp} FROM messages WHERE session_id = ? "
-                               f"AND role IN ('user','assistant') ORDER BY {order}", (sid,)).fetchall()
+            for role, content, ts in con.execute(f"SELECT role, content, {stamp} FROM messages WHERE session_id = ? "
+                                                 f"AND role IN ('user','assistant') ORDER BY {order}", (sid,)):
+                text = _block_text(content) if isinstance(content, str) else ""
+                if text:
+                    messages.append({"role": role, "text": text, "time": _epoch(ts)})
         except sqlite3.DatabaseError:
             continue  # one unreadable session never loses the others
-        for role, content, ts in rows:
-            text = _block_text(content) if isinstance(content, str) else ""
-            if text:
-                messages.append({"role": role, "text": text, "time": _epoch(ts)})
         if messages:
-            chats.append({"id": str(sid), "title": str(stitle or messages[0]["text"][:60]),
-                          "created": _epoch(started), "updated": messages[-1]["time"] or _epoch(started),
-                          "messages": messages, "note": f"Hermes {ssource}" if ssource else ""})
-    return chats
+            yield {"id": str(sid), "title": str(stitle or messages[0]["text"][:60]),
+                   "created": _epoch(started), "updated": messages[-1]["time"] or _epoch(started),
+                   "messages": messages, "note": f"Hermes {ssource}" if ssource else ""}
+    _tick(done=len(sessions), work=work)
 
 
 def _hermes_facts(src: Source, prefix: str) -> list[dict]:
@@ -1178,6 +1256,17 @@ def _existing_skill_names() -> set[str]:
     return names
 
 
+def _chat_summaries(chats) -> list[dict]:
+    """What a scan shows of each chat (title, dates, message count), read chat by chat: the messages themselves
+    are dropped as soon as they are counted, so a scan of any size of history stays within memory."""
+    out = []
+    for chat in chats:
+        _memory_check("scan", len(out))
+        out.append({"id": chat["id"], "title": chat["title"], "created": chat.get("created"),
+                    "updated": chat.get("updated"), "messages": len(chat["messages"])})
+    return out
+
+
 def scan(args: dict) -> dict:
     with _scan_progress(args.get("scan_id")):
         return _scan(args)
@@ -1188,11 +1277,14 @@ def _scan(args: dict) -> dict:
     history = args.get("history") is True
     kind, data, src, _prefix_ = load(path)
     src.close()
-    if history:
-        _history_checks(kind, _prefix_, data)
+    try:
+        if history:
+            _history_checks(kind, _prefix_, data)
+        chats = _chat_summaries(data["chats"])
+    finally:
+        _close_chats(data)
     _tick("checking")
     import_id = _import_id(path)
-    chats = data["chats"]
     times = sorted(t for c in chats for t in (c.get("created"), c.get("updated")) if t)
     existing = _existing_skill_names()
     # Stock Hermes homes carry the bundled skills too: list only the ones this agent lacks in full.
@@ -1222,7 +1314,7 @@ def _scan(args: dict) -> dict:
         "import_id": import_id,
         "kind": kind,
         "source": label,
-        "counts": {"chats": len(chats), "messages": sum(len(c["messages"]) for c in chats),
+        "counts": {"chats": len(chats), "messages": sum(c["messages"] for c in chats),
                    "memories": len(data["memories"]), "custom_instructions": len(data["instructions"]),
                    "projects": len(data["projects"]), "skills": len(data["skills"]),
                    "facts": len(data.get("facts") or [])},
@@ -1319,22 +1411,35 @@ def archive(args: dict) -> dict:
     history = args.get("history") is True
     kind, data, src, _p = load(path)
     src.close()
-    if history:
-        _history_checks(kind, _p, data)
-        data = {**data, "chats": [_history_chat(c) for c in data["chats"]], "soul": scrub(data["soul"]),
-                "memories": [scrub(m) for m in data["memories"]]}
-    label = SOURCES[kind]
-    root = files_root() / IMPORT_DIR / label
-    root.mkdir(parents=True, exist_ok=True)
-    written, mine = 0, []
-    for chat in data["chats"]:
-        rel = _chat_relpath(chat)
-        target = root / rel
-        if not _within(target, root):
-            continue
-        _atomic_write(target, _chat_markdown(chat, label, history))
-        written += 1
-        mine.append(f"{label}/{rel}")
+    try:
+        if history:
+            _history_checks(kind, _p, data)
+            data = {**data, "soul": scrub(data["soul"]), "memories": [scrub(m) for m in data["memories"]]}
+        label = SOURCES[kind]
+        root = files_root() / IMPORT_DIR / label
+        root.mkdir(parents=True, exist_ok=True)
+        written, mine = 0, []
+        try:
+            for chat in data["chats"]:  # one chat at a time: a Hermes history is streamed, never held whole
+                _memory_check("import", written)
+                if history:
+                    chat = _history_chat(chat)
+                rel = _chat_relpath(chat)
+                target = root / rel
+                if not _within(target, root):
+                    continue
+                _atomic_write(target, _chat_markdown(chat, label, history))
+                written += 1
+                mine.append(f"{label}/{rel}")
+        except BaseException:
+            if mine:  # a stop part-way keeps what came in, Undo still finds it, and History says it is older
+                _record(import_id, source=_source_field(path), kind=kind, archived_chats=written,
+                        files=sorted(set(_registry().get(import_id, {}).get("files", [])) | set(mine)),
+                        **({"history_done": True} if history else {}))
+                _rebuild_index(root, label)
+            raise
+    finally:
+        _close_chats(data)
     _rebuild_index(root, label)
 
     about = [f"# What {label} knew about you", "",
