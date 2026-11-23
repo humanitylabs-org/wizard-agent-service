@@ -236,6 +236,14 @@ describe('private first (issue 545)', () => {
     const r = await b.call('PATCH', '/wizard/v1/agents/private', { permissions: { wizard_apps: [...kept, 'wizard-claude'] } })
     expect(r.status).toBe(409)
     expect(r.json).toMatchObject({ check: 'agent.standard_only_app' })
+    // The app's settings sheet: moving Claude from the standard agent to the private one is refused before anything
+    // moves, so it stays with the standard agent.
+    expect((await b.call('PUT', '/wizard/v1/apps/wizard-claude/agents', { agents: ['hermes'] })).status).toBe(200)
+    const moved = await b.call('PUT', '/wizard/v1/apps/wizard-claude/agents', { agents: ['private'] })
+    expect(moved.status).toBe(409)
+    expect(moved.json).toMatchObject({ check: 'agent.standard_only_app' })
+    const holders = (await b.call('GET', '/wizard/v1/apps/wizard-claude/agents')).json.agents.filter((a: any) => a.enabled).map((a: any) => a.id)
+    expect(holders).toEqual(['hermes'])
     // A standard agent may still be given them.
     const created = await b.call('POST', '/wizard/v1/agents', { label: 'Helper', permissions: { preset: 'standard', wizard_apps: ['wizard-claude'] }, model: { provider: 'openai-codex', model: 'gpt-6.1-sol' } })
     expect(created.status).toBeLessThan(300)

@@ -721,6 +721,8 @@ export function createAgentRegistry(options = {}) {
     for (const id of wanted) {
       const agent = readRaw(id)
       if (!agent || agent.role === 'recovery' || (agent.id !== MAIN_AGENT_ID && agent.runtime.kind === 'external')) fail(404, 'agent_not_found', 'agent.id', id)
+      // Issue 598: refused before any assignment moves, so a refusal leaves the app where it was.
+      if (!agentAppIds(agent).has(appId)) assertNoStandardOnlyApps({ ...agent, permissions: { wizard_apps: [appId], agent_apps: [] } }, standardOnlyApps())
     }
     const all = list().filter(agent => agent.role !== 'recovery' && (agent.id === MAIN_AGENT_ID || agent.runtime.kind !== 'external'))
     for (const agent of all) {
