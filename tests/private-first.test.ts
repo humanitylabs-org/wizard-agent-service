@@ -21,7 +21,7 @@ const APPS = [
   { id: 'meditate', name: 'Meditate', status: 'running', view: { url: '/meditate/' } },
 ]
 
-async function box({ on = true, mainModel = '', mainProvider = 'openai-codex', look, heavy = true, gateway = false, boundary = false, runtime = true, reuse = '' }: { on?: boolean | null, mainModel?: string, mainProvider?: string, look?: boolean, heavy?: boolean, gateway?: boolean, boundary?: boolean, runtime?: boolean, reuse?: string } = {}) {
+async function box({ on = true, mainModel = '', mainProvider = 'openai-codex', look, heavy = true, gateway = false, boundary = false, runtime = true, reuse = '', apps = APPS }: { on?: boolean | null, mainModel?: string, mainProvider?: string, look?: boolean, heavy?: boolean, gateway?: boolean, boundary?: boolean, runtime?: boolean, reuse?: string, apps?: unknown[] } = {}) {
   const reached: { method: string, path: string, body: string }[] = []
   const state = { model: mainModel }
   const main = createServer((req, res) => {
@@ -47,7 +47,7 @@ async function box({ on = true, mainModel = '', mainProvider = 'openai-codex', l
   const mainAddress = await listen(main) as import('node:net').AddressInfo
   const dir = reuse || mkdtempSync(join(tmpdir(), 'private-first-'))
   mkdirSync(join(dir, 'agents'), { recursive: true })
-  writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps: APPS }))
+  writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps }))
   if (look !== undefined) {
     mkdirSync(join(dir, 'Pages', 'wizard-look'), { recursive: true })
     writeFileSync(join(dir, 'Pages', 'wizard-look', 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { [PRIVATE_FIRST_SWITCH]: { on: look, at: 1 } } }))
@@ -175,6 +175,78 @@ describe('private first (issue 545)', () => {
     const list = await b.agents()
     expect(list.find((a) => a.id === 'private').permissions.wizard_apps).toContain('notes')
     expect(list.find((a) => a.id === 'hermes').permissions.wizard_apps).not.toContain('notes')
+  })
+
+  // Issue 598 (DECISIONS 115, spec/AGENTS.md section 10): Claude and ChatGPT only ever run on the standard agent, so
+  // their connection apps are never granted to a private agent, whichever way it gets its apps.
+  const CONNECTIONS = [
+    { id: 'wizard-claude', name: 'Claude', type: 'external', category: 'system', status: 'running', view: { url: '/wizard-claude/' }, mcp: { url: 'http://wizard-claude:8799/mcp' }, provides: ['ai-connection', 'claude-subscription'] },
+    { id: 'wizard-chatgpt', name: 'ChatGPT', type: 'external', category: 'system', status: 'running', view: { url: '/wizard-chatgpt/' }, mcp: { url: 'http://wizard-chatgpt:8801/mcp' }, provides: ['ai-connection', 'chatgpt-subscription'] },
+    { id: 'wizard-tinfoil', name: 'Tinfoil', type: 'external', category: 'system', status: 'running', view: { url: '/wizard-tinfoil/' }, mcp: { url: 'http://wizard-tinfoil:18804/mcp' }, provides: ['ai-connection', 'tinfoil-api-key', 'private-inference'], private_inference: { kind: 'attested-relay', client: 'tinfoil' } },
+    { id: 'wizard-connection-router', name: 'Connection Router', type: 'service', category: 'system', status: 'running', view: { url: '/wizard-connection-router/' }, mcp: { url: 'http://wizard-connection-router:8802/mcp' }, provides: ['connection-router'], uses: ['ai-connection'] },
+  ]
+  const STANDARD_ONLY = ['wizard-claude', 'wizard-chatgpt']
+
+  it('fresh box: the private agent gets every app but the Claude and ChatGPT connection apps (issue 598)', async () => {
+    const b = await box({ apps: [...APPS, ...CONNECTIONS] })
+    expect((await b.internal('private-agent', TINFOIL)).status).toBe(200)
+    const list = await b.agents()
+    const priv = list.find((a) => a.id === 'private')
+    expect([...priv.permissions.wizard_apps].sort()).toEqual(['meditate', 'messenger', 'photos', 'wizard-connection-router', 'wizard-mail', 'wizard-tinfoil'])
+    // Nothing is added to the standard agent.
+    expect(list.find((a) => a.id === 'hermes').permissions.wizard_apps).toEqual([])
+    // Claude and ChatGPT signing in later changes neither.
+    await b.internal('standard-agent', { provider: 'anthropic', model: 'claude-opus-5-5' })
+    const after = await b.agents()
+    expect(after.find((a) => a.id === 'private').permissions.wizard_apps).not.toEqual(expect.arrayContaining(['wizard-claude']))
+    expect(after.find((a) => a.id === 'private').permissions.wizard_apps.filter((id: string) => STANDARD_ONLY.includes(id))).toEqual([])
+    expect(after.find((a) => a.id === 'hermes').permissions.wizard_apps).toEqual([])
+  })
+
+  it('Claude or ChatGPT installed after the private agent never joins it (issue 598)', async () => {
+    const b = await box()
+    await b.internal('private-agent', TINFOIL)
+    writeFileSync(join(b.dir, 'apps.json'), JSON.stringify({ schema: 1, apps: [...APPS, ...CONNECTIONS] }))
+    await b.agents()
+    await new Promise((r) => setTimeout(r, 50))
+    const list = await b.agents()
+    const apps = list.find((a) => a.id === 'private').permissions.wizard_apps
+    expect(apps).toEqual(expect.arrayContaining(['wizard-tinfoil', 'wizard-connection-router']))
+    expect(apps.filter((id: string) => STANDARD_ONLY.includes(id))).toEqual([])
+    expect(list.find((a) => a.id === 'hermes').permissions.wizard_apps).toEqual([])
+  })
+
+  it('a private agent that already has them loses them, and they can\'t be ticked for it again (issue 598)', async () => {
+    const before = await box({ apps: [...APPS, ...CONNECTIONS] })
+    await before.internal('private-agent', TINFOIL)
+    // A box set up before the fix: the grant is already in agent.json. The Service then restarts on the new release.
+    const file = join(before.dir, 'agents', 'private', 'agent.json')
+    const stored = JSON.parse(readFileSync(file, 'utf8'))
+    stored.permissions.wizard_apps = [...new Set([...stored.permissions.wizard_apps, ...STANDARD_ONLY])]
+    writeFileSync(file, JSON.stringify(stored))
+    const b = await box({ apps: [...APPS, ...CONNECTIONS], reuse: before.dir })
+    await b.agents()
+    await new Promise((r) => setTimeout(r, 50))
+    const kept = (await b.agents()).find((a) => a.id === 'private').permissions.wizard_apps
+    expect(kept.filter((id: string) => STANDARD_ONLY.includes(id))).toEqual([])
+    expect(kept).toEqual(expect.arrayContaining(['wizard-tinfoil', 'meditate']))
+    // The gateway change reaches the running agent: its harness is re-applied once.
+    expect(b.applied).toEqual(['private'])
+    // The owner's app ticks: the shell sends the whole list; Claude and ChatGPT are refused for a private agent.
+    const r = await b.call('PATCH', '/wizard/v1/agents/private', { permissions: { wizard_apps: [...kept, 'wizard-claude'] } })
+    expect(r.status).toBe(409)
+    expect(r.json).toMatchObject({ check: 'agent.standard_only_app' })
+    // The app's settings sheet: moving Claude from the standard agent to the private one is refused before anything
+    // moves, so it stays with the standard agent.
+    expect((await b.call('PUT', '/wizard/v1/apps/wizard-claude/agents', { agents: ['hermes'] })).status).toBe(200)
+    const moved = await b.call('PUT', '/wizard/v1/apps/wizard-claude/agents', { agents: ['private'] })
+    expect(moved.status).toBe(409)
+    expect(moved.json).toMatchObject({ check: 'agent.standard_only_app' })
+    const holders = (await b.call('GET', '/wizard/v1/apps/wizard-claude/agents')).json.agents.filter((a: any) => a.enabled).map((a: any) => a.id)
+    expect(holders).toEqual(['hermes'])
+    // A standard agent may still be given them.
+    const created = await b.call('POST', '/wizard/v1/agents', { label: 'Helper', permissions: { preset: 'standard', wizard_apps: ['wizard-claude'] }, model: { provider: 'openai-codex', model: 'gpt-6.1-sol' } })
+    expect(created.status).toBeLessThan(300)
   })
 
   it('the Look file switch turns it on without the env setting', async () => {
