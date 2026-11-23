@@ -56,8 +56,13 @@ and project notes; `projects/<cwd>/<session>.jsonl` → chats (user/assistant te
 thinking, sub-agent runs or command echoes); `skills/**/SKILL.md`, `commands/*.md`, `agents/*.md` → skills.
 `.credentials.json`, `.claude.json`, `settings*.json`, `history.jsonl` and `plugins/` are never read.
 
+A Hermes `state.db` is read chat by chat (one session's messages at a time), by the scan and the import alike, so
+memory stays flat whatever the history's size (a 1.1 GB state.db with 8,802 chats: 30 MB peak, was 0.9 GB). Between
+chats the engine checks the container's memory (cgroup v2/v1, else the machine); above 90% of the limit the scan or
+import stops with a plain message saying how many chats came in, and those stay (Undo finds them).
+
 Not yet: ChatGPT/Claude conversations as Hermes sessions for `session_search`, Hermes holographic
-fact-store rows, and streaming very large exports (a conversations file is read whole).
+fact-store rows, and streaming very large ChatGPT/Claude exports (a conversations file is read whole).
 
 ## Into another agent, and "Move this agent into WizardOS"
 
