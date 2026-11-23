@@ -720,6 +720,28 @@ class StoppedImportTests(unittest.TestCase):
         got = self.entry(scan['import_id'])
         self.assertEqual((got['state'], got['archived_chats']), ('failed', 2))
 
+    def test_a_runner_that_waited_on_a_finished_one_keeps_a_live_journal(self):
+        import fcntl
+        big_history_zip(self.base, sessions=12, per=2, size=50)
+        scan = self.scan('big-backup.zip')
+        journal = self.home / 'cache/bring-data/running' / f"{scan['import_id']}.files"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        first = open(journal, 'a')  # another runner of the same import holds it
+        fcntl.flock(first.fileno(), fcntl.LOCK_EX)
+        second = self.child(scan['import_id'], 2, 'hang')
+        self.addCleanup(lambda: second.poll() is None and second.kill())
+        time.sleep(1)
+        journal.unlink()  # the first one finishes: unlink, then let go
+        first.close()
+        for _ in range(300):
+            if journal.is_file() and len(journal.read_text().splitlines()) >= 2:
+                break
+            time.sleep(0.05)
+        self.assertEqual(len(journal.read_text().splitlines()), 2)
+        self.assertEqual(self.entry(scan['import_id'])['state'], 'importing')
+        second.kill()
+        second.communicate(timeout=30)
+
     def test_states_for_a_whole_import_a_partly_failed_one_and_one_where_every_part_failed(self):
         big_history_zip(self.base, sessions=3, per=2, size=50)
         scan = self.scan('big-backup.zip')

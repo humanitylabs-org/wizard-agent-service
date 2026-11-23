@@ -1263,8 +1263,15 @@ def _running(import_id: str):
         return
     path = _journal_path(import_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    handle = open(path, "a", encoding="utf-8")
-    _lock(handle, True)
+    while True:  # a runner of the same import that held the lock unlinks the journal before letting go: open anew
+        handle = open(path, "a", encoding="utf-8")
+        _lock(handle, True)
+        try:
+            if fcntl is None or os.fstat(handle.fileno()).st_ino == path.stat().st_ino:
+                break
+        except FileNotFoundError:
+            pass
+        handle.close()
     _JOURNALS[key] = [handle, 1]
     try:
         yield
