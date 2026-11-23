@@ -98,11 +98,11 @@ import { createRestartGate, restartRequestRefusal } from './restart-gate.mjs'
 import { onboardingTools } from './onboarding.mjs'
 import { followUpThreadNote, followUpTool } from './follow-ups.mjs'
 import { agentReachOutTools, reachOutNote } from './agent-reach-out.mjs'
-import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, importAgentHistorySchedules, isSilentResult, isScheduleInput, projectFollowUps, scheduledRunEvents, scheduledThreadOf } from './scheduler.mjs'
+import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, importAgentHistorySchedules, isSilentResult, isScheduleInput, projectFollowUps, projectFollowUpsPayload, scheduledRunEvents, scheduledThreadOf } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { handleAgentNotesApi } from './agent-notes-http.mjs'
 import { createLookup } from './lookup.mjs'
-import { loadAgentSessionRows, projectProfileSessions, decorateThreadAgent, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
+import { loadAgentSessionRows, projectProfileSessions, decorateThreadAgent, decorateThreadAgentPayload, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { placeAgentFiles } from './agent-files.mjs'
 import { createIncognito, isIncognitoPath } from './incognito.mjs'
 import { AgentChatInputs } from './agent-chat-inputs.mjs'
@@ -5260,44 +5260,48 @@ function buildWizardServer(options, lifetime) {
     if (operator) return result
     try {
       const payload = JSON.parse(result.toString('utf8'))
-      const heavyJobs = ledgerRows()
-      for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => {
-        if (!session || typeof session.id !== 'string') return session
-        const guarded = heavyStatus('hermes', session.id, session.wizard_attention, heavyJobs)
-        if (guarded !== session.wizard_attention) session = { ...session, wizard_attention: guarded, status: 'running', wizard_waiting_on: 'heavy' }
-        session = projectOwnedOpenWork(session, ownedOpenWork?.evidenceFor(session.id))
-        const renames = threadTitleStore.visibleHistory(session.id)
-        if (misspellsProductName(session.title)) {
-          queueRespell(session.id)
-          session = { ...session, title: spellProductName(session.title) }
-        }
-        if (!session.title) {
-          const placeholder = threadTitleStore.get(session.id)
-          if (placeholder?.provisional && !placeholder.locked && placeholder.title) {
-            session = { ...session, title: placeholder.title, wizard_title_provisional: true }
-            if (Date.now() - (provisionalPushedAt.get(session.id) ?? 0) > 20_000) {
-              provisionalPushedAt.set(session.id, Date.now())
-              if (provisionalPushedAt.size > 500) provisionalPushedAt.delete(provisionalPushedAt.keys().next().value)
-              void lifetime.track(pushProvisionalTitle(session.id).catch(() => undefined))
-            }
-          }
-        }
-        // Fold the agent's subject into the owner's list (subjects.json) for Ready's By subject order.
-        spaceFiling.apply('hermes', session.id, session.wizard_attention)
-        const attention = session.wizard_attention ? subjectCatalog.apply(session.id, session.wizard_attention) : null
-        if (attention?.subject) {
-          servedSubjects.delete(session.id)
-          servedSubjects.set(session.id, attention.subject)
-          if (servedSubjects.size > 2000) servedSubjects.delete(servedSubjects.keys().next().value)
-        }
-        return {
-          ...session,
-          ...(attention ? { wizard_attention: attention } : {}),
-          ...(renames.length ? { wizard_title_renames: renames } : {}),
-        }
-      })
+      decorateSessionTitlesPayload(payload)
       return Buffer.from(JSON.stringify(payload))
     } catch { return result }
+  }
+  // decorateSessionTitles on a parsed payload (collections replaced in place); throws instead of falling back.
+  const decorateSessionTitlesPayload = (payload) => {
+    const heavyJobs = ledgerRows()
+    for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => {
+      if (!session || typeof session.id !== 'string') return session
+      const guarded = heavyStatus('hermes', session.id, session.wizard_attention, heavyJobs)
+      if (guarded !== session.wizard_attention) session = { ...session, wizard_attention: guarded, status: 'running', wizard_waiting_on: 'heavy' }
+      session = projectOwnedOpenWork(session, ownedOpenWork?.evidenceFor(session.id))
+      const renames = threadTitleStore.visibleHistory(session.id)
+      if (misspellsProductName(session.title)) {
+        queueRespell(session.id)
+        session = { ...session, title: spellProductName(session.title) }
+      }
+      if (!session.title) {
+        const placeholder = threadTitleStore.get(session.id)
+        if (placeholder?.provisional && !placeholder.locked && placeholder.title) {
+          session = { ...session, title: placeholder.title, wizard_title_provisional: true }
+          if (Date.now() - (provisionalPushedAt.get(session.id) ?? 0) > 20_000) {
+            provisionalPushedAt.set(session.id, Date.now())
+            if (provisionalPushedAt.size > 500) provisionalPushedAt.delete(provisionalPushedAt.keys().next().value)
+            void lifetime.track(pushProvisionalTitle(session.id).catch(() => undefined))
+          }
+        }
+      }
+      // Fold the agent's subject into the owner's list (subjects.json) for Ready's By subject order.
+      spaceFiling.apply('hermes', session.id, session.wizard_attention)
+      const attention = session.wizard_attention ? subjectCatalog.apply(session.id, session.wizard_attention) : null
+      if (attention?.subject) {
+        servedSubjects.delete(session.id)
+        servedSubjects.set(session.id, attention.subject)
+        if (servedSubjects.size > 2000) servedSubjects.delete(servedSubjects.keys().next().value)
+      }
+      return {
+        ...session,
+        ...(attention ? { wizard_attention: attention } : {}),
+        ...(renames.length ? { wizard_title_renames: renames } : {}),
+      }
+    })
   }
   const enrichSessionListMessages = async (result, operator, sessionTruth = null, previewOffset = 0) => {
     try {
@@ -5478,6 +5482,30 @@ function buildWizardServer(options, lifetime) {
     recordProjectionSlice(sliceStarted)
     return result
   }
+  // The same decoration for the shared list snapshot (issue 584). It runs over every chat on each snapshot build, so it
+  // copies the rows once (not a parse and stringify per step), resolves the main agent once per build instead of once
+  // per row (each lookup stats the agent and app files), and gives the event loop back between slices of rows. Each
+  // row still gets its own copy of the agent object. A failing step leaves its slice as it found it, as before.
+  const DECORATE_SLICE = 250
+  const decorateSessionRows = async (rows) => {
+    const out = []
+    let main = null
+    try { main = agents ? agents.threadAgent(MAIN_AGENT_ID) : null } catch { /* rows keep no agent, as before */ }
+    for (let index = 0; index < rows.length; index += DECORATE_SLICE) {
+      if (index) await new Promise(resolveSlice => setImmediate(resolveSlice))
+      const sliceStarted = performance.now()
+      const payload = JSON.parse(JSON.stringify({ data: rows.slice(index, index + DECORATE_SLICE) }))
+      try { decorateSessionTitlesPayload(payload) } catch { /* titles and subjects are optional decoration */ }
+      if (agents) try { decorateThreadAgentPayload(payload, () => structuredClone(main)) } catch { /* as decorateThreadAgent */ }
+      out.push(...payload.data)
+      recordProjectionSlice(sliceStarted)
+    }
+    const sliceStarted = performance.now()
+    try { projectFollowUpsPayload({ data: out }, scheduler, { agent: 'main' }) } catch { /* follow-ups are optional decoration */ }
+    if (agents) agents.observeSessions(MAIN_AGENT_ID, out.filter(row => row && typeof row === 'object').map(row => row.id))
+    recordProjectionSlice(sliceStarted)
+    return out
+  }
   const projectSessionList = async (result, operator, canonicalPage, firstPage) =>
     decorateSessionList(await projectSessionListCore(result, operator, canonicalPage, firstPage), operator)
 
@@ -5515,7 +5543,7 @@ function buildWizardServer(options, lifetime) {
       appCatalog().map(app => app.id).sort(),
       [...dismissedFailureStore.dismissals].filter(([, record]) => record.agent_id === 'hermes').sort(([a], [b]) => a.localeCompare(b)),
     ])
-    const decorate = (rows) => JSON.parse(decorateSessionList(Buffer.from(JSON.stringify({ data: rows })), false).toString('utf8')).data
+    const decorate = decorateSessionRows
     const fullCore = async (all) => {
       const rows = []
       for (let index = 0; index < all.length; index += 100) rows.push(...await projectBatch(all.slice(index, index + 100), index === 0))
@@ -5629,10 +5657,10 @@ function buildWizardServer(options, lifetime) {
           if(snapshot.age()>20000) setImmediate(()=>{ void listCache.served().catch(()=>undefined) })
           return cached
         }
-        return snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
+        return snapshot.get({ gate: gate(), local: localRevision, build: async () => await decorate((await buildHybrid()).rows) })
       },
       served: async (shared = false) => {
-        const rows = await snapshot.get({ gate: gate(), local: localRevision, build: async () => decorate((await buildHybrid()).rows) })
+        const rows = await snapshot.get({ gate: gate(), local: localRevision, build: async () => await decorate((await buildHybrid()).rows) })
         return shared ? rows : rows.map((row) => ({ ...row }))
       },
       fellBack: (error) => {

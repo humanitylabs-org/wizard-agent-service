@@ -22,7 +22,21 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
       return img ? ` 🖼 ${files.length === 1 ? 'Photo' : files.length + ' photos'} ` : ` 📎 ${files.length === 1 ? (files[0].filename || 'File') : files.length + ' files'} `;
     } catch (e) { return ' '; }
   };
-  const clean = s => String(s || '')
+  // clean() runs on each row's latest and last owner message on every list snapshot build (issue 584), and those
+  // messages rarely change between builds, so long inputs keep their result. The memo is bounded by total characters.
+  const CLEAN_MEMO = new Map(), CLEAN_MEMO_CHARS = 8_000_000, CLEAN_MEMO_MIN = 200;
+  let cleanMemoChars = 0;
+  const clean = s => {
+    const input = String(s || '');
+    if (input.length < CLEAN_MEMO_MIN || input.length > CLEAN_MEMO_CHARS / 8) return cleanText(input);
+    const kept = CLEAN_MEMO.get(input);
+    if (kept !== undefined) return kept;
+    const out = cleanText(input);
+    CLEAN_MEMO.set(input, out); cleanMemoChars += input.length;
+    while (cleanMemoChars > CLEAN_MEMO_CHARS) { const [oldest] = CLEAN_MEMO.keys(); cleanMemoChars -= oldest.length; CLEAN_MEMO.delete(oldest); }
+    return out;
+  };
+  const cleanText = s => s
     .replace(/\[WIZARD_FILES_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_FILES_V1\]/g, (_, j) => chipLabel(j))
     .replace(/\[WIZARD_FILE_CHIPS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_FILE_CHIPS_V1\]/g, (_, j) => chipLabel(j))
     .replace(/\[WIZARD_IMAGE_INTENT_V1\][\s\S]*?\[\/WIZARD_IMAGE_INTENT_V1\]/g, ' ')

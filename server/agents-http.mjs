@@ -281,25 +281,35 @@ export function runIdFromPath(upstreamPath) {
 /** Adds the server-side `agent` object to every thread in a session list or session response. */
 export function decorateThreadAgent(result, agentInfo) {
   try {
-    const payload = JSON.parse(result.toString('utf8'))
-    let changed = false
-    const decorate = item => {
-      if (!item || typeof item !== 'object') return item
-      const agent = typeof agentInfo === 'function' ? agentInfo(item) : agentInfo
-      return { ...item, agent, agent_id: agent.id, session_id: item.session_id ?? item.id }
-    }
-    for (const key of ['data', 'sessions']) {
-      if (!Array.isArray(payload?.[key])) continue
-      payload[key] = payload[key].map(decorate)
-      changed = true
-    }
-    if (payload?.session && typeof payload.session === 'object') {
-      payload.session = decorate(payload.session)
-      changed = true
-    }
-    if (!changed && typeof payload?.id === 'string') return Buffer.from(JSON.stringify(decorate(payload)))
-    return changed ? Buffer.from(JSON.stringify(payload)) : result
+    const { value, changed } = threadAgentRows(JSON.parse(result.toString('utf8')), agentInfo)
+    return changed ? Buffer.from(JSON.stringify(value)) : result
   } catch { return result }
+}
+
+/** decorateThreadAgent on a parsed payload: list collections are replaced in place, a bare session comes back as a
+ *  new object. A list build that already holds the parsed rows skips a stringify and parse of the whole list. */
+export function decorateThreadAgentPayload(payload, agentInfo) {
+  return threadAgentRows(payload, agentInfo).value
+}
+
+function threadAgentRows(payload, agentInfo) {
+  let changed = false
+  const decorate = item => {
+    if (!item || typeof item !== 'object') return item
+    const agent = typeof agentInfo === 'function' ? agentInfo(item) : agentInfo
+    return { ...item, agent, agent_id: agent.id, session_id: item.session_id ?? item.id }
+  }
+  for (const key of ['data', 'sessions']) {
+    if (!Array.isArray(payload?.[key])) continue
+    payload[key] = payload[key].map(decorate)
+    changed = true
+  }
+  if (payload?.session && typeof payload.session === 'object') {
+    payload.session = decorate(payload.session)
+    changed = true
+  }
+  if (!changed && typeof payload?.id === 'string') return { value: decorate(payload), changed: true }
+  return { value: payload, changed }
 }
 
 /**
