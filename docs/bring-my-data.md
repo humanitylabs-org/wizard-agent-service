@@ -84,7 +84,13 @@ The Importer reaches that with the same engine, no second migration system:
   of the source's (vectors, entities, banks); an agent with one gets each new fact through the plugin's own store
   (plain SQL with the table's FTS triggers when the plugin is not on this box), keeping trust scores. Key-looking
   facts stay behind. Undo removes exactly the facts that import added.
-- Credentials never move (`.env`, `auth.json`, `config.yaml` are not read). A whole-agent move with credentials and
+- Imported facts are only used when the agent recalls from that store. When the target agent has chosen no memory
+  provider, the import sets `memory.provider: holographic` in the TARGET agent's config through stock Hermes'
+  raw reader and comment-preserving writer (the same default `ops/agent-runtime/hermes_import.py` applies); an
+  explicit other provider, or `holographic` in `plugins.disabled`, stays. The facts result carries
+  `fact_memory: {on, turned_on, why}` (`why` is plain words for the Importer) and undo puts the old value back
+  once no other import's facts remain. New chats pick it up; nothing restarts.
+- Credentials never move (`.env`, `auth.json`, `config.yaml` of the source are not read). A whole-agent move with credentials and
   runtime stays the owner CLI `ops/agent-runtime/hermes_import.py`.
 - `scan` reports `blocked` when Files can't take chats or About me (the Files root often belongs to the Files
   app's user), before the owner approves; a failed part comes back as plain words, never an errno, and running
