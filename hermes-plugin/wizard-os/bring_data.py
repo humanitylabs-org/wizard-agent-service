@@ -1844,8 +1844,9 @@ def import_facts(args: dict) -> dict:
         _record(import_id, source=_source_field(path), kind=kind,
                 facts_added=sorted(set(prior) | set(added)), facts_created=created or bool(
                     _registry().get(import_id, {}).get("facts_created")))
+        memory = _fact_memory_on(import_id)
         return {"facts_added": len(added), "already_here": len(facts) - len(added) if not created else 0,
-                "store": FACT_DB, "provider_on": _holographic_on()}
+                "store": FACT_DB, "provider_on": memory["on"], "fact_memory": memory}
     finally:
         src.close()
 
@@ -1906,6 +1907,87 @@ def _holographic_on() -> bool:
     except OSError:
         return False
     return bool(re.search(r"^\s*provider:\s*['\"]?holographic\b", text, re.M))
+
+
+def _config_io():
+    """Stock Hermes' own raw reader and comment-preserving writer for config.yaml, or None outside Hermes."""
+    try:
+        from hermes_cli.config import atomic_config_write, read_user_config_raw
+
+        return read_user_config_raw, atomic_config_write
+    except Exception:  # noqa: BLE001 - outside Hermes, or a build without them
+        return None
+
+
+def _holographic_here() -> bool:
+    """Whether this Hermes can load the holographic provider (bundled or in this home's plugins)."""
+    try:
+        from plugins.memory import find_provider_dir
+
+        if find_provider_dir("holographic"):
+            return True
+    except Exception:  # noqa: BLE001 - outside Hermes
+        pass
+    return _fact_store_class() is not None
+
+
+def _fact_memory_on(import_id: str) -> dict:
+    """Imported facts are only used when the agent recalls from its fact store. When this agent has chosen no
+    memory provider, pick the stock holographic one (the rule Wizard's own Hermes import follows; an explicit
+    other provider, or holographic parked in ``plugins.disabled``, is the owner's choice and stays). Undo puts
+    the old value back. Returns ``{on, turned_on, why}``; ``why`` says in plain words why facts go unused."""
+    if _holographic_on():
+        return {"on": True, "turned_on": _registry().get(import_id, {}).get("fact_memory_was") is not None}
+    path = hermes_home() / "config.yaml"
+    io = _config_io()
+    if io is None or not _holographic_here():
+        return {"on": False, "turned_on": False, "why": "This agent's Hermes has no fact memory to turn on."}
+    read, write = io
+    try:
+        raw = read(path)
+    except Exception:  # noqa: BLE001 - an unreadable config is never rewritten
+        return {"on": False, "turned_on": False, "why": "Couldn't read this agent's settings to turn fact memory on."}
+    memory = raw.get("memory") if isinstance(raw.get("memory"), dict) else {}
+    chosen = memory.get("provider")
+    if chosen not in (None, ""):
+        return {"on": False, "turned_on": False, "why": f"This agent uses the {chosen} memory, not its fact store."}
+    disabled = (raw.get("plugins") or {}).get("disabled") if isinstance(raw.get("plugins"), dict) else None
+    if isinstance(disabled, list) and "holographic" in disabled:
+        return {"on": False, "turned_on": False, "why": "Fact memory is switched off in this agent's plugins."}
+    raw["memory"] = {**memory, "provider": "holographic"}
+    try:
+        write(path, raw)
+    except Exception:  # noqa: BLE001 - refused (e.g. managed config): say so, change nothing else
+        return {"on": False, "turned_on": False, "why": "Couldn't turn fact memory on in this agent's settings."}
+    if not _holographic_on():
+        return {"on": False, "turned_on": False, "why": "Couldn't turn fact memory on in this agent's settings."}
+    _record(import_id, fact_memory_was=chosen if chosen is not None else "")
+    return {"on": True, "turned_on": True}
+
+
+def _undo_fact_memory(import_id: str, entry: dict) -> bool:
+    """Put back the memory provider this import chose, when no other import's facts still need it and the
+    owner has not changed it since."""
+    if entry.get("fact_memory_was") is None or not _holographic_on():
+        return False
+    still = [k for k, v in _registry().items() if k != import_id and v.get("facts_added")]
+    if still:  # another import's facts still need it: that import now owns putting it back
+        if not any(_registry()[k].get("fact_memory_was") is not None for k in still):
+            _record(still[0], fact_memory_was=entry["fact_memory_was"])
+        return False
+    io = _config_io()
+    if io is None:
+        return False
+    read, write = io
+    path = hermes_home() / "config.yaml"
+    try:
+        raw = read(path)
+        memory = raw.get("memory") if isinstance(raw.get("memory"), dict) else {}
+        raw["memory"] = {**memory, "provider": entry.get("fact_memory_was") or ""}
+        write(path, raw)
+    except Exception:  # noqa: BLE001 - leave it on rather than half-write
+        return False
+    return True
 
 
 def _undo_facts(entry: dict) -> int:
@@ -2304,13 +2386,14 @@ def undo(args: dict) -> dict:
         removed_facts = 0
     removed_schedules = _undo_schedules(entry)
     restored = _undo_owner_side(import_id, entry)
+    fact_memory_off = _undo_fact_memory(import_id, entry)
     reg = _registry()
     reg.pop(import_id, None)
     _save_registry(reg)
     kept = "" if entry.get("via") == "importer" else \
         "Files/Imported/About me.md and memory entries were approved by the owner: ask which to remove."
     return {"removed_files": removed_files, "removed_skills": removed_skills, "removed_facts": removed_facts,
-            "removed_schedules": removed_schedules, **restored, "kept": kept}
+            "removed_schedules": removed_schedules, **restored, "fact_memory_off": fact_memory_off, "kept": kept}
 
 
 def _other_agents_imports() -> list[dict]:
@@ -2688,8 +2771,9 @@ def history_facts(args: dict) -> dict:
         prior = _registry().get(import_id, {})
         _record(import_id, facts_added=sorted(set(prior.get("facts_added") or []) | set(added)),
                 facts_created=bool(prior.get("facts_created")) or created)
+        memory = _fact_memory_on(import_id)
         return {"facts_added": len(added), "already_here": len(facts) - len(added), "store": FACT_DB,
-                "provider_on": _holographic_on(), "trust": HISTORY_TRUST}
+                "provider_on": memory["on"], "fact_memory": memory, "trust": HISTORY_TRUST}
     finally:
         src.close()
 

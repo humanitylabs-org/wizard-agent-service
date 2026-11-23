@@ -262,6 +262,89 @@ class HistoryTests(unittest.TestCase):
         self.assertLessEqual(max(t for c, t in facts.items() if c.startswith('[Earlier agent')), bd.HISTORY_TRUST)
         self.assertEqual(self.memory.entries, ['Lives in Porto.'])   # nothing went into always-on memory by itself
 
+    # 3b. imported facts are used: fact memory goes on when this agent chose none (wizard-importer issue 14)
+    def fake_hermes_config(self, text):
+        """Stand-in for stock hermes_cli.config's raw reader and writer (flat two-level YAML is enough here)."""
+        path = self.home / 'config.yaml'
+        path.write_text(text, 'utf-8')
+
+        def read(p):
+            out, section = {}, None
+            for line in Path(p).read_text('utf-8').splitlines():
+                if not line.strip() or line.lstrip().startswith('#'):
+                    continue
+                key, _, value = line.strip().partition(':')
+                value = value.strip().strip("'\"")
+                if not line.startswith(' '):
+                    section = key
+                    out[key] = {} if not value else value
+                else:
+                    out[section][key] = [v.strip() for v in value.strip('[]').split(',')] if value.startswith('[') else value
+            return out
+
+        def write(p, data):
+            lines = []
+            for key, value in data.items():
+                if isinstance(value, dict):
+                    lines.append(f'{key}:')
+                    lines += [f"  {k}: {'[' + ', '.join(v) + ']' if isinstance(v, list) else (v or chr(39) * 2)}"
+                              for k, v in value.items()]
+                else:
+                    lines.append(f'{key}: {value}')
+            Path(p).write_text('\n'.join(lines) + '\n', 'utf-8')
+
+        for name, value in (('_config_io', lambda: (read, write)), ('_holographic_here', lambda: True)):
+            self.addCleanup(setattr, bd, name, getattr(bd, name))
+            setattr(bd, name, value)
+        return path
+
+    def test_imported_facts_turn_fact_memory_on_and_undo_turns_it_back(self):
+        config = self.fake_hermes_config('model:\n  default: x\n')
+        backup_zip(self.base)
+        scan, result = self.bring_all()
+        facts = result['done']['facts']
+        self.assertTrue(facts['provider_on'])
+        self.assertEqual(facts['fact_memory'], {'on': True, 'turned_on': True})
+        self.assertTrue(bd._holographic_on())
+        self.assertIn('default: x', config.read_text('utf-8'))   # the rest of the settings stay
+        undone = call('undo', import_id=scan['import_id'])
+        self.assertTrue(undone['fact_memory_off'])
+        self.assertFalse(bd._holographic_on())
+
+    def test_undoing_the_import_that_turned_it_on_hands_the_undo_to_the_next(self):
+        self.fake_hermes_config('model:\n  default: x\n')
+        backup_zip(self.base)
+        first, _ = self.bring_all()
+        backup_zip(self.base, 'second.zip')
+        second = self.scan('second.zip')
+        self.assertNotEqual(second['import_id'], first['import_id'])
+        call('import', import_id=second['import_id'], facts=True)
+        bd._record(second['import_id'], facts_added=['still here'])  # its own facts, whatever the first left
+        self.assertFalse(call('undo', import_id=first['import_id'])['fact_memory_off'])
+        self.assertTrue(bd._holographic_on())                           # the second import's facts still need it
+        self.assertTrue(call('undo', import_id=second['import_id'])['fact_memory_off'])
+        self.assertFalse(bd._holographic_on())
+
+    def test_an_owner_chosen_memory_stays_and_the_result_says_why(self):
+        config = self.fake_hermes_config('memory:\n  provider: honcho\n')
+        backup_zip(self.base)
+        _, result = self.bring_all()
+        memory = result['done']['facts']['fact_memory']
+        self.assertEqual((memory['on'], memory['turned_on']), (False, False))
+        self.assertIn('honcho', memory['why'])
+        self.assertEqual(config.read_text('utf-8'), 'memory:\n  provider: honcho\n')
+        self.fake_hermes_config('plugins:\n  disabled: [holographic]\n')
+        self.assertIn('switched off', bd._fact_memory_on('x')['why'])
+
+    def test_without_a_hermes_settings_writer_the_result_says_facts_go_unused(self):
+        backup_zip(self.base)
+        self.addCleanup(setattr, bd, '_config_io', bd._config_io)
+        bd._config_io = lambda: None
+        _, result = self.bring_all()
+        memory = result['done']['facts']['fact_memory']
+        self.assertFalse(memory['on'])
+        self.assertTrue(memory['why'])
+
     # 4. skills are readable reference documents, never active skills
     def test_skills_are_documents_not_active_skills(self):
         backup_zip(self.base)
