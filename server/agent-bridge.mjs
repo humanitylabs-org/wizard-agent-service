@@ -12,6 +12,7 @@ import { constants, opendirSync, openSync, closeSync, fstatSync, lstatSync, real
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { dirname, join, resolve, sep } from 'node:path'
 import { isPrivateApp } from './agents.mjs'
+import { CAPABILITY_TOOL } from './capabilities.mjs'
 
 export const MCP_SERVER_NAME = 'wizard'
 export const META_TOOL = 'wizard_apps'
@@ -133,6 +134,21 @@ function jobTools(job, list) {
   return list.map((t, i) => [rank(t), i, t]).sort((a, b) => a[0] - b[0] || a[1] - b[1]).map((x) => x[2])
 }
 
+const CAPABILITY_SLOT = '\u0000capabilities'
+
+/** Job names joined with ', ' within `budget` characters; cut ones end in '…'; nothing fits = '…'. */
+export function capabilityIndex(jobs, budget) {
+  const names = [...new Set((Array.isArray(jobs) ? jobs : []).map((j) => jobWords(j)).filter(Boolean))]
+  let out = ''
+  for (let i = 0; i < names.length; i += 1) {
+    const next = out ? `${out}, ${names[i]}` : names[i]
+    const more = i < names.length - 1 ? ', …'.length : 0
+    if (next.length + more > budget) return out ? `${out}, …` : '…'
+    out = next
+  }
+  return out || 'see the tool'
+}
+
 /**
  * The kernel (spec v2): FIXED and short, the same text on every box, with no per-app list. Discovery
  * happens through the wizard-job-* pointer skills in the agent's normal skills index. Keep this function
@@ -140,7 +156,7 @@ function jobTools(job, list) {
  * `jobMap` adds the fallback job -> app map (max 12 lines); the generic harness, which has no skills index,
  * always gets it.
  */
-export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false, skillsIndex } = {}) {
+export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false, skillsIndex, capabilities = null } = {}) {
   const hermes = harness === 'hermes'
   // Only the main agent's skills index holds wizard-job-* pointers (#58). Any other agent on the gateway is told the
   // jobs directly, limited to the apps on its own list.
@@ -162,10 +178,21 @@ export function renderKernel(apps = [], { harness = 'hermes', filesRoot = DEFAUL
     'Use the installed app for its job.',
     'Never ask the owner what an installed app can answer: call its tools first; if missing, list apps, retry once, never blame access. Never guess from old chats or call app URLs.',
     'Answer from the source of truth: owning app for data, live checks for box state, release records for what shipped. Say none found only after checking. Report tool errors.',
-    `"What apps do I have?": call \`${meta}\`. Report unreachable ones (\`wam doctor\`).`,
-    'Prefer Wizard tools to installing software; never install speech models.',
+    ...(Array.isArray(capabilities) ? [CAPABILITY_SLOT] : [
+      `"What apps do I have?": call \`${meta}\`. Report unreachable ones (\`wam doctor\`).`,
+      'Prefer Wizard tools to installing software; never install speech models.',
+    ]),
     'Save routing-only app-job skills.',
   ]
+  if (Array.isArray(capabilities)) {
+    // Issue 463: one generated index line instead of a hand-written line per capability, capped so the kernel stays
+    // within KERNEL_LIMIT however many jobs the box has (the lookup tool holds the rest).
+    const tool = hermes ? `mcp__${MCP_SERVER_NAME}__${CAPABILITY_TOOL}` : CAPABILITY_TOOL
+    const tail = `For "what can you do?" and before installing software or downloading a model, call \`${tool}\`.`
+    const rest = text.filter((line) => line !== CAPABILITY_SLOT).join('\n').length + 1
+    const index = capabilityIndex(capabilities, KERNEL_LIMIT - rest - 'Built in: . '.length - tail.length)
+    text[text.indexOf(CAPABILITY_SLOT)] = `Built in: ${index}${index.endsWith('…') ? ' ' : '. '}${tail}`
+  }
   if (jobMap || !pointers) {
     const rows = mapJobs(apps).slice(0, JOB_MAP_LINES).map(([job, owners]) =>
       `- ${JOB_ASKS[job]?.map || jobWords(job)} -> ${owners.map((a) => `${a.name} (\`${agentToolName(a.prefix, '*', harness)}\`)`).join(', ')}`)
@@ -510,7 +537,7 @@ export function createAgentBridge({
   appsJsonPath, osHome = appsJsonPath ? dirname(appsJsonPath) : '', grantsHome = osHome, mcpAddress = 'url', token = '',
   fetchImpl = fetch, timeoutMs = 4000, callTimeoutMs = 120_000, log = () => {}, watchIntervalMs = 2000,
   writeSkills = true, harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false,
-  agentForToken = () => '', appsFor = () => null, builtins = null, agents = () => null, skillRetryMs = 2000,
+  agentForToken = () => '', appsFor = () => null, builtins = null, agents = () => null, skillRetryMs = 2000, capabilities = () => null,
   recheckMs = TOOLS_RECHECK_MS,
 }) {
   const shared = sharedAgentTools(agents, log)
@@ -871,7 +898,7 @@ export function createAgentBridge({
           protocolVersion: PROTOCOL_VERSIONS.includes(asked) ? asked : PROTOCOL_VERSIONS[0],
           capabilities: { tools: { listChanged: true } },
           serverInfo: { name: 'wizard-os', version: '1' },
-          instructions: renderKernel(visible(agentId), { harness, filesRoot, jobMap, skillsIndex: agentId === GATEWAY_MAIN_AGENT && writeSkills && Boolean(osHome) }),
+          instructions: renderKernel(visible(agentId), { harness, filesRoot, jobMap, skillsIndex: agentId === GATEWAY_MAIN_AGENT && writeSkills && Boolean(osHome), capabilities: capabilityJobs(agentId) }),
         })
       }
       if (method === 'ping') return reply({})
@@ -945,10 +972,13 @@ export function createAgentBridge({
     send(response, 200, Array.isArray(body) ? replies : replies[0], headers)
   }
 
+  // Issue 463: the agent's capability index (job names) while the capability switch is on, else null (old kernel).
+  const capabilityJobs = (agentId) => { try { const jobs = capabilities(agentId); return Array.isArray(jobs) ? jobs : null } catch { return null } }
+
   async function kernel({ harness: h = harness, agent: agentId = GATEWAY_MAIN_AGENT } = {}) {
     const tools = await toolNames(agentId)
     const mine = visible(agentId)
-    const text = renderKernel(mine, { harness: h, filesRoot, jobMap })
+    const text = renderKernel(mine, { harness: h, filesRoot, jobMap, capabilities: capabilityJobs(agentId) })
     return {
       text, chars: text.length, harness: h, mcp_server: MCP_SERVER_NAME, job_map: Boolean(jobMap || h !== 'hermes'),
       job_skills: jobsOf(mine).map(([job]) => jobSkillName(job)),
@@ -962,7 +992,7 @@ export function createAgentBridge({
     handle, kernel, listTools, callTool, refresh: () => { if (refresh()) notifyChanged() }, agentFor: authorized,
     // An agent's app list changed (#58): rewrite the main agent's pointer skills and tell open sessions.
     appsChanged: () => { refresh(); rewriteSkills(); notifyChanged() },
-    kernelText: (h = harness, agentId = GATEWAY_MAIN_AGENT) => { refresh(); return renderKernel(visible(agentId), { harness: h, filesRoot, jobMap }) },
+    kernelText: (h = harness, agentId = GATEWAY_MAIN_AGENT) => { refresh(); return renderKernel(visible(agentId), { harness: h, filesRoot, jobMap, capabilities: capabilityJobs(agentId) }) },
     // No argument: every installed app. With an agent id: only the apps that agent may use (#58), same as callTool.
     apps: (agentId) => { refresh(); return agentId === undefined ? apps : visible(agentId) },
     snapshot: () => { refresh(); return Object.fromEntries(apps.map((a) => [a.id, a.status])) },

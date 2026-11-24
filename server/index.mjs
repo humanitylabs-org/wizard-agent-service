@@ -134,6 +134,8 @@ server = createWizardServer({
   agentInbox: envChoice(process.env.WIZARD_AGENT_INBOX),
   // Replies into messaging-app chats (issue 427, owner switch wizard/messaging-chat-replies; '1'/'0' forces it).
   messagingReplies: envChoice(process.env.WIZARD_MESSAGING_REPLIES),
+  // Capability registry (issue 463): unset follows the owner's wizard/capability-registry switch; 1 on, 0 off.
+  capabilityRegistry: envChoice(process.env.WIZARD_CAPABILITY_REGISTRY),
   threadSeenStatePath: process.env.WIZARD_THREAD_SEEN_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-seen.json'),
   voiceRecoveryManifestPath: process.env.WIZARD_VOICE_RECOVERY_MANIFEST_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'voice-recoveries.json'),
   dismissedFailureStatePath: process.env.WIZARD_DISMISSED_FAILURE_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'dismissed-failures.json'),

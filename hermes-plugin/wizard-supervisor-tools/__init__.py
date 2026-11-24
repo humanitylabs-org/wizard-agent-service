@@ -69,6 +69,15 @@ def call(action, args, session_id=None, **kwargs):
 
 
 def register(ctx):
+    # Look up before installing (issue 463): the same guard as the wizard-os plugin, for every managed agent.
+    try:
+        from . import capability_guard
+    except ImportError:  # loaded as a plain module (tests): load the file beside this one
+        import importlib.util
+        spec = importlib.util.spec_from_file_location('wizard_capability_guard', Path(__file__).with_name('capability_guard.py'))
+        capability_guard = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(capability_guard)
+    capability_guard.register(ctx)
     specs = json.loads(Path(__file__).with_name('tools.json').read_text())
     for spec in specs:
         action = spec['name'].removeprefix('supervisor_')

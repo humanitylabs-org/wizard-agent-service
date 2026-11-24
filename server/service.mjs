@@ -55,6 +55,7 @@ import { dayOf, mintDailyThreadId, dailyTitle, openerOf, dailyRunNote, validDay,
 import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigration } from './channel-spaces.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
 import { createChannelsSwitch, channelOn, channelPart } from './channels-switch.mjs'
+import { createCapabilities, CAPABILITY_SWITCH } from './capabilities.mjs'
 import { LOCAL_APP_ROUTES_SWITCH, createRouteTable, launcherPath as localLauncherPath, loopbackRequest, serveLocalAppRoute, upgradeLocalAppRoute } from './local-app-routes.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, appDoor, recordApp } from './agent-inbox.mjs'
@@ -3174,12 +3175,30 @@ function buildWizardServer(options, lifetime) {
   // wizard_transcribe on the gateway (server/transcribe.mjs): the box's Wizard Voice Service on loopback, for the
   // agent's own audio files. Bound with the agent registry (it resolves each agent's home).
   let transcribeTools = null
+  const builtinTools = (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(reachOut?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId), ...(transcribeTools?.list(agentId) || [])]
+  // System capability registry (issue 463, capabilities.mjs): the owner's `wizard/capability-registry` switch in the
+  // Look file; option capabilityRegistry (env WIZARD_CAPABILITY_REGISTRY, '1' on / '0' off) wins. Off = no
+  // wizard_capabilities tool, the old kernel line and no run note: nothing changes.
+  const capabilitySwitchOn = createChannelsSwitch({ id: CAPABILITY_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.capabilityRegistryTtlMs ?? 3000 })
+  const capabilityOn = () => channelPart(options.capabilityRegistry, capabilitySwitchOn)
+  const capabilities = createCapabilities({
+    on: capabilityOn,
+    apps: (agentId) => bridge?.apps(agentId) || [],
+    allApps: () => bridge?.apps() || [],
+    builtins: builtinTools,
+    isPrivate: (agentId) => { try { return gatewayAgents?.read?.(agentId)?.privacy === 'private' } catch { return false } },
+    agentLabel: (agentId) => { try { return gatewayAgents?.read?.(agentId)?.label || (agentId === GATEWAY_MAIN_AGENT ? 'your main agent' : '') } catch { return '' } },
+    voice: () => sttReadiness(),
+    statePath: options.capabilityStatePath ?? (bridgeOsHome ? join(bridgeOsHome, 'capabilities.json') : ''),
+    log: (line) => process.stdout.write(`[capabilities] ${line}\n`),
+  })
   const bridge = appsJsonPath && options.agentBridge !== false
     ? createAgentBridge({
       builtins: {
-        list: (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(reachOut?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId), ...(transcribeTools?.list(agentId) || [])],
-        call: async (name, args, agentId) => (await transcribeTools?.call(name, args, agentId)) ?? (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await reachOut?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
+        list: (agentId) => [...builtinTools(agentId), ...capabilities.list(agentId)],
+        call: async (name, args, agentId) => (await capabilities.call(name, args, agentId)) ?? (await transcribeTools?.call(name, args, agentId)) ?? (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await reachOut?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
       },
+      capabilities: (agentId) => capabilities.jobs(agentId),
       agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
       appsFor: (agentId) => (gatewayAgents ? gatewayAgents.allowedApps(agentId) : null),
@@ -3191,6 +3210,17 @@ function buildWizardServer(options, lifetime) {
     })
     : null
   if (bridge) lifetime.own(() => bridge.close())
+  // The switch decides whether wizard_capabilities is in the tool list: when the owner flips it, tell every open MCP
+  // session (tools/list_changed), so a client holding a cached list re-asks instead of missing the tool the kernel names.
+  if (bridge) {
+    let capabilityWas = capabilityOn()
+    const capabilityWatch = setInterval(() => {
+      const now = capabilityOn()
+      if (now !== capabilityWas) { capabilityWas = now; bridge.appsChanged() }
+    }, options.capabilitySwitchWatchMs ?? 3000)
+    capabilityWatch.unref?.()
+    lifetime.own(() => clearInterval(capabilityWatch))
+  }
   const threadApps = bridge ? new ThreadAppSnapshots(options.threadAppsStatePath ? resolve(String(options.threadAppsStatePath)) : '') : null
   // The status ask's length from the owner's short-answer setting (140 unless the reply-summary view set one).
   const askMaxNow = () => askMaxFor(readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')))
@@ -3204,7 +3234,7 @@ function buildWizardServer(options, lifetime) {
       return delta ? `\n\n${delta}` : ''
     }
     // No plugin: the full kernel every run, with the job -> app map (no skills index to lean on).
-    return `\n\n${renderKernel(apps, { jobMap: true, filesRoot: options.filesRoot || undefined })}`
+    return `\n\n${renderKernel(apps, { jobMap: true, filesRoot: options.filesRoot || undefined, capabilities: capabilities.jobs(GATEWAY_MAIN_AGENT) })}`
   }
   const appCatalog = () => appProvenanceCatalog(readApps({ appsJsonPath, launcherPath }).apps)
   // Agents (wizard-os spec/AGENTS.md): <wizard-os home>/agents/<id>/agent.json; the main agent is this Hermes.
@@ -3477,7 +3507,7 @@ function buildWizardServer(options, lifetime) {
   const heavyNotices = (agentId, sessionId) => heavyWork?.queue.noticeContext(agentId, sessionId) || ''
   const acknowledgeHeavyNotices = (agentId, sessionId, body) => heavyWork?.queue.acknowledgeNotices(agentId, sessionId, body)
   const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling,
-    heavyStatus, heavyNotices, trackerNote: (agentId, id) => [trackerNote(agentId, id), dailyNote(agentId, id)].filter(Boolean).join('\n') }) : null
+    heavyStatus, heavyNotices, trackerNote: (agentId, id) => [trackerNote(agentId, id), dailyNote(agentId, id), capabilities.runNote(agentId)].filter(Boolean).join('\n') }) : null
   const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   const providerFailureDismissed = record => dismissedFailureStore.isDismissedAfter(record.sessionId, record.createdAt * 1000, record.agent_id)
     || dismissedFailureStore.isDismissed(record.sessionId, record.publicRunId, record.agent_id)
@@ -7533,6 +7563,23 @@ function buildWizardServer(options, lifetime) {
         if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         if (request.method !== 'GET') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
         sendJson(response, 200, privateFirst.state(), { 'Cache-Control': 'no-store' })
+        return
+      }
+      // Capability registry (issue 463): the owner reads what the main agent finds, the recorded gaps and which agents
+      // have the install guard off; PATCH {agent, guard} turns the guard off or on for one agent. Owner settings gate.
+      if (url.pathname === '/wizard/v1/capabilities') {
+        if (!bridge || !capabilityOn()) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        if (!['GET', 'PATCH'].includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'GET, PATCH' }); return }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (request.method === 'PATCH') {
+          if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
+          let value
+          try { value = JSON.parse((await readBoundedBody(request, 4096)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_json' }); return }
+          try { capabilities.setGuard(value?.agent, value?.guard) } catch (error) { sendJson(response, error.status || 400, { error: error.code || 'invalid_request' }); return }
+        }
+        sendJson(response, 200, await capabilities.ownerView(GATEWAY_MAIN_AGENT), { 'Cache-Control': 'no-store' })
         return
       }
       if (url.pathname === '/wizard/v1/main-providers') {

@@ -15,6 +15,8 @@ from pathlib import Path
 
 MCP_SERVER_NAME = "wizard"
 META_TOOL = "wizard_apps"
+CAPABILITY_TOOL = "wizard_capabilities"
+_CAPABILITY_SLOT = "\u0000capabilities"
 KERNEL_LIMIT = 1300
 JOB_SKILL_PREFIX = "wizard-job-"
 JOB_MAP_LINES = 12
@@ -131,8 +133,22 @@ def _job_tools(job: str, tools: list) -> list:
     return sorted(tools, key=rank)
 
 
+def capability_index(jobs, budget: int) -> str:
+    """Twin of agent-bridge.mjs capabilityIndex: job names joined with ', ' within `budget`, cut ones end in '…'."""
+    names = list(dict.fromkeys(w for w in (job_words(j) for j in (jobs or [])) if w))
+    out = ""
+    for i, name in enumerate(names):
+        nxt = f"{out}, {name}" if out else name
+        more = len(", …") if i < len(names) - 1 else 0
+        if len(nxt) + more > budget:
+            return f"{out}, …" if out else "…"
+        out = nxt
+    return out or "see the tool"
+
+
 def render_kernel(apps: list[dict] | None = None, harness: str = "hermes",
-                  files_root: str = DEFAULT_FILES_ROOT, job_map: bool = False, skills_index: bool | None = None) -> str:
+                  files_root: str = DEFAULT_FILES_ROOT, job_map: bool = False, skills_index: bool | None = None,
+                  capabilities: list[str] | None = None) -> str:
     """Twin of agent-bridge.mjs renderKernel: FIXED text, no per-app list unless job_map."""
     apps = apps or []
     hermes = harness == "hermes"
@@ -153,10 +169,19 @@ def render_kernel(apps: list[dict] | None = None, harness: str = "hermes",
         "Use the installed app for its job.",
         "Never ask the owner what an installed app can answer: call its tools first; if missing, list apps, retry once, never blame access. Never guess from old chats or call app URLs.",
         "Answer from the source of truth: owning app for data, live checks for box state, release records for what shipped. Say none found only after checking. Report tool errors.",
-        f'"What apps do I have?": call `{meta}`. Report unreachable ones (`wam doctor`).',
-        "Prefer Wizard tools to installing software; never install speech models.",
+        *([_CAPABILITY_SLOT] if isinstance(capabilities, list) else [
+            f'"What apps do I have?": call `{meta}`. Report unreachable ones (`wam doctor`).',
+            "Prefer Wizard tools to installing software; never install speech models.",
+        ]),
         "Save routing-only app-job skills.",
     ]
+    if isinstance(capabilities, list):
+        # Issue 463: one generated, length-capped index line (twin of renderKernel).
+        tool = f"mcp__{MCP_SERVER_NAME}__{CAPABILITY_TOOL}" if hermes else CAPABILITY_TOOL
+        tail = f'For "what can you do?" and before installing software or downloading a model, call `{tool}`.'
+        rest = len("\n".join(line for line in text if line != _CAPABILITY_SLOT)) + 1
+        index = capability_index(capabilities, KERNEL_LIMIT - rest - len("Built in: . ") - len(tail))
+        text[text.index(_CAPABILITY_SLOT)] = f"Built in: {index}{' ' if index.endswith('…') else '. '}{tail}"
     if job_map or not pointers:
         rows = [f"- {(JOB_ASKS.get(job) or {}).get('map') or job_words(job)} -> " + ", ".join(f"{a['name']} (`{agent_tool_name(a['prefix'], '*', harness)}`)" for a in owners)
                 for job, owners in _map_jobs(apps)[:JOB_MAP_LINES]]
@@ -164,11 +189,12 @@ def render_kernel(apps: list[dict] | None = None, harness: str = "hermes",
     return "\n".join(text)
 
 
-def kernel_for_session(home: Path | None = None) -> str:
+def kernel_for_session(home: Path | None = None, capabilities: list[str] | None = None) -> str:
     home = home or os_home()
     job_map = os.environ.get("WIZARD_KERNEL_JOB_MAP") == "1"
     apps = bridge_apps(read_registry(home / "apps.json"), os.environ.get("WIZARD_APPS_MCP_ADDRESS", "url")) if job_map else []
-    return render_kernel(apps, "hermes", os.environ.get("WIZARD_FILES_ROOT") or DEFAULT_FILES_ROOT, job_map)
+    return render_kernel(apps, "hermes", os.environ.get("WIZARD_FILES_ROOT") or DEFAULT_FILES_ROOT, job_map,
+                         capabilities=capabilities)
 
 
 def _tool_entry(tool) -> tuple[str, str]:
