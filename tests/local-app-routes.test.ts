@@ -72,6 +72,17 @@ describe('local app routes: which apps get one', () => {
     expect(routeOf(row({ view: { url: 'http://127.0.0.1:8930/' } }), 'internal')).toBe(null)
     expect(routeOf(row({ view: { url: 'http://127.0.0.1:8930/', internal: 'http://evil.example.com:80/' } }), 'internal')).toBe(null)
   })
+  it('without view.internal, the MCP address behind the same published port (what apps.json has on every box today)', () => {
+    // Files as the App Manager writes it: page and MCP on published 8794, MCP inside the network on files:8080.
+    const files = { id: 'files', status: 'running', provides: ['files'], view: { url: 'http://127.0.0.1:8794/files/' },
+      mcp: { url: 'http://127.0.0.1:8794/mcp', internal: 'http://files:8080/mcp', transport: 'streamable-http' } }
+    expect(routeOf(files, 'internal')).toEqual({ id: 'files', path: '/files/', strip: false, target: 'http://files:8080' })
+    // Published through Serve already: view.url is the path, view.local keeps the port.
+    expect(routeOf({ ...files, view: { url: '/files/', local: 'http://127.0.0.1:8794/files/' } }, 'internal')?.target).toBe('http://files:8080')
+    // An MCP on another published port says nothing about the page.
+    expect(routeOf({ ...files, mcp: { url: 'http://127.0.0.1:9999/mcp', internal: 'http://files:8080/mcp' } }, 'internal')).toBe(null)
+    expect(routeOf({ ...files, mcp: { url: 'http://127.0.0.1:8794/mcp', internal: 'http://evil.example:80/mcp' } }, 'internal')).toBe(null)
+  })
   it('never the shell, agents, owner-proof apps, the shell\'s own paths or non-loopback pages', () => {
     expect(routeOf(row({ provides: ['shell'] }))).toBe(null)
     expect(routeOf(row({ category: 'agent' }))).toBe(null)

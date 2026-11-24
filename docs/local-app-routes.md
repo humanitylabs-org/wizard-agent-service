@@ -31,9 +31,12 @@ paths (`/wizard/`, `/wizard-os-home/`, `/api/`, ...).
 
 ## Where the app is
 
-`apps.json` (written by the App Manager): `view.local` or `view.url` (the app's published `http://127.0.0.1:<port>`),
-used when this service shares the host network (alongside boxes, `WIZARD_APPS_MCP_ADDRESS=url`), or `view.internal`
-(`http://<app id>:<view port>/...` on the app's gateway network), used when it runs in a container (fresh boxes,
-`WIZARD_APPS_MCP_ADDRESS=internal`).
+From `apps.json` (written by the App Manager). When this service shares the host network (alongside boxes,
+`WIZARD_APPS_MCP_ADDRESS=url`): the page's loopback address, `view.local` or `view.url` (`http://127.0.0.1:<port>`).
+When it runs in a container (fresh boxes, `WIZARD_APPS_MCP_ADDRESS=internal`), the app's address on its gateway
+network: `view.internal` when present, else the origin of `mcp.internal` (`http://<app id>:<port>`) when `mcp.url` uses
+the same published port as the page. apps.json gives the page and the MCP the one published port, so both reach the
+same container port, which `mcp.internal` names (Files: published 8794, served on 8080). An app page with no MCP on
+that port and no `view.internal` gets no route in a container and stays as it was.
 
 Code: `server/local-app-routes.mjs`; tests: `tests/local-app-routes.test.ts`.

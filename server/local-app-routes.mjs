@@ -9,8 +9,9 @@
 //   - the app gets no forwarding or Wizard credential headers, so it sees what it sees on its own loopback port today;
 //   - left out: the shell, agents, apps with an owner proof (they need the owner edge) and the shell's own paths.
 // The target is the app's loopback address from apps.json (`view.local` / `view.url`, alongside boxes, where the Agent
-// Service shares the host network) or `view.internal` (`http://<app id>:<view port>/...` on the app's gateway network,
-// fresh boxes, where the Agent Service runs in a container), picked like MCP addresses (`appsMcpAddress`).
+// Service shares the host network) or its address on the app's gateway network (fresh boxes, where the Agent Service
+// runs in a container: `view.internal`, else the origin of `mcp.internal` behind the same published port), picked like
+// MCP addresses (`appsMcpAddress`).
 import { request as httpRequest } from 'node:http'
 import { readFileSync, statSync } from 'node:fs'
 
@@ -61,9 +62,16 @@ export function routeOf(app, address = 'local') {
   // The registered loopback host as written (an app may listen on [::1] only).
   let origin = `http://${host.toLowerCase()}:${validPort(port)}`
   if (address === 'internal') {
+    // The page's address inside the app network: `view.internal` when the App Manager writes one, else the app's own
+    // `mcp.internal` when its MCP answers on the same published port as the page (apps.json gives both the one port,
+    // so they reach the same container port, which mcp.internal names: Files publishes 8794 and serves both on 8080).
     const m = typeof view.internal === 'string' ? view.internal.match(INTERNAL_URL) : null
-    if (!m || !validPort(m[2])) return null
-    origin = `http://${m[1]}:${validPort(m[2])}`
+    const mcpLocal = typeof app.mcp?.url === 'string' ? app.mcp.url.match(LOOPBACK_URL) : null
+    const mcpInternal = typeof app.mcp?.internal === 'string' ? app.mcp.internal.match(INTERNAL_URL) : null
+    const hit = m && validPort(m[2]) ? m
+      : mcpLocal && mcpInternal && validPort(mcpLocal[2]) === validPort(port) && validPort(mcpInternal[2]) ? mcpInternal : null
+    if (!hit) return null
+    origin = `http://${hit[1]}:${validPort(hit[2])}`
   }
   return { id, path, strip, target: origin }
 }
