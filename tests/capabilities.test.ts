@@ -153,6 +153,9 @@ describe('install guard (hermes-plugin capability_guard.py, issue 463)', () => {
     expect(notGranted[0]).toEqual({ action: 'block', message: 'WizardOS: not run. Ask the owner.' })
     expect(guard([['terminal', { command: 'pip install faster-whisper' }]], `{"guard": False, "capabilities": json.loads(sys.stdin.read())}`)).toEqual([null])
     expect(guard([['terminal', { command: 'pip install faster-whisper' }]], 'None')).toEqual([null])
+    // A refusal is decided on a fresh read: the owner's guard-off is honoured on the very next try (Codex P2).
+    const fresh = JSON.parse(py(`on = {"guard": True, "capabilities": json.loads(sys.stdin.read())}; off = {**on, "guard": False}; g.registry = lambda fresh=False: off if fresh else on; print(json.dumps(g.pre_tool_call('terminal', {'command': 'pip install faster-whisper'})))`, records))
+    expect(fresh).toBe(null)
     // No gateway configured at all (switch state unknown): the real lookup returns None and the call runs.
     const env = { ...process.env, HERMES_HOME: mkdtempSync(join(tmpdir(), 'hh-')), WIZARD_MCP_TOKEN: '' }
     const out = execFileSync('python3', ['-c', `import sys; sys.path.insert(0, ${JSON.stringify(PLUGIN)}); import capability_guard as g; print(g.registry(), g.index_jobs(), g.pre_tool_call('terminal', {'command': 'pip install faster-whisper'}))`], { env }).toString().trim()

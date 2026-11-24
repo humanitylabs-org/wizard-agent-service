@@ -277,6 +277,13 @@ def pre_tool_call(tool_name: str = "", args=None, **_kwargs):
     value = registry()
     if value is None or value.get("guard") is False:
         return None
+    if not any(match(name, value["capabilities"]) for name in names):
+        return None
+    # About to refuse: decide on a fresh read, so an owner who just turned the guard (or the switch) off for this
+    # agent is honoured on the very next try, never up to a cache lifetime later.
+    value = registry(fresh=True)
+    if value is None or value.get("guard") is False:
+        return None
     for name in names:
         record = match(name, value["capabilities"])
         if record is not None:

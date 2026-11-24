@@ -2422,8 +2422,17 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.ok(off.includes('never install speech models') && !off.includes('Built in:'), 'switch off: the old kernel')
     assert.equal((await s.raw('/wizard/v1/capabilities')).status, 404, 'switch off: no owner route')
     if (s.kind !== 'main') { await admit(s, { input: 'Synthetic: switch off' }); assert.ok(!sent(s).instructions.includes('wizard_capabilities'), 'switch off: no run note') }
-    // On.
-    look(true)
+    // On: an open MCP session is told its tool list changed (a cached list would miss the tool), then lists it.
+    const init = await s.agentMcp('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'parity' } })
+    const sid = init.headers.get('mcp-session-id')
+    const stream = await s.agentMcpStream(sid)
+    try {
+      assert.equal(stream.status, 200, 'session event stream on this kind\'s transport')
+      look(true)
+      const changed = () => stream.frames.join('').includes('notifications/tools/list_changed')
+      for (let n = 0; n < 100 && !changed(); n++) await new Promise(resolve => setTimeout(resolve, 50))
+      assert.ok(changed(), 'switching on sends tools/list_changed to open sessions')
+    } finally { stream.close() }
     assert.ok((await names()).includes('wizard_capabilities'), 'switch on: the lookup tool is served')
     const index = (await call({})).content[0].text
     assert.match(index, /- transcription: Wizard Voice Service \(host-service\), tool `wizard_transcribe`, ready/u)

@@ -3210,6 +3210,17 @@ function buildWizardServer(options, lifetime) {
     })
     : null
   if (bridge) lifetime.own(() => bridge.close())
+  // The switch decides whether wizard_capabilities is in the tool list: when the owner flips it, tell every open MCP
+  // session (tools/list_changed), so a client holding a cached list re-asks instead of missing the tool the kernel names.
+  if (bridge) {
+    let capabilityWas = capabilityOn()
+    const capabilityWatch = setInterval(() => {
+      const now = capabilityOn()
+      if (now !== capabilityWas) { capabilityWas = now; bridge.appsChanged() }
+    }, options.capabilitySwitchWatchMs ?? 3000)
+    capabilityWatch.unref?.()
+    lifetime.own(() => clearInterval(capabilityWatch))
+  }
   const threadApps = bridge ? new ThreadAppSnapshots(options.threadAppsStatePath ? resolve(String(options.threadAppsStatePath)) : '') : null
   // The status ask's length from the owner's short-answer setting (140 unless the reply-summary view set one).
   const askMaxNow = () => askMaxFor(readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')))
