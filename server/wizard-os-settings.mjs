@@ -294,7 +294,7 @@ const APP_PERMISSIONS = new Set(['geolocation'])
 export function appPermissions(value) {
   return Array.isArray(value) ? [...new Set(value.filter(v => typeof v === 'string' && APP_PERMISSIONS.has(v)))] : []
 }
-export function readApps({ appsJsonPath, launcherPath }) {
+export function readApps({ appsJsonPath, launcherPath, localPath = null }) {
   const out = []
   const seen = new Set()
   const installed = readJsonFile(appsJsonPath)
@@ -305,8 +305,12 @@ export function readApps({ appsJsonPath, launcherPath }) {
     if (Array.isArray(app.provides) && app.provides.includes('shell')) continue
     // Agents are not apps (spec/AGENTS.md): an agent's container never gets a launcher tile; it lives in Agents.
     if (id.startsWith('agent-') && (app.type === 'agent' || app.category === 'agent')) continue
-    const view = typeof app.view === 'string' && SAFE_URL.test(app.view) ? app.view
+    const listed = typeof app.view === 'string' && SAFE_URL.test(app.view) ? app.view
       : app.view && typeof app.view.url === 'string' && SAFE_URL.test(app.view.url) ? app.view.url : ''
+    // `localPath` (switch wizard/local-app-routes, loopback requests only): the app's local Wizard path when it has no
+    // openable view; still checked by the same rule.
+    const local = !listed && typeof localPath === 'function' ? localPath(app) : ''
+    const view = listed || (typeof local === 'string' && SAFE_URL.test(local) ? local : '')
     seen.add(id)
     out.push({
       id, name: cleanText(app.name, 60) || id, desc: cleanText(app.summary, 120),

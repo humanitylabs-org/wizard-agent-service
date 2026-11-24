@@ -55,6 +55,7 @@ import { dayOf, mintDailyThreadId, dailyTitle, openerOf, dailyRunNote, validDay,
 import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigration } from './channel-spaces.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
 import { createChannelsSwitch, channelOn, channelPart } from './channels-switch.mjs'
+import { LOCAL_APP_ROUTES_SWITCH, createRouteTable, launcherPath as localLauncherPath, loopbackRequest, serveLocalAppRoute, upgradeLocalAppRoute } from './local-app-routes.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, appDoor, recordApp } from './agent-inbox.mjs'
 import { isSweepPhrase, isScheduledSweep, withCardRow, WAITING_CAP, DONE_CAP } from './agent-sweep.mjs'
@@ -3214,6 +3215,11 @@ function buildWizardServer(options, lifetime) {
   // option privateFirst (env WIZARD_PRIVATE_FIRST, '1' on / '0' off) wins, because a fresh box has no Look file yet.
   const privateFirstSwitchOn = createChannelsSwitch({ id: PRIVATE_FIRST_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.privateFirstTtlMs ?? 3000 })
   const privateFirstOn = () => channelPart(options.privateFirst, privateFirstSwitchOn)
+  // Local app routes (wizard-app-manager issue 629, local-app-routes.mjs): the owner's `wizard/local-app-routes` switch
+  // in the Look file; option localAppRoutes (env WIZARD_LOCAL_APP_ROUTES, '1' on / '0' off) wins.
+  const localAppRoutesSwitchOn = createChannelsSwitch({ id: LOCAL_APP_ROUTES_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.localAppRoutesTtlMs ?? 3000 })
+  const localAppRoutesOn = () => channelPart(options.localAppRoutes, localAppRoutesSwitchOn)
+  const localAppRoutes = createRouteTable({ appsJsonPath, address: options.appsMcpAddress === 'internal' ? 'internal' : 'local' })
   let privateFirst = null
   // The main Hermes plugins' loopback credential (issues 575 and 577: private first, schedules, agent reads,
   // supervisor): the heavy-lane token where a box has one, else the main Hermes's own gateway key (no standard install
@@ -6459,6 +6465,8 @@ function buildWizardServer(options, lifetime) {
       if (await servePhoneFeed(request, response, options.phoneFeedDir)) return
       const principal = await (tailnetIngress ? tailnetPrincipals : principals).attach(request)
       if (principal.kind === 'refused') { sendJson(response, url.pathname.startsWith('/wizard/v1/agent-heavy/') ? 403 : principal.status, { error: principal.error, check: principal.check }); return }
+      // An installed app's page at its Wizard path on the box's own loopback address (switch wizard/local-app-routes).
+      if (!isAgentIngress(request) && serveLocalAppRoute(request, response, { on: localAppRoutesOn, routes: localAppRoutes, tailnetIngress, owner: principal.kind === 'owner' })) return
       const staticRequest = ['GET', 'HEAD'].includes(request.method) && (shellStaticPath(url.pathname, uxPrefix) || (browserBoundary.enabled && appViewFile(request.method, url.pathname)))
       // Dedicated machine routes keep their own credentials and downstream route gates.
       // This exemption never grants an owner principal and is never available on Serve.
@@ -7471,7 +7479,10 @@ function buildWizardServer(options, lifetime) {
       }
       if (url.pathname === '/wizard/v1/apps' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        sendJson(response, 200, readApps({ appsJsonPath, launcherPath }), { 'Cache-Control': 'no-store' })
+        // Switch wizard/local-app-routes, on the box's own loopback address: an app page with no openable view gets its
+        // local Wizard path (served above), so it opens inside Wizard instead of listing as backend-only.
+        const localPath = localAppRoutesOn() && loopbackRequest(request, { tailnetIngress }) ? (app) => localLauncherPath(localAppRoutes(), app) : null
+        sendJson(response, 200, readApps({ appsJsonPath, launcherPath, localPath }), { 'Cache-Control': 'no-store' })
         return
       }
       if (url.pathname === '/wizard/v1/lookup/stream') {
@@ -8702,6 +8713,12 @@ function buildWizardServer(options, lifetime) {
     }
   })
   server.phoneSetup = phoneSetup
+  // WebSockets of a local app route (the shell's nginx passes Upgrade through); anything else is closed as before.
+  server.on('upgrade', (request, socket, head) => {
+    Promise.resolve(request[TAILNET_INGRESS] === true ? { kind: 'refused' } : principals.attach(request)).then(principal => {
+      if (isAgentIngress(request) || !upgradeLocalAppRoute(request, socket, head, { on: localAppRoutesOn, routes: localAppRoutes, tailnetIngress: request[TAILNET_INGRESS] === true, owner: principal?.kind === 'owner' })) socket.destroy()
+    }, () => socket.destroy())
+  })
   if (chatPhotos) {
     server.once('listening', () => chatPhotos.start())
     lifetime.own(() => chatPhotos.stop(), () => chatPhotos.stop())
