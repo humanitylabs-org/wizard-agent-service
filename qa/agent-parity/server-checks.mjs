@@ -60,6 +60,23 @@ export const dailyClock = { at: null }
 // Issue 532: the synthetic loopback capability of the main agent's schedule tool in the Daily scene.
 export const dailyScheduleToken = crypto.randomUUID() + crypto.randomUUID() // generated per run, never a fixed value
 export const serverChecks = {
+  // wizard-ux issue 1766: a chat started in another app (Hermes source telegram) keeps that source on every Chats list
+  // shape, so the shell says it lives in Telegram instead of offering a Retry Hermes always refuses.
+  'chat-source-list': async s => {
+    const row = s.sessions.get('wizard_parity')
+    Object.assign(row, { hidden: false, source: 'telegram' })
+    row.messages.push({ role: 'user', content: 'Synthetic message from Telegram', timestamp: Date.now() / 1000 })
+    for (const query of ['?limit=100', '?view=list', '?view=list&window=archive-50&limit=100']) {
+      let item
+      for (let n = 0; n < 40 && !item; n++) {
+        const r = await s.request('/api/sessions' + query); assert.equal(r.status, 200)
+        item = (await r.json()).data.find(x => x.id === 'wizard_parity')
+        if (!item) await new Promise(done => setTimeout(done, 50))
+      }
+      assert.ok(item, `the Telegram chat lists (${query})`)
+      assert.equal(item.source, 'telegram', `the list row keeps its source (${query})`)
+    }
+  },
   // Issue 527 (Daily channel, with the channel store): one pinned channel per agent holding one real thread per day,
   // through each runtime's real Service routes and scheduler.
   // Issue 564: a scheduled run the agent's queue reports finished stops counting toward the scheduler's in-flight
