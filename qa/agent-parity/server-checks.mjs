@@ -2051,6 +2051,56 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.equal(unknown.status, 409, 'an unknown result is refused')
     assert.ok(!(await list()).results.some(r => r.session_id === 'wizard_parity_saved'), 'a continued result is no longer offered')
   },
+  'needs-you-reason-dismiss': async s => {
+    // Issue 469 (switch wizard/needs-you-reason, on in this scene): the saved-result Needs you the Service adds
+    // itself carries its reason, and Dismiss (or Done / Archive through the thread-wide form) clears it on the box,
+    // so every device's next read drops it. Main only, like the saved-result scan; routed kinds answer unsupported.
+    const at = Date.now() / 1000 - 3 * 3600
+    const thread = id => s.sessions.set(id, { id, source: 'wizard-mobile', title: 'Synthetic helper', created_at: at - 200, messages: [
+      { id: 1, role: 'user', content: 'Check the synthetic routing in the background.', timestamp: at - 200 },
+      { id: 2, role: 'assistant', finish_reason: 'stop', timestamp: at - 190, content: 'Started a helper.\n[WIZARD_STATUS_V1]{"state":"working","ask":"Helper is checking","subject":"Parity QA"}[/WIZARD_STATUS_V1]' },
+      { id: 3, role: 'user', display_kind: 'async_delegation_complete', timestamp: at,
+        content: `[ASYNC DELEGATION BATCH COMPLETE — deleg_${id}]\nA background fan-out unit you dispatched earlier has finished.\n\n--- ✓ TASK 1/1: Synthetic check (status=completed, 9s) ---\nsynthetic finding ${id}` }] })
+    thread('wizard_parity_dismiss_a'); thread('wizard_parity_dismiss_b')
+    const dismiss = (body, headers = {}) => s.raw('/wizard/background-results/dismiss', { method: 'POST', headers: { ...s.ownerHeaders, 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) })
+    const runsFor = id => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === id)
+    if (s.kind !== 'main') {
+      const r = await dismiss({ session_id: 'wizard_parity_dismiss_a', agent_id: s.id })
+      assert.deepEqual([r.status, (await r.json()).error], [409, 'unsupported_action'], `${s.kind}: Dismiss is an explicit unsupported state`)
+      const rows = (await (await s.request('/api/sessions?limit=200')).json()).data
+      assert.ok(!rows.some(r => r.wizard_background_result), `${s.kind}: routed lists carry no saved-result row`)
+      return
+    }
+    const list = async () => {
+      let listed
+      for (let n = 0; n < 400; n++) {
+        listed = await (await s.raw('/wizard/background-results', { headers: s.ownerHeaders })).json()
+        if (!listed.scanning && listed.scan_complete && listed.results?.length) return listed
+        await new Promise(r => setTimeout(r, 25))
+      }
+      return listed
+    }
+    const listed = await list()
+    const of = id => listed.results.find(r => r.session_id === id)
+    const a = of('wizard_parity_dismiss_a'), b = of('wizard_parity_dismiss_b')
+    assert.ok(a && b, 'both saved results are offered')
+    assert.deepEqual([a.reason, a.actions], ['A helper finished after this chat closed', ['continue', 'dismiss']], 'the result carries its reason and its two actions')
+    assert.equal(listed.sessions.find(r => r.id === 'wizard_parity_dismiss_a')?.wizard_attention?.ask, 'A helper finished after this chat closed', 'the Needs you says why')
+    assert.equal((await dismiss({ session_id: 'wizard_parity_dismiss_a', id: a.id }, { 'Sec-Fetch-Site': 'cross-site' })).status, 403, 'a cross-site page cannot dismiss')
+    assert.equal((await dismiss({ session_id: 'wizard_parity_dismiss_b', id: a.id })).status, 409, 'a result of another thread is refused')
+    const done = await dismiss({ session_id: 'wizard_parity_dismiss_a', id: a.id })
+    assert.equal(done.status, 200, `Dismiss is accepted (${done.status})`)
+    assert.deepEqual((await done.json()).ids, [a.id])
+    const after = await list()
+    assert.ok(!after.results.some(r => r.id === a.id) && !after.sessions.some(r => r.id === 'wizard_parity_dismiss_a'), 'a dismissed result is gone for every reader')
+    const rows = (await (await s.request('/api/sessions?limit=200')).json()).data
+    assert.ok(!rows.find(r => r.id === 'wizard_parity_dismiss_a')?.wizard_background_result, 'the thread row no longer carries it')
+    const all = await (await dismiss({ session_id: 'wizard_parity_dismiss_b' })).json()
+    assert.deepEqual(all.ids, [b.id], 'the thread-wide form (Done, Archive) clears that thread')
+    const last = await (await s.raw('/wizard/background-results', { headers: s.ownerHeaders })).json()
+    assert.ok(!last.results.some(r => /wizard_parity_dismiss_/.test(r.session_id)), 'nothing of either thread is offered any more')
+    assert.equal(runsFor('wizard_parity_dismiss_a').length + runsFor('wizard_parity_dismiss_b').length, 0, 'Dismiss never starts work')
+  },
   'new-chat-unreachable-agent': async s => {
     // Issue 448: one unreachable optional agent (no sealed catalog) must not stop new chats on this agent.
     // Registered after the scene's own session-create, as running, with an upstream that refuses connections.

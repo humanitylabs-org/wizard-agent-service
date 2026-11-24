@@ -9,7 +9,7 @@ import { createWizardServer, listen } from '../server/service.mjs'
 const owned: Array<() => Promise<void>> = []
 afterEach(async () => { while (owned.length) await owned.pop()!() })
 const status = (state: string) => `Outcome\n[WIZARD_STATUS_V1]{"state":"${state}","ask":"Approve the release"}[/WIZARD_STATUS_V1]`
-async function fixture({ count = 205, access = false, history = false, loseAck = false } = {}) {
+async function fixture({ count = 205, access = false, history = false, loseAck = false, reason = undefined as boolean | undefined } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'wizard-manual-background-'))
   const at = Date.now() / 1000, finished = at - 3 * 3600
   const rows = new Map<string, any[]>(), sessions: any[] = [], calls: any[] = [], reads: string[] = []
@@ -75,7 +75,7 @@ async function fixture({ count = 205, access = false, history = false, loseAck =
       runQueueStatePath: join(dir, 'queue.db'), runQueuePollIntervalMs: loseAck ? 0 : 25, dispatchHealthReader: () => canDispatch,
       activeSessionReader: () => [], turnHeldReader: () => false, threadTitleStatePath: join(dir, 'titles.json'),
       threadDispositionStatePath: join(dir, 'dispositions.json'), settingsPath: join(dir, 'settings.json'),
-      requireAccess: access, accessVerifier: () => false, backgroundResultsRefreshMs: 30,
+      requireAccess: access, accessVerifier: () => false, backgroundResultsRefreshMs: 30, needsYouReason: reason,
       backgroundResultsBusyReader: (id: string) => { if (failLease) throw new Error('temporary lease DB busy'); return held.has(id) }, backgroundResultsNow: () => Date.now() + skew, runQueueRetryDelayMs: loseAck ? 60_000 : 25 })
     base = `http://127.0.0.1:${(await listen(server)).port}`
   }
@@ -100,6 +100,11 @@ async function fixture({ count = 205, access = false, history = false, loseAck =
     click: async (item: any, overrides = {}) => fetch(`${base}/wizard/background-results/${item.id}/continue`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session_id: item.session_id, ...overrides }),
     }),
+    dismiss: async (body: any, headers: Record<string, string> = {}) => fetch(`${base}/wizard/background-results/dismiss`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body),
+    }),
+    sessionRows: async () => (await (await fetch(`${base}/wizard/hermes/api/sessions?limit=100`)).json()).data,
+    setReason: async (v: boolean | undefined) => { reason = v; await close(); await open() },
     base: () => base!,
   }
 }
@@ -506,5 +511,62 @@ describe('manual Continue authority: only the service can mark a run as an owner
     expect(f.calls[0].session_id).toBe('wizard_manual_0')
     expect(f.calls[0].input).toContain('owner pressed Continue')
     expect(f.calls[0]).not.toHaveProperty('_wizard_background_recovery')
+  })
+})
+
+describe('reason and Dismiss on the saved-result Needs you (issue 469, switch wizard/needs-you-reason)', () => {
+  it('switch off: nothing changes (no reason, the old ask, Dismiss is not there)', async () => {
+    const f = await fixture({ count: 2 })
+    const { body } = await f.list()
+    expect(body.results).toHaveLength(2)
+    expect(body.results[0]).not.toHaveProperty('reason')
+    expect(body.sessions[0].wizard_attention.ask).toBe('Continue from the saved background result')
+    const r = await f.dismiss({ session_id: body.results[0].session_id, id: body.results[0].id })
+    expect(r.status).toBe(404)
+    expect((await f.list()).body.results).toHaveLength(2)
+  })
+  it('switch on: the reason rides the result and the row; Dismiss clears it for every reader and survives a restart', async () => {
+    const f = await fixture({ count: 3, reason: true })
+    const { body } = await f.list()
+    const [first, second] = body.results
+    expect(first.reason).toBe('A helper finished after this chat closed')
+    expect(first.actions).toEqual(['continue', 'dismiss'])
+    expect(body.sessions.find((r: any) => r.id === first.session_id).wizard_attention.ask).toBe('A helper finished after this chat closed')
+    const row = (await f.sessionRows()).find((r: any) => r.id === first.session_id)
+    expect(row.wizard_background_result).toMatchObject({ id: first.id, reason: 'A helper finished after this chat closed' })
+    // A cross-site page and a result of another thread are refused; nothing is stored.
+    expect((await f.dismiss({ session_id: first.session_id, id: first.id }, { 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403)
+    expect((await f.dismiss({ session_id: second.session_id, id: first.id })).status).toBe(409)
+    expect((await f.dismiss({ session_id: first.session_id, id: first.id, extra: 1 })).status).toBe(400)
+    const done = await f.dismiss({ session_id: first.session_id, id: first.id })
+    expect(done.status).toBe(200)
+    expect(await done.json()).toMatchObject({ ok: true, dismissed: 1, ids: [first.id] })
+    expect((await (await f.dismiss({ session_id: first.session_id, id: first.id })).json())).toMatchObject({ ok: true, replayed: true })
+    const after = (await f.list()).body
+    expect(after.results.map((r: any) => r.id)).not.toContain(first.id)
+    expect(after.results).toHaveLength(2)
+    expect((await f.sessionRows()).find((r: any) => r.id === first.session_id)).not.toHaveProperty('wizard_background_result')
+    expect((await f.sessionRows()).find((r: any) => r.id === second.session_id)?.wizard_background_result?.id).toBe(second.id)
+    // Done / Archive know no result id: the thread-wide form clears every saved result of that thread.
+    const all = await (await f.dismiss({ session_id: second.session_id })).json()
+    expect(all).toMatchObject({ ok: true, dismissed: 1, ids: [second.id] })
+    expect((await (await f.dismiss({ session_id: second.session_id })).json())).toMatchObject({ ok: true, dismissed: 0 })
+    await f.restart()
+    expect((await f.list()).body.results.map((r: any) => r.session_id)).toEqual([body.results[2].session_id])
+    expect(f.calls).toHaveLength(0)
+    // Turning the switch off again shows them as before (the switch, not the dismissal, decides).
+    await f.setReason(false)
+    expect((await f.list()).body.results).toHaveLength(3)
+  })
+  it('switch on: an archived row is never decorated, even before the next scan', async () => {
+    const f = await fixture({ count: 1, reason: true })
+    const { body } = await f.list()
+    expect(body.results).toHaveLength(1)
+    expect((await f.sessionRows()).find((r: any) => r.id === body.results[0].session_id)?.wizard_background_result?.id).toBe(body.results[0].id)
+    f.sessions[0].archived = true
+    const row = (await f.sessionRows()).find((r: any) => r.id === body.results[0].session_id)
+    expect(row).toBeTruthy()
+    expect(row).not.toHaveProperty('wizard_background_result')
+    expect(row?.wizard_attention?.state).not.toBe('needs_you')
   })
 })
