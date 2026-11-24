@@ -160,7 +160,9 @@ export function listRow(item, q = '', channels = null, opts = null) {
   if (post && typeof post === 'object' && typeof post.text === 'string' && Array.isArray(post.attachments)) {
     channelFields = { ...channelFields, firstRequest: post.text.slice(0, FIRST_REQUEST_MAX), firstAttachments: post.attachments };
   }
-  return { ...row, preview: s.preview.slice(0, 140), listVersion: 1, ...channelFields,
+  // wizard-ux issue 1766: the app a chat started in (Hermes `source`: telegram, slack …). The shell reads it to say a
+  // Telegram chat lives in Telegram (WosModels.foreignApp) instead of offering a Retry Hermes always refuses.
+  return { ...row, ...(source ? { source } : {}), preview: s.preview.slice(0, 140), listVersion: 1, ...channelFields,
     ...(body ? { searchSnippet: (at ? '…' : '') + body.slice(at, at+140) } : {}) };
 
 }
