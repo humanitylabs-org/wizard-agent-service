@@ -1,6 +1,8 @@
 // Manual recovery of finished work. Canonical Hermes results are the durable source; the Service's existing
 // run queue is the durable admission ledger. Discovery never starts a model and never writes Hermes state.
 import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
+import { atomicStoreWrite } from './store-migration.mjs'
 import { readUndeliveredHelperReceipts, RECEIPT_PREFIX, receiptKey, completionDelegationId } from './delegation-receipts.mjs'
 import { parseStatus } from './thread-status.mjs'
 import { trackWork } from './speed-meter.mjs'
@@ -37,6 +39,40 @@ const error = (message, status = 409) => Object.assign(new Error(message), { sta
 // continuation column, which no client path can set; the body marker alone carries no authority.
 export const BACKGROUND_RECOVERY_KIND = 'background-recovery'
 export const MARKER = '_wizard_background_recovery'
+// Reason and Dismiss for this service-added Needs you (issue 469). Owner switch in the Look file, off by default.
+export const NEEDS_YOU_REASON_SWITCH = 'wizard/needs-you-reason'
+export const SAVED_RESULT_REASON = 'A helper finished after this chat closed'
+const DISMISSED_CAP = 2000
+
+/** Saved results the owner dismissed (Dismiss, Done or Archive on any device), kept on the box so every device
+ * reads the same answer. A small JSON file of result id -> { session_id, at }; the oldest fall off past the cap. */
+export function createDismissals(path = '', now = Date.now) {
+  let ids = null
+  const load = () => {
+    if (ids) return ids
+    ids = new Map()
+    if (!path) return ids
+    try {
+      const value = JSON.parse(readFileSync(path, 'utf8'))
+      for (const [id, row] of Object.entries(value?.dismissed || {})) {
+        if (/^bg_[0-9a-f]{32}$/.test(id) && typeof row?.session_id === 'string') ids.set(id, { session_id: row.session_id, at: Number(row.at) || 0 })
+      }
+    } catch {}
+    return ids
+  }
+  return {
+    has: id => load().has(id),
+    add(entries) {
+      const map = load()
+      let added = 0
+      for (const { id, sessionId } of entries) if (!map.has(id)) { map.set(id, { session_id: sessionId, at: now() }); added++ }
+      if (!added) return 0
+      while (map.size > DISMISSED_CAP) map.delete(map.keys().next().value)
+      if (path) atomicStoreWrite(path, `${JSON.stringify({ schema: 1, dismissed: Object.fromEntries(map) })}\n`, { inventory: false })
+      return added
+    },
+  }
+}
 
 function snapshot(rows, at) {
   const ordered = rows.map((row, n) => ({ ...row, n })).sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0) || Number(b.id || b.n) - Number(a.id || a.n))
@@ -46,7 +82,11 @@ function snapshot(rows, at) {
   return { boundary: String(user?.id || ''), moved: Number(user?.timestamp || 0) > at, gated: ['needs_you', 'check'].includes(gate) }
 }
 
-export function createBackgroundResults({ request, sessionDbPath = '', queue, busy = () => false, now = Date.now, refreshMs = 15_000 }) {
+export function createBackgroundResults({ request, sessionDbPath = '', queue, busy = () => false, now = Date.now, refreshMs = 15_000, reasonOn = () => false, dismissedPath = '' }) {
+  const dismissals = createDismissals(dismissedPath, now)
+  const on = () => { try { return reasonOn() === true } catch { return false } }
+  // With the switch off nothing is hidden: a dismissal made while it was on shows again (the switch decides).
+  const dismissed = row => on() && dismissals.has(row.id)
   let cache = { at: 0, records: [], sessions: [], complete: true }
   let inflight = null
   let discovery = null
@@ -225,14 +265,16 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     if (fresh) completedUnreported = false
     return result
   }
-  const publicRecord = row => ({ id: row.id, agent_id: 'hermes', session_id: row.sessionId, completed_at: row.at, state: 'ready', label: 'Background result ready', action: 'Continue' })
+  const askText = () => on() ? SAVED_RESULT_REASON : 'Continue from the saved background result'
+  const publicRecord = row => ({ id: row.id, agent_id: 'hermes', session_id: row.sessionId, completed_at: row.at, state: 'ready', label: 'Background result ready', action: 'Continue',
+    ...(on() ? { reason: SAVED_RESULT_REASON, actions: ['continue', 'dismiss'] } : {}) })
   return {
     // Thread id -> identity of its pending saved results. The Chats list cache fingerprints cached rows
     // with this: a result that appears or clears re-projects its thread instead of serving a stale row
     // (a stale wizard_background_result row tripped the cache self-check and turned the cache off).
     stamps() {
       const out = new Map()
-      for (const row of cache.records) if (!admitted(row.key)) out.set(row.sessionId, `${out.get(row.sessionId) ?? ''}${row.id};`)
+      for (const row of cache.records) if (!admitted(row.key) && !dismissed(row)) out.set(row.sessionId, `${out.get(row.sessionId) ?? ''}${row.id};`)
       return out
     },
     async list() {
@@ -241,7 +283,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       if (completedUnreported && !inflight && !discovery) completedUnreported = false
       else void refresh()
       const c = cache
-      const pending = c.records.filter(row => !admitted(row.key) && !isBusy(row.sessionId) && !isBusy(row.readId))
+      const pending = c.records.filter(row => !admitted(row.key) && !dismissed(row) && !isBusy(row.sessionId) && !isBusy(row.readId))
       const bySession = new Map(pending.map(row => [row.sessionId, row]))
       // Include the minimal public thread metadata for an unresolved result that the normal 30-day display
       // window omitted. Full helper findings and host paths never cross into this listing.
@@ -249,7 +291,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
         id: row.id, title: String(row.title || 'Background work'), source: row.source || 'api_server',
         last_active: row.last_active || row.started_at, started_at: row.started_at, message_count: row.message_count,
         status: 'completed', wizard_background_result: publicRecord(bySession.get(row.id)),
-        wizard_attention: { state: 'needs_you', ask: 'Continue from the saved background result' },
+        wizard_attention: { state: 'needs_you', ask: askText() },
       }))
       return { results: pending.map(publicRecord), sessions, scan_complete: !inflight && !discovery && !c.error && c.complete, scanning: Boolean(inflight || discovery), available: !c.error }
     },
@@ -264,19 +306,37 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
         if (!busyById.has(id)) busyById.set(id, isBusy(id, sessionTruth))
         return busyById.get(id)
       }
-      const bySession = new Map(c.records.filter(row => ids.has(row.sessionId) && !admitted(row.key) && !busyFor(row.sessionId) && !busyFor(row.readId)).map(row => [row.sessionId, row]))
+      const bySession = new Map(c.records.filter(row => ids.has(row.sessionId) && !admitted(row.key) && !dismissed(row) && !busyFor(row.sessionId) && !busyFor(row.readId)).map(row => [row.sessionId, row]))
       const decorate = row => {
         const id = String(row._lineage_root_id || row.id || '')
         const pending = bySession.get(id)
-        if (!pending) return row
+        // Archive clears it at once (the scan skips archived threads; this row is fresher than the scan).
+        if (!pending || (on() && row.archived)) return row
         // Ready/manual is separate from Working: never pretend a stopped parent or finished helper is running.
-        return { ...row, status: 'completed', wizard_waiting_on: '', wizard_background_result: publicRecord(pending), wizard_attention: { state: 'needs_you', ask: 'Continue from the saved background result', subject: '', title: '' } }
+        return { ...row, status: 'completed', wizard_waiting_on: '', wizard_background_result: publicRecord(pending), wizard_attention: { state: 'needs_you', ask: askText(), subject: '', title: '' } }
       }
       for (const key of ['data', 'sessions']) {
         if (Array.isArray(payload[key])) payload[key] = payload[key].map(decorate)
       }
       if (payload.session && typeof payload.session === 'object') payload.session = decorate(payload.session)
       return Buffer.from(JSON.stringify(payload))
+    },
+    get dismissOn() { return on() },
+    // Dismiss (issue 469): the owner's Dismiss, Done or Archive. Without an id, every saved result of the thread
+    // (Done and Archive don't know result ids). Stored on the box, so every device's next list read drops it.
+    async dismiss(sessionId, id = '') {
+      if (!on()) throw error('not found', 404)
+      if (!WIZARD.test(sessionId) || (id && !/^bg_[0-9a-f]{32}$/.test(id))) throw error('invalid dismissal', 400)
+      if (id && dismissals.has(id)) return { dismissed: 0, ids: [id], replayed: true }
+      // Done and Archive (no id) need every result of the thread, also one that finished since the last scan:
+      // reconcile a fresh generation, or refuse while history can't be read. A known id can use the cache.
+      const known = id && cache.records.some(row => row.id === id && row.sessionId === sessionId)
+      const c = known ? cache : await refresh(true)
+      if (!id && (c.error || !c.complete || c.failures?.get(sessionId))) throw error('history is temporarily unavailable', 503)
+      const matches = c.records.filter(row => row.sessionId === sessionId && (!id || row.id === id) && !admitted(row.key))
+      if (id && !matches.length) throw error('recovery no longer matches this thread')
+      const added = dismissals.add(matches.map(row => ({ id: row.id, sessionId })))
+      return { dismissed: added, ids: matches.map(row => row.id) }
     },
     async continue(id, sessionId) {
       const key = `${sessionId}/${id}`
