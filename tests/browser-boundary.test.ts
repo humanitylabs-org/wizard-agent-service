@@ -96,7 +96,7 @@ describe('browser owner boundary', () => {
     const { base, tailnet } = await service(true)
     const paths = [
       ['GET', '/wizard/v1/settings'], ['GET', '/wizard/v1/apps'], ['GET', '/wizard/hermes/api/sessions'],
-      ['GET', '/wizard/files'], ['GET', '/wizard/v1/bootstrap'], ['GET', '/wizard/health'],
+      ['GET', '/wizard/files'], ['GET', '/wizard/v1/bootstrap'],
       ['POST', '/wizard/hermes/v1/runs'], ['PUT', '/wizard/v1/settings'],
       ['POST', '/wizard-os-home/api/voice'], ['POST', '/wizard/v1/setup/seen'],
       ['POST', '/wizard/v1/agents'], ['DELETE', '/wizard/v1/agents/synthetic'],
@@ -112,6 +112,28 @@ describe('browser owner boundary', () => {
     // Main's earlier Origin gate also rejects opaque requests, before the boundary.
     expect((await fetch(base + '/wizard/v1/settings', { headers: { ...headers, Origin: 'null' } })).status).toBe(403)
     expect((await fetch(base + '/wizard-os-home/api/voice')).status).toBe(401)
+  })
+  it('HTTP: the box\'s own health probe needs no token; a browser page still does', async () => {
+    const { base, tailnet } = await service(true)
+    // node:http, not fetch: Node's fetch overwrites Sec-Fetch-Mode, and the probe must carry no browser metadata.
+    const get = (url: string, headers: Record<string, string> = {}, method = 'GET') => new Promise<number>((resolve, reject) => {
+      const r = httpRequest(url, { method, headers }, res => { res.resume(); resolve(res.statusCode ?? 0) })
+      r.on('error', reject); r.end()
+    })
+    for (const origin of [base, tailnet]) {
+      expect(await get(origin + '/wizard/health'), origin).toBe(200)   // docker healthcheck, wam work/updates, the Mac idle check
+      for (const headers of [{ 'Sec-Fetch-Site': 'same-origin' }, { Origin: origin }, { 'Sec-Fetch-Dest': 'empty' }, { 'Sec-Fetch-Site': 'cross-site' }]) {
+        expect(await get(origin + '/wizard/health', headers), JSON.stringify(headers)).toBe(401)
+      }
+      expect(await get(origin + '/wizard/health', { 'Sec-Fetch-Site': 'same-origin', 'X-Wizard-Shell-Token': TOKEN })).toBe(200)
+      // only the health read: no other route, no other method
+      expect(await get(origin + '/wizard/v1/settings')).toBe(401)
+      expect(await get(origin + '/wizard/health', {}, 'POST')).not.toBe(200)
+    }
+    const gate = createBrowserBoundary({ enabled: true, token: TOKEN })
+    expect(gate.allows(req(), owner, { healthRequest: true })).toBe(true)
+    expect(gate.allows(req({ 'sec-fetch-site': 'same-origin' }), owner, { healthRequest: true })).toBe(false)
+    expect(gate.allows(req(), owner)).toBe(false)
   })
   it('HTTP: an owner <img>/<video> load of an attachment or saved file passes the gate on both listeners; fetch() and frames do not', async () => {
     const { base, tailnet } = await service(true, true)

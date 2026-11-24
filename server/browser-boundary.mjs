@@ -43,14 +43,16 @@ export function createBrowserBoundary({ enabled = false, token = '' } = {}) {
     // This is an additional gate, NEVER a replacement for the principal/access
     // verifier. Internal and socket-bound agent calls retain their existing scope.
     allows(request, principal, { staticRequest = false, healthRequest = false, machineRequest = false, mediaRequest = false } = {}) {
-      if (!enabled || staticRequest || healthRequest) return true
+      if (!enabled || staticRequest) return true
       // Machine credentials cannot be used to turn an ordinary browser request
       // into an internal call. Browser Fetch Metadata is not script-settable.
       // Node's fetch adds Sec-Fetch-Mode:cors but no Site/Dest; preserve those
       // existing machine clients. A real browser cannot suppress Sec-Fetch-Site.
-      if (principal?.kind === 'service' || principal?.kind === 'agent' || machineRequest) {
-        return !['origin', 'sec-fetch-site', 'sec-fetch-dest'].some(name => request.headers?.[name] !== undefined)
-      }
+      const browserMade = ['origin', 'sec-fetch-site', 'sec-fetch-dest'].some(name => request.headers?.[name] !== undefined)
+      if (principal?.kind === 'service' || principal?.kind === 'agent' || machineRequest) return !browserMade
+      // The health probe (queue counts, no owner data, no action) of the box's own programs: the container's own
+      // healthcheck, `wam work` / `wam updates`, the Mac app's idle check. A browser page still needs the token.
+      if (healthRequest && !browserMade) return true
       if (mediaRequest && principal?.kind === 'owner' && passiveMediaLoad(request.headers)) return true
       // Even possession of a stolen token may not authorize an opaque frame.
       const origin = String(request.headers?.origin ?? '').trim().toLowerCase()
