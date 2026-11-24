@@ -328,7 +328,11 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       if (!on()) throw error('not found', 404)
       if (!WIZARD.test(sessionId) || (id && !/^bg_[0-9a-f]{32}$/.test(id))) throw error('invalid dismissal', 400)
       if (id && dismissals.has(id)) return { dismissed: 0, ids: [id], replayed: true }
-      const c = cache.at ? cache : await refresh(true)
+      // Done and Archive (no id) need every result of the thread, also one that finished since the last scan:
+      // reconcile a fresh generation, or refuse while history can't be read. A known id can use the cache.
+      const known = id && cache.records.some(row => row.id === id && row.sessionId === sessionId)
+      const c = known ? cache : await refresh(true)
+      if (!id && (c.error || !c.complete || c.failures?.get(sessionId))) throw error('history is temporarily unavailable', 503)
       const matches = c.records.filter(row => row.sessionId === sessionId && (!id || row.id === id) && !admitted(row.key))
       if (id && !matches.length) throw error('recovery no longer matches this thread')
       const added = dismissals.add(matches.map(row => ({ id: row.id, sessionId })))

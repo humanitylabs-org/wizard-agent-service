@@ -551,12 +551,21 @@ describe('reason and Dismiss on the saved-result Needs you (issue 469, switch wi
     const all = await (await f.dismiss({ session_id: second.session_id })).json()
     expect(all).toMatchObject({ ok: true, dismissed: 1, ids: [second.id] })
     expect((await (await f.dismiss({ session_id: second.session_id })).json())).toMatchObject({ ok: true, dismissed: 0 })
+    // A helper that finished after the last scan is still caught by the thread-wide form (a fresh generation).
+    const late = f.rows.get(body.results[2].session_id)!
+    late.push({ id: 9001, role: 'user', content: '[ASYNC DELEGATION BATCH COMPLETE — deleg_late_2] Saved findings: late result.', display_kind: 'async_delegation_complete', timestamp: f.finished + 60 })
+    f.sessions.find((r: any) => r.id === body.results[2].session_id).message_count += 1
+    f.failHistory(true)
+    expect((await f.dismiss({ session_id: body.results[2].session_id })).status).toBe(503)
+    f.failHistory(false)
+    const both = await (await f.dismiss({ session_id: body.results[2].session_id })).json()
+    expect(both.ids).toHaveLength(2)
     await f.restart()
-    expect((await f.list()).body.results.map((r: any) => r.session_id)).toEqual([body.results[2].session_id])
+    expect((await f.list()).body.results).toEqual([])
     expect(f.calls).toHaveLength(0)
     // Turning the switch off again shows them as before (the switch, not the dismissal, decides).
     await f.setReason(false)
-    expect((await f.list()).body.results).toHaveLength(3)
+    expect((await f.list()).body.results).toHaveLength(4)
   })
   it('switch on: an archived row is never decorated, even before the next scan', async () => {
     const f = await fixture({ count: 1, reason: true })
