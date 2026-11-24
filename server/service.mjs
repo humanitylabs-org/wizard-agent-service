@@ -66,6 +66,7 @@ import { isSweepPhrase, isScheduledSweep, withCardRow, WAITING_CAP, DONE_CAP } f
 import { AlertRulesFile, createAlertGate, privateRouter } from './agent-alerts.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
 import { routeUtterance } from './voice-router.mjs'
+import { createFollowMain, FOLLOW_MAIN_SWITCH } from './follow-main.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER, NEEDS_YOU_REASON_SWITCH } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX, resolveHelperAttempt, MAX_HELPER_ATTEMPTS } from './delegation-follow-through.mjs'
 import { projectOwnedOpenWork } from './owned-open-work.mjs'
@@ -6263,6 +6264,17 @@ function buildWizardServer(options, lifetime) {
       alertTimer.unref()
     }
   }
+  // Follow main (issue 514): the owner's wizard/follow-main switch (option followMain, env WIZARD_FOLLOW_MAIN, '1'/'0'
+  // forces it). On: /wizard/health shows the host step's follow-main.json and the owner hears once when the box is behind.
+  const followMainSwitchOn = createChannelsSwitch({ id: FOLLOW_MAIN_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.followMainTtlMs ?? 3000 })
+  const followMain = createFollowMain({ statusPath: options.followMainStatusPath ? resolve(String(options.followMainStatusPath)) : '',
+    on: () => channelPart(options.followMain, followMainSwitchOn), now: options.followMainNow || Date.now,
+    notifier: options.followMainNotifier ?? (bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null) })
+  if (options.followMainStatusPath) {
+    const followMainTimer = setInterval(() => { void trackWork('follow-main notice', () => followMain.tick()).catch(() => undefined) }, options.followMainIntervalMs || 60_000)
+    followMainTimer.unref()
+    lifetime.own(() => clearInterval(followMainTimer))
+  }
   const supervisor = options.supervisorStatePath ? new Supervisor({ statePath: resolve(options.supervisorStatePath),
     deliver: deliverBackgroundOccurrence, lookup: lookupBackgroundOccurrence, now: options.supervisorNow || Date.now,
     canReadSource: id => id === MAIN_AGENT_ID || Boolean(agents?.readableSources(MAIN_AGENT_ID).some(s => s.source === id && s.scope === 'read')),
@@ -7709,7 +7721,9 @@ function buildWizardServer(options, lifetime) {
         const restart = restartGate?.holding() ? restartGate.summary() : null
         // client_storm: present only while a device's writes are being refused or shared (issue 513).
         const storm = clientStorm.summary()
-        sendJson(response, 200, { status: 'ok', upstream_reachable: reachable, ...(queue ? { queue } : {}), ...(hermesState ? { hermes_state: hermesState } : {}), ...(restart ? { restart } : {}), ...(storm ? { client_storm: storm } : {}) })
+        // follow_main: present only while the wizard/follow-main switch is on (issue 514); the host step reads `on` here.
+        const follow = followMain.health()
+        sendJson(response, 200, { status: 'ok', upstream_reachable: reachable, ...(queue ? { queue } : {}), ...(hermesState ? { hermes_state: hermesState } : {}), ...(restart ? { restart } : {}), ...(storm ? { client_storm: storm } : {}), ...(follow ? { follow_main: follow } : {}) })
         return
       }
 

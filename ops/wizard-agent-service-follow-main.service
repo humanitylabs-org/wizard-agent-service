@@ -1,0 +1,17 @@
+# Follow main (issue 514): one pass that prepares the newest green main as an immutable release and deploys it
+# with the box's own deploy helper (ops/wizard-agent-service-follow-main.py). Does nothing unless the owner's
+# wizard/follow-main switch is on (or WIZARD_FOLLOW_MAIN=1 in the env file below; =0 forces it off).
+# Runs the copy in the live release, so each deploy brings its own newer follow-main step; before the first
+# deploy that carries it, the source checkout's copy runs.
+# Install: cp this file and wizard-agent-service-follow-main.timer to ~/.config/systemd/user/,
+#          systemctl --user daemon-reload, systemctl --user enable --now wizard-agent-service-follow-main.timer
+# Undo:    systemctl --user disable --now wizard-agent-service-follow-main.timer
+[Unit]
+Description=Wizard Agent Service: follow main (prepare and deploy the newest green main)
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/wizard-agent-service/follow-main.env
+ExecStart=/bin/sh -c 'f=%h/.local/share/wizard-mobile-server/current/ops/wizard-agent-service-follow-main.py; [ -f "$$f" ] || f=%h/apps/wizard-agent-service/ops/wizard-agent-service-follow-main.py; exec /usr/bin/python3 "$$f"'
+TimeoutStartSec=3600
