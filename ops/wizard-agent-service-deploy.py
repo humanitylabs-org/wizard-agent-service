@@ -247,6 +247,7 @@ if __name__ == "__main__":
         # reply, so parallel threads must queue here; the live-ancestry check runs after the
         # lock, so a waiting deploy whose ref no longer contains the new live release is refused.
         import fcntl
+        (Path.home() / ".local/state").mkdir(parents=True, exist_ok=True)
         _lock = open(Path.home() / ".local/state/wizard-agent-service-deploy.lock", "w")
         try:
             fcntl.flock(_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

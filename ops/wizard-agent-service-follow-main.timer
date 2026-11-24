@@ -1,0 +1,11 @@
+# Every 5 min (issue 514): a merge whose checks pass (~7 min) is live on the box well within 30 min.
+[Unit]
+Description=Wizard Agent Service: follow main every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+RandomizedDelaySec=30s
+
+[Install]
+WantedBy=timers.target
