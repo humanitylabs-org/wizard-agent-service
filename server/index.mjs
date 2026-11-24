@@ -206,6 +206,8 @@ server = createWizardServer({
   // Private first (issue 545): a fresh install's default agent is a private Tinfoil agent; Claude/ChatGPT switch on
   // the standard agent. Follows the owner's `wizard/private-first-setup` switch; '1' forces it on, '0' off.
   privateFirst: envChoice(process.env.WIZARD_PRIVATE_FIRST),
+  // Local app routes (wizard-app-manager issue 629): '1' on / '0' off; unset follows the owner's wizard/local-app-routes switch.
+  localAppRoutes: envChoice(process.env.WIZARD_LOCAL_APP_ROUTES),
   // Graceful restart (issue 480): /wizard/v1/restart lets a restarter hold new sends (saved, launched by the next
   // process) and wait for running turns to finish before it restarts the service. Off by default.
   gracefulRestart: process.env.WIZARD_GRACEFUL_RESTART === '1',
