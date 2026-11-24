@@ -62,6 +62,8 @@ describe('local app routes: which apps get one', () => {
   it('a page at / gets /<id>/ (prefix stripped); a page with its own path keeps it', () => {
     expect(routeOf(row())).toEqual({ id: 'wizard-search', path: '/wizard-search/', strip: true, target: 'http://127.0.0.1:8930' })
     expect(routeOf(row({ id: 'files', view: { url: 'http://127.0.0.1:8794/files/' } }))).toEqual({ id: 'files', path: '/files/', strip: false, target: 'http://127.0.0.1:8794' })
+    expect(routeOf(row({ view: { url: 'http://[::1]:8930/' } }))?.target).toBe('http://[::1]:8930')
+    expect(routeOf(row({ view: { url: 'http://localhost:8930/' } }))?.target).toBe('http://localhost:8930')
     // Published through Serve before: the loopback address stays in view.local.
     expect(routeOf(row({ view: { url: '/wizard-search/', local: 'http://127.0.0.1:8930/' } }))?.path).toBe('/wizard-search/')
   })
@@ -109,6 +111,17 @@ describe('local app routes over HTTP', () => {
     expect((await get(port, '/wizard-search?x=1')).headers.location).toBe('/wizard-search/?x=1')
     // An owner-proof app keeps needing its owner edge.
     expect((await get(port, '/notes/')).status).toBe(404)
+  })
+  it('switch on: overlapping paths go to the most specific app', async () => {
+    const d = home(); setLook(d, true); const a = await fakeApp(), b = await fakeApp()
+    await start(d, a.port)
+    writeFileSync(join(d, 'apps.json'), JSON.stringify({ schema: 1, apps: [
+      { id: 'foo', status: 'running', provides: [], view: { url: `http://127.0.0.1:${a.port}/foo/` } },
+      { id: 'foo-bar', status: 'running', provides: [], view: { url: `http://127.0.0.1:${b.port}/foo/bar/` } }] }))
+    const port = (servers.at(-1) as any).address().port
+    expect((await get(port, '/foo/bar/x')).body).toBe('app:/foo/bar/x')
+    expect((await get(port, '/foo/x')).body).toBe('app:/foo/x')
+    expect([a.seen.map((r: any) => r.url), b.seen.map((r: any) => r.url)]).toEqual([['/foo/x'], ['/foo/bar/x']])
   })
   it('switch on: refused through Tailscale Serve, from any other Host, and cross-site', async () => {
     const d = home(); setLook(d, true); const app = await fakeApp(); const port = await start(d, app.port)

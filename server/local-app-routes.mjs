@@ -22,7 +22,7 @@ const ID = /^[a-z0-9][a-z0-9-]{0,62}$/u
 const RESERVED = new Set(['wizard-os-home', 'wizard-ux', 'wizard', 'api', 'mcp', 'v1', 'troubleshoot', 'login', 'logout',
   'assets', 'static', 'fonts', 'health', 'healthz', 'shell-health', 'pages', 'hermes', 'favicon.ico'])
 const LOOPBACK_HOST = /^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d{1,5})?$/iu
-const LOOPBACK_URL = /^http:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})(\/[^\s?#]*)?$/iu
+const LOOPBACK_URL = /^http:\/\/(127\.0\.0\.1|localhost|\[::1\]):(\d{1,5})(\/[^\s?#]*)?$/iu
 const INTERNAL_URL = /^http:\/\/([a-z0-9][a-z0-9-]{0,62}):(\d{1,5})(\/[^\s?#]*)?$/u
 // Never passed on to an app: hop-by-hop headers, proxy/identity marks and the owner's Wizard credentials.
 const HOP = new Set(['connection', 'keep-alive', 'proxy-connection', 'proxy-authorization', 'proxy-authenticate', 'te', 'trailer',
@@ -50,7 +50,7 @@ export function routeOf(app, address = 'local') {
   if (!view) return null
   const local = [view.local, view.url].find(u => typeof u === 'string' && LOOPBACK_URL.test(u))
   if (!local) return null
-  const [, port, rawPath = '/'] = local.match(LOOPBACK_URL)
+  const [, host, port, rawPath = '/'] = local.match(LOOPBACK_URL)
   if (!validPort(port)) return null
   const lp = rawPath.endsWith('/') ? rawPath : `${rawPath}/`
   // Same rule as the App Manager's implicit gateway (wam/links.py): a page served at / gets /<id>/ with the prefix
@@ -58,7 +58,8 @@ export function routeOf(app, address = 'local') {
   const strip = lp === '/'
   const path = strip ? `/${id}/` : lp
   if (!pathOk(path)) return null
-  let origin = `http://127.0.0.1:${validPort(port)}`
+  // The registered loopback host as written (an app may listen on [::1] only).
+  let origin = `http://${host.toLowerCase()}:${validPort(port)}`
   if (address === 'internal') {
     const m = typeof view.internal === 'string' ? view.internal.match(INTERNAL_URL) : null
     if (!m || !validPort(m[2])) return null
@@ -78,7 +79,9 @@ export function createRouteTable({ appsJsonPath, address = 'local' } = {}) {
     try {
       const doc = JSON.parse(readFileSync(appsJsonPath, 'utf8'))
       const seen = new Set()
+      // Longest path first, so /foo/bar/ wins over /foo/ for its own requests.
       routes = (Array.isArray(doc?.apps) ? doc.apps : []).map(a => routeOf(a, address)).filter(r => r && !seen.has(r.path) && seen.add(r.path))
+        .sort((a, b) => b.path.length - a.path.length)
       sig = next
     } catch { routes = [] }
     return routes
@@ -161,7 +164,7 @@ export function serveLocalAppRoute(request, response, { on, routes, tailnetIngre
     return true
   }
   const target = new URL(hit.route.target)
-  const up = httpRequest({ hostname: target.hostname, port: target.port, method: request.method, path: upstreamPath(hit.route, rawUrl),
+  const up = httpRequest({ hostname: target.hostname.replace(/^\[|\]$/gu, ''), port: target.port, method: request.method, path: upstreamPath(hit.route, rawUrl),
     headers: upstreamHeaders(request, hit.route) }, res => {
     const headers = { ...res.headers }
     for (const k of ['connection', 'keep-alive', 'transfer-encoding']) delete headers[k]
@@ -192,7 +195,7 @@ export function upgradeLocalAppRoute(request, socket, head, { on, routes, tailne
     return true
   }
   const target = new URL(hit.route.target)
-  const up = httpRequest({ hostname: target.hostname, port: target.port, method: request.method, path: upstreamPath(hit.route, rawUrl),
+  const up = httpRequest({ hostname: target.hostname.replace(/^\[|\]$/gu, ''), port: target.port, method: request.method, path: upstreamPath(hit.route, rawUrl),
     headers: upstreamHeaders(request, hit.route, true) })
   up.on('upgrade', (res, upSocket, upHead) => {
     const lines = [`HTTP/1.1 ${res.statusCode} ${res.statusMessage || 'Switching Protocols'}`]
