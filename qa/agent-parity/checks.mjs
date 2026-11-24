@@ -11,6 +11,7 @@ const featureScenes = {
   'thread-tracker': kind => scene(kind, { threadTracker: true }),
   'routed-owner-turns': kind => scene(kind, { routedOwnerTurns: true }),
   'main-provider-attach': kind => scene(kind, { mainProviderAttach: true }),
+  'messaging-chat-replies': kind => scene(kind, { messagingReplies: true, agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' }),
   'private-first-setup': kind => scene(kind, { privateFirst: true }),
   'graceful-restart-hold': kind => scene(kind, { gracefulRestart: true }),
   'file-store-inbox-import': kind => scene(kind, { mediaLegacyIds: true }),

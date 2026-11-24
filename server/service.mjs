@@ -71,6 +71,8 @@ import { PAGES_FOLDER, PagesError, createPages, servePage } from './pages.mjs'
 import { serveOldReport } from './reports-redirect.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
+import { RunEventLog } from './run-event-log.mjs'
+import { MessagingReplies, MESSAGING_REPLIES_SWITCH, FILES_ERROR, isMessagingRunId, readMessagingSession } from './messaging-replies.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { heavyJobsForSession, pendingHeavyJobs } from './heavy-wait.mjs'
 import { createDetachedJobReader, createLedger, detachedRowsFor } from './detached-job-wait.mjs'
@@ -4598,6 +4600,9 @@ function buildWizardServer(options, lifetime) {
   const runQueueStatePath = options.runQueueStatePath ? resolve(String(options.runQueueStatePath)) : ''
   let runQueue = null
   let heavyWork = null
+  let messagingReplies = null
+  let messagingRepliesOn = () => false
+  const messagingEvents = new RunEventLog()
   // The queue owns the data-version snapshot; every projection sees writes immediately.
   const heavyJobRows = () => ledgerRows() ?? []
   let backgroundResults = null
@@ -4646,9 +4651,38 @@ function buildWizardServer(options, lifetime) {
       if (!result.ok) throw Object.assign(new Error('watcher archive preservation failed'), { status: result.status })
       canonicalSessionCache.expiresAt = 0
     }
+    // Replies into chats a messaging app owns (issue 427, owner switch wizard/messaging-chat-replies, off by default):
+    // they go to the wizard-os plugin in the Hermes gateway (messaging-replies.mjs), never to /v1/runs.
+    const messagingSwitchOn = createChannelsSwitch({ id: MESSAGING_REPLIES_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.messagingRepliesSwitchTtlMs ?? 3000 })
+    messagingRepliesOn = () => Boolean(hermesStatePath) && channelPart(options.messagingReplies, messagingSwitchOn)
+    messagingReplies = new MessagingReplies(options.messagingRepliesStatePath ? resolve(String(options.messagingRepliesStatePath))
+      : resolve(dirname(runQueueStatePath), 'messaging-replies.json'), { now: options.messagingRepliesNow ?? Date.now })
+    const SERVICE_SEND = /^(?:wizard-heavy-|wizard-follow-through-|wizard-helper-receipt-|wizard-inbox-|wizard-not-started-requeue-|schedule:)/u
+    const messagingAdmission = (record) => {
+      if (!messagingRepliesOn() || record.runtime !== 'direct' || record.dispatchBody || record.continuation || SERVICE_SEND.test(record.idempotencyKey)) return null
+      const chat = readMessagingSession(hermesStatePath, record.sessionId)
+      if (!chat) return null
+      // An older chat (its app moved on with /new): nothing else writes into it any more, so the reply carries on here
+      // through the normal route, and the app gets a one-line "continued in WizardOS" note once.
+      if (chat.current === false) { messagingReplies.add({ kind: 'note', sessionId: record.sessionId, chat }); return null }
+      const value = parseJsonBody(Buffer.from(record.body, 'utf8'))
+      const parts = Array.isArray(value?.input) ? value.input.flatMap(item => Array.isArray(item?.content) ? item.content : [item]) : []
+      if (record.trustedPaths?.length || parts.some(part => part && typeof part === 'object' && typeof part.type === 'string' && !['text', 'input_text', 'message'].includes(part.type))) {
+        return { upstreamRunId: '', capacityStatus: 'failed', payload: { status: 'failed', safe_error: FILES_ERROR, error: { type: 'wizard_messaging_files', message: FILES_ERROR } } }
+      }
+      const text = inputText(value?.input).trim()
+      if (!text) return null
+      const item = messagingReplies.add({ kind: 'inject', runId: record.publicRunId, sessionId: record.sessionId, chat, text })
+      messagingEvents.open(item.id)
+      console.log(`[messaging-replies] ${record.sessionId} reply ${record.publicRunId} waits for the ${chat.source} connection as ${item.id}`)
+      unarchiveForNewTurn(record.sessionId)
+      return { upstreamRunId: item.id, capacityStatus: 'running', payload: { status: 'running', run_id: item.id, session_id: record.sessionId } }
+    }
     const queueHermesAdmission = async (record) => {
       if ((record.agent_id ?? MAIN_AGENT_ID) !== MAIN_AGENT_ID) throw Object.assign(new Error('Agent-qualified job belongs to a different executor'), { status: 410 })
       if (agents?.read(record.agent_id ?? MAIN_AGENT_ID)?.role === 'recovery' && !record.recoveryAuthorized) throw Object.assign(new Error('Recovery agent requires explicit owner admission'), { status: 410 })
+      const messaging = messagingAdmission(record)
+      if (messaging) return messaging
       let queuedBody = Buffer.from(record.body, 'utf8')
       // Owner-approved manual Continue (#14) for a saved result older than the 2 h automatic window. Its authority
       // is the service-written queue continuation {kind:'background-recovery'} (no client path can set the
@@ -4744,6 +4778,17 @@ function buildWizardServer(options, lifetime) {
       }
     }
     const lookupQueuedRun = async (record) => {
+      if (isMessagingRunId(record.upstreamRunId)) {
+        const state = messagingReplies.status(record.upstreamRunId, hermesStatePath)
+        const payload = { run_id: record.upstreamRunId, session_id: record.sessionId, status: state.status,
+          ...(state.status === 'completed' ? { output: state.output } : {}),
+          ...(state.status === 'failed' ? { safe_error: state.error, error: { type: 'wizard_messaging_reply', message: state.error } } : {}) }
+        if (!messagingEvents.runs.get(record.upstreamRunId)?.terminal) {
+          if (state.status === 'completed') { messagingEvents.record(record.upstreamRunId, 'assistant.delta', { delta: state.output }); messagingEvents.record(record.upstreamRunId, 'run.completed', { status: 'completed', output: state.output }) }
+          else if (state.status === 'failed') messagingEvents.record(record.upstreamRunId, 'run.failed', { status: 'failed', error: state.error, safe_error: state.error })
+        }
+        return { payload, capacityStatus: state.status, workerRunId: '' }
+      }
       const payload = await hermesJson(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)
       if (payload.status === 'completed') { chatPhotos?.kick('completed_assistant'); if (record.runtime !== 'operator') { spaceFiling.apply('hermes', record.sessionId, parseStatus(payload.output)); noteRunItems(record.sessionId, payload.output) } }
       if (record.runtime !== 'operator') inboxNoteRun(MAIN_AGENT_ID, record.sessionId, payload, record.publicRunId)
@@ -4804,7 +4849,7 @@ function buildWizardServer(options, lifetime) {
       launch: queueHermesAdmission,
       lookup: lookupQueuedRun,
       staleAfterSeconds: Number(options.staleRunAfterSeconds ?? 300),
-      turnHeld: options.turnHeldReader ?? ((record) => runTurnHeld(record.upstreamRunId)),
+      turnHeld: (record) => (isMessagingRunId(record.upstreamRunId) ? true : (options.turnHeldReader ?? ((r) => runTurnHeld(r.upstreamRunId)))(record)),
       notStartedSeconds: Number(options.runQueueNotStartedSeconds ?? 60),
       // True while any turn holds this thread (the reply is only waiting its turn); false when none does; throws when unreadable.
       leaseHeld: options.sessionLeaseReader ?? (async (record) => {
@@ -4823,6 +4868,7 @@ function buildWizardServer(options, lifetime) {
       onRequeued: (record, replacement) => console.log(`[not-started-requeue] ${record.sessionId} run ${record.upstreamRunId} never started; resent as ${replacement.publicRunId}`),
       onNotStartedGaveUp: (record, cancelled, stalledFor) => console.log(`[not-started-gave-up] ${record.sessionId} run ${record.upstreamRunId} never started after ${Math.round(stalledFor)} s and every resend; shown as failed with Retry (upstream cancel ${cancelled ? 'confirmed' : 'unconfirmed'})`),
       confirmAbandoned: async (record) => {
+        if (isMessagingRunId(record.upstreamRunId)) return null // the messaging connection runs it; its status read decides
         if (!await runHasNoAgent(record.upstreamRunId)) return null
         const outcome = await (options.abandonedOutcomeReader ?? ((sessionId, startedAt) => readAbandonedRunOutcomeHttp((path) => hermesJson(path), sessionId, startedAt)))(record.sessionId, record.createdAt)
         const delivered = await (options.runDeliveredReader ?? ((r) => (hermesStatePath ? readRunDelivered(hermesStatePath, r.sessionId, r.upstreamRunId) : true)))(record)
@@ -5750,6 +5796,19 @@ function buildWizardServer(options, lifetime) {
           .catch(error => { if (!controller.signal.aborted) throw error })
         return
       }
+      if (isMessagingRunId(record.upstreamRunId)) {
+        if (!messagingEvents.has(record.upstreamRunId)) messagingEvents.open(record.upstreamRunId)
+        const raw = request.headers['last-event-id']
+        const lastSeq = raw !== undefined && /^\d+$/.test(String(raw).trim()) ? Number(raw) : -1
+        // The run's status read (the queue's refresh) records the answer; keep it moving while someone watches.
+        const poke = setInterval(() => { runQueue.refreshRun(record.publicRunId).catch(() => undefined) }, 1_000)
+        poke.unref?.()
+        try {
+          await pipeline(Readable.from(messagingEvents.frames(record.upstreamRunId, lastSeq, controller.signal)), ...eventTransforms(), response)
+            .catch(error => { if (!controller.signal.aborted) throw error })
+        } finally { clearInterval(poke) }
+        return
+      }
       if (lockedBridge.isLockedRun(record.upstreamRunId)) { response.end(); return }
       const upstream = await fetchImpl(`${upstreamOrigin}/v1/runs/${encodeURIComponent(record.upstreamRunId)}/events`, { headers, redirect: 'manual', signal: controller.signal })
       if (!upstream.ok || !upstream.body) {
@@ -6467,7 +6526,7 @@ function buildWizardServer(options, lifetime) {
           && sameSecret(String(request.headers.authorization || '').replace(/^Bearer /u, ''), options.heavyToken))
         || (['/wizard/mcp', '/wizard/standard-chats/mcp', '/wizard/v1/agent-context'].includes(url.pathname) && Boolean(bridge?.agentFor(request)))
         // The main Hermes plugins (issues 575 and 577): the heavy token or the main Hermes's own gateway key, as each route checks.
-        || (request.method === 'POST' && /^\/wizard\/internal\/(?:agents|schedules|supervisor|private-first)\//u.test(url.pathname) && mainPluginCredential(request))
+        || (request.method === 'POST' && /^\/wizard\/internal\/(?:agents|schedules|supervisor|private-first|messaging-replies)\//u.test(url.pathname) && mainPluginCredential(request))
         // An app's door to the agent inbox (issue 569) with its own app token; the route still checks its scope.
         || (url.pathname.startsWith('/wizard/v1/agent-inbox') && agentInboxOn() && Boolean(inboxAppOf(request)))
       )
@@ -7307,6 +7366,31 @@ function buildWizardServer(options, lifetime) {
             scheduler.delete(job.id); sendJson(response, 200, { deleted: true, id: job.id, name: job.name })
           } else sendJson(response, 404, { error: 'not_found' })
         } catch (error) { sendJson(response, error?.status || 500, { error: error?.status ? error.message : 'schedule request failed' }) }
+        return
+      }
+      if (url.pathname.startsWith('/wizard/internal/messaging-replies/')) {
+        // Replies into messaging-app chats (issue 427): the wizard-os plugin inside the main Hermes gateway takes them
+        // and reports back, with the main Hermes's own gateway key (or the heavy-lane token), like the schedule tools.
+        // Switch off: `on: false` and no items, so the plugin injects nothing and drops its Hermes permission.
+        if (!messagingReplies || (!options.heavyToken && !bridge)) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        if (isAgentIngress(request) || principalOf(request).kind === 'agent' || request.headers.origin || request.headers['sec-fetch-site']
+          || !mainPluginCredential(request)) { sendJson(response, 403, { error: 'messaging replies access denied' }); return }
+        let value
+        try { value = JSON.parse((await readBoundedBody(request, 16 * 1024)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid body' }); return }
+        if (!value || typeof value !== 'object' || Array.isArray(value)) { sendJson(response, 400, { error: 'invalid body' }); return }
+        const action = url.pathname.slice('/wizard/internal/messaging-replies/'.length)
+        const on = messagingRepliesOn()
+        if (action === 'take') {
+          sendJson(response, 200, { on, items: on ? messagingReplies.take(Math.min(20, Math.max(1, Number(value.limit) || 10))) : [] }, { 'Cache-Control': 'no-store' })
+        } else if (action === 'done') {
+          if (typeof value.id !== 'string' || typeof value.status !== 'string') { sendJson(response, 400, { error: 'invalid body' }); return }
+          const item = messagingReplies.done(value.id, { status: value.status, at: value.at })
+          if (!item) { sendJson(response, 404, { error: 'not_found' }); return }
+          console.log(`[messaging-replies] ${item.sessionId} ${item.kind} ${item.id}: ${value.status}${value.reason ? ` (${String(value.reason).slice(0, 80)})` : ''}`)
+          if (item.runId && item.state !== 'queued') runQueue?.refreshRun(item.runId).catch(() => undefined)
+          sendJson(response, 200, { ok: true, state: item.state })
+        } else sendJson(response, 404, { error: 'not_found' })
         return
       }
       if (url.pathname.startsWith('/wizard/internal/private-first/')) {

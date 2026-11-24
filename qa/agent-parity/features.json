@@ -1410,6 +1410,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "messaging-chat-replies",
+      "description": "With the owner switch wizard/messaging-chat-replies on, a WizardOS reply into a main-agent chat a messaging app owns (Telegram, Slack, ...) goes through that chat's own connection: it waits in the Service's outbox until the wizard-os Hermes plugin in the gateway takes it, posts a From WizardOS line in the app and injects it with stock PluginContext.inject_message, so the answer shows in both places and the connection stays the only writer. An older chat (the app moved on with /new) carries on through the normal route with a one-off continued-in-WizardOS note. Routed agents own no messaging connection and are unchanged.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP route with messagingReplies on: main marks a fixture session as a Telegram chat in its state.db, sends an owner reply, and checks it never reaches Hermes /v1/runs, that the plugin route (main gateway key only, 403 without) hands it out with the chat's key, that a done report plus the answer row completes the run with that answer, that a repeated report changes nothing, and that an older chat goes through the normal route and yields one note item. Routed kinds (host-profile, container, restricted) send as before and the outbox stays empty. tests/messaging-replies.test.ts covers the outbox and state.db reads; tests/test_wizard_os_messaging_replies.py covers the plugin worker (one inject per item, Slack thread kept, older chat, grant on/off). Synthetic fixture evidence; the real proof ran stock Hermes v2026.9.24 with its Telegram adapter against a fake Bot API.",
+      "source_refs": [
+        "server/messaging-replies.mjs",
+        "server/service.mjs",
+        "hermes-plugin/wizard-os/messaging_replies.py"
+      ],
+      "reference_tests": [
+        "tests/messaging-replies.test.ts",
+        "tests/test_wizard_os_messaging_replies.py"
+      ],
+      "fixture": "messaging-chat-replies",
+      "policy_exemptions": []
+    },
+    {
       "id": "private-first-setup",
       "description": "Private first (issue 545, wizard-os DECISIONS 115, spec/AGENTS.md section 10), behind the owner's wizard/private-first-setup switch (Look file) or WIZARD_PRIVATE_FIRST=1, off by default: Tinfoil connected first on a fresh box creates one private agent (private preset, Tinfoil, no fallback) that becomes the default agent with every installed app (except the Claude and ChatGPT connection apps, which never go to a private agent: issue 598) and every app binding, while the standard agent (the main Hermes) stays hidden with no apps; a Claude or ChatGPT sign-in switches the standard agent on and attaches that provider to it without touching the private agent; apps installed later start on the private agent only; and the main-agent provider attach protection is on without WIZARD_MAIN_PROVIDER_ATTACH. Existing installs are not migrated. A box with no agent runtime yet (issue 582) stays on with reason runtime_unavailable, refuses the private-agent hand-off with 503 runtime_unavailable before writing anything and logs it (Tinfoil never lands on the standard agent); freshness is kept as decided, so the box moves over as its first run once the App Manager has installed its runtime. The runtime helper can listen on a Unix socket (--socket) and the Service reaches it with WIZARD_AGENT_RUNTIME_URL=unix:<path>.",
       "layer": "server",
