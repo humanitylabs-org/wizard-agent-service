@@ -143,6 +143,9 @@ export async function scene(kind, serverOptions = {}) {
         return json(200, { data: url.searchParams.get('order') === 'latest' ? rows.slice(offset, offset + limit).reverse() : rows.slice(offset, offset + limit), has_more: offset + limit < rows.length })
       }
       if (req.method === 'PATCH' || sm[2] === 'model') {
+        // Stock Hermes keeps titles unique (hermes_state_titles.py); opt-in so older contracts keep their renames.
+        if (serverOptions.fixtureUniqueTitles && req.method === 'PATCH' && typeof body.title === 'string'
+          && [...sessions.values()].some(other => other.id !== row.id && other.title === body.title)) return json(400, { error: `Title '${body.title}' is already in use` })
         Object.assign(row, body)
         if (typeof body.title === 'string') titleDb.prepare('UPDATE sessions SET title=? WHERE id=?').run(body.title, row.id)
         if (serverOptions.fixtureSelectorLock && sm[2] === 'model' && body.model && body.provider) {

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { STATUS_INSTRUCTIONS, parseStatus } from '../server/thread-status.mjs'
-import { ANCHOR_SECONDS, TITLE_INSTRUCTIONS, ThreadTitleStore, appTopicName, clashCandidates, looksLikeOpener, looksLikeSentence, normalizeTitle, provisionalTitleFrom, titleContextLine, titleKey, titleToApply, topicFor } from '../server/thread-titles.mjs'
+import { ANCHOR_SECONDS, TITLE_INSTRUCTIONS, ThreadTitleStore, appTopicName, clashCandidates, undatedTitle, looksLikeOpener, looksLikeSentence, normalizeTitle, provisionalTitleFrom, titleContextLine, titleKey, titleToApply, topicFor } from '../server/thread-titles.mjs'
 import { kinds, scene } from '../qa/agent-parity/fixture.mjs'
 import { serverChecks } from '../qa/agent-parity/server-checks.mjs'
 import { WIZARD_RUN_INSTRUCTIONS, createWizardServer, listen } from '../server/service.mjs'
@@ -140,6 +140,35 @@ describe('topic titles: the app or area, never the opener words', () => {
     // Without a topic option (routed agents such as Philosopher) behaviour is exactly as before.
     expect(decide('Review 0xMovez post on X', 'Bro on music, I am', null)).toBe('Bro on music, I am')
     expect(decide('WizardOS · Chats', 'Messenger', null, 'Notes')).toBe('Messenger')
+  })
+
+  it('drops only the date the Service adds to a clashing title (issue 518)', async () => {
+    const at = new Date(Date.UTC(2026, 10, 8, 13, 5))
+    for (const dated of clashCandidates('Messenger', at, 'wizard_ab12')) expect(undatedTitle(dated)).toBe('Messenger')
+    expect(undatedTitle('Messenger #2')).toBe('Messenger #2')
+    expect(undatedTitle('Trip (Nov)')).toBe('Trip (Nov)')
+    const directory = await mkdtemp(join(tmpdir(), 'plain-titles-'))
+    let clock = 1_000_000
+    const store = new ThreadTitleStore(join(directory, 'titles.json'), { now: () => clock })
+    store.recordRename('wizard_a', { from: 'Messenger · Composer', to: 'Vespa (14 Nov)', by: 'agent', since: 1 })
+    expect(store.plainTitle('wizard_a', 'Vespa (14 Nov)')).toBe('Vespa')
+    expect(store.plainTitle('wizard_a', 'Other (14 Nov)')).toBe('Other (14 Nov)') // not the title the Service applied
+    expect(store.plainTitle('wizard_none', 'Vespa (14 Nov)')).toBe('Vespa (14 Nov)') // no record: never the Service's
+    expect(store.visibleHistory('wizard_a')).toEqual([{ from: 'Messenger · Composer', to: 'Vespa (14 Nov)', at: 1_000_000, by: 'agent' }])
+    expect(store.visibleHistory('wizard_a', { plain: true })).toEqual([{ from: 'Messenger · Composer', to: 'Vespa', at: 1_000_000, by: 'agent' }])
+    // The owner typed the date: it stays.
+    store.recordRename('wizard_b', { from: 'Vespa', to: 'Party (14 Nov)', by: 'you' })
+    expect(store.plainTitle('wizard_b', 'Party (14 Nov)')).toBe('Party (14 Nov)')
+    // An owner title the Service had to date when respelling it: the date is the Service's.
+    const twoWords = `Wizard${' '}OS notes`
+    store.recordRename('wizard_c', { from: 'Old', to: twoWords, by: 'you' })
+    store.respell('wizard_c', { from: twoWords, to: 'WizardOS notes (2 Nov)', locked: true })
+    expect(store.plainTitle('wizard_c', 'WizardOS notes (2 Nov)')).toBe('WizardOS notes')
+    // A dated agent title renamed again: the note reads plain on both ends, and a rename that only moved the date is gone.
+    store.recordRename('wizard_d', { from: '', to: 'Vespa (14 Nov)', by: 'agent', since: 1 })
+    clock += 3600
+    store.recordRename('wizard_d', { from: 'Vespa (14 Nov)', to: 'Music (15 Nov)', by: 'agent', since: 1 })
+    expect(store.visibleHistory('wizard_d', { plain: true }).map(({ from, to }) => [from, to])).toEqual([['Vespa', 'Music']])
   })
 
   it('puts a clash-free spelling on a title another thread holds: dated, never numbered', () => {
@@ -379,6 +408,20 @@ describe('the Agent Service applies titles through Hermes', () => {
     expect(titles.slice(1)).toEqual(clashCandidates('Messenger').slice(0, 2))
     expect(titles.join('|')).not.toMatch(/#\d/u)
     expect((await list()).title).toBe(clashCandidates('Messenger')[1])
+  })
+
+  it('lists a dated clash title without its date when the switch is on (issue 518)', async () => {
+    for (const on of [false, true]) {
+      const { origin, list, patches, reply, statePath } = await fixture({ title: null, startedAgo: 5, queued: true, apps: [{ id: 'messenger', name: 'Messenger' }], extra: { plainClashTitles: on } })
+      const db = new DatabaseSync(statePath)
+      db.prepare("INSERT INTO sessions VALUES ('wizard_other', 1, 'Messenger', 'llm')").run(); db.close()
+      reply.title = 'Messenger'
+      reply.app_id = 'messenger'
+      await firstSend(origin, `first-send-plain-${on}`, 'Fix my chat window thing now please')
+      await settle(); await list(); await settle()
+      expect(patches.at(-1)?.body.title).toBe(clashCandidates('Messenger')[1]) // Hermes keeps a unique title either way
+      expect((await list()).title).toBe(on ? 'Messenger' : clashCandidates('Messenger')[1])
+    }
   })
 
   it('never puts a placeholder over a title that exists or one James set', async () => {

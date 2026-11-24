@@ -14,6 +14,7 @@ const featureScenes = {
   'messaging-chat-replies': kind => scene(kind, { messagingReplies: true, agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' }),
   'private-first-setup': kind => scene(kind, { privateFirst: true }),
   'needs-you-reason-dismiss': kind => scene(kind, { needsYouReason: true, backgroundResultsRefreshMs: 100 }),
+  'plain-chat-titles': kind => scene(kind, ({ root }) => ({ pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, plainClashTitlesTtlMs: 0, fixtureUniqueTitles: true })),
   'graceful-restart-hold': kind => scene(kind, { gracefulRestart: true }),
   'file-store-inbox-import': kind => scene(kind, { mediaLegacyIds: true }),
   'chats-channels': kind => scene(kind, { channelStore: true, channelDaily: false, channelFirstPosts: false, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true }),

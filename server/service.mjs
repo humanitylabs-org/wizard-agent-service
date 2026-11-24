@@ -37,7 +37,7 @@ import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, fullStatusAsk, askMaxFor, withAskMax, createHeavyStatusGuard, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
-import { ThreadTitleStore, clashCandidates, provisionalTitleFrom, readMisspelledTitles, readSessionTitle, titleContextLine, titleKey, titleToApply, topicFor } from './thread-titles.mjs'
+import { PLAIN_TITLES_SWITCH, ThreadTitleStore, clashCandidates, provisionalTitleFrom, readMisspelledTitles, readSessionTitle, titleContextLine, titleKey, titleToApply, topicFor } from './thread-titles.mjs'
 import { PRODUCT_NAME, misspellsProductName, spellProductName } from './product-name.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
 import { createRoutedQueues } from './routed-run-queue.mjs'
@@ -3939,6 +3939,9 @@ function buildWizardServer(options, lifetime) {
   const statusBackfill = new StatusBackfill(options.threadStatusBackfillPath ? resolve(String(options.threadStatusBackfillPath)) : '')
   const threadDispositionStore = new ThreadDispositionStore(options.threadDispositionStatePath ? resolve(String(options.threadDispositionStatePath)) : '')
   const threadTitleStore = new ThreadTitleStore(options.threadTitleStatePath ? resolve(String(options.threadTitleStatePath)) : '')
+  // Undated chat titles (issue 518): the owner's wizard/plain-chat-titles switch; WIZARD_PLAIN_CHAT_TITLES=1/0 forces it.
+  const plainTitlesSwitchOn = createChannelsSwitch({ id: PLAIN_TITLES_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.plainClashTitlesTtlMs ?? 3000 })
+  const plainTitlesOn = () => channelPart(options.plainClashTitles, plainTitlesSwitchOn)
   const subjectCatalog = new SubjectCatalog(options.subjectsPath ? resolve(String(options.subjectsPath)) : '')
   // The subject each thread was last served with, so the next run can be told to keep it.
   const servedSubjects = new Map()
@@ -5211,7 +5214,8 @@ function buildWizardServer(options, lifetime) {
     const current = readSessionTitle(titleDbPath(), sessionId)
     if (!current) return ''
     const record = threadTitleStore.get(sessionId)
-    return titleContextLine(current.title, { locked: titleLocked(current, record), provisional: record?.provisional === true })
+    const shown = plainTitlesOn() ? threadTitleStore.plainTitle(sessionId, current.title) : current.title
+    return titleContextLine(shown, { locked: titleLocked(current, record), provisional: record?.provisional === true })
   }
   // Appended to every direct run: the thread's current title and the owner's subject list.
   const runTitleNote = (sessionId) => {
@@ -5373,15 +5377,20 @@ function buildWizardServer(options, lifetime) {
   // decorateSessionTitles on a parsed payload (collections replaced in place); throws instead of falling back.
   const decorateSessionTitlesPayload = (payload) => {
     const heavyJobs = ledgerRows()
+    const plain = plainTitlesOn()
     for (const key of sessionListCollections(payload)) payload[key] = payload[key].map((session) => {
       if (!session || typeof session.id !== 'string') return session
       const guarded = heavyStatus('hermes', session.id, session.wizard_attention, heavyJobs)
       if (guarded !== session.wizard_attention) session = { ...session, wizard_attention: guarded, status: 'running', wizard_waiting_on: 'heavy' }
       session = projectOwnedOpenWork(session, ownedOpenWork?.evidenceFor(session.id))
-      const renames = threadTitleStore.visibleHistory(session.id)
+      const renames = threadTitleStore.visibleHistory(session.id, { plain })
       if (misspellsProductName(session.title)) {
         queueRespell(session.id)
         session = { ...session, title: spellProductName(session.title) }
+      }
+      if (plain && session.title) {
+        const shown = threadTitleStore.plainTitle(session.id, session.title)
+        if (shown !== session.title) session = { ...session, title: shown }
       }
       if (!session.title) {
         const placeholder = threadTitleStore.get(session.id)
@@ -5660,7 +5669,8 @@ function buildWizardServer(options, lifetime) {
       if (hermes === null) return null
       // The session listing is refreshed in the background after it expires; a snapshot built from
       // the stale listing must not outlive the refresh, or a new thread waits for the 30 s ceiling.
-      try { return `${hermes}|${runQueue?.listRevision() ?? ''}|${readWizardAssistantRevision(inboxDbPath) ?? ''}|${canonicalSessionCache.generation ?? 0}|${readSupervisorWaitRevision(options.supervisorStatePath)}` } catch { return null }
+      // The undated-titles switch (issue 518) is part of the decoration, so a flip rebuilds the shared snapshot.
+      try { return `${hermes}|${runQueue?.listRevision() ?? ''}|${readWizardAssistantRevision(inboxDbPath) ?? ''}|${canonicalSessionCache.generation ?? 0}|${readSupervisorWaitRevision(options.supervisorStatePath)}|${plainTitlesOn() ? 1 : 0}` } catch { return null }
     }
     // Threads that must be re-projected on this build. reset=true: the change set is unknown.
     const hotIds = async () => {

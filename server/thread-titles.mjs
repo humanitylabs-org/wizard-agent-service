@@ -139,6 +139,17 @@ export function topicFor({ appId = '', catalog = [], texts = [], subject = '' } 
   return area && area.length >= 3 && !GENERIC_SUBJECTS.has(area.toLocaleLowerCase()) && !looksLikeOpener(area) ? area : ''
 }
 
+// The date clashCandidates adds (issue 518): '(8 Nov)', '(8 Nov 13:05)' or '(8 Nov 13:05 ab12)', never a '#N'.
+const DATED_SUFFIX = /\s+\(\d{1,2} [A-Za-z]{3}(?: \d{2}:\d{2}(?: [a-z0-9]{1,4})?)?\)$/u
+// Owner switch wizard/plain-chat-titles (issue 518): a dated clash title is shown without its date. Hermes keeps
+// its unique stored title; only what the Service serves changes.
+export const PLAIN_TITLES_SWITCH = 'wizard/plain-chat-titles'
+export const undatedTitle = (value) => {
+  const title = squash(value)
+  const plain = title.replace(DATED_SUFFIX, '')
+  return plain.length >= 3 ? plain : title
+}
+
 // A clash-free spelling of a title another thread already holds: dated, never numbered.
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
 export function clashCandidates(title, now = new Date(), salt = '') {
@@ -313,9 +324,34 @@ export class ThreadTitleStore {
     return this._put(sessionId, { title: entry.to, locked: false, appliedFor: current?.appliedFor ?? null, history: [...history, entry].slice(-HISTORY_MAX) })
   }
 
-  // Renames the thread view can mark in place ("Renamed from …"), oldest first.
-  visibleHistory(sessionId) {
-    return (this.load()[sessionId]?.history ?? []).filter((entry) => !entry.quiet).map(({ from, to, at, by }) => ({ from: spellProductName(from), to: spellProductName(to), at, by }))
+  // Renames the thread view can mark in place ("Renamed from …"), oldest first. `plain` (issue 518) drops the date
+  // the Service added to an agent title; a title the owner typed keeps every word.
+  visibleHistory(sessionId, { plain = false } = {}) {
+    const history = this.load()[sessionId]?.history ?? []
+    const visible = []
+    history.forEach(({ from, to, at, by, quiet }, index) => {
+      if (quiet) return
+      if (plain) {
+        const before = history[index - 1]
+        if (before?.by === 'agent' && squash(before.to) === squash(from)) from = undatedTitle(from)
+        if (by === 'agent') to = undatedTitle(to)
+        if (squash(from) === squash(to)) return
+      }
+      visible.push({ from: spellProductName(from), to: spellProductName(to), at, by })
+    })
+    return visible
+  }
+
+  // The title to show without a date the Service added to avoid a clash (issue 518, switch wizard/plain-chat-titles).
+  // Only the title the Service last applied for this thread as the agent's (or respelled) loses its date: an owner's
+  // own rename, a title changed outside the Service, or a thread with no record is shown exactly as Hermes holds it.
+  plainTitle(sessionId, title) {
+    if (typeof title !== 'string' || !DATED_SUFFIX.test(squash(title))) return title
+    const record = this.load()[sessionId]
+    if (!record || spellProductName(squash(record.title)) !== spellProductName(squash(title))) return title
+    const last = record.history.at(-1)
+    if (last?.by === 'you' && squash(last.to) === squash(record.title)) return title
+    return undatedTitle(title)
   }
 }
 
