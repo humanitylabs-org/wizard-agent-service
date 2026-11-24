@@ -2394,6 +2394,74 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     setApps(['parity-qa', 'parity-video'])
     assert.doesNotMatch((await call()).content[0].text, /not allowed/u, 'on again: no restart needed')
   },
+  'capability-registry': async s => {
+    // Issue 463: agents find what the box already does (built-ins, host voice service, app jobs) before installing
+    // their own. One owner switch (wizard/capability-registry in the Look file): off = no tool, the old kernel line.
+    const osHome = join(s.root, 'os')
+    const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/capability-registry': { on, at: Date.now() } } })) }
+    const video = { id: 'parity-video', name: 'Synthetic Video', status: 'running', provides: ['short-form-video'], mcp: { url: 'http://127.0.0.1:9/mcp' } }
+    const notes = { id: 'parity-notes', name: 'Synthetic Notes', status: 'running', provides: ['notes'], mcp: { url: 'http://127.0.0.1:9/mcp' } }
+    const parityQa = { id: 'parity-qa', name: 'Synthetic Parity App', view: '/parity/', agent_binding: true }
+    writeFileSync(join(s.root, 'apps.json'), JSON.stringify({ schema: 1, apps: [parityQa, video, notes] }))
+    const setApps = apps => {
+      if (s.kind === 'main') return writeFileSync(join(osHome, 'agents', '.main-agent.json'), JSON.stringify({ schema: 1, wizard_apps: apps, agent_apps: [] }))
+      const file = join(osHome, 'agents', s.id, 'agent.json'), agent = JSON.parse(readFileSync(file, 'utf8'))
+      agent.permissions.wizard_apps = apps; agent.permissions.agent_apps = []
+      writeFileSync(file, JSON.stringify(agent))
+    }
+    // After the restart: a new apps.json joins the main agent's list on start (syncApps), so narrow it again.
+    setApps(['parity-qa', 'parity-video']); await s.restart(); setApps(['parity-qa', 'parity-video'])
+    const names = async () => { const r = await s.agentMcp('tools/list'); assert.equal(r.status, 200, 'own gateway credential and transport'); return (await r.json()).result.tools.map(t => t.name) }
+    const call = async args => (await (await s.agentMcp('tools/call', { name: 'wizard_capabilities', arguments: args })).json()).result
+    const kernel = async () => (await (await s.agentMcp('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'parity' } })).json()).result.instructions
+    // Off: nothing changes.
+    look(false)
+    assert.ok(!(await names()).includes('wizard_capabilities'), 'switch off: no lookup tool')
+    assert.match((await call({})).content[0].text, /^No installed app has a tool called wizard_capabilities/u)
+    const off = await kernel()
+    assert.ok(off.includes('never install speech models') && !off.includes('Built in:'), 'switch off: the old kernel')
+    assert.equal((await s.raw('/wizard/v1/capabilities')).status, 404, 'switch off: no owner route')
+    if (s.kind !== 'main') { await admit(s, { input: 'Synthetic: switch off' }); assert.ok(!sent(s).instructions.includes('wizard_capabilities'), 'switch off: no run note') }
+    // On.
+    look(true)
+    assert.ok((await names()).includes('wizard_capabilities'), 'switch on: the lookup tool is served')
+    const index = (await call({})).content[0].text
+    assert.match(index, /- transcription: Wizard Voice Service \(host-service\), tool `wizard_transcribe`, ready/u)
+    assert.match(index, /- short form video: Synthetic Video \(app\), tool `parity_video__\*`/u)
+    assert.match(index, /- notes: Synthetic Notes \(app\), tool `parity_notes__\*`, not-granted\. Synthetic Notes does notes on this box but is not granted to .+\. Ask the owner to allow Synthetic Notes for .+ in Connections/u, 'an app it may not use: not-granted plus the exact ask')
+    const detail = JSON.parse((await call({ job: 'can you transcribe audio?' })).content[0].text)
+    assert.equal(detail.matches[0].tool, 'wizard_transcribe'); assert.equal(detail.matches[0].status, 'ready')
+    assert.ok(detail.matches[0].inputs?.properties?.path, 'details carry the tool inputs')
+    const data = JSON.parse((await call({ format: 'json' })).content[0].text)
+    assert.equal(data.schema, 'wizard.capabilities/1'); assert.equal(data.guard, true)
+    assert.ok(data.capabilities.find(r => r.job === 'transcription').equivalents.includes('faster-whisper'), 'the guard reads known duplicates')
+    const on = await kernel()
+    assert.ok(on.includes('Built in: transcription') && on.includes('wizard_capabilities') && !on.includes('never install speech models'), 'switch on: one generated index line')
+    assert.ok(on.split('\nJobs on this box:')[0].length <= 1300, 'the kernel stays within its budget')
+    // A gap is said plainly and recorded (words + agent id); the owner sees it and can turn the guard off per agent.
+    assert.match((await call({ job: 'ocr a scanned pdf' })).content[0].text, /^Nothing on this box does "ocr a scanned pdf" yet\. Tell the owner plainly/u)
+    const view = await (await s.raw('/wizard/v1/capabilities')).json()
+    assert.ok(view.gaps.some(g => g.agent === s.id && g.words === 'ocr scanned pdf'), 'gap recorded for the owner')
+    const patch = guard => s.raw('/wizard/v1/capabilities', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent: s.id, guard }) })
+    assert.equal((await patch(false)).status, 200)
+    assert.equal(JSON.parse((await call({ format: 'json' })).content[0].text).guard, false, 'owner turned the guard off for this agent')
+    assert.equal((await patch(true)).status, 200)
+    if (s.kind !== 'main') {
+      // A routed agent has no kernel: its run note carries the same index.
+      await s.request('/api/sessions', post({ id: 'wizard_parity_capabilities' }))
+      await admit(s, { session_id: 'wizard_parity_capabilities', input: 'Synthetic: can you transcribe audio?' })
+      assert.match(sent(s).instructions, /Built into this box for you: transcription, .+ call wizard_capabilities\./u, 'routed run note names the lookup')
+      // Privacy seal: a private agent is not offered the shared voice service or another agent's private app.
+      s.setSupervisorSeal('private', false)
+      try {
+        const sealed = (await call({})).content[0].text
+        assert.ok(!sealed.includes('transcription'), 'private agent: no transcription')
+        assert.ok(!sealed.includes('Synthetic Notes'), 'private agent: no not-granted names')
+      } finally { s.setSupervisorSeal('standard', true) }
+    }
+    look(false)
+    assert.ok(!(await names()).includes('wizard_capabilities'), 'switched off again: gone')
+  },
   'tools-list-cache-hints': async s => {
     // Issue 435: tools/list carries SEP-2549 cache hints so Hermes `lazy: true` can register app tools at chat start.
     // A complete discovery is cacheable for a day; an app that cannot answer makes the whole list ttlMs 0.

@@ -23,12 +23,14 @@ try:  # loaded as a package by Hermes
     from . import app_skill_guard as _app_skill_guard
     from . import bring_data as _bring_data
     from . import messaging_replies as _messaging_replies
+    from . import capability_guard as _capability_guard
 except ImportError:  # loaded as a plain module (tests)
     import kernel as _kernel  # type: ignore[no-redef]
     import media as _media  # type: ignore[no-redef]
     import app_skill_guard as _app_skill_guard  # type: ignore[no-redef]
     import bring_data as _bring_data  # type: ignore[no-redef]
     import messaging_replies as _messaging_replies  # type: ignore[no-redef]
+    import capability_guard as _capability_guard  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 SECTION_ID = "wizard-os.kernel"
@@ -152,7 +154,12 @@ def _section(_session_info) -> str:
     registry = _kernel.read_registry()
     if registry is None:
         return ""  # no WizardOS on this box (yet): add nothing
-    return _kernel.kernel_for_session()
+    # Issue 463: with the capability switch on, the gateway's registry gives the kernel its generated index line.
+    try:
+        jobs = _capability_guard.index_jobs()
+    except Exception:  # noqa: BLE001 - never block a turn on the lookup
+        jobs = None
+    return _kernel.kernel_for_session(capabilities=jobs)
 
 
 def _history_section(_session_info) -> str:
@@ -175,6 +182,8 @@ def register(ctx) -> None:
     # Every MEDIA: file the agent sends lands where Wizard chats can show it (media.py).
     if hasattr(ctx, "register_hook"):
         ctx.register_hook("transform_llm_output", _media.transform_llm_output)
+        # Look up before installing (issue 463): refuses only installs that duplicate a capability the box has.
+        _capability_guard.register(ctx)
         _app_skill_guard.register(ctx)
     # Replies typed in WizardOS into a Telegram/Slack chat go through that chat's own connection (issue 427; the
     # Agent Service decides the owner switch, and the worker only works inside the gateway process).
