@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { listRow, normalizeFull } from '../server/session-list-view.mjs';
-const fixture = { id: 'synthetic', title: 'A full title '.repeat(20), agent: { id: 'hermes', label: 'Not needed' }, status: 'failed', message_count: 8,
+const fixture = { id: 'synthetic', source: 'telegram', title: 'A full title '.repeat(20), agent: { id: 'hermes', label: 'Not needed' }, status: 'failed', message_count: 8,
   wizard_started_at: 1699999000, wizard_last_user_at: 1700000000, wizard_last_assistant_at: 1700000100, wizard_activity_at: 1700000101,
   wizard_request_preview: 'FULL REQUEST '.repeat(300), latest_message: { role: 'assistant', content: '<memory-context>not visible</memory-context> **Visible** '+ 'answer '.repeat(50), timestamp: 1700000100 },
   wizard_run_id: 'run-exact', wizard_last_run_idempotency_key: 'key-exact', model: 'model-exact', provider: 'provider-exact', wizard_model_lock_updated_at: 123456789,
@@ -12,7 +12,7 @@ const fixture = { id: 'synthetic', title: 'A full title '.repeat(20), agent: { i
   wizard_last_run_error: { code: 'provider_billing', provider: 'openai-codex', message: 'Synthetic plan ended' } };
 test('list keeps exact grouping/unread/ack/model/helper inputs and full title', () => {
   const full = normalizeFull(fixture), list = listRow(fixture);
-  for (const key of Object.keys(full).filter(k => !['request','renames','source','runtime','preview'].includes(k))) assert.deepEqual(list[key],full[key],key);
+  for (const key of Object.keys(full).filter(k => !['request','renames','runtime','preview'].includes(k))) assert.deepEqual(list[key],full[key],key);
   assert.equal(list.preview,full.preview.slice(0,140)); assert.equal(list.preview.length,140);
   assert.equal(list.agent,'hermes'); assert.equal(list.listVersion,1);
   assert.deepEqual(list.followUp, fixture.wizard_follow_up);
@@ -60,4 +60,11 @@ test('tweak-card marker never reaches the list preview, main and routed (host-pr
     }
     assert.equal(listRow({ ...base, latest_message: { role: 'assistant', content: 'No card here.' } }).preview, 'No card here.');
   }
+});
+// wizard-ux issue 1766: the compact list keeps the app a chat started in, so the shell can say a Telegram chat lives in
+// Telegram (no Retry Hermes always refuses). A row with no source carries no key.
+test('list rows keep the chat source (telegram, slack); a row without one has none', () => {
+  assert.equal(listRow(fixture).source, 'telegram');
+  assert.equal(listRow({ id: 'tg', source: 'slack', status: 'failed' }).source, 'slack');
+  assert.equal('source' in listRow({ id: 'plain' }), false);
 });

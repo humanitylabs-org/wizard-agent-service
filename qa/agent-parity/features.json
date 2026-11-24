@@ -60,6 +60,16 @@
       "policy_exemptions": []
     },
     {
+      "id": "chat-source-list",
+      "description": "wizard-ux issue 1766: every Chats list row (full list, compact view=list, and the archive-50 window) keeps the Hermes source of a chat started in another app (telegram, slack ...), so the shell shows that the chat lives in that app and offers no Retry for a reply Hermes refuses (permission_denied).",
+      "layer": "server",
+      "fixture": "chat-source-list",
+      "how_to_test": "For main, host-profile, container and restricted: make the parity thread a visible chat with Hermes source telegram and an owner message, then read /api/sessions?limit=100, ?view=list and ?view=list&window=archive-50: each row for it carries source telegram. tests/session-list-view.node.mjs covers listRow directly (source kept, no key when Hermes has none).",
+      "source_refs": ["server/session-list-view.mjs"],
+      "reference_tests": ["tests/session-list-view.node.mjs", "qa/agent-parity/server-checks.mjs"],
+      "policy_exemptions": []
+    },
+    {
       "id": "tools-list-cache-hints",
       "description": "The wizard MCP gateway's tools/list carries SEP-2549 cache hints (ttlMs, cacheScope private) so a caching client such as Hermes lazy: true can register app tools at chat start; only a complete discovery is cacheable (one day), and any visible app that is stopped, failing, malformed, filtered, paginated or replaced during the request makes the reply ttlMs 0. Issue 623: a session served without a running app's tools (failing, slow or empty) is rechecked in the background and sent tools/list_changed once they come back, and wizard_apps says per app whether its tools are temporarily unavailable or not yet in the caller's tool list.",
       "layer": "server",
