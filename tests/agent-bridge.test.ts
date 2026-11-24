@@ -367,6 +367,31 @@ describe('agent bridge: app skills for a containerised agent', () => {
       expect(readFileSync(join(state, 'skills', 'hello-wizard', 'SKILL.md'), 'utf8')).toBe(texts['hello-wizard'])
     } finally { bridge.close() }
   })
+
+  it('an app skill behind a switch (the shell manual, wizard-ux issue 1437) is copied only while it is on and removed when it goes off', () => {
+    const reg = registry([app('hello-wizard', 9), shell], texts)
+    const state = mkdtempSync(join(tmpdir(), 'wab-state-'))
+    let on = false
+    const bridge = createAgentBridge({ appsJsonPath: join(reg, 'apps.json'), osHome: state, watchIntervalMs: 0, appSkillOn: (id: string) => (id === 'wizard-ux' ? on : true) })
+    try {
+      // off: exactly the skills the agent had without the manual
+      expect(listing(state)).toEqual(['hello-wizard', 'wizard-job-diagnostics'])
+      on = true; bridge.skillsChanged()
+      expect(listing(state)).toEqual(['hello-wizard', 'wizard-job-diagnostics', 'wizard-ux'])
+      expect(readFileSync(join(state, 'skills', 'wizard-ux', 'SKILL.md'), 'utf8')).toBe(texts['wizard-ux'])
+      // an apps.json rewrite while on keeps it
+      writeFileSync(join(reg, 'apps.json'), JSON.stringify({ schema: 1, apps: [app('hello-wizard', 9), shell], v: 2 }))
+      bridge.appsChanged()
+      expect(listing(state)).toContain('wizard-ux')
+      on = false; bridge.skillsChanged()
+      expect(listing(state)).toEqual(['hello-wizard', 'wizard-job-diagnostics'])
+      // a gate that throws counts as off
+      const other = mkdtempSync(join(tmpdir(), 'wab-state-'))
+      const b2 = createAgentBridge({ appsJsonPath: join(reg, 'apps.json'), osHome: other, watchIntervalMs: 0, appSkillOn: (id: string) => { if (id === 'wizard-ux') throw new Error('x'); return true } })
+      expect(listing(other)).toEqual(['hello-wizard', 'wizard-job-diagnostics'])
+      b2.close()
+    } finally { bridge.close() }
+  })
 })
 
 describe('agent bridge: MCP gateway', () => {

@@ -136,6 +136,7 @@ server = createWizardServer({
   messagingReplies: envChoice(process.env.WIZARD_MESSAGING_REPLIES),
   // Capability registry (issue 463): unset follows the owner's wizard/capability-registry switch; 1 on, 0 off.
   capabilityRegistry: envChoice(process.env.WIZARD_CAPABILITY_REGISTRY),
+  interfaceManual: envChoice(process.env.WIZARD_INTERFACE_MANUAL),
   // Reason + Dismiss on the saved-result Needs you (issue 469): unset follows wizard/needs-you-reason; 1 on, 0 off.
   needsYouReason: envChoice(process.env.WIZARD_NEEDS_YOU_REASON),
   threadSeenStatePath: process.env.WIZARD_THREAD_SEEN_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-seen.json'),

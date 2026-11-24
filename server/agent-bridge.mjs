@@ -538,7 +538,7 @@ export function createAgentBridge({
   fetchImpl = fetch, timeoutMs = 4000, callTimeoutMs = 120_000, log = () => {}, watchIntervalMs = 2000,
   writeSkills = true, harness = 'hermes', filesRoot = DEFAULT_FILES_ROOT, jobMap = false,
   agentForToken = () => '', appsFor = () => null, builtins = null, agents = () => null, skillRetryMs = 2000, capabilities = () => null,
-  recheckMs = TOOLS_RECHECK_MS,
+  recheckMs = TOOLS_RECHECK_MS, appSkillOn = (_appId) => true,
 }) {
   const shared = sharedAgentTools(agents, log)
   let mtime = null
@@ -571,7 +571,10 @@ export function createAgentBridge({
     let allowed = null
     try { allowed = appsFor(GATEWAY_MAIN_AGENT) } catch { allowed = new Set() }
     const pending = new Set()
-    const appSkills = writeAppSkills(osHome, appsJsonPath ? dirname(appsJsonPath) : '', registryApps, { allowed, pending })
+    // An app skill behind an owner switch (the shell's interface manual, wizard-ux issue 1437) is left out while that
+    // switch is off, and writeAppSkills then removes the copy it wrote earlier.
+    const skillApps = registryApps.filter((app) => { try { return appSkillOn(String(app?.id || '')) !== false } catch { return false } })
+    const appSkills = writeAppSkills(osHome, appsJsonPath ? dirname(appsJsonPath) : '', skillApps, { allowed, pending })
     if (appSkills && fresh) log(`app skills: ${appSkills.length} copied for the agent`)
     if (appSkills && pending.size && skillTries < APP_SKILL_RETRIES) {
       skillTries += 1
@@ -992,6 +995,8 @@ export function createAgentBridge({
     handle, kernel, listTools, callTool, refresh: () => { if (refresh()) notifyChanged() }, agentFor: authorized,
     // An agent's app list changed (#58): rewrite the main agent's pointer skills and tell open sessions.
     appsChanged: () => { refresh(); rewriteSkills(); notifyChanged() },
+    // A switch that gates an app's skill changed (appSkillOn): copy or remove those skills, nothing else.
+    skillsChanged: () => { refresh(); if (writeSkills && osHome) copyAppSkills(true) },
     kernelText: (h = harness, agentId = GATEWAY_MAIN_AGENT) => { refresh(); return renderKernel(visible(agentId), { harness: h, filesRoot, jobMap, capabilities: capabilityJobs(agentId) }) },
     // No argument: every installed app. With an agent id: only the apps that agent may use (#58), same as callTool.
     apps: (agentId) => { refresh(); return agentId === undefined ? apps : visible(agentId) },

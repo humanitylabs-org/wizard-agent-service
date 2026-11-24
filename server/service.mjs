@@ -56,6 +56,9 @@ import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigratio
 import { createSpaceFiling } from './thread-spaces.mjs'
 import { createChannelsSwitch, channelOn, channelPart } from './channels-switch.mjs'
 import { createCapabilities, CAPABILITY_SWITCH } from './capabilities.mjs'
+// wizard-ux issue 1437: the shell app whose skill is the generated interface manual, and the switch that lets it in.
+const INTERFACE_MANUAL_SWITCH = 'wizard/interface-manual'
+const INTERFACE_MANUAL_APPS = new Set(['wizard-ux'])
 import { LOCAL_APP_ROUTES_SWITCH, createRouteTable, launcherPath as localLauncherPath, loopbackRequest, serveLocalAppRoute, upgradeLocalAppRoute } from './local-app-routes.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, appDoor, recordApp } from './agent-inbox.mjs'
@@ -3181,6 +3184,8 @@ function buildWizardServer(options, lifetime) {
   // wizard_capabilities tool, the old kernel line and no run note: nothing changes.
   const capabilitySwitchOn = createChannelsSwitch({ id: CAPABILITY_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.capabilityRegistryTtlMs ?? 3000 })
   const capabilityOn = () => channelPart(options.capabilityRegistry, capabilitySwitchOn)
+  const interfaceManualSwitchOn = createChannelsSwitch({ id: INTERFACE_MANUAL_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.interfaceManualTtlMs ?? 3000 })
+  const interfaceManualOn = () => channelPart(options.interfaceManual, interfaceManualSwitchOn)
   const capabilities = createCapabilities({
     on: capabilityOn,
     apps: (agentId) => bridge?.apps(agentId) || [],
@@ -3199,6 +3204,7 @@ function buildWizardServer(options, lifetime) {
         call: async (name, args, agentId) => (await capabilities.call(name, args, agentId)) ?? (await transcribeTools?.call(name, args, agentId)) ?? (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await reachOut?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
       },
       capabilities: (agentId) => capabilities.jobs(agentId),
+      appSkillOn: (appId) => (INTERFACE_MANUAL_APPS.has(appId) ? interfaceManualOn() : true),
       agents: () => gatewayAgents,
       agentForToken: (supplied) => gatewayAgents?.agentForGatewayToken(supplied) ?? '',
       appsFor: (agentId) => (gatewayAgents ? gatewayAgents.allowedApps(agentId) : null),
@@ -3220,6 +3226,19 @@ function buildWizardServer(options, lifetime) {
     }, options.capabilitySwitchWatchMs ?? 3000)
     capabilityWatch.unref?.()
     lifetime.own(() => clearInterval(capabilityWatch))
+  }
+  // The shell's interface manual (wizard-ux issue 1437): the wizard-ux app's skill reaches the agent only while the
+  // owner's `wizard/interface-manual` switch is on (option interfaceManual, env WIZARD_INTERFACE_MANUAL '1'/'0',
+  // wins). Off = the agent's skills are what they were; turning it off removes the copy again.
+  if (bridge) {
+    // undefined: the first tick always syncs (the Look file is only readable once Pages starts, below).
+    let manualWas
+    const manualWatch = setInterval(() => {
+      const now = interfaceManualOn()
+      if (now !== manualWas) { manualWas = now; bridge.skillsChanged() }
+    }, options.interfaceManualWatchMs ?? 3000)
+    manualWatch.unref?.()
+    lifetime.own(() => clearInterval(manualWatch))
   }
   const threadApps = bridge ? new ThreadAppSnapshots(options.threadAppsStatePath ? resolve(String(options.threadAppsStatePath)) : '') : null
   // The status ask's length from the owner's short-answer setting (140 unless the reply-summary view set one).
