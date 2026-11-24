@@ -2097,6 +2097,15 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.ok(!rows.find(r => r.id === 'wizard_parity_dismiss_a')?.wizard_background_result, 'the thread row no longer carries it')
     const all = await (await dismiss({ session_id: 'wizard_parity_dismiss_b' })).json()
     assert.deepEqual(all.ids, [b.id], 'the thread-wide form (Done, Archive) clears that thread')
+    // Archive sends it after the archive succeeded: the thread is out of the scan by then, and restoring it later
+    // must not bring the stale Needs you back.
+    thread('wizard_parity_dismiss_c'); s.sessions.get('wizard_parity_dismiss_c').archived = true
+    assert.equal((await dismiss({ session_id: 'wizard_parity_dismiss_c' })).status, 200, 'an archived thread can be cleared')
+    s.sessions.get('wizard_parity_dismiss_c').archived = false
+    // Let at least two fresh scans run (the scene rescans every 100 ms) so the restored thread is read again.
+    let restored
+    for (let n = 0; n < 4; n++) { await new Promise(r => setTimeout(r, 250)); restored = await list() }
+    assert.ok(!restored.results.some(r => r.session_id === 'wizard_parity_dismiss_c'), 'a restored archived thread does not bring the result back')
     const last = await (await s.raw('/wizard/background-results', { headers: s.ownerHeaders })).json()
     assert.ok(!last.results.some(r => /wizard_parity_dismiss_/.test(r.session_id)), 'nothing of either thread is offered any more')
     assert.equal(runsFor('wizard_parity_dismiss_a').length + runsFor('wizard_parity_dismiss_b').length, 0, 'Dismiss never starts work')
