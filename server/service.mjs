@@ -6473,7 +6473,9 @@ function buildWizardServer(options, lifetime) {
       )
       // Passive owner media (<img>/<video>/<audio>, a download link) of a known attachment or saved file id.
       const mediaRequest = browserBoundary.enabled && passiveMediaPath(request.method, url.pathname)
-      if (!browserBoundary.allows(request, principal, { staticRequest, machineRequest, mediaRequest })) {
+      // The box's own health probes (GET /wizard/health with no browser metadata; browserBoundary.allows).
+      const healthRequest = browserBoundary.enabled && request.method === 'GET' && url.pathname === '/wizard/health'
+      if (!browserBoundary.allows(request, principal, { staticRequest, machineRequest, mediaRequest, healthRequest })) {
         sendJson(response, 401, { error: 'shell_token_required', check: 'browser_boundary' })
         return
       }
