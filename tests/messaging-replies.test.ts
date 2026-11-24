@@ -82,6 +82,36 @@ describe('the outbox', () => {
     expect(store.status(silent.id, path).status).toBe('failed')
   })
 
+  it('a worker that stopped after taking a reply: injected words become that turn, no words fail visibly', () => {
+    const { path, db } = stateDb()
+    let now = 9_000_000_000
+    const store = new MessagingReplies('', { now: () => now })
+    const lost = store.add({ runId: 'lost', sessionId: 'tg-now', chat, text: 'did it go?' })
+    const gone = store.add({ runId: 'gone', sessionId: 'tg-now', chat, text: 'never sent' })
+    store.take() // both taken; the worker dies before /done
+    db.prepare('INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)').run('tg-now', 'user', 'did it go?', now / 1000 + 1)
+    now += TAKE_TIMEOUT_MS
+    expect(store.status(lost.id, path).status).toBe('running') // its words are in the chat: wait for its answer
+    expect(store.get(lost.id).state).toBe('injected')
+    expect(store.status(gone.id, path)).toEqual({ status: 'failed', error: NOT_TAKEN_ERROR })
+    db.prepare('INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)').run('tg-now', 'assistant', 'yes it went', now / 1000)
+    expect(store.status(lost.id, path)).toEqual({ status: 'completed', output: 'yes it went' })
+  })
+
+  it('the same words twice: the second reply waits for its own answer', () => {
+    const { path, db } = stateDb()
+    let now = 9_100_000_000
+    const store = new MessagingReplies('', { now: () => now })
+    db.prepare('INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)').run('tg-now', 'user', 'yes', now / 1000 - 3)
+    db.prepare('INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)').run('tg-now', 'assistant', 'first answer', now / 1000 - 2)
+    const item = store.add({ runId: 'again', sessionId: 'tg-now', chat, text: 'yes' })
+    store.take(); store.done(item.id, { status: 'injected', at: now / 1000 })
+    expect(store.status(item.id, path).status).toBe('running')
+    db.prepare('INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)').run('tg-now', 'user', 'yes', now / 1000 + 0.2)
+    db.prepare('INSERT INTO messages (session_id, role, content, timestamp) VALUES (?,?,?,?)').run('tg-now', 'assistant', 'second answer', now / 1000 + 1)
+    expect(store.status(item.id, path)).toEqual({ status: 'completed', output: 'second answer' })
+  })
+
   it('posts the "continued in WizardOS" note once per older chat', () => {
     const store = new MessagingReplies('')
     const note = store.add({ kind: 'note', sessionId: 'tg-old', chat })

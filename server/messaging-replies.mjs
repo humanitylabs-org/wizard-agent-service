@@ -74,9 +74,14 @@ export function readMessagingSession(path, sessionId) {
   finally { try { db?.close() } catch { /* closed */ } }
 }
 
-/** The agent's answer to an injected reply: the first final assistant row after the owner's injected user row. */
-export function readInjectedAnswer(path, sessionId, text, sinceSeconds) {
-  if (!path) return null
+/**
+ * The injected reply in state.db: `user` when its owner row is there, `answer` = the first final assistant row after it.
+ * Anchored at the injection time (the gateway's clock, the same one Hermes stamps rows with), so an earlier identical
+ * message ("yes" twice) and its answer are never taken for this one.
+ */
+export function readInjected(path, sessionId, text, sinceSeconds) {
+  const none = { user: false, answer: null }
+  if (!path) return none
   let db
   try {
     db = openRead(path)
@@ -85,19 +90,21 @@ export function readInjectedAnswer(path, sessionId, text, sinceSeconds) {
       .all(sessionId, Number(sinceSeconds) || 0)
     const want = String(text || '').trim()
     const user = rows.find(row => row.role === 'user' && String(row.content || '').trim() === want)
-    if (!user) return null
+    if (!user) return none
     for (const row of rows) {
       if (row.id <= user.id) continue
       if (row.role !== 'assistant' || row.tool_calls) continue
       if (['commentary', 'hidden'].includes(row.display_kind)) continue
       const content = typeof row.content === 'string' ? row.content.trim() : ''
       if (!content) continue
-      return { messageId: row.id, userMessageId: user.id, text: content, at: Number(row.timestamp) || 0 }
+      return { user: true, answer: { messageId: row.id, userMessageId: user.id, text: content, at: Number(row.timestamp) || 0 } }
     }
-    return null
-  } catch { return null }
+    return { user: true, answer: null }
+  } catch { return none }
   finally { try { db?.close() } catch { /* closed */ } }
 }
+
+export const readInjectedAnswer = (path, sessionId, text, sinceSeconds) => readInjected(path, sessionId, text, sinceSeconds).answer
 
 export class MessagingReplies {
   constructor(path, { now = Date.now } = {}) {
@@ -177,8 +184,8 @@ export class MessagingReplies {
       if (item.state === 'noted') this.notes.add(item.sessionId)
     } else if (status === 'injected') {
       item.state = 'injected'
-      const at = Number(result.at)
-      item.injectedAt = Number.isFinite(at) && at > 0 ? Math.min(at * 1000, now) : now
+      const at = Number(result.at) * 1000
+      item.injectedAt = Number.isFinite(at) && Math.abs(at - now) < 86_400_000 ? at : now
     } else if (status === 'older') {
       item.state = 'failed'; item.error = MOVED_ON_ERROR; item.finishedAt = now
     } else {
@@ -196,14 +203,18 @@ export class MessagingReplies {
     if (item.state === 'answered') return { status: 'completed', output: item.answer?.text || '' }
     if (item.state === 'failed') return { status: 'failed', error: item.error || NOT_TAKEN_ERROR }
     if (['queued', 'taken'].includes(item.state)) {
-      if (now - item.createdAt >= TAKE_TIMEOUT_MS && item.state === 'queued') {
+      if (now - item.createdAt < TAKE_TIMEOUT_MS) return { status: 'running' }
+      // Nothing reported in time. A worker that stopped after injecting but before reporting left the owner's words in
+      // the chat: then this is that turn (its answer or still waiting), never a failure that invites a second send.
+      const seen = item.state === 'taken' ? readInjected(hermesStatePath, item.sessionId, item.text, item.createdAt / 1000 - 5) : { user: false }
+      if (!seen.user) {
         item.state = 'failed'; item.error = NOT_TAKEN_ERROR; item.finishedAt = now; this._save()
         return { status: 'failed', error: item.error }
       }
-      return { status: 'running' }
+      item.state = 'injected'; item.injectedAt = item.createdAt - 5000; this._save()
     }
     // injected: the turn runs in the messaging connection; its answer is the next final assistant row.
-    const answer = readInjectedAnswer(hermesStatePath, item.sessionId, item.text, item.injectedAt / 1000 - 5)
+    const answer = readInjectedAnswer(hermesStatePath, item.sessionId, item.text, item.injectedAt / 1000 - 1)
     if (answer) {
       item.state = 'answered'; item.answer = answer; item.finishedAt = now; this._save()
       return { status: 'completed', output: answer.text }
