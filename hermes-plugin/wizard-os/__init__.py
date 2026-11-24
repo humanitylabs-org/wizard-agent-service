@@ -22,11 +22,13 @@ try:  # loaded as a package by Hermes
     from . import media as _media
     from . import app_skill_guard as _app_skill_guard
     from . import bring_data as _bring_data
+    from . import messaging_replies as _messaging_replies
 except ImportError:  # loaded as a plain module (tests)
     import kernel as _kernel  # type: ignore[no-redef]
     import media as _media  # type: ignore[no-redef]
     import app_skill_guard as _app_skill_guard  # type: ignore[no-redef]
     import bring_data as _bring_data  # type: ignore[no-redef]
+    import messaging_replies as _messaging_replies  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 SECTION_ID = "wizard-os.kernel"
@@ -174,3 +176,6 @@ def register(ctx) -> None:
     if hasattr(ctx, "register_hook"):
         ctx.register_hook("transform_llm_output", _media.transform_llm_output)
         _app_skill_guard.register(ctx)
+    # Replies typed in WizardOS into a Telegram/Slack chat go through that chat's own connection (issue 427; the
+    # Agent Service decides the owner switch, and the worker only works inside the gateway process).
+    _messaging_replies.start(ctx, _gateway_url, _get_secret)

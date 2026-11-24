@@ -1790,6 +1790,63 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.ok(md.headers.get('content-disposition').startsWith('attachment'))
     assert.equal(await md.text(), '# PARITY_MARKDOWN\n\n- one\n')
   },
+  'messaging-chat-replies': async s => {
+    // Issue 427: with the switch on, an owner reply into a chat a messaging app owns (Telegram here) never reaches
+    // Hermes /v1/runs (a second writer there; newer Hermes refuses it). It waits in the outbox until the wizard-os plugin
+    // in the gateway takes it with the main gateway key, injects it through the chat's own connection and reports
+    // back; the run then reads the answer from state.db. An older chat (its app moved on) carries on through the
+    // normal route with a one-off "continued" note. Routed agents own no messaging connection: their replies are
+    // unchanged and the outbox stays empty.
+    const gateway = { Authorization: 'Bearer parity-main-gateway', 'Content-Type': 'application/json' }
+    const take = async () => { const r = await s.raw('/wizard/internal/messaging-replies/take', { method: 'POST', headers: gateway, body: '{}' }); assert.equal(r.status, 200); return r.json() }
+    const done = async (id, body) => { const r = await s.raw('/wizard/internal/messaging-replies/done', { method: 'POST', headers: gateway, body: JSON.stringify({ id, ...body }) }); assert.equal(r.status, 200) }
+    const sentFor = (from, id) => s.seen.slice(from).some(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === id)
+    const poll = async (read, label) => { for (let n = 0; n < 80; n++) { const v = await read(); if (v) return v; await new Promise(r => setTimeout(r, 50)) } assert.fail(label) }
+    const refused = await s.raw('/wizard/internal/messaging-replies/take', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+    assert.equal(refused.status, 403, 'only the main gateway key takes replies')
+    if (s.kind !== 'main') {
+      const before = s.seen.length
+      assert.equal((await s.request('/v1/runs', post({ session_id: 'wizard_parity', input: 'Synthetic routed reply' }))).status, 202)
+      await poll(() => sentFor(before, 'wizard_parity'), 'a routed reply still goes to its Hermes')
+      assert.deepEqual((await take()).items, [], 'routed replies never enter the outbox')
+      return
+    }
+    assert.equal((await s.request('/api/sessions', post({ id: 'parity_tg', title: 'From Telegram' }))).status, 201)
+    const key = 'agent:main:telegram:dm:7'
+    const db = new DatabaseSync(join(s.root, 'hermes-state.db'))
+    try {
+      for (const column of ['session_key', 'chat_id', 'chat_type', 'thread_id']) { try { db.exec(`ALTER TABLE sessions ADD COLUMN ${column} TEXT`) } catch { /* already there */ } }
+      db.exec('CREATE TABLE IF NOT EXISTS gateway_routing (scope TEXT, session_key TEXT, data TEXT, updated_at REAL)')
+      db.prepare("UPDATE sessions SET source = 'telegram', session_key = ?, chat_id = '7', chat_type = 'dm' WHERE id = 'parity_tg'").run(key)
+      db.prepare('INSERT INTO gateway_routing VALUES (?, ?, ?, ?)').run('/hermes/sessions', key, JSON.stringify({ session_id: 'parity_tg' }), 1)
+    } finally { db.close() }
+    const before = s.seen.length
+    const admitted = await s.request('/v1/runs', post({ session_id: 'parity_tg', input: 'Synthetic WizardOS reply' }))
+    assert.equal(admitted.status, 202)
+    const runId = (await admitted.json()).run_id
+    const item = await poll(async () => (await take()).items[0], 'the reply waits in the outbox for the gateway plugin')
+    assert.deepEqual({ kind: item.kind, platform: item.platform, session_key: item.session_key, chat_id: item.chat_id, text: item.text },
+      { kind: 'inject', platform: 'telegram', session_key: key, chat_id: '7', text: 'Synthetic WizardOS reply' })
+    assert.ok(!sentFor(before, 'parity_tg'), 'the reply never reaches Hermes /v1/runs (the connection stays the only writer)')
+    await done(item.id, { status: 'injected', at: Date.now() / 1000 })
+    const now = Date.now() / 1000
+    s.sessions.get('parity_tg').messages.push({ role: 'user', content: 'Synthetic WizardOS reply', display_kind: 'internal_notification', timestamp: now },
+      { role: 'assistant', content: 'Synthetic answer, also in Telegram', timestamp: now + 1 })
+    await s.request('/api/sessions/parity_tg/messages') // the fixture writes its rows to state.db on a Hermes read
+    const run = await poll(async () => { const r = await (await s.request(`/v1/runs/${runId}`)).json(); return r.status === 'completed' && r }, 'the run completes with the answer')
+    assert.equal(run.output, 'Synthetic answer, also in Telegram')
+    // A repeated report changes nothing (the plugin's ledger keeps it to one inject).
+    await done(item.id, { status: 'failed' })
+    assert.equal((await (await s.request(`/v1/runs/${runId}`)).json()).status, 'completed')
+    // The app moved on (a /new there): the older chat carries on here, and the app gets one note.
+    const moved = new DatabaseSync(join(s.root, 'hermes-state.db'))
+    try { moved.prepare('UPDATE gateway_routing SET data = ? WHERE session_key = ?').run(JSON.stringify({ session_id: 'parity_tg_new' }), key) } finally { moved.close() }
+    const later = s.seen.length
+    assert.equal((await s.request('/v1/runs', post({ session_id: 'parity_tg', input: 'Older chat reply' }))).status, 202)
+    await poll(() => sentFor(later, 'parity_tg'), 'an older chat carries on through the normal route')
+    const note = await poll(async () => (await take()).items.find(x => x.kind === 'note'), 'the app gets a continued note')
+    assert.equal(note.session_id, 'parity_tg')
+  },
   'main-provider-attach': async s => {
     // Issue 428: with the switch on, only the main agent's picker is narrowed to the providers attached to it, and
     // a model change onto an unattached provider never reaches Hermes. Routed kinds keep their own allowed models.
