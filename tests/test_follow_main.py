@@ -43,8 +43,11 @@ class Checks(BaseHTTPRequestHandler):
         pass
 
 
+IDS = iter(range(1000, 100000))
+
+
 def green(*names):
-    return [{"name": n, "status": "completed", "conclusion": "success", "started_at": "2026-11-24T00:00:00Z"}
+    return [{"id": next(IDS), "name": n, "status": "completed", "conclusion": "success", "started_at": "2026-11-24T00:00:00Z"}
             for n in names or fm.REQUIRED_CHECKS]
 
 
@@ -140,7 +143,7 @@ class FollowMainTest(unittest.TestCase):
 
     def test_waits_for_checks_then_deploys(self):
         sha = self.merge()
-        Checks.runs[sha] = green("gitleaks") + [{"name": "test", "status": "in_progress", "started_at": "2026-11-24T00:00:00Z"}]
+        Checks.runs[sha] = green("gitleaks") + [{"id": next(IDS), "name": "test", "status": "in_progress", "started_at": "2026-11-24T00:00:00Z"}]
         out = fm.follow_once()
         self.assertEqual(out["state"], "waiting")
         self.assertIn("test", out["reason"])
@@ -159,7 +162,7 @@ class FollowMainTest(unittest.TestCase):
 
     def test_failed_checks_never_deploy_and_say_why(self):
         sha = self.merge()
-        Checks.runs[sha] = green("gitleaks", "validate") + [{"name": "test", "status": "completed", "conclusion": "failure", "started_at": "x"}]
+        Checks.runs[sha] = green("gitleaks", "validate") + [{"id": next(IDS), "name": "test", "status": "completed", "conclusion": "failure", "started_at": "x"}]
         out = fm.follow_once()
         self.assertEqual(out["state"], "behind")
         self.assertIn("failed its checks (test)", out["reason"])
@@ -168,8 +171,16 @@ class FollowMainTest(unittest.TestCase):
 
     def test_a_rerun_check_counts_by_its_newest_run(self):
         sha = self.merge()
-        Checks.runs[sha] = green() + [{"name": "test", "status": "completed", "conclusion": "failure", "started_at": "2026-11-23T00:00:00Z"}]
+        Checks.runs[sha] = [{"id": 1, "name": "test", "status": "completed", "conclusion": "failure", "started_at": "2026-11-24T01:00:00Z"}] + green()
         self.assertEqual(fm.follow_once()["state"], "current")
+
+    def test_a_queued_rerun_after_a_green_run_is_still_pending(self):
+        sha = self.merge()
+        Checks.runs[sha] = green() + [{"id": next(IDS), "name": "test", "status": "queued", "conclusion": None, "started_at": None}]
+        out = fm.follow_once()
+        self.assertEqual(out["state"], "waiting")
+        self.assertIn("test", out["reason"])
+        self.assertFalse(self.deploy_log.exists())
 
     def test_a_refused_deploy_is_behind_with_the_helpers_reason_and_waits_to_retry(self):
         (self.tmp / "refuse").write_text("")

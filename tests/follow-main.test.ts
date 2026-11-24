@@ -80,6 +80,14 @@ describe('the behind notice', () => {
     await fm.tick()
     expect(n.sent[0].message).toMatch(/^This Wizard has stopped following main: the follow-main timer has not run since 2026-11-24T10:00:00/)
   })
+  it('a pass still deploying 45 min later is not stale (the unit allows 60 min); at 80 min it is', () => {
+    const d = home(), p = join(d, 'follow-main.json'); let now = T0 + 45 * 60_000
+    writeStatus(p, { state: 'deploying', behind_since: at(T0), reason: 'installing the release' })
+    const fm = createFollowMain({ statusPath: p, on: () => true, now: () => now, log: () => undefined })
+    expect(fm.health()).toMatchObject({ state: 'deploying' })
+    now = T0 + 80 * 60_000
+    expect(fm.health()).toMatchObject({ state: 'stale', last_state: 'deploying' })
+  })
   it('no status file reads not_installed and tells nobody', async () => {
     const d = home(), n = notifier()
     const fm = createFollowMain({ statusPath: join(d, 'follow-main.json'), on: () => true, notifier: n, log: () => undefined })

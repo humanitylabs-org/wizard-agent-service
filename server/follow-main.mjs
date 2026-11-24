@@ -9,8 +9,10 @@ import { dirname, join } from 'node:path'
 export const FOLLOW_MAIN_SWITCH = 'wizard/follow-main'
 export const FOLLOW_MAIN_SCHEMA = 'wizard.follow-main/1'
 export const FOLLOW_MAIN_NOTICE_MS = 30 * 60_000
-// The timer runs every 5 min; a status this old means the host step is not running.
+// The timer runs every 5 min; a status this old means the host step is not running. A pass that is preparing or
+// deploying may take up to its 60 min unit limit, so those states read stale only after that.
 export const FOLLOW_MAIN_STALE_MS = 30 * 60_000
+export const FOLLOW_MAIN_BUSY_STALE_MS = 75 * 60_000
 const STATES = new Set(['current', 'waiting', 'preparing', 'deploying', 'behind', 'unknown'])
 const SHA = /^[0-9a-f]{40}$/
 const text = (v, max = 300) => typeof v === 'string' ? v.replace(/[\x00-\x1f]/g, ' ').slice(0, max) : undefined
@@ -38,7 +40,7 @@ export function behindMessage(status) {
   return `${count} on main ${status.behind_by === 1 ? "hasn't" : "haven't"} gone live on this Wizard${since}${why}. It keeps retrying by itself.`
 }
 
-export function createFollowMain({ statusPath, on, notifier = null, now = Date.now, noticeMs = FOLLOW_MAIN_NOTICE_MS, staleMs = FOLLOW_MAIN_STALE_MS, log = console.error } = {}) {
+export function createFollowMain({ statusPath, on, notifier = null, now = Date.now, noticeMs = FOLLOW_MAIN_NOTICE_MS, staleMs = FOLLOW_MAIN_STALE_MS, busyStaleMs = FOLLOW_MAIN_BUSY_STALE_MS, log = console.error } = {}) {
   const enabled = () => { try { return Boolean(statusPath) && on?.() === true } catch { return false } }
   const sentPath = statusPath ? join(dirname(statusPath), 'follow-main-notified.json') : ''
   let sent = null
@@ -61,7 +63,8 @@ export function createFollowMain({ statusPath, on, notifier = null, now = Date.n
     const found = readFollowMainStatus(statusPath)
     if (!found) return { state: 'not_installed', reason: 'the follow-main timer has not run on this box' }
     const checked = Date.parse(found.checked_at ?? '')
-    if (!Number.isFinite(checked) || now() - checked > staleMs) {
+    const limit = ['preparing', 'deploying'].includes(found.state) ? Math.max(staleMs, busyStaleMs) : staleMs
+    if (!Number.isFinite(checked) || now() - checked > limit) {
       return { ...found, state: 'stale', reason: `the follow-main timer has not run since ${found.checked_at ?? 'an unknown time'}`, last_state: found.state }
     }
     return found

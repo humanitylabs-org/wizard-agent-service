@@ -143,7 +143,8 @@ def checks(cfg: dict, sha: str) -> tuple[str, str]:
     newest: dict[str, dict] = {}
     for item in runs:
         name = item.get("name")
-        if name in REQUIRED_CHECKS and (name not in newest or str(item.get("started_at") or "") > str(newest[name].get("started_at") or "")):
+        # The newest run by id: a re-run that is still queued has no started_at yet and must count as pending.
+        if name in REQUIRED_CHECKS and (name not in newest or int(item.get("id") or 0) > int(newest[name].get("id") or 0)):
             newest[name] = item
     failed = [n for n in REQUIRED_CHECKS if n in newest and newest[n].get("status") == "completed"
               and newest[n].get("conclusion") not in {"success", "skipped", "neutral"}]
