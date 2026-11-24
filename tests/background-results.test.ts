@@ -551,21 +551,25 @@ describe('reason and Dismiss on the saved-result Needs you (issue 469, switch wi
     const all = await (await f.dismiss({ session_id: second.session_id })).json()
     expect(all).toMatchObject({ ok: true, dismissed: 1, ids: [second.id] })
     expect((await (await f.dismiss({ session_id: second.session_id })).json())).toMatchObject({ ok: true, dismissed: 0 })
-    // A helper that finished after the last scan is still caught by the thread-wide form (a fresh generation).
-    const late = f.rows.get(body.results[2].session_id)!
+    // A helper that finished after the last scan is still caught by the thread-wide form (a thread mark), and so is
+    // a thread that is already archived (Archive sends it after the archive succeeded; the scan skips archived ones).
+    const third = body.results[2].session_id
+    const late = f.rows.get(third)!
     late.push({ id: 9001, role: 'user', content: '[ASYNC DELEGATION BATCH COMPLETE — deleg_late_2] Saved findings: late result.', display_kind: 'async_delegation_complete', timestamp: f.finished + 60 })
-    f.sessions.find((r: any) => r.id === body.results[2].session_id).message_count += 1
-    f.failHistory(true)
-    expect((await f.dismiss({ session_id: body.results[2].session_id })).status).toBe(503)
-    f.failHistory(false)
-    const both = await (await f.dismiss({ session_id: body.results[2].session_id })).json()
-    expect(both.ids).toHaveLength(2)
+    const row3 = f.sessions.find((r: any) => r.id === third); row3.message_count += 1; row3.archived = true
+    expect(await (await f.dismiss({ session_id: third })).json()).toMatchObject({ ok: true, thread: true })
+    row3.archived = false // restored later: neither result comes back
     await f.restart()
     expect((await f.list()).body.results).toEqual([])
+    // A result that finishes after Done/Archive is new work: it shows.
+    late.push({ id: 9002, role: 'user', content: '[ASYNC DELEGATION BATCH COMPLETE — deleg_later_2] Saved findings: later result.', display_kind: 'async_delegation_complete', timestamp: Date.now() / 1000 + 60 })
+    row3.message_count += 1
+    f.advance(3 * 3600 * 1000)
+    expect((await f.list()).body.results.map((r: any) => r.session_id)).toEqual([third])
     expect(f.calls).toHaveLength(0)
     // Turning the switch off again shows them as before (the switch, not the dismissal, decides).
     await f.setReason(false)
-    expect((await f.list()).body.results).toHaveLength(4)
+    expect((await f.list()).body.results).toHaveLength(5)
   })
   it('switch on: an archived row is never decorated, even before the next scan', async () => {
     const f = await fixture({ count: 1, reason: true })

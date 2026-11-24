@@ -45,32 +45,39 @@ export const SAVED_RESULT_REASON = 'A helper finished after this chat closed'
 const DISMISSED_CAP = 2000
 
 /** Saved results the owner dismissed (Dismiss, Done or Archive on any device), kept on the box so every device
- * reads the same answer. A small JSON file of result id -> { session_id, at }; the oldest fall off past the cap. */
+ * reads the same answer. A small JSON file: result id -> { session_id, at } for Dismiss, and thread id -> at (ms)
+ * for Done and Archive, which clear every saved result of the thread that finished by then, also one no scan has
+ * seen yet or one of a thread that is already archived. A result that finishes later shows. Oldest fall off past the cap. */
 export function createDismissals(path = '', now = Date.now) {
-  let ids = null
+  let ids = null, threads = null
   const load = () => {
-    if (ids) return ids
-    ids = new Map()
-    if (!path) return ids
+    if (ids) return
+    ids = new Map(); threads = new Map()
+    if (!path) return
     try {
       const value = JSON.parse(readFileSync(path, 'utf8'))
       for (const [id, row] of Object.entries(value?.dismissed || {})) {
         if (/^bg_[0-9a-f]{32}$/.test(id) && typeof row?.session_id === 'string') ids.set(id, { session_id: row.session_id, at: Number(row.at) || 0 })
       }
+      for (const [id, at] of Object.entries(value?.threads || {})) if (WIZARD.test(id) && Number.isFinite(Number(at))) threads.set(id, Number(at))
     } catch {}
-    return ids
+  }
+  const save = () => {
+    for (const map of [ids, threads]) while (map.size > DISMISSED_CAP) map.delete(map.keys().next().value)
+    if (path) atomicStoreWrite(path, `${JSON.stringify({ schema: 1, dismissed: Object.fromEntries(ids), threads: Object.fromEntries(threads) })}\n`, { inventory: false })
   }
   return {
-    has: id => load().has(id),
+    hasId: id => { load(); return ids.has(id) },
+    // row: a saved result ({ id, sessionId, at } with `at` in Hermes seconds).
+    has: row => { load(); return ids.has(row.id) || (threads.has(row.sessionId) && Number(row.at) * 1000 <= threads.get(row.sessionId)) },
     add(entries) {
-      const map = load()
+      load()
       let added = 0
-      for (const { id, sessionId } of entries) if (!map.has(id)) { map.set(id, { session_id: sessionId, at: now() }); added++ }
-      if (!added) return 0
-      while (map.size > DISMISSED_CAP) map.delete(map.keys().next().value)
-      if (path) atomicStoreWrite(path, `${JSON.stringify({ schema: 1, dismissed: Object.fromEntries(map) })}\n`, { inventory: false })
+      for (const { id, sessionId } of entries) if (!ids.has(id)) { ids.set(id, { session_id: sessionId, at: now() }); added++ }
+      if (added) save()
       return added
     },
+    thread(sessionId) { load(); threads.delete(sessionId); threads.set(sessionId, now()); save() },
   }
 }
 
@@ -86,7 +93,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
   const dismissals = createDismissals(dismissedPath, now)
   const on = () => { try { return reasonOn() === true } catch { return false } }
   // With the switch off nothing is hidden: a dismissal made while it was on shows again (the switch decides).
-  const dismissed = row => on() && dismissals.has(row.id)
+  const dismissed = row => on() && dismissals.has(row)
   let cache = { at: 0, records: [], sessions: [], complete: true }
   let inflight = null
   let discovery = null
@@ -327,14 +334,18 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     async dismiss(sessionId, id = '') {
       if (!on()) throw error('not found', 404)
       if (!WIZARD.test(sessionId) || (id && !/^bg_[0-9a-f]{32}$/.test(id))) throw error('invalid dismissal', 400)
-      if (id && dismissals.has(id)) return { dismissed: 0, ids: [id], replayed: true }
-      // Done and Archive (no id) need every result of the thread, also one that finished since the last scan:
-      // reconcile a fresh generation, or refuse while history can't be read. A known id can use the cache.
-      const known = id && cache.records.some(row => row.id === id && row.sessionId === sessionId)
+      if (!id) {
+        // Done and Archive (no id): a thread mark, so every saved result that finished by now stays cleared, also
+        // one no scan has seen yet and one of a thread that is already archived (the scan skips those).
+        const matches = cache.records.filter(row => row.sessionId === sessionId && !admitted(row.key) && !dismissals.has(row))
+        dismissals.thread(sessionId)
+        return { dismissed: matches.length, ids: matches.map(row => row.id), thread: true }
+      }
+      if (dismissals.hasId(id)) return { dismissed: 0, ids: [id], replayed: true }
+      const known = cache.records.some(row => row.id === id && row.sessionId === sessionId)
       const c = known ? cache : await refresh(true)
-      if (!id && (c.error || !c.complete || c.failures?.get(sessionId))) throw error('history is temporarily unavailable', 503)
-      const matches = c.records.filter(row => row.sessionId === sessionId && (!id || row.id === id) && !admitted(row.key))
-      if (id && !matches.length) throw error('recovery no longer matches this thread')
+      const matches = c.records.filter(row => row.sessionId === sessionId && row.id === id && !admitted(row.key))
+      if (!matches.length) throw error('recovery no longer matches this thread')
       const added = dismissals.add(matches.map(row => ({ id: row.id, sessionId })))
       return { dismissed: added, ids: matches.map(row => row.id) }
     },
