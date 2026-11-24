@@ -199,6 +199,7 @@ def deploy_command(cfg: dict, release: Path) -> list[str]:
 
 def deploy(cfg: dict, sha: str, release: Path) -> None:
     command = deploy_command(cfg, release) + [sha]
+    (cfg["home"] / ".local/state").mkdir(parents=True, exist_ok=True)  # the helper's lock lives there; a fresh home lacks it
     result = subprocess.run(command, env={**cfg["env"], "WAS_SOURCE": str(cfg["src"]),
                                           "WIZARD_SERVER_RELEASE_ROOT": str(cfg["root"])},
                             text=True, capture_output=True, timeout=3600)
