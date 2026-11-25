@@ -1,6 +1,6 @@
 """Replies from WizardOS into chats a messaging app owns (wizard-agent-service issue 427).
 
-Owner switch ``wizard/messaging-chat-replies`` (off by default), decided by the Agent Service. Hermes lets only the
+On for everyone (the Agent Service's ``WIZARD_MESSAGING_REPLIES=0`` turns it off). Hermes lets only the
 Telegram/Slack/... connection write into a chat that connection started, so the Service never sends these replies to
 ``/v1/runs``. It keeps them in an outbox, and this worker, running inside the Hermes gateway process, takes them:
 
@@ -16,8 +16,8 @@ A "note" item (an older chat the Service carries on itself) only posts ``↪ Thi
 Exactly once: each item id is written to a ledger in the plugin's Hermes home BEFORE the inject, so a lost
 acknowledgement or a second offer of the same id is acknowledged again, never injected twice.
 
-Hermes' own permission (``plugins.entries.<plugin>.allow_gateway_injection``) is set while the switch is on and taken
-back when it goes off (only if this worker set it). No Hermes core change.
+Hermes' own permission (``plugins.entries.<plugin>.allow_gateway_injection``) is set while the Service reports it on and
+taken back when it reports it off (only if this worker set it). No Hermes core change.
 """
 
 from __future__ import annotations

@@ -1,5 +1,5 @@
-// Replies from WizardOS into chats a messaging app owns (wizard-agent-service issue 427; owner switch
-// wizard/messaging-chat-replies, off by default; env WIZARD_MESSAGING_REPLIES '1'/'0' forces it).
+// Replies from WizardOS into chats a messaging app owns (wizard-agent-service issue 427; on for everyone, env
+// WIZARD_MESSAGING_REPLIES=0 turns it off).
 //
 // Hermes lets only the Telegram/Slack/... connection write into a chat that connection started: an API turn into it
 // is a second writer (newer Hermes refuses it with permission_denied, gateway/session_api_turn.py). So a WizardOS reply
@@ -17,7 +17,6 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const MESSAGING_REPLIES_SWITCH = 'wizard/messaging-chat-replies'
 export const MESSAGING_RUN_PREFIX = 'wizmr_'
 const RUN_ID = /^wizmr_[0-9a-f]{32}$/u
 
