@@ -39,8 +39,7 @@ const error = (message, status = 409) => Object.assign(new Error(message), { sta
 // continuation column, which no client path can set; the body marker alone carries no authority.
 export const BACKGROUND_RECOVERY_KIND = 'background-recovery'
 export const MARKER = '_wizard_background_recovery'
-// Reason and Dismiss for this service-added Needs you (issue 469). Owner switch in the Look file, off by default.
-export const NEEDS_YOU_REASON_SWITCH = 'wizard/needs-you-reason'
+// Reason and Dismiss for this service-added Needs you (issue 469). On for everyone (switch removed).
 export const SAVED_RESULT_REASON = 'A helper finished after this chat closed'
 const DISMISSED_CAP = 2000
 
@@ -89,11 +88,9 @@ function snapshot(rows, at) {
   return { boundary: String(user?.id || ''), moved: Number(user?.timestamp || 0) > at, gated: ['needs_you', 'check'].includes(gate) }
 }
 
-export function createBackgroundResults({ request, sessionDbPath = '', queue, busy = () => false, now = Date.now, refreshMs = 15_000, reasonOn = () => false, dismissedPath = '' }) {
+export function createBackgroundResults({ request, sessionDbPath = '', queue, busy = () => false, now = Date.now, refreshMs = 15_000, dismissedPath = '' }) {
   const dismissals = createDismissals(dismissedPath, now)
-  const on = () => { try { return reasonOn() === true } catch { return false } }
-  // With the switch off nothing is hidden: a dismissal made while it was on shows again (the switch decides).
-  const dismissed = row => on() && dismissals.has(row)
+  const dismissed = row => dismissals.has(row)
   let cache = { at: 0, records: [], sessions: [], complete: true }
   let inflight = null
   let discovery = null
@@ -272,9 +269,8 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
     if (fresh) completedUnreported = false
     return result
   }
-  const askText = () => on() ? SAVED_RESULT_REASON : 'Continue from the saved background result'
-  const publicRecord = row => ({ id: row.id, agent_id: 'hermes', session_id: row.sessionId, completed_at: row.at, state: 'ready', label: 'Background result ready', action: 'Continue',
-    ...(on() ? { reason: SAVED_RESULT_REASON, actions: ['continue', 'dismiss'] } : {}) })
+  const askText = () => SAVED_RESULT_REASON
+  const publicRecord = row => ({ id: row.id, agent_id: 'hermes', session_id: row.sessionId, completed_at: row.at, state: 'ready', label: 'Background result ready', action: 'Continue', reason: SAVED_RESULT_REASON, actions: ['continue', 'dismiss'] })
   return {
     // Thread id -> identity of its pending saved results. The Chats list cache fingerprints cached rows
     // with this: a result that appears or clears re-projects its thread instead of serving a stale row
@@ -318,7 +314,7 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
         const id = String(row._lineage_root_id || row.id || '')
         const pending = bySession.get(id)
         // Archive clears it at once (the scan skips archived threads; this row is fresher than the scan).
-        if (!pending || (on() && row.archived)) return row
+        if (!pending || row.archived) return row
         // Ready/manual is separate from Working: never pretend a stopped parent or finished helper is running.
         return { ...row, status: 'completed', wizard_waiting_on: '', wizard_background_result: publicRecord(pending), wizard_attention: { state: 'needs_you', ask: askText(), subject: '', title: '' } }
       }
@@ -328,11 +324,9 @@ export function createBackgroundResults({ request, sessionDbPath = '', queue, bu
       if (payload.session && typeof payload.session === 'object') payload.session = decorate(payload.session)
       return Buffer.from(JSON.stringify(payload))
     },
-    get dismissOn() { return on() },
     // Dismiss (issue 469): the owner's Dismiss, Done or Archive. Without an id, every saved result of the thread
     // (Done and Archive don't know result ids). Stored on the box, so every device's next list read drops it.
     async dismiss(sessionId, id = '') {
-      if (!on()) throw error('not found', 404)
       if (!WIZARD.test(sessionId) || (id && !/^bg_[0-9a-f]{32}$/.test(id))) throw error('invalid dismissal', 400)
       if (!id) {
         // Done and Archive (no id): a thread mark, so every saved result that finished by now stays cleared, also

@@ -2483,7 +2483,7 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.ok(!(await list()).results.some(r => r.session_id === 'wizard_parity_saved'), 'a continued result is no longer offered')
   },
   'needs-you-reason-dismiss': async s => {
-    // Issue 469 (switch wizard/needs-you-reason, on in this scene): the saved-result Needs you the Service adds
+    // Issue 469 (on for everyone): the saved-result Needs you the Service adds
     // itself carries its reason, and Dismiss (or Done / Archive through the thread-wide form) clears it on the box,
     // so every device's next read drops it. Main only, like the saved-result scan; routed kinds answer unsupported.
     const at = Date.now() / 1000 - 3 * 3600

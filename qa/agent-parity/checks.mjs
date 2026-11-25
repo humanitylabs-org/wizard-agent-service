@@ -13,7 +13,7 @@ const featureScenes = {
   'main-provider-attach': kind => scene(kind, { mainProviderAttach: true }),
   'messaging-chat-replies': kind => scene(kind, { agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' }),
   'private-first-setup': kind => scene(kind, { privateFirst: true }),
-  'needs-you-reason-dismiss': kind => scene(kind, { needsYouReason: true, backgroundResultsRefreshMs: 100 }),
+  'needs-you-reason-dismiss': kind => scene(kind, { backgroundResultsRefreshMs: 100 }),
   'plain-chat-titles': kind => scene(kind, ({ root }) => ({ pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, plainClashTitlesTtlMs: 0, fixtureUniqueTitles: true })),
   'graceful-restart-hold': kind => scene(kind, { gracefulRestart: true }),
   'chat-after-reset-list': kind => scene(kind, { canonicalSessionListing: true, canonicalSessionCacheMs: 0 }),
