@@ -2327,6 +2327,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "chats-sent-tab",
+      "description": "wizard-ux issue 1778 (switch wizard/chats-inbox, needs wizard/agent-inbox, both off by default): the main agent's Chats list gets bottom tabs Inbox, Tags and Sent. Sent reads the Sent log (GET /wizard/v1/sent, issue 607), shows each capture's route, live state and why, opens the thread it ran in by id (a background row through its agent inbox record), and posts Should have replied / Didn't need a reply (POST /wizard/v1/sent/<id>/correct). The Sent log holds the owner's own captures to the main agent, so a routed agent's Chats list (host-profile, container, restricted) keeps today's look with no tabs; its threads and their parity are unchanged.",
+      "layer": "ux",
+      "how_to_test": "In wizard-ux run node --test tests/chats-sent-tab.test.mjs: the reader against a fake box (rows, 404, correction in place) and the real core/chats-sent.js part, which draws the tabs on the main list and none on host-profile, container or restricted lists or the AI apps sidebar. Browser proof (phone 412 px and Classic desktop, Nebula and Light, fake box): wizard-ux/tests/qa-chats-sent-tab.cjs, including Sent, a hidden thread, Back twice with the app still open, and a byte-identical list with the switch off. Synthetic evidence, not live box proof.",
+      "source_refs": [
+        "wizard-ux/web/core/chats-sent.js",
+        "wizard-ux/web/live-channels.js",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/chats-sent-tab.test.mjs",
+        "wizard-ux/tests/qa-chats-sent-tab.cjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "chat-answer-postscript",
       "description": "An agent reply written in the same message as a tool call (e.g. a notes patch) stays the visible answer when the turn ends with a short postscript (wizard-ux issue 1319): a finished turn whose final reply is under 500 characters, with an earlier non-commentary reply of 1,000+ characters and 3x longer, shows the long reply first and the postscript under it instead of folding the answer into the collapsed work log. Commentary, short interim lines, mid-run and failed turns are unchanged.",
       "layer": "ux",
