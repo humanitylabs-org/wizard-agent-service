@@ -5,7 +5,7 @@
 // duplicate_of. The old database is opened read-only and the old blob folder is left as it is, so the
 // agent's old `trusted_path`s keep working. A dry run reports the same counts and writes nothing.
 //
-// The store only serves the imported ids with WIZARD_MEDIA_LEGACY_IDS=1 (option mediaLegacyIds).
+// The store serves the imported ids as soon as they are in its list; no switch is needed.
 import { copyFileSync, existsSync, linkSync, mkdirSync, realpathSync, renameSync, statSync, unlinkSync } from 'node:fs'
 import { dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'

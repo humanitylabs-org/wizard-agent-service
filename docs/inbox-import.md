@@ -4,7 +4,7 @@ A box that moves from the old Wizard Uploads service (wizard-inbox, port 8941) t
 (`WIZARD_MEDIA_ROOT` set, `WIZARD_INBOX_INTERNAL_TOKEN` unset) would otherwise lose every attachment in its
 older chats: those chats name `drop_<32 hex>` ids, and the built-in store only knew its own `wf_` ids.
 
-Two parts, both off until someone uses them:
+Two parts:
 
 1. **The import** (`server/inbox-import.mjs`, one time, safe to run again). It opens the old service's
    `inbox.sqlite3` read-only and, for each row in `drops`, hard-links the blob into
@@ -14,9 +14,9 @@ Two parts, both off until someone uses them:
    keep working. It reports `imported`, `already_present`, `missing`, `size_mismatch`, `invalid`, `linked`,
    `copied` and `copied_bytes`, and the first 50 problems by id. `--dry-run` reports the same counts and
    writes nothing. A second run adds nothing; a run that stopped half way reuses the links it made.
-2. **The switch** `WIZARD_MEDIA_LEGACY_IDS=1` (option `mediaLegacyIds`, default off). With it on, the
-   built-in store serves the imported `drop_` ids: `/wizard/files/<id>/content` (range requests included)
-   and attachment resends. With it off nothing changes: `drop_` ids are refused as before.
+2. **Serving the old ids.** The built-in store serves the imported `drop_` ids like its own:
+   `/wizard/files/<id>/content` (range requests included) and attachment resends. No switch is needed
+   (on for everyone since issue 423 was approved); an id that is not in the list is still refused.
 
 ## Running it
 
@@ -36,5 +36,5 @@ blobs outside it are refused), `--media-root` (default `$WIZARD_MEDIA_ROOT`), `-
 the Service image, so `docker exec <service> node server/inbox-import.mjs ...` works when both folders are
 mounted there.
 
-Then set `WIZARD_MEDIA_LEGACY_IDS=1` for the Service and restart it. The index is appended in batches of
+The Service picks up the new list on its own. The index is appended in batches of
 500 in one write each and never drops records already listed. Run it while the box is quiet: an upload saved in the same instant as a batch write could be missed from the list.

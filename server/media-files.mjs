@@ -16,8 +16,7 @@ import { createReadStream, existsSync, linkSync, mkdirSync, readFileSync, rename
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 
 const ID = /^wf_[0-9a-f]{32}$/
-// Ids of files imported from the old Wizard Uploads service (issue 423). They are only accepted when the
-// store is built with `legacyIds` (switch WIZARD_MEDIA_LEGACY_IDS, off by default).
+// Ids of files imported from the old Wizard Uploads service (issue 423), served like the store's own ids.
 export const LEGACY_ID = /^drop_[0-9a-f]{32}$/
 
 export function cleanName(value) {
@@ -25,8 +24,8 @@ export function cleanName(value) {
   return (name || 'file').slice(0, 200)
 }
 
-export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => new Date(), legacyIds = false }) {
-  const known = (id) => ID.test(String(id)) || (legacyIds === true && LEGACY_ID.test(String(id)))
+export function createMediaFiles({ mediaRoot, agentRoot, indexPath, now = () => new Date() }) {
+  const known = (id) => ID.test(String(id)) || LEGACY_ID.test(String(id))
   const root = resolve(String(mediaRoot))
   const agent = resolve(String(agentRoot || mediaRoot))
   if (root === sep || agent === sep) throw new Error('media root must be narrower than /')
