@@ -8775,6 +8775,11 @@ function buildWizardServer(options, lifetime) {
           const guidance = trackerOn() ? expandReplyToInput(parseJsonBody(prepared.body).input, id => threadItems.titleOf('hermes', queuedProxyRecord.sessionId, id)) : parseJsonBody(prepared.body).input
           const updated = await runQueue.appendGuidance(
             queuedProxyRecord.publicRunId, guidance, prepared.trustedPaths)
+          // Issue 1808: guidance for a turn still queued is a reply row on that turn too.
+          if (queuedProxyRecord.runtime === 'direct' && principal.kind === 'owner' && agentInboxOn()) {
+            sentReply(queuedProxyRecord.sessionId, prepared.body.toString('utf8'), typeof request.headers['idempotency-key'] === 'string' ? request.headers['idempotency-key'] : '',
+              (prepared.audioPaths ?? []).length > 0, queuedProxyRecord.publicRunId, true)
+          }
           sendJson(response, 202, { accepted: true, run_id: updated.publicRunId, status: 'queued', queue_position: runQueue.publicPayload(updated).queue_position })
           return
         }
@@ -8839,11 +8844,6 @@ function buildWizardServer(options, lifetime) {
             const thread = typeof value.session_id === 'string' ? value.session_id : (queuedProxyRecord?.sessionId || '')
             if (value.input !== undefined) body = Buffer.from(JSON.stringify({ ...value, input: expandReplyToInput(value.input, id => threadItems.titleOf('hermes', thread, id)) }))
           }
-        }
-        // Issue 1808: the owner typing while a turn runs (steer) is a reply row on that run.
-        if (body && steerPathId && request.method === 'POST' && queuedProxyRecord?.runtime === 'direct' && principal.kind === 'owner' && agentInboxOn()) {
-          const steerKey = typeof request.headers['idempotency-key'] === 'string' ? request.headers['idempotency-key'] : ''
-          sentReply(queuedProxyRecord.sessionId, body.toString('utf8'), steerKey, audioPaths.length > 0, queuedProxyRecord.publicRunId, true)
         }
         if (queuedAdmission) {
           // Android retains a voice note until it is acknowledged and re-uploads the
@@ -9048,6 +9048,13 @@ function buildWizardServer(options, lifetime) {
         }
         if (upstream.ok && steerPathId && !operator && request.method === 'POST' && runQueue && body) {
           try { runQueue.noteAcceptedSteer(steerPathId, inputText(parseJsonBody(body).input)) } catch { /* the reply still reached Hermes */ }
+        }
+        // Issue 1808: the owner typing while a turn runs (steer) is a reply row on that run, once Hermes took it.
+        if (upstream.ok && steerPathId && request.method === 'POST' && body && queuedProxyRecord?.runtime === 'direct' && principal.kind === 'owner' && agentInboxOn()) {
+          let accepted = true
+          try { accepted = JSON.parse(result.toString('utf8'))?.accepted !== false } catch { /* a 2xx without a body: taken */ }
+          const steerKey = typeof request.headers['idempotency-key'] === 'string' ? request.headers['idempotency-key'] : ''
+          if (accepted) sentReply(queuedProxyRecord.sessionId, body.toString('utf8'), steerKey, audioPaths.length > 0, queuedProxyRecord.publicRunId, true)
         }
         if (upstream.ok && steerPathId && request.method === 'POST' && trustedPaths.length) {
           const existing = runTrustedPaths.get(steerPathId) ?? []

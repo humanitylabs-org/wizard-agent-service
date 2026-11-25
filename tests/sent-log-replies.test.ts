@@ -21,7 +21,9 @@ const readBody = (req: IncomingMessage) => new Promise<any>(resolve => { let b =
 const status = (state: string, ask: string) => `[WIZARD_STATUS_V1]${JSON.stringify({ state, ask })}[/WIZARD_STATUS_V1]`
 
 // A Hermes that answers each run with the reply `answer(input)` gives.
+const control = { acceptSteer: true, holding: new Set<string>() }
 async function fakeHermes(answer: (input: string) => string | null) {
+  control.acceptSteer = true; control.holding.clear()
   const rows = new Map<string, any>()
   const messages = new Map<string, any[]>()
   const outputs = new Map<string, string | null>()
@@ -50,9 +52,13 @@ async function fakeHermes(answer: (input: string) => string | null) {
       Object.assign(rows.get(id), { message_count: list.length, last_active: t + 0.5, preview: input })
       const runId = `run-${runs}`
       outputs.set(runId, out)
+      if (/long job/.test(input)) control.holding.add(runId)
       return json(202, { run_id: runId, status: 'started' })
     }
+    const steer = url.pathname.match(/^\/v1\/runs\/([^/]+)\/steer$/)
+    if (req.method === 'POST' && steer) return json(200, { accepted: control.acceptSteer, run_id: steer[1] })
     const run = url.pathname.match(/^\/v1\/runs\/([^/]+)$/)
+    if (req.method === 'GET' && run && control.holding.has(run[1])) return json(200, { run_id: run[1], status: 'running' })
     if (req.method === 'GET' && run) {
       const out = outputs.get(run[1])
       return out == null ? json(200, { run_id: run[1], status: 'failed', error: 'boom' }) : json(200, { run_id: run[1], status: 'completed', output: out })
@@ -148,6 +154,24 @@ describe('issue 1808: replies typed in a thread', { timeout: 30_000 }, () => {
     expect(b[0]).toMatchObject({ state: 'failed', quiet: false })
     await new Promise(r => setTimeout(r, 200))
     expect((await listRow(base, 'wizard_t_a'))?.wizard_quiet_reply).toBeUndefined()
+  })
+
+  it('a steer while the turn runs is a reply row on that run once Hermes takes it; a refused steer leaves none', async () => {
+    const { base } = await box(answers, { agentInbox: true })
+    const thread = 'wizard_steer_1'
+    await send(base, thread, 'Why did the clips edit fail?', 's-1')
+    await until(() => sent(base), rows => rows[0]?.state === 'done')
+    const admitted = await (await send(base, thread, 'thanks, start the long job', 's-2')).json()
+    const runId = admitted.run_id || admitted.id
+    await until(() => sent(base), r => r[0]?.source === 'reply' && r[0]?.state === 'running')
+    const steer = (text: string, key: string) => fetch(`${base}/wizard/hermes/v1/runs/${runId}/steer`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key }, body: JSON.stringify({ input: text }) })
+    control.acceptSteer = false
+    expect((await steer('also do the audio', 'st-1')).status).toBe(200)
+    expect((await sent(base)).filter(r => r.text === 'also do the audio')).toHaveLength(0)
+    control.acceptSteer = true
+    expect((await steer('and tell me when?', 'st-2')).status).toBe(200)
+    const rows = await sent(base)
+    expect(rows[0]).toMatchObject({ source: 'reply', route: 'thread', text: 'and tell me when?', wants_reply: true, state: 'running' })
   })
 
   it('switch off: no reply row, no quiet flag (unchanged from today)', async () => {
