@@ -1,4 +1,4 @@
-"""Look up before installing: the WizardOS install guard (issue 463, switch `wizard/capability-registry`).
+"""Look up before installing: the WizardOS install guard (issue 463, on for everyone).
 
 A stock Hermes agent that finds no tool for a job builds its own: asked to transcribe audio, one pip-installed
 faster-whisper and a speech model next to the box's own Wizard Voice Service. This ``pre_tool_call`` hook catches
@@ -7,8 +7,8 @@ package installs (pip, uv, pipx, poetry, conda, npm, yarn, pnpm, bun, apt, brew,
 and matches each name against the box's capability registry, which it reads from this agent's own ``wizard``
 gateway (``wizard_capabilities`` with ``format: json``). Only a match is refused, with the tool to use instead (or,
 for a capability this agent is not granted, the exact ask for the owner). Everything else runs: this is a nudge
-against known duplicates, not a ban on installing things. With the switch off the gateway has no such tool, so
-nothing is ever refused. The owner can turn the guard off per agent (Agent Service ``/wizard/v1/capabilities``).
+against known duplicates, not a ban on installing things. A gateway without that tool (an older Agent Service)
+means nothing is ever refused. The owner can turn the guard off per agent (Agent Service ``/wizard/v1/capabilities``).
 
 The same file ships in the wizard-os plugin (main agent) and in wizard-supervisor-tools (every managed agent);
 tests/capability-guard.test.ts keeps the two copies byte-identical. No Hermes core change.
@@ -86,7 +86,7 @@ def _gateway_url() -> str:
 
 
 def _fetch() -> dict | None:
-    """The registry for this agent, or None (switch off, no gateway, unreachable: the guard then allows)."""
+    """The registry for this agent, or None (no such tool, no gateway, unreachable: the guard then allows)."""
     url, token = _gateway_url(), _secret("WIZARD_MCP_TOKEN")
     if not url or not token:
         return None
@@ -125,7 +125,7 @@ def registry(fresh: bool = False) -> dict | None:
 
 
 def index_jobs() -> list[str] | None:
-    """Job names for the kernel's index line, in registry order; None while the switch is off or unreachable."""
+    """Job names for the kernel's index line, in registry order; None while the gateway has no registry or is unreachable."""
     value = registry()
     if value is None:
         return None
@@ -279,7 +279,7 @@ def pre_tool_call(tool_name: str = "", args=None, **_kwargs):
         return None
     if not any(match(name, value["capabilities"]) for name in names):
         return None
-    # About to refuse: decide on a fresh read, so an owner who just turned the guard (or the switch) off for this
+    # About to refuse: decide on a fresh read, so an owner who just turned the guard off for this
     # agent is honoured on the very next try, never up to a cache lifetime later.
     value = registry(fresh=True)
     if value is None or value.get("guard") is False:

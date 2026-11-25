@@ -154,7 +154,7 @@ def _section(_session_info) -> str:
     registry = _kernel.read_registry()
     if registry is None:
         return ""  # no WizardOS on this box (yet): add nothing
-    # Issue 463: with the capability switch on, the gateway's registry gives the kernel its generated index line.
+    # Issue 463: the gateway's registry gives the kernel its generated index line.
     try:
         jobs = _capability_guard.index_jobs()
     except Exception:  # noqa: BLE001 - never block a turn on the lookup

@@ -1,7 +1,7 @@
 # Capability registry and install guard (issue 463)
 
-Switch: `wizard/capability-registry` (the owner's Look file, read at runtime), off by default. `WIZARD_CAPABILITY_REGISTRY=1`
-forces it on and `0` forces it off. While it is off, nothing on this page happens.
+On for everyone. James said yes at show-and-tell, so the `wizard/capability-registry` switch and the
+`WIZARD_CAPABILITY_REGISTRY` env knob were removed; a value the old switch left in the Look file is ignored.
 
 ## Why
 
@@ -41,11 +41,11 @@ second copy (`whisper`, `faster-whisper`, `vosk`, `Systran/faster-whisper-*` mea
   `execute_code` calls that install (pip, uv, pipx, poetry, conda, npm, yarn, pnpm, bun, apt, brew, cargo, gem), download
   a model (Hugging Face CLI or URL, `git clone` of a model repo, `ollama pull`) or load a known duplicate, and only when
   the name matches a capability the box has. The refusal names the tool to use (for `not-granted`, the ask for the
-  owner; for `unavailable`, "tell the owner"). Everything else runs, and so does everything while the switch is off or
-  the gateway can't be reached.
+  owner; for `unavailable`, "tell the owner"). Everything else runs, and so does everything while the gateway can't be
+  reached or has no registry (an older Agent Service).
 - **Owner route** `GET /wizard/v1/capabilities`: what the main agent finds, the gaps, and the agents whose guard is off.
   `PATCH {"agent": "<id>", "guard": false|true}` turns the guard off or back on for one agent. It is gated like the
-  other owner settings routes and answers 404 while the switch is off.
+  other owner settings routes (404 only when the Service runs without the agent bridge).
 
 `wizard_apps` is unchanged. Shells and harnesses that call it keep working.
 
@@ -53,5 +53,5 @@ second copy (`whisper`, `faster-whisper`, `vosk`, `Systran/faster-whisper-*` mea
 
 - `tests/capabilities.test.ts`: kernel twins, registry rules, the Python guard (refuses faster-whisper with a pointer to
   `wizard_transcribe` and lets pandas through), and the two guard copies staying identical.
-- Parity check `capability-registry` (`qa/agent-parity`): every agent kind through its own gateway transport, the switch
-  flipped in the Look file.
+- Parity check `capability-registry` (`qa/agent-parity`): every agent kind through its own gateway transport, with a stored
+  off value of the old switch in the Look file (it changes nothing).

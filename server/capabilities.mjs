@@ -1,4 +1,4 @@
-// System capability registry (issue 463, switch `wizard/capability-registry`, env WIZARD_CAPABILITY_REGISTRY).
+// System capability registry (issue 463, on for everyone: the wizard/capability-registry switch was removed).
 //
 // Agents learned what a box can do only from apps.json (kernel, wizard-job-* pointers, wizard_apps), so a built-in
 // such as wizard_transcribe or the host Wizard Voice Service was invisible and an agent installed its own Whisper.
@@ -14,7 +14,6 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { dirname } from 'node:path'
 
 export const CAPABILITY_TOOL = 'wizard_capabilities'
-export const CAPABILITY_SWITCH = 'wizard/capability-registry'
 export const CAPABILITY_SCHEMA = 'wizard.capabilities/1'
 const GAP_LIMIT = 200
 
@@ -108,12 +107,12 @@ function writeJson(path, value) {
 }
 
 /**
- * `on()` is the switch. `apps(agentId)` -> bridge apps that agent may use; `allApps()` -> every installed bridge app.
+ * `apps(agentId)` -> bridge apps that agent may use; `allApps()` -> every installed bridge app.
  * `builtins(agentId)` -> the gateway built-in tools served to the agent (without this one). `isPrivate(agentId)`,
  * `agentLabel(agentId)`. `voice()` -> {ready, reachable, name} of the Wizard Voice Service. `statePath` keeps the
  * per-agent guard choice and the recorded gaps (job words + agent id, never content).
  */
-export function createCapabilities({ on = () => false, apps = () => [], allApps = () => [], builtins = () => [], isPrivate = () => false, agentLabel = () => 'This agent', voice = async () => ({ ready: true, reachable: true }), statePath = '', now = Date.now, log = () => {} } = {}) {
+export function createCapabilities({ apps = () => [], allApps = () => [], builtins = () => [], isPrivate = () => false, agentLabel = () => 'This agent', voice = async () => ({ ready: true, reachable: true }), statePath = '', now = Date.now, log = () => {} } = {}) {
   const state = () => {
     const value = readJson(statePath, {})
     return { guard_off: Array.isArray(value?.guard_off) ? value.guard_off.filter((id) => typeof id === 'string') : [], gaps: Array.isArray(value?.gaps) ? value.gaps : [] }
@@ -161,7 +160,6 @@ export function createCapabilities({ on = () => false, apps = () => [], allApps 
 
   /** Job names on this agent's index, built-ins first (the kernel line, the run note). */
   function jobs(agentId) {
-    if (!on()) return null
     return [...new Set(base(agentId).map((r) => r.job))]
   }
 
@@ -213,7 +211,7 @@ export function createCapabilities({ on = () => false, apps = () => [], allApps 
   }
 
   async function call(name, args = {}, agentId) {
-    if (name !== CAPABILITY_TOOL || !on()) return undefined
+    if (name !== CAPABILITY_TOOL) return undefined
     if (!args || typeof args !== 'object' || Array.isArray(args)) return bad('Arguments must be an object.')
     const list = await records(agentId)
     if (args.format === 'json') {
@@ -246,14 +244,13 @@ export function createCapabilities({ on = () => false, apps = () => [], allApps 
   /** Routed agents get no kernel: one line in their run note with the same index. */
   function runNote(agentId) {
     const names = jobs(agentId)
-    if (!names) return ''
     return `Built into this box for you: ${names.map(words).join(', ') || 'see the list'}. Before doing one of these yourself, installing software, downloading a model or saying the box cannot do something, call ${CAPABILITY_TOOL}.`
   }
 
   /** The owner's view: the main agent's registry, the agents with the guard off and the recorded gaps. */
   async function ownerView(mainAgent = 'hermes') {
     const s = state()
-    return { schema: CAPABILITY_SCHEMA, on: on() === true, capabilities: on() ? (await records(mainAgent)).map(brief) : [], guard_off: s.guard_off, gaps: s.gaps.slice(-100).reverse() }
+    return { schema: CAPABILITY_SCHEMA, on: true, capabilities: (await records(mainAgent)).map(brief), guard_off: s.guard_off, gaps: s.gaps.slice(-100).reverse() }
   }
 
   /** The owner turns the install guard off (or back on) for one agent. */
@@ -266,5 +263,5 @@ export function createCapabilities({ on = () => false, apps = () => [], allApps 
     return { agent, guard }
   }
 
-  return { tool: TOOL, list: () => (on() ? [TOOL] : []), call, jobs, records, runNote, ownerView, setGuard, guardOn }
+  return { tool: TOOL, list: () => [TOOL], call, jobs, records, runNote, ownerView, setGuard, guardOn }
 }
