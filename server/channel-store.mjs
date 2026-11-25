@@ -114,7 +114,7 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     forgetDay: q('DELETE FROM daily_days WHERE agent=? AND session_id=?'),
     // Tags (issue 608): a chat can carry several of its agent's channels. `membership` keeps the primary tag (the first
     // one, then the oldest left), so everything that knows one channel per chat (Daily, filing, older shells) still works.
-    tagsOf: q('SELECT channel_id, tagged_at, tagged_by FROM tags WHERE agent=? AND session_id=? ORDER BY tagged_at, channel_id'),
+    tagsOf: q('SELECT channel_id, tagged_at, tagged_by FROM tags WHERE agent=? AND session_id=? ORDER BY tagged_at, rowid'),
     tag: q('SELECT 1 AS y FROM tags WHERE agent=? AND session_id=? AND channel_id=?'),
     addTag: q('INSERT OR IGNORE INTO tags(agent,session_id,channel_id,tagged_at,tagged_by) VALUES(?,?,?,?,?)'),
     dropTag: q('DELETE FROM tags WHERE agent=? AND session_id=? AND channel_id=?'),
