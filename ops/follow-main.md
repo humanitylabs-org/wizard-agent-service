@@ -23,9 +23,18 @@ If a prepare or deploy of the same commit fails, it is retried after 30 min (`WI
 The Agent Service reads that file (`WIZARD_FOLLOW_MAIN_STATUS` overrides the path). While the switch is on:
 
 - `/wizard/health` carries `follow_main`. The timer reads `follow_main.on` from it.
-- Once the box has been behind main for 30 min, the owner gets one notification ("Wizard is behind") naming
-  the reason.
-- If the timer stops running, the owner gets the same kind of notice.
+- The owner is told ("Wizard is behind") only when there is a step he can take, and the notice names it
+  (issue 638):
+  - the timer stopped running: the `systemctl --user enable --now ...` command that restarts it;
+  - a prepare or deploy of main still fails after its 30-min retry: ask his agent to run the box's deploy helper
+    and fix what it reports.
+- Everything else is not the owner's and sends nothing; `follow_main.reason` and `follow_main.cause` in health still
+  say why the box is behind:
+  - `red-main`: a required check failed on main. The **Red main** workflow (`.github/workflows/red-main.yml`) reruns
+    the failed jobs once, so a flaky test heals and the box installs the commit on its next pass. If the rerun fails
+    too, it files one `bug` issue "Main is red: ..." here for the builder (later red commits comment on it).
+  - `checks-pending`: main's checks are still running; `github`: GitHub could not be read.
+- At most one notice per cause until the box is current again, never one per merge.
 
 With the switch off, health has no `follow_main` field, the timer pass changes nothing and no notice is sent.
 

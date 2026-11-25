@@ -1,0 +1,84 @@
+# Red main (issue 638). A required check (test, gitleaks, validate) that fails on main keeps every box that follows
+# main (ops/follow-main.md) behind, and that is the builder's to fix, never the owner's. So when one of the
+# workflows behind those checks fails on a push to main:
+#   1. its failed jobs are rerun once (a flaky test heals by itself and the boxes install the commit);
+#   2. if the rerun fails too (or a person's rerun failed), the builder is told: one open `bug` issue
+#      "Main is red: ..." in this repo, with a comment for each further red commit, never one issue per merge.
+# Nothing runs for a commit that is no longer the newest main (the newer commit's own checks decide).
+# Never checks out or runs this repo's code; uses only the workflow's own token.
+name: Red main
+on:
+  workflow_run:
+    workflows: ["Quality", "Secret scan", "Publish public image"]
+    types: [completed]
+    branches: [main]
+permissions:
+  actions: write
+  issues: write
+  contents: read
+concurrency:
+  group: red-main-${{ github.event.workflow_run.id }}
+  cancel-in-progress: false
+jobs:
+  heal-or-report:
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - name: Rerun the failed jobs once, then tell the builder if main stays red
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          ATTEMPT: ${{ github.event.workflow_run.run_attempt }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+          WORKFLOW: ${{ github.event.workflow_run.name }}
+          RUN_URL: ${{ github.event.workflow_run.html_url }}
+        run: |
+          set -euo pipefail
+          newest() { gh api "repos/$GH_REPO/commits/main" --jq .sha; }
+          if [ "$(newest)" != "$SHA" ]; then
+            echo "::notice::$SHA is no longer the newest main; its newer commit's checks decide"
+            exit 0
+          fi
+          if [ "$ATTEMPT" = "1" ]; then
+            gh run rerun "$RUN_ID" --failed
+            echo "Reran the failed jobs of $WORKFLOW on $SHA; waiting for them"
+            for _ in $(seq 1 90); do
+              sleep 30
+              read -r attempt status conclusion < <(gh run view "$RUN_ID" --json attempt,status,conclusion --jq '"\(.attempt) \(.status) \(.conclusion // "none")"')
+              if [ "$attempt" -ge 2 ] && [ "$status" = "completed" ]; then break; fi
+            done
+            if [ "${attempt:-1}" -lt 2 ] || [ "$status" != "completed" ]; then
+              echo "::warning::the rerun did not finish in time; its own completion is judged when it does"
+              exit 0
+            fi
+            if [ "$conclusion" = "success" ]; then
+              echo "The rerun passed: a flaky failure healed, boxes install $SHA on their next pass"
+              exit 0
+            fi
+            [ "$(newest)" = "$SHA" ] || { echo "::notice::main moved on while rerunning"; exit 0; }
+          fi
+          title="Main is red: $WORKFLOW failed twice on ${SHA:0:7}"
+          body=$(printf '%s\n' \
+            "\`$WORKFLOW\` failed on main ($SHA) and its rerun failed too: $RUN_URL" \
+            "" \
+            "What happens: every Wizard that follows main stays on its last release until main is green again (the owner is not told; this is the builder's to fix)." \
+            "What should happen: main's required checks (test, gitleaks, validate) pass, so boxes install the newest main." \
+            "How to see it: open the run above; \`gh run list --branch main --workflow \"$WORKFLOW\"\`." \
+            "" \
+            "Filed by the Red main workflow. Refs humanitylabs-org/wizard-agent-service#638")
+          open=$(gh issue list --state open --search 'in:title "Main is red:"' --json number,title \
+                   --jq '[.[] | select(.title | startswith("Main is red:"))][0].number // empty')
+          if [ -n "$open" ]; then
+            if gh issue view "$open" --json body,comments --jq '.body, .comments[].body' | grep -qF "$RUN_URL"; then
+              echo "Already reported on #$open"; exit 0
+            fi
+            gh issue comment "$open" --body "$title. $RUN_URL"
+            echo "Told the builder on #$open"
+          else
+            gh issue create --title "$title" --label bug --body "$body"
+          fi

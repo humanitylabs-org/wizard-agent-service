@@ -31,26 +31,33 @@ describe('follow-main status', () => {
   it('keeps only known fields and refuses foreign files', () => {
     const d = home(), p = join(d, 's.json')
     writeStatus(p, { state: 'behind', behind_by: 3, behind_since: at(T0), reason: 'the deploy stopped:\nrefusing', token: 'x', live: 'not-a-sha' })
-    expect(readFollowMainStatus(p)).toEqual({ state: 'behind', main: B, behind_by: 3, behind_since: at(T0), checked_at: at(T0), reason: 'the deploy stopped: refusing' })
+    expect(readFollowMainStatus(p)).toEqual({ state: 'behind', main: B, behind_by: 3, behind_since: at(T0), checked_at: at(T0), reason: 'the deploy stopped: refusing', cause: 'deploy' })
+    writeStatus(p, { state: 'behind', cause: 'prepare', failures: 2, reason: 'x' })
+    expect(readFollowMainStatus(p)).toMatchObject({ cause: 'prepare', failures: 2 })
+    writeStatus(p, { state: 'behind', cause: 'nonsense', failures: -1, reason: 'the newest change on main failed its checks (test), so it is not installed' })
+    expect(readFollowMainStatus(p)).toMatchObject({ cause: 'red-main' })
+    expect(readFollowMainStatus(p)).not.toHaveProperty('failures')
     writeFileSync(p, JSON.stringify({ schema: 'other/1', state: 'current' }))
     expect(readFollowMainStatus(p)).toBeNull()
     expect(readFollowMainStatus(join(d, 'missing.json'))).toBeNull()
   })
-  it('says how far behind, since when and why', () => {
-    expect(behindMessage({ state: 'behind', behind_by: 2, behind_since: at(T0), reason: 'the newest change on main failed its checks (test), so it is not installed' }))
-      .toBe("2 merged changes on main haven't gone live on this Wizard since 2026-11-24 10:00 UTC: the newest change on main failed its checks (test), so it is not installed. It keeps retrying by itself.")
-    expect(behindMessage({ state: 'behind', behind_by: 1, reason: 'x' })).toBe("1 merged change on main hasn't gone live on this Wizard: x. It keeps retrying by itself.")
+  it('says how far behind, since when, why and the one step the owner can take (never "keeps retrying")', () => {
+    expect(behindMessage({ state: 'behind', behind_by: 2, behind_since: at(T0), main: B, cause: 'deploy', failures: 2, reason: 'the deploy stopped: refusing to deploy' }))
+      .toBe(`2 merged changes on main haven't gone live on this Wizard since 2026-11-24 10:00 UTC: the deploy stopped: refusing to deploy. It failed again after a retry. Ask your agent to run wizard-agent-service-deploy ${B} on this Wizard and fix what it reports.`)
+    expect(behindMessage({ state: 'stale', reason: 'the follow-main timer has not run since x' }))
+      .toBe("This Wizard has stopped following main: the follow-main timer has not run since x. Merged changes won't go live until it runs again. To restart it, run: systemctl --user enable --now wizard-agent-service-follow-main.timer")
+    expect(behindMessage({ state: 'behind', behind_by: 1, reason: 'x' })).not.toMatch(/keeps retrying|Nothing to do/i)
   })
 })
 
 describe('the behind notice', () => {
   const notifier = () => { const sent: any[] = []; return { sent, available: () => true, send: async (n: any) => { sent.push(n); return { app: 'notes' } } } }
-  it('is sent once per main and reason after 30 min behind, never while off or current', async () => {
+  it('is sent once per cause after a deploy failed again past its retry, never while off or current', async () => {
     const d = home(), p = join(d, 'follow-main.json'), n = notifier()
     let now = T0, on = false
     const fm = createFollowMain({ statusPath: p, on: () => on, notifier: n, now: () => now, log: () => undefined })
-    writeStatus(p, { state: 'behind', behind_by: 1, behind_since: at(T0), reason: 'the deploy stopped: refusing to deploy' })
-    now = T0 + 31 * 60_000; writeStatus(p, { state: 'behind', behind_by: 1, behind_since: at(T0), checked_at: at(now), reason: 'the deploy stopped: refusing to deploy' })
+    writeStatus(p, { state: 'behind', behind_by: 1, behind_since: at(T0), cause: 'deploy', failures: 2, reason: 'the deploy stopped: refusing to deploy' })
+    now = T0 + 31 * 60_000; writeStatus(p, { state: 'behind', behind_by: 1, behind_since: at(T0), checked_at: at(now), cause: 'deploy', failures: 2, reason: 'the deploy stopped: refusing to deploy' })
     expect(fm.health()).toBeNull(); expect(await fm.tick()).toBeNull(); expect(n.sent).toEqual([])
     on = true
     expect(fm.health()).toMatchObject({ on: true, state: 'behind', live: A, main: B, reason: 'the deploy stopped: refusing to deploy' })
@@ -60,11 +67,40 @@ describe('the behind notice', () => {
     // A restarted Service remembers it already told the owner.
     const again = createFollowMain({ statusPath: p, on: () => true, notifier: n, now: () => now, log: () => undefined })
     expect(await again.tick()).toBeNull(); expect(n.sent).toHaveLength(1)
-    // A new reason is a new notice; catching up sends nothing.
-    writeStatus(p, { state: 'behind', behind_by: 1, behind_since: at(T0), checked_at: at(now), reason: "couldn't prepare the release: npm failed" })
+    // The same cause on a newer merge is no news (issue 638: one notice per cause, not per merge).
+    writeStatus(p, { state: 'behind', main: 'c'.repeat(40), behind_by: 2, behind_since: at(T0), checked_at: at(now), cause: 'deploy', failures: 3, reason: 'the deploy stopped: health check failed' })
+    expect(await fm.tick()).toBeNull(); expect(n.sent).toHaveLength(1)
+    // A new cause is a new notice; catching up sends nothing and makes the next episode news again.
+    writeStatus(p, { state: 'behind', behind_by: 1, behind_since: at(T0), checked_at: at(now), cause: 'prepare', failures: 2, reason: "couldn't prepare the release: npm failed" })
     await fm.tick(); expect(n.sent).toHaveLength(2)
     writeStatus(p, { state: 'current', live: B, checked_at: at(now) })
     expect(await fm.tick()).toBeNull(); expect(n.sent).toHaveLength(2)
+    writeStatus(p, { state: 'behind', behind_by: 1, behind_since: at(T0), checked_at: at(now), cause: 'prepare', failures: 2, reason: "couldn't prepare the release: npm failed" })
+    await fm.tick(); expect(n.sent).toHaveLength(3)
+  })
+  it('a first deploy failure waits for its retry: the owner hears only when it fails again', async () => {
+    const d = home(), p = join(d, 'follow-main.json'), n = notifier(), now = T0 + 40 * 60_000
+    writeStatus(p, { state: 'behind', behind_since: at(T0), checked_at: at(now), cause: 'deploy', failures: 1, reason: 'the deploy stopped: x' })
+    const fm = createFollowMain({ statusPath: p, on: () => true, notifier: n, now: () => now, log: () => undefined })
+    expect(await fm.tick()).toBeNull(); expect(n.sent).toEqual([])
+  })
+  it('a red check on main never tells the owner, for any number of merges or hours (issue 638)', async () => {
+    const d = home(), p = join(d, 'follow-main.json'), n = notifier(); let now = T0
+    const fm = createFollowMain({ statusPath: p, on: () => true, notifier: n, now: () => now, log: () => undefined })
+    for (const [i, main] of ['b', 'c', 'd', 'e'].entries()) {
+      now = T0 + (31 + i * 60) * 60_000
+      // Both what the new host step writes and what an older one wrote (no cause; read from the reason).
+      for (const cause of [{ cause: 'red-main' }, {}]) {
+        writeStatus(p, { state: 'behind', main: main.repeat(40), behind_by: i + 1, behind_since: at(T0), checked_at: at(now), ...cause, reason: 'the newest change on main failed its checks (test), so it is not installed' })
+        expect(fm.health()).toMatchObject({ state: 'behind', cause: 'red-main' })
+        expect(await fm.tick()).toBeNull()
+      }
+    }
+    for (const [cause, reason] of [['checks-pending', "waiting for main's checks (test)"], ['github', "couldn't read main's checks from GitHub: x"]]) {
+      writeStatus(p, { state: 'behind', behind_since: at(T0), checked_at: at(now), cause, reason })
+      expect(await fm.tick()).toBeNull()
+    }
+    expect(n.sent).toEqual([])
   })
   it('waits 30 min: a merge still in its checks is no news', async () => {
     const d = home(), p = join(d, 'follow-main.json'), n = notifier(), now = T0 + 10 * 60_000
