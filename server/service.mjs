@@ -5254,7 +5254,7 @@ function buildWizardServer(options, lifetime) {
       if (!next) { threadTitleStore.markConsidered(sessionId, assistantAt); return }
       const applied = await patchHermesTitle(sessionId, next)
       if (!applied) { threadTitleStore.markConsidered(sessionId, assistantAt); return }
-      threadTitleStore.recordRename(sessionId, { from: current.title, to: applied, by: 'agent', assistantAt, since: current.startedAt })
+      threadTitleStore.recordRename(sessionId, { from: current.title, to: applied, asked: next, by: 'agent', assistantAt, since: current.startedAt })
       canonicalSessionCache.expiresAt = 0
       if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
     } catch { /* the next final reply proposes again */ }
@@ -5281,7 +5281,7 @@ function buildWizardServer(options, lifetime) {
       let applied = locked ? await patchHermesTitle(sessionId, spelled, { exact: true }) : ''
       if (!applied) applied = await patchHermesTitle(sessionId, spelled, { datedAt: since })
       if (!applied) return null
-      threadTitleStore.respell(sessionId, { from: current.title, to: applied, locked })
+      threadTitleStore.respell(sessionId, { from: current.title, to: applied, asked: spelled, locked })
       canonicalSessionCache.expiresAt = 0
       return { id: sessionId, from: current.title, to: applied, locked }
     })()

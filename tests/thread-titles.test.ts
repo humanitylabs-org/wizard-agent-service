@@ -148,27 +148,46 @@ describe('topic titles: the app or area, never the opener words', () => {
     expect(undatedTitle('Messenger #2')).toBe('Messenger #2')
     expect(undatedTitle('Trip (Nov)')).toBe('Trip (Nov)')
     const directory = await mkdtemp(join(tmpdir(), 'plain-titles-'))
-    let clock = 1_000_000
+    let clock = Date.UTC(2026, 10, 14, 9) / 1000
     const store = new ThreadTitleStore(join(directory, 'titles.json'), { now: () => clock })
-    store.recordRename('wizard_a', { from: 'Messenger · Composer', to: 'Vespa (14 Nov)', by: 'agent', since: 1 })
+    store.recordRename('wizard_a', { from: 'Messenger · Composer', to: 'Vespa (14 Nov)', asked: 'Vespa', by: 'agent', since: 1 })
     expect(store.plainTitle('wizard_a', 'Vespa (14 Nov)')).toBe('Vespa')
     expect(store.plainTitle('wizard_a', 'Other (14 Nov)')).toBe('Other (14 Nov)') // not the title the Service applied
     expect(store.plainTitle('wizard_none', 'Vespa (14 Nov)')).toBe('Vespa (14 Nov)') // no record: never the Service's
-    expect(store.visibleHistory('wizard_a')).toEqual([{ from: 'Messenger · Composer', to: 'Vespa (14 Nov)', at: 1_000_000, by: 'agent' }])
-    expect(store.visibleHistory('wizard_a', { plain: true })).toEqual([{ from: 'Messenger · Composer', to: 'Vespa', at: 1_000_000, by: 'agent' }])
+    expect(store.visibleHistory('wizard_a')).toEqual([{ from: 'Messenger · Composer', to: 'Vespa (14 Nov)', at: clock, by: 'agent' }])
+    expect(store.visibleHistory('wizard_a', { plain: true })).toEqual([{ from: 'Messenger · Composer', to: 'Vespa', at: clock, by: 'agent' }])
+    // The agent named a date itself and Hermes took it as is: it stays.
+    store.recordRename('wizard_e', { from: 'Plans', to: 'Launch (14 Nov)', asked: 'Launch (14 Nov)', by: 'agent', since: 1 })
+    expect(store.plainTitle('wizard_e', 'Launch (14 Nov)')).toBe('Launch (14 Nov)')
+    expect(store.visibleHistory('wizard_e', { plain: true }).map(({ to }) => to)).toEqual(['Launch (14 Nov)'])
     // The owner typed the date: it stays.
     store.recordRename('wizard_b', { from: 'Vespa', to: 'Party (14 Nov)', by: 'you' })
     expect(store.plainTitle('wizard_b', 'Party (14 Nov)')).toBe('Party (14 Nov)')
     // An owner title the Service had to date when respelling it: the date is the Service's.
     const twoWords = `Wizard${' '}OS notes`
     store.recordRename('wizard_c', { from: 'Old', to: twoWords, by: 'you' })
-    store.respell('wizard_c', { from: twoWords, to: 'WizardOS notes (2 Nov)', locked: true })
+    store.respell('wizard_c', { from: twoWords, to: 'WizardOS notes (2 Nov)', asked: 'WizardOS notes', locked: true })
     expect(store.plainTitle('wizard_c', 'WizardOS notes (2 Nov)')).toBe('WizardOS notes')
     // A dated agent title renamed again: the note reads plain on both ends, and a rename that only moved the date is gone.
-    store.recordRename('wizard_d', { from: '', to: 'Vespa (14 Nov)', by: 'agent', since: 1 })
+    store.recordRename('wizard_d', { from: '', to: 'Vespa (14 Nov)', asked: 'Vespa', by: 'agent', since: 1 })
     clock += 3600
-    store.recordRename('wizard_d', { from: 'Vespa (14 Nov)', to: 'Music (15 Nov)', by: 'agent', since: 1 })
+    store.recordRename('wizard_d', { from: 'Vespa (14 Nov)', to: 'Music (14 Nov)', asked: 'Music', by: 'agent', since: 1 })
     expect(store.visibleHistory('wizard_d', { plain: true }).map(({ from, to }) => [from, to])).toEqual([['Vespa', 'Music']])
+  })
+
+  it('reads the date of a title dated before issue 518 from the day it was renamed', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'plain-titles-legacy-'))
+    const at = Date.UTC(2026, 10, 14, 18, 2) / 1000
+    const threads = {
+      wizard_dated: { title: 'Vespa (14 Nov 18:02)', locked: false, appliedFor: 1, history: [{ from: 'Plans', to: 'Vespa (14 Nov 18:02)', at, by: 'agent' }] },
+      wizard_own: { title: 'Launch (20 Nov)', locked: false, appliedFor: 1, history: [{ from: 'Plans', to: 'Launch (20 Nov)', at, by: 'agent' }] },
+      wizard_owner: { title: 'Party (14 Nov)', locked: true, appliedFor: 1, history: [{ from: 'Plans', to: 'Party (14 Nov)', at, by: 'you', quiet: true }] },
+    }
+    await writeFile(join(directory, 'titles.json'), JSON.stringify({ schema: 1, threads }))
+    const store = new ThreadTitleStore(join(directory, 'titles.json'))
+    expect(store.plainTitle('wizard_dated', 'Vespa (14 Nov 18:02)')).toBe('Vespa')
+    expect(store.plainTitle('wizard_own', 'Launch (20 Nov)')).toBe('Launch (20 Nov)') // not the day it was applied
+    expect(store.plainTitle('wizard_owner', 'Party (14 Nov)')).toBe('Party (14 Nov)')
   })
 
   it('puts a clash-free spelling on a title another thread holds: dated, never numbered', () => {

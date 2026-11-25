@@ -149,6 +149,17 @@ export const undatedTitle = (value) => {
   const plain = title.replace(DATED_SUFFIX, '')
   return plain.length >= 3 ? plain : title
 }
+// Records written before issue 518 don't say whether the Service dated a title. Its date is the day of the rename
+// (clashCandidates is called with now), so only a suffix naming that day is taken as the Service's.
+const datedOnDay = (value, at) => {
+  const day = squash(value).match(DATED_SUFFIX)?.[0]?.match(/\((\d{1,2}) ([A-Za-z]{3})/u)
+  if (!day || !Number.isFinite(at)) return false
+  const when = new Date(at * 1000)
+  return Number(day[1]) === when.getUTCDate() && day[2] === MONTHS[when.getUTCMonth()]
+}
+// The title a rename asked for, before any clash date: recorded since issue 518, else read from the date's day.
+const askedTitle = (entry) => typeof entry?.asked === 'string' ? entry.asked
+  : entry?.by === 'agent' && datedOnDay(entry.to, entry.at) ? undatedTitle(entry.to) : squash(entry?.to)
 
 // A clash-free spelling of a title another thread already holds: dated, never numbered.
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -240,6 +251,7 @@ export class ThreadTitleStore {
             title: typeof record.title === 'string' ? record.title : '',
             locked: record.locked === true,
             ...(record.provisional === true ? { provisional: true } : {}),
+            ...(typeof record.undated === 'string' ? { undated: record.undated } : {}),
             appliedFor: Number.isFinite(record.appliedFor) ? record.appliedFor : null,
             history: Array.isArray(record.history) ? record.history.filter(validEntry).slice(-HISTORY_MAX) : [],
           }
@@ -285,7 +297,7 @@ export class ThreadTitleStore {
     const current = this.get(sessionId)
     if (!current?.provisional) return null
     const at = this.now()
-    return this._put(sessionId, { ...current, title, history: [{ from: '', to: title, at, by: 'agent', quiet: true }] })
+    return this._put(sessionId, { ...current, title, undated: squash(title), history: [{ from: '', to: title, asked: squash(title), at, by: 'agent', quiet: true }] })
   }
 
   // The agent's proposal for this reply was considered; nothing changed.
@@ -297,14 +309,16 @@ export class ThreadTitleStore {
 
   // A rename that reached Hermes. `since` is when the old title first appeared (session start for the
   // first rename), so a title that was barely on screen leaves no mark in the thread.
-  recordRename(sessionId, { from, to, by, assistantAt = null, since = null }) {
+  // `asked` is the title before the Service dated a clash (issue 518); without one the rename is exactly `to`.
+  recordRename(sessionId, { from, to, by, assistantAt = null, since = null, asked = to }) {
     const at = this.now()
     const current = this.get(sessionId) ?? { title: '', locked: false, appliedFor: null, history: [] }
     const shownSince = current.history.at(-1)?.at ?? since ?? 0
     const quiet = by === 'you' || !squash(from) || (shownSince > 0 && at - shownSince < ANCHOR_SECONDS)
-    const entry = { from: squash(from), to: squash(to), at, by, ...(quiet ? { quiet: true } : {}) }
+    const entry = { from: squash(from), to: squash(to), asked: squash(asked), at, by, ...(quiet ? { quiet: true } : {}) }
     return this._put(sessionId, {
       title: entry.to,
+      undated: entry.asked,
       locked: current.locked || by === 'you',
       appliedFor: assistantAt ?? current.appliedFor,
       history: [...current.history, entry].slice(-HISTORY_MAX),
@@ -313,15 +327,15 @@ export class ThreadTitleStore {
 
   // A spelling fix (WizardOS is one word) that reached Hermes: not a rename. An owner-locked title stays the owner's;
   // an agent or auto title stays the agent's (a quiet entry), so the agent may still rename it later.
-  respell(sessionId, { from, to, locked = false }) {
+  respell(sessionId, { from, to, locked = false, asked = to }) {
     const current = this.get(sessionId)
     const history = (current?.history ?? []).map((entry) => ({ ...entry, from: spellProductName(entry.from), to: spellProductName(entry.to) }))
     if (locked || current?.locked || current?.provisional) {
       if (!current) return null
-      return this._put(sessionId, { ...current, title: squash(to), history })
+      return this._put(sessionId, { ...current, title: squash(to), undated: squash(asked), history })
     }
-    const entry = { from: squash(from), to: squash(to), at: this.now(), by: 'agent', quiet: true }
-    return this._put(sessionId, { title: entry.to, locked: false, appliedFor: current?.appliedFor ?? null, history: [...history, entry].slice(-HISTORY_MAX) })
+    const entry = { from: squash(from), to: squash(to), asked: squash(asked), at: this.now(), by: 'agent', quiet: true }
+    return this._put(sessionId, { title: entry.to, undated: entry.asked, locked: false, appliedFor: current?.appliedFor ?? null, history: [...history, entry].slice(-HISTORY_MAX) })
   }
 
   // Renames the thread view can mark in place ("Renamed from …"), oldest first. `plain` (issue 518) drops the date
@@ -329,12 +343,14 @@ export class ThreadTitleStore {
   visibleHistory(sessionId, { plain = false } = {}) {
     const history = this.load()[sessionId]?.history ?? []
     const visible = []
-    history.forEach(({ from, to, at, by, quiet }, index) => {
+    history.forEach((entry, index) => {
+      let { from, to } = entry
+      const { at, by, quiet } = entry
       if (quiet) return
       if (plain) {
         const before = history[index - 1]
-        if (before?.by === 'agent' && squash(before.to) === squash(from)) from = undatedTitle(from)
-        if (by === 'agent') to = undatedTitle(to)
+        if (before && squash(before.to) === squash(from)) from = askedTitle(before)
+        to = askedTitle(entry)
         if (squash(from) === squash(to)) return
       }
       visible.push({ from: spellProductName(from), to: spellProductName(to), at, by })
@@ -343,15 +359,15 @@ export class ThreadTitleStore {
   }
 
   // The title to show without a date the Service added to avoid a clash (issue 518, switch wizard/plain-chat-titles).
-  // Only the title the Service last applied for this thread as the agent's (or respelled) loses its date: an owner's
-  // own rename, a title changed outside the Service, or a thread with no record is shown exactly as Hermes holds it.
+  // Only a date the Service added (the record keeps the title it asked for) is dropped: an owner's own rename, an agent
+  // title that names a date itself, a title changed outside the Service, or a thread with no record is shown as is.
   plainTitle(sessionId, title) {
     if (typeof title !== 'string' || !DATED_SUFFIX.test(squash(title))) return title
     const record = this.load()[sessionId]
     if (!record || spellProductName(squash(record.title)) !== spellProductName(squash(title))) return title
+    if (typeof record.undated === 'string') return spellProductName(record.undated) || title
     const last = record.history.at(-1)
-    if (last?.by === 'you' && squash(last.to) === squash(record.title)) return title
-    return undatedTitle(title)
+    return last && squash(last.to) === squash(record.title) ? spellProductName(askedTitle(last)) || title : title
   }
 }
 
