@@ -61,6 +61,23 @@ test('tweak-card marker never reaches the list preview, main and routed (host-pr
     assert.equal(listRow({ ...base, latest_message: { role: 'assistant', content: 'No card here.' } }).preview, 'No card here.');
   }
 });
+// A reply can carry an app's action card ([WIZARD_ACTION_V1]{"app":…,"id":…}[/WIZARD_ACTION_V1], wizard-ux issue 1463,
+// core/chat-kit.js actionIds). The marker is drawn as a card in the thread and never shows as text in the Chats list,
+// for the main agent and every routed kind.
+test('action-card marker never reaches the list preview, main and routed (host-profile, container, restricted)', () => {
+  const mark = '[WIZARD_ACTION_V1]{"app":"wizard-messenger","id":"draft-1"}[/WIZARD_ACTION_V1]';
+  for (const kind of ['main', 'host-profile', 'container', 'restricted']) {
+    const agent = kind === 'main' ? '' : `qa-${kind}`;
+    const base = { id: `action-${kind}`, title: 'Synthetic', status: 'completed', ...(agent ? { agent } : {}), wizard_last_user_at: 1700000000 };
+    for (const content of [`I drafted a reply to Sam.\n\n${mark}\n\nSend it?`, `I drafted a reply to Sam.\n\n${mark.slice(0, 30)}`]) {
+      const row = listRow({ ...base, latest_message: { role: 'assistant', content, timestamp: 1700000100 } });
+      assert.equal(row.agent, agent, kind);
+      assert.doesNotMatch(row.preview, /WIZARD|ACTION|draft-1|messenger/, `${kind}: ${row.preview}`);
+      assert.match(row.preview, /^I drafted a reply to Sam\./, kind);
+      assert.equal(normalizeFull({ ...base, latest_message: { role: 'assistant', content } }).preview, row.preview, `${kind} full = slim`);
+    }
+  }
+});
 // wizard-ux issue 1766: the compact list keeps the app a chat started in, so the shell can say a Telegram chat lives in
 // Telegram (no Retry Hermes always refuses). A row with no source carries no key.
 test('list rows keep the chat source (telegram, slack); a row without one has none', () => {
