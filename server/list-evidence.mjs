@@ -18,9 +18,12 @@ export function createListEvidenceReader(hermesStatePath) {
       // Chats list reads of Hermes' state.db (issue 584). A cold read of a large state.db waits on the disk for
       // seconds; here it waits off the HTTP thread. A failure comes back as { failed } (the caller re-throws it for
       // its health report), so one bad read never takes the worker down.
-      // `path` names a routed agent's own state.db; without it, the main one.
+      // `path` names a routed agent's own state.db; only the main list's reads leave it out. An empty path is an
+      // agent whose state.db the Service cannot read (an external or restricted runtime): it has no rows here,
+      // never the main agent's (issue 649: Pi's list served and pinned every archived main thread).
       if (kind === 'revision' || kind === 'first-posts' || kind === 'first-requests' || kind === 'archive' || kind === 'hot') {
-        const db = path || hermesStatePath
+        // Every reader below answers an empty path with no rows, as the in-thread reads did before the worker.
+        const db = path ?? hermesStatePath
         try {
           if (kind === 'revision') return { value: readHermesListRevision(db) }
           // The list cache's change set: threads with new messages since `mark`, and threads active since `since`.

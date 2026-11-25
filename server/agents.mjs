@@ -1361,6 +1361,29 @@ export function createAgentRegistry(options = {}) {
     return value
   })
   let catalogs = readJson(catalogPath)?.agents ?? {}
+  // Issue 649 repair: an agent whose state.db the Service cannot read (external, restricted) had the main
+  // Hermes archive served as its own list, and the list pinned every one of those threads to it next to the
+  // main pin, so the thread answered 409 ambiguous_thread. Drop such a pin once at start: a list-written pin
+  // of an agent with no readable state.db, for a thread its runtime never listed, that another agent also holds.
+  try {
+    const table = pins(), holders = new Map()
+    for (const row of Object.values(table)) {
+      if (!['runtime_verified', 'service_admission', 'migrated_pin'].includes(row?.provenance)) continue
+      if (!holders.has(row.session_id)) holders.set(row.session_id, new Set())
+      holders.get(row.session_id).add(row.agent_id)
+    }
+    let next = null
+    for (const [key, row] of Object.entries(table)) {
+      if (row?.provenance !== 'runtime_verified' || row.agent_id === MAIN_AGENT_ID || (holders.get(row.session_id)?.size ?? 0) < 2) continue
+      const agent = readRaw(row.agent_id)
+      if (agent?.runtime?.kind === 'profile' || existsSync(join(agentsDir, row.agent_id, 'home', 'state.db'))) continue
+      if ((catalogs[row.agent_id]?.ids ?? []).includes(row.session_id)) continue
+      next ??= { ...table }
+      delete next[key]
+      holders.get(row.session_id).delete(row.agent_id)
+    }
+    if (next) { writeJsonAtomic(threadsPath, { schema: 2, threads: next }); pinsCache = next }
+  } catch { /* an unreadable pin table stays as it is */ }
   const catalogEpochs = new Map()
   // Catalog rows are replaced, never edited, so a Set per ids array stays valid for that row's
   // lifetime. Chats polls observe every listed id per request (issue 497: rebuilding two Sets over
