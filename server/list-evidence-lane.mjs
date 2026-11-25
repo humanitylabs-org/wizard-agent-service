@@ -1,13 +1,16 @@
 import { Worker } from 'node:worker_threads'
 import { createListEvidenceReader } from './list-evidence.mjs'
 
-// One worker per service, bounded request batches supplied by projectListSlices.
-// No controllers, write handles, credentials or private-agent paths cross here.
+// One worker per service, bounded request batches supplied by projectListSlices, plus the Chats list's other reads of
+// Hermes' state.db (issue 584: revision, first posts, archive, and a routed agent's own state.db). No controllers, write
+// handles or credentials cross here; a routed agent's path is only the state.db file the Service already reads.
 export function createListEvidenceLane({ hermesStatePath, enabled = true, log = console.log,
   workerUrl = new URL('./list-evidence-worker.mjs', import.meta.url), timeoutMs = 120_000 } = {}) {
   let worker, failed = false, closed = false, sequence = 0, fallback
   const pending = new Map()
   const stats = { reads: 0, worker_reads: 0, fallbacks: 0, last_ms: 0, last_main_ms: 0, max_main_ms: 0 }
+  // Reads per kind ('truth' is the list evidence itself), for /wizard/list-cache.
+  const kinds = {}
   const fail = () => {
     if (failed || closed) return
     failed = true
@@ -33,11 +36,13 @@ export function createListEvidenceLane({ hermesStatePath, enabled = true, log = 
     } catch { fail() }
   }
   return {
-    stats: () => ({ ...stats, pending: pending.size, failed }),
+    stats: () => ({ ...stats, kinds: { ...kinds }, pending: pending.size, failed }),
     async read(input) {
       if (closed) throw new Error('list evidence lane closed')
       const started = performance.now()
       stats.reads++
+      const kind = typeof input?.kind === 'string' ? input.kind : 'truth'
+      kinds[kind] = (kinds[kind] ?? 0) + 1
       start()
       if (worker && !failed) {
         try {

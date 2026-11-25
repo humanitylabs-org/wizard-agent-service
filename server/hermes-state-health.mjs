@@ -60,6 +60,21 @@ export function createHermesStateHealth({ dbPath = '', stat = statSync, log = co
         throw error
       }
     },
+    /** read() for a read that runs elsewhere (the list worker): same recording, awaited. */
+    async readAsync(where, fn) {
+      try {
+        const value = await fn()
+        errors.delete(where)
+        return value
+      } catch (error) {
+        const files = stale()
+        const failure = { where, code: errorCode(error), message: String(error?.message ?? error).slice(0, 200), at: new Date(now()).toISOString() }
+        errors.set(where, failure)
+        note(`${where}:${failure.code}:${files.join(',')}`,
+          `[hermes-state] ${where} read of ${dbPath} failed (${failure.code}: ${failure.message})${files.length ? `; stale mount: ${files.join(', ')}. ${hint}` : ''}`)
+        throw error
+      }
+    },
     /** For /wizard/health. null when no Hermes state database is configured. */
     report() {
       if (!dbPath) return null

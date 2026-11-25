@@ -155,14 +155,38 @@ export function batchedOwnerTurnRestore(queue, run) {
  *  first user rows and newest reply are unchanged.
  *  Whole messages are parsed: the file marker comes after the owner's words, so a cut message would lose its photos. */
 export function readHermesFirstPosts(path, sessionIds, { restore = null, memo = null, now = Date.now(), agentFirst = false } = {}) {
-  const out = new Map(), ids = boundedIds(sessionIds)
+  const read = firstPostReadInput(sessionIds, { restore, memo, now, agentFirst })
+  return finishFirstPosts(readFirstPostPages(path, read), { restore, memo, now })
+}
+
+/** The same post, with the state.db part run by `readPages(input)` (issue 584: the Service's list worker, so a cold
+ *  read of a large state.db never holds the event loop). `readPages` returns readFirstPostPages(path, input). */
+export async function readHermesFirstPostsAsync(readPages, sessionIds, { restore = null, memo = null, now = Date.now(), agentFirst = false } = {}) {
+  const read = firstPostReadInput(sessionIds, { restore, memo, now, agentFirst })
+  if (!read.ids.length) return new Map()
+  return finishFirstPosts(await readPages(read), { restore, memo, now })
+}
+
+// What the database part needs: the ids, the memo keys still fresh (a match skips the message bodies), and which reads.
+function firstPostReadInput(sessionIds, { restore, memo, now, agentFirst }) {
+  const ids = boundedIds(sessionIds), known = []
+  if (memo) for (const id of ids) { const kept = memo.get(id); if (kept && now - kept.at < FIRST_POST_MEMO_MS) known.push([id, kept.key]) }
+  return { ids, known, reach: typeof restore === 'function', agentFirst: agentFirst === true }
+}
+
+/** The database part of readHermesFirstPosts: plain data only (it runs in a worker thread). `{ hits, pages }`:
+ *  hits = ids whose memo key still matches, pages = the rest with their first user rows. */
+export function readFirstPostPages(path, { ids = [], known = [], reach: withReach = false, agentFirst = false } = {}) {
+  const out = { hits: [], pages: [] }
+  ids = boundedIds(ids)
   if (!ids.length || !path || !existsSync(path)) return out
+  const keys = new Map(Array.isArray(known) ? known : [])
   let db
   try { db = new DatabaseSync(path, { readOnly: true }) } catch { return out }
   try {
     const columns = new Set(preparedRead(db, 'PRAGMA table_info(messages)').all().map(row => row.name))
     const kind = columns.has('display_kind') ? 'display_kind' : 'NULL AS display_kind'
-    const known = preparedRead(db, 'SELECT 1 FROM sessions WHERE id=?')
+    const exists = preparedRead(db, 'SELECT 1 FROM sessions WHERE id=?')
     const userRows = `FROM messages WHERE session_id=? AND role='user'
       AND ${retainedMessagesWhere(columns)} AND trim(COALESCE(content,''))<>'' ORDER BY timestamp ASC, id ASC LIMIT 50`
     // Ids and kinds only: what the memo is keyed by, without loading any message body.
@@ -177,36 +201,54 @@ export function readHermesFirstPosts(path, sessionIds, { restore = null, memo = 
     const firstReply = agentFirst ? preparedRead(db, `SELECT timestamp, id FROM messages WHERE session_id=? AND role='assistant'
       AND ${retainedMessagesWhere(columns)} AND COALESCE(${columns.has('display_kind') ? 'display_kind' : 'NULL'},'') NOT IN ('commentary','hidden') AND trim(COALESCE(content,''))<>''
       ORDER BY timestamp ASC, id ASC LIMIT 1`) : null
-    const pages = []
+    const plain = row => row ? { id: Number(row.id), role: row.role === undefined ? undefined : String(row.role), display_kind: row.display_kind ?? null, timestamp: row.timestamp } : null
     for (const id of ids) {
-      if (!known.get(id)) continue
-      const other = typeof restore === 'function' ? reach.get(id) : null
-      const key = `${shape.all(id).map(row => `${row.id}:${row.display_kind || ''}`).join(',')}|${other ? other.id : ''}|${typeof restore === 'function' ? 1 : 0}${agentFirst ? '|a' : ''}`
-      const kept = memo?.get(id)
-      if (kept && kept.key === key && now - kept.at < FIRST_POST_MEMO_MS) { out.set(id, kept.post); continue }
-      let rows = read.all(id).map(row => ({ id: Number(row.id), session_id: id, role: 'user', content: storedContent(row.content),
+      if (!exists.get(id)) continue
+      const other = withReach ? plain(reach.get(id)) : null
+      const key = `${shape.all(id).map(row => `${row.id}:${row.display_kind || ''}`).join(',')}|${other ? other.id : ''}|${withReach ? 1 : 0}${agentFirst ? '|a' : ''}`
+      if (keys.get(id) === key) { out.hits.push([id, key]); continue }
+      const rows = read.all(id).map(row => ({ id: Number(row.id), session_id: id, role: 'user', content: storedContent(row.content),
         timestamp: row.timestamp, ...(row.display_kind ? { display_kind: row.display_kind } : {}) }))
-      const owner = typeof restore === 'function' ? firstOwnerRow(rows) : null
-      const restoring = typeof restore === 'function' && !owner
-      if (restoring && other && rows.length < 50) rows = [...rows, { id: Number(other.id), session_id: id, role: String(other.role), content: '', timestamp: other.timestamp,
-        ...(other.display_kind ? { display_kind: other.display_kind } : {}) }].sort((a, b) => Number(a.timestamp) - Number(b.timestamp) || a.id - b.id)
-      pages.push({ id, key, rows, restoring: restoring && rows.length > 0, owner, other })
+      const reply = firstReply ? firstReply.get(id) : null
+      out.pages.push({ id, key, rows, other, reply: reply ? { id: Number(reply.id), timestamp: reply.timestamp } : null })
     }
-    // A page whose first owner row is plain still needs the restore when the queue holds an earlier send that Hermes
-    // may have lost (compaction): the history page would put that turn back before this row. Unknown counts restore.
-    const plain = pages.filter(page => page.owner)
-    if (plain.length) {
-      let counts = null
-      try { counts = typeof restore.sendsUpTo === 'function' ? restore.sendsUpTo(plain.map(page => [page.id, Number(page.owner.timestamp) + 5])) : null } catch { counts = null }
-      for (const page of plain) {
-        if (counts instanceof Map && Number(counts.get(page.id) ?? Infinity) <= 1) continue
-        page.restoring = true
-        if (page.other && page.rows.length < 50) page.rows = [...page.rows, { id: Number(page.other.id), session_id: page.id, role: String(page.other.role), content: '', timestamp: page.other.timestamp,
-          ...(page.other.display_kind ? { display_kind: page.other.display_kind } : {}) }].sort((a, b) => Number(a.timestamp) - Number(b.timestamp) || a.id - b.id)
-      }
+    return out
+  } finally { try { db.close() } catch { /* read-only cleanup */ } }
+}
+
+/** The main-thread part: the owner-turn restore, the agent-first rule and the memo, over readFirstPostPages output. */
+export function finishFirstPosts({ hits = [], pages: read = [] } = {}, { restore = null, memo = null, now = Date.now() } = {}) {
+  const out = new Map()
+  for (const [id, key] of hits) {
+    const kept = memo?.get(id)
+    if (kept && kept.key === key) out.set(id, kept.post)
+  }
+  const pages = []
+  for (const page of read) {
+    let rows = page.rows
+    const other = typeof restore === 'function' ? page.other : null
+    const owner = typeof restore === 'function' ? firstOwnerRow(rows) : null
+    const restoring = typeof restore === 'function' && !owner
+    if (restoring && other && rows.length < 50) rows = [...rows, { id: Number(other.id), session_id: page.id, role: String(other.role), content: '', timestamp: other.timestamp,
+      ...(other.display_kind ? { display_kind: other.display_kind } : {}) }].sort((a, b) => Number(a.timestamp) - Number(b.timestamp) || a.id - b.id)
+    pages.push({ id: page.id, key: page.key, rows, restoring: restoring && rows.length > 0, owner, other, reply: page.reply })
+  }
+  // A page whose first owner row is plain still needs the restore when the queue holds an earlier send that Hermes
+  // may have lost (compaction): the history page would put that turn back before this row. Unknown counts restore.
+  const plain = pages.filter(page => page.owner)
+  if (plain.length) {
+    let counts = null
+    try { counts = typeof restore.sendsUpTo === 'function' ? restore.sendsUpTo(plain.map(page => [page.id, Number(page.owner.timestamp) + 5])) : null } catch { counts = null }
+    for (const page of plain) {
+      if (counts instanceof Map && Number(counts.get(page.id) ?? Infinity) <= 1) continue
+      page.restoring = true
+      if (page.other && page.rows.length < 50) page.rows = [...page.rows, { id: Number(page.other.id), session_id: page.id, role: String(page.other.role), content: '', timestamp: page.other.timestamp,
+        ...(page.other.display_kind ? { display_kind: page.other.display_kind } : {}) }].sort((a, b) => Number(a.timestamp) - Number(b.timestamp) || a.id - b.id)
     }
-    const restored = pages.filter(page => page.restoring)
-    if (restored.length && typeof restore.prepare === 'function') { try { restore.prepare(restored.map(page => page.id)) } catch { /* per-thread reads */ } }
+  }
+  const restored = pages.filter(page => page.restoring)
+  if (restored.length && typeof restore.prepare === 'function') { try { restore.prepare(restored.map(page => page.id)) } catch { /* per-thread reads */ } }
+  try {
     for (const page of pages) {
       let rows = page.rows
       if (page.restoring) {
@@ -217,10 +259,10 @@ export function readHermesFirstPosts(path, sessionIds, { restore = null, memo = 
         } catch { /* unrestored rows: internal_notification owner turns stay hidden, as in that history */ }
       }
       let post = firstPostOfHistory(rows, false) ?? null
-      if (post && firstReply) {
-        const reply = firstReply.get(page.id), owner = rows.find(row => ownerMessage(row))
+      if (post && page.reply) {
+        const reply = page.reply, owner = rows.find(row => ownerMessage(row))
         // Database order breaks a timestamp tie, as both reads order by (timestamp, id).
-        if (reply && owner && (Number(reply.timestamp) < Number(owner.timestamp) || (Number(reply.timestamp) === Number(owner.timestamp) && Number(reply.id) < Number(owner.id)))) post = null
+        if (owner && (Number(reply.timestamp) < Number(owner.timestamp) || (Number(reply.timestamp) === Number(owner.timestamp) && Number(reply.id) < Number(owner.id)))) post = null
       }
       out.set(page.id, post)
       if (memo) {
@@ -228,7 +270,8 @@ export function readHermesFirstPosts(path, sessionIds, { restore = null, memo = 
         while (memo.size > FIRST_POST_MEMO_MAX) memo.delete(memo.keys().next().value)
       }
     }
+  } finally {
     if (restored.length && typeof restore.prepare === 'function') { try { restore.prepare([]) } catch { /* released */ } }
-    return out
-  } finally { try { db.close() } catch { /* read-only cleanup */ } }
+  }
+  return out
 }

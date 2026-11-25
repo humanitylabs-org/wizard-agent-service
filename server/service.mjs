@@ -24,6 +24,7 @@ import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
 import { indexedSearchWords, readHermesFirstRequests, LEGACY_RECOVERY_REQUEST_MARKER, RECOVERY_REQUEST_MARKER, readHelmActivitySessionIds, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, createHermesSessionTruthReader, readRecentHermesRootIds, readWizardAssistantRevision, readWizardAssistantRunReferences } from './session-truth.mjs'
 import { createHybridProjector, createSharedSnapshot, diffProjectedRows, directRunStamps, heavyJobStamps, listCacheMode, mergeStamps, projectListSlices, createJoinedListCheck } from './session-list-cache.mjs'
 import { createListEvidenceLane } from './list-evidence-lane.mjs'
+import { readAgentEvidence } from './list-evidence.mjs'
 import { agentReadablePaths, projectPrivateFilePaths } from './private-file-projection.mjs'
 import { projectMemoryContent, visibleMemoryText } from './memory-context-projection.mjs'
 import { historyRunContext, runContextText } from './run-context-projection.mjs'
@@ -97,7 +98,7 @@ import { serveAppView, appViewFile } from './app-views.mjs'
 import { serveChatsView } from './chats-views.mjs'
 import { UPLOAD_ID, SHARE_ID, UploadError, createUploadStore, parseShareRequest, shareMessageText } from './uploads.mjs'
 import { listPayload } from './session-list-view.mjs'
-import { batchedOwnerTurnRestore, readHermesFirstPosts } from './first-post.mjs'
+import { batchedOwnerTurnRestore, readHermesFirstPostsAsync } from './first-post.mjs'
 import { fullRetryInput, ownerRetryRows } from './session-detail.mjs'
 import { createListWindows } from './session-list-window.mjs'
 import { standardChatRpc } from './standard-chats.mjs'
@@ -3585,19 +3586,17 @@ function buildWizardServer(options, lifetime) {
     onRun: (agent, thread, payload, runId) => inboxNoteRun(agent, thread, payload, runId) }) : null
   const routedOpenAskEvidence = (agent, ids) => {
     const home = routedAgentMedia(agent)?.home
-    const path = home ? join(home, 'state.db') : ''
-    const wanted = [...new Set((ids ?? []).filter(id => typeof id === 'string' && id))]
-    const evidence = new Map(wanted.map(id => [id, { truth: undefined, helperStatus: undefined, supervisorPending: false }]))
-    const now = Date.now()
-    // Same 100-thread batches as the main list (readers cap at 200; helper evidence caps per batch).
-    for (let at = 0; at < wanted.length; at += 100) {
-      const batch = wanted.slice(at, at + 100)
-      for (const [id, truth] of readHermesSessionTruth(path, batch, now / 1000)) if (evidence.has(id)) evidence.get(id).truth = truth
-      for (const [id, status] of readHelperStatuses(path, batch, { now })) if (evidence.has(id)) evidence.get(id).helperStatus = status
-      for (const id of readSupervisorBuildWaits(options.supervisorStatePath, path, batch, now, { includeOwnerGates: true }).keys()) if (evidence.has(id)) evidence.get(id).supervisorPending = true
-    }
+    const evidence = readAgentEvidence(home ? join(home, 'state.db') : '', ids, options.supervisorStatePath, Date.now())
     // One heavy-ledger snapshot for the whole list as well.
     // The snapshot is addressed to this agent's threads: a detached deploy names only its thread.
+    evidence.heavyJobs = [...(heavyWork?.queue.rows() ?? []), ...detachedRowsFor(detachedJobs.rows(), agent.id)]
+    return evidence
+  }
+  // The whole list's evidence, read in the list worker (issue 584): a cold read of an agent's state.db held every
+  // route for up to 9 s on each of its list reads.
+  const routedOpenAskEvidenceAsync = async (agent, ids) => {
+    const home = routedAgentMedia(agent)?.home
+    const evidence = await hermesListRead('agent-evidence', { path: home ? join(home, 'state.db') : '', ids, supervisorStatePath: options.supervisorStatePath, now: Date.now() })
     evidence.heavyJobs = [...(heavyWork?.queue.rows() ?? []), ...detachedRowsFor(detachedJobs.rows(), agent.id)]
     return evidence
   }
@@ -3610,7 +3609,11 @@ function buildWizardServer(options, lifetime) {
     failureDismissed: (agentId, sessionId, runId) => dismissedFailureStore.isDismissed(sessionId, runId, agentId),
     // One read of the agent's state.db per 100 listed threads, not three opens per row:
     // projectProfileSessions prepares this once per list and passes it to projectOpenAsk.
-    prepareOpenAsk: (agent, ids) => routedOpenAskEvidence(agent, ids),
+    prepareOpenAsk: (agent, ids) => routedOpenAskEvidenceAsync(agent, ids),
+    // The agent's own state.db reads of a list, in the list worker (issue 584).
+    readArchivedRows: (path, limit) => hermesListRead('archive', { path, limit }),
+    readFirstPostPages: (path, input) => hermesListRead('first-posts', { path, posts: input }),
+    readFirstRequests: (path, ids) => hermesListRead('first-requests', { path, ids }),
     projectOpenAsk: (agent, row, replies, lastUserAt, prepared) => {
       const evidence = prepared?.get(row.id) ?? routedOpenAskEvidence(agent, [row.id]).get(row.id)
       const truth = { ...(evidence?.truth ?? {}) }
@@ -3889,12 +3892,14 @@ function buildWizardServer(options, lifetime) {
   // "Agent adapter" keeps the list.
   const pendingFirstSendReader = options.pendingFirstSendReader ?? ((ids) => (hermesStatePath ? hermesStateHealth.read('pending-first-send', () => readPendingFirstSendSessions(hermesStatePath, ids)) : []))
   const archivedSessionReader = options.archivedSessionReader ?? (() => (hermesStatePath ? hermesStateHealth.read('archive', () => readArchivedSessions(hermesStatePath)) : []))
+  // The Chats listing's archived rows, read in the list worker (issue 584).
+  const archivedListReader = options.archivedSessionReader ?? (async () => (hermesStatePath ? await hermesStateHealth.readAsync('archive', () => hermesListRead('archive', { limit: 100 })) : []))
   const sessionArchivedReader = options.sessionArchivedReader ?? null
   const canonicalSessionParents = new Map()
   const canonicalSessionReader = options.canonicalSessionReader
     ?? (!options.canonicalSessionListing ? null
       : hermesStatePath && helmDbPath && existsSync(helmDbPath) ? () => hermesStateHealth.read('list', () => readCanonicalSessions(hermesStatePath, helmDbPath))
-        : () => readCanonicalSessionsHttp((path) => hermesJson(path), { archived: archivedSessionReader, parents: canonicalSessionParents }))
+        : () => readCanonicalSessionsHttp((path) => hermesJson(path), { archived: archivedListReader, parents: canonicalSessionParents }))
   const canonicalSessionSnapshots = new Map()
   let canonicalSessionCache = { sessions: null, expiresAt: 0, assistantRevision: '' }
   let mainCatalogCensus = null, mainCatalogCensusAt = 0
@@ -5322,6 +5327,12 @@ function buildWizardServer(options, lifetime) {
   lifetime.own(() => listTruthReader.close())
   const listEvidenceLane = createListEvidenceLane({ hermesStatePath, enabled: options.listEvidenceWorker !== false })
   lifetime.own(() => listEvidenceLane.close(), () => listEvidenceLane.close())
+  // A Chats list read of Hermes' state.db through the list worker (issue 584); { failed } comes back as a throw.
+  const hermesListRead = async (kind, input = {}) => {
+    const got = await listEvidenceLane.read({ kind, ...input })
+    if (got?.failed) throw Object.assign(new Error(got.failed.message), { code: got.failed.code ?? undefined })
+    return got?.value
+  }
   if (runQueue) backgroundResults = createBackgroundResults({
     request: (path, init) => hermesJson(path, init, true), sessionDbPath: hermesStatePath, queue: () => runQueue,
     now: options.backgroundResultsNow ?? Date.now,
@@ -5416,7 +5427,7 @@ function buildWizardServer(options, lifetime) {
   const listWindowPage = createListWindows({ reuseSelections: true, archiveDays: () => readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')).archiveAfterDays })
   // The main agent's first visible request per listed row (issue 440). Read failures leave the key absent.
   const mainFirstPostMemo = new Map()
-  const withFirstRequests = listed => {
+  const withFirstRequests = async listed => {
     const rows = ['data', 'sessions', 'items'].flatMap(key => Array.isArray(listed?.[key]) ? listed[key] : [])
     if (!hermesStatePath || !rows.length || listed.mode === 'body' || listed.fields === 'slim') return
     if (channelFirstPostsOn()) {
@@ -5425,12 +5436,13 @@ function buildWizardServer(options, lifetime) {
       // The owner's own turns Hermes stamped internal_notification are restored first, exactly as in view=wizard history.
       // One batched queue read per page, and only for threads whose post the restore can change; decided posts are kept.
       const restore = batchedOwnerTurnRestore(runQueue, (raw, queue, sessionId) => restoreOwnerTurns(raw, queue, sessionId, ownerTurnRowMeta, { screenshots: ownerScreenshotTurns }))
-      try { posts = hermesStateHealth.read('first-post', () => readHermesFirstPosts(hermesStatePath, rows.map(row => row?.id), { restore, memo: mainFirstPostMemo, agentFirst: channelAgentFilingOn() })) } catch { return }
+      // The state.db part runs in the list worker (issue 584): a cold read held every route for seconds.
+      try { posts = await hermesStateHealth.readAsync('first-post', () => readHermesFirstPostsAsync(input => hermesListRead('first-posts', { posts: input }), rows.map(row => row?.id), { restore, memo: mainFirstPostMemo, agentFirst: channelAgentFilingOn() })) } catch { return }
       for (const row of rows) if (row && posts.has(row.id)) row.wizard_first_post = posts.get(row.id)
       return
     }
     let firsts
-    try { firsts = hermesStateHealth.read('first-request', () => readHermesFirstRequests(hermesStatePath, rows.map(row => row?.id))) } catch { return }
+    try { firsts = await hermesStateHealth.readAsync('first-request', () => hermesListRead('first-requests', { ids: rows.map(row => row?.id) })) } catch { return }
     for (const row of rows) if (row && firsts.has(row.id)) row.wizard_first_request = firsts.get(row.id)
   }
   const canonicalSessionPage = async (operator, searchParams, request) => {
@@ -6034,8 +6046,10 @@ function buildWizardServer(options, lifetime) {
       for (let index = 0; index < all.length; index += 100) rows.push(...await projectBatch(all.slice(index, index + 100), index === 0))
       return rows
     }
-    const gate = () => {
-      const hermes = readHermesListRevision(hermesStatePath)
+    // The revision query reads every sessions row: in the list worker (issue 584), never on the HTTP thread.
+    const gate = async () => {
+      let hermes = null
+      try { hermes = hermesStatePath ? await hermesListRead('revision') : readHermesListRevision(hermesStatePath) } catch { hermes = null }
       if (hermes === null) return null
       // The session listing is refreshed in the background after it expires; a snapshot built from
       // the stale listing must not outlive the refresh, or a new thread waits for the 30 s ceiling.
@@ -6143,10 +6157,10 @@ function buildWizardServer(options, lifetime) {
           if(snapshot.age()>20000) setImmediate(()=>{ void listCache.served().catch(()=>undefined) })
           return cached
         }
-        return snapshot.get({ gate: gate(), local: localRevision, build: async () => await decorate((await buildHybrid()).rows) })
+        return snapshot.get({ gate: await gate(), local: localRevision, build: async () => await decorate((await buildHybrid()).rows) })
       },
       served: async (shared = false) => {
-        const rows = await snapshot.get({ gate: gate(), local: localRevision, build: async () => await decorate((await buildHybrid()).rows) })
+        const rows = await snapshot.get({ gate: await gate(), local: localRevision, build: async () => await decorate((await buildHybrid()).rows) })
         return shared ? rows : rows.map((row) => ({ ...row }))
       },
       fellBack: (error) => {
@@ -9378,7 +9392,7 @@ function buildWizardServer(options, lifetime) {
         const channelListing = (channelStore || channelFirstPosts) && !operator && upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions'
           && url.searchParams.get('view') === 'list' && contentType.includes('application/json')
         if (channelListing) {
-          try { const listed = JSON.parse(result.toString('utf8')); withFirstRequests(listed); result = Buffer.from(JSON.stringify(listed)) } catch { /* not a list body */ }
+          try { const listed = JSON.parse(result.toString('utf8')); await withFirstRequests(listed); result = Buffer.from(JSON.stringify(listed)) } catch { /* not a list body */ }
         }
         const privatePaths = [...inboxTrustedRoots, ...responseTrustedPaths, ...trustedPaths]
         // Recovery notes can contain a raw attachment location outside a file

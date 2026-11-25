@@ -213,7 +213,7 @@ function isHumanSession(session) {
  * come from `archived()` (Hermes lists only live ones). `parents` caches parent end reasons between
  * calls (a parent not on the page is read once with GET /api/sessions/<id>).
  */
-/** @param {{ limit?: number, archived?: () => Array<Record<string, any>>, now?: number, parents?: Map<string, { boundary: boolean, at: number }> }} [options] */
+/** @param {{ limit?: number, archived?: () => Array<Record<string, any>> | Promise<Array<Record<string, any>>>, now?: number, parents?: Map<string, { boundary: boolean, at: number }> }} [options] */
 export async function readCanonicalSessionsHttp(request, { limit = 2_000, archived = () => [], now = Date.now(), parents = new Map() } = {}) {
   const cutoff = now / 1000 - MAX_AGE_SECONDS
   const out = []
@@ -264,7 +264,7 @@ export async function readCanonicalSessionsHttp(request, { limit = 2_000, archiv
   }
   const byActivity = (a, b) => Number(b.last_active ?? b.started_at ?? 0) - Number(a.last_active ?? a.started_at ?? 0)
   if (out.length > limit) out.sort(byActivity).length = limit
-  for (const session of archived()) {
+  for (const session of await archived()) {
     if (out.length >= limit) break
     if (!known.has(session.id) && Number(session.last_active ?? session.started_at ?? 0) >= cutoff) { known.add(session.id); out.push(session) }
   }
