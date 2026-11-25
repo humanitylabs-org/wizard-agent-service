@@ -62,7 +62,7 @@ const INTERFACE_MANUAL_SWITCH = 'wizard/interface-manual'
 const INTERFACE_MANUAL_APPS = new Set(['wizard-ux'])
 import { createRouteTable, launcherPath as localLauncherPath, loopbackRequest, serveLocalAppRoute, upgradeLocalAppRoute } from './local-app-routes.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
-import { APP_WAKE_SWITCH, APP_WAKE_CONTRACT, APP_WAKE_RUN_PREFIX, createWakeLedger, parseWakeEvent, wakeTurnText } from './app-wake.mjs'
+import { APP_WAKE_CONTRACT, APP_WAKE_RUN_PREFIX, createWakeLedger, parseWakeEvent, wakeTurnText } from './app-wake.mjs'
 import { APP_BATCH, APP_BATCH_MAX, CAPTURE_SOURCE, CAPTURE_SWITCH, SCAN_MS as CAPTURE_SCAN_MS, batchTurnText, captureTool, createCaptureInbox } from './capture-inbox.mjs'
 import { AgentInboxStore, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, START_FAILED, appDoor, recordApp } from './agent-inbox.mjs'
 import { SentLog } from './sent-log.mjs'
@@ -4467,11 +4467,10 @@ function buildWizardServer(options, lifetime) {
     finished: batchId => { captureOutcome(batchId) },
     undone: result => { captureOutcome(result.batch) },
   })
-  // App wake events (wizard-os issue 634, spec/APP_WAKE.md; owner switch wizard/app-wake, off by default; env
-  // WIZARD_APP_WAKE '1'/'0' forces it). The box is the agent's event inbox: an app's own token wakes an agent that the
-  // owner gave this app, with one turn in a new hidden background thread. Switch off: the routes are 404.
-  const appWakeSwitchOn = createChannelsSwitch({ id: APP_WAKE_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.appWakeSwitchTtlMs ?? 3000 })
-  const appWakeOn = () => channelPart(options.appWake, appWakeSwitchOn)
+  // App wake events (wizard-os issue 634, spec/APP_WAKE.md; on for everyone, the wizard/app-wake switch is removed;
+  // a box's WIZARD_APP_WAKE=0 turns it off). The box is the agent's event inbox: an app's own token wakes an agent that
+  // the owner gave this app, with one turn in a new hidden background thread. Turned off: the routes are 404.
+  const appWakeOn = () => channelOn(options.appWake)
   const wakeLedger = createWakeLedger({ mergeMs: options.appWakeMergeMs ?? undefined, hourlyCap: options.appWakeHourlyCap ?? undefined })
   // The agents this app may wake: the main agent and every standard agent whose app grant includes it. Without the
   // agent bridge (no apps.json) there is no owner grant to read, so nobody can be woken.
@@ -7350,9 +7349,9 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, 200, { status: child?.status || source.status, resent: !!child, sent: child?.status === 'completed' })
         return
       }
-      // App wake events (wizard-os issue 634, spec/APP_WAKE.md, switch wizard/app-wake): GET is the app's probe
-      // (on, and the agents it may wake), POST wakes one agent with a small typed event. Only an installed app's own
-      // app token, never the owner or an agent. Switch off: 404, nothing runs.
+      // App wake events (wizard-os issue 634, spec/APP_WAKE.md, on for everyone): GET is the app's probe (on, and the
+      // agents it may wake), POST wakes one agent with a small typed event. Only an installed app's own app token,
+      // never the owner or an agent. A box's WIZARD_APP_WAKE=0: 404, nothing runs.
       if (url.pathname === '/wizard/v1/agent-events') {
         if (!appWakeOn()) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!['GET', 'POST'].includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' }); return }
