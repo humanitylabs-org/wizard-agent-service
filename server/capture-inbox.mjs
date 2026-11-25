@@ -187,6 +187,10 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
     try { chat = chatFiles() || new Set() } catch { chat = new Set() }
     let changed = false
     const seen = new Set()
+    // A handled mark only matters while its file is still in Inbox (kept, waiting or put back): once the file has left,
+    // the mark goes, so a later drop that happens to reuse the inode is new again.
+    const present = new Set(files.map(f => f.id))
+    for (const key of Object.keys(data.handled)) if (!present.has(key)) { delete data.handled[key]; changed = true }
     for (const file of files) {
       if (file.ctimeMs <= data.baseline_at || data.handled[file.id] || chat.has(file.rel)) continue
       seen.add(file.rel)
@@ -207,18 +211,9 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
     for (const [rel, p] of entries) { data.handled[p.id] = { batch: id, at: t }; delete data.pending[rel] }
     const batch = { id, source: 'files', at: t, items, log: [], state: 'open', outcome: '', record_id: null, thread_id: null }
     data.batches.push(batch)
-    pruneHandled()
     save()
     log(`batch ${id}: ${items.length} item(s)`)
     return structuredClone(batch)
-  }
-
-  // Handled marks for files that no longer exist anywhere under Inbox are dropped once their batch is old.
-  function pruneHandled() {
-    const keys = Object.keys(data.handled)
-    if (keys.length < 5000) return
-    const live = new Set(walk().map(f => f.id))
-    for (const key of keys) if (!live.has(key)) delete data.handled[key]
   }
 
   const batchById = id => data.batches.find(b => b.id === id) || null
@@ -409,8 +404,10 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
     }
     if (!problems.length) batch.state = 'undone'
     batch.undone_at = now()
+    const back = batch.items.filter(i => placeOf(batch, i) === i.path && existsSync(join(base, i.path))).length
+    batch.undo_result = { restored: restored.length, problems: problems.length, back, of: batch.items.length }
     save()
-    return { batch: batch.id, restored: restored.length, problems, items_back_in_inbox: batch.items.filter(i => placeOf(batch, i) === i.path && existsSync(join(base, i.path))).length, of: batch.items.length }
+    return { batch: batch.id, restored: restored.length, problems, items_back_in_inbox: back, of: batch.items.length }
   }
 
   function link(batchId, { record_id = null, thread_id = null } = {}) {

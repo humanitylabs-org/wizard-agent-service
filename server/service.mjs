@@ -4281,13 +4281,17 @@ function buildWizardServer(options, lifetime) {
   const captureSwitchOn = createChannelsSwitch({ id: CAPTURE_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.captureInboxSwitchTtlMs ?? 3000 })
   const captureOn = () => channelPart(options.captureInbox, captureSwitchOn)
   const captureRoot = String(options.userFilesRoot || options.mediaRoot || '')
+  // Where the agent sees the same folder: WIZARD_FILES_ROOT (the agent's view of owner Files) when the box names it;
+  // otherwise the attachments' agent root when the Files root is the media root (a WizardOS box), else the root itself.
+  const captureAgentRoot = String(options.filesRoot
+    || (options.mediaRoot && (!options.userFilesRoot || resolve(String(options.userFilesRoot)) === resolve(String(options.mediaRoot))) ? (options.mediaAgentRoot || options.mediaRoot) : captureRoot))
   const captureStatePath = options.captureInboxStatePath ? resolve(String(options.captureInboxStatePath))
     : options.agentInboxStatePath ? join(dirname(resolve(String(options.agentInboxStatePath))), 'capture-inbox.json') : ''
   let captureBox = null
   const captureInbox = () => {
     if (captureBox || !captureRoot) return captureBox
     try {
-      captureBox = createCaptureInbox({ root: captureRoot, agentRoot: options.mediaAgentRoot || captureRoot, statePath: captureStatePath,
+      captureBox = createCaptureInbox({ root: captureRoot, agentRoot: captureAgentRoot, statePath: captureStatePath,
         now: options.captureInboxNow ?? Date.now, quietMs: options.captureQuietMs ?? undefined,
         chatFiles: () => (mediaFiles ? mediaFiles.rels() : new Set()), log: line => console.log(`[capture] ${line}`) })
     } catch (error) { console.warn(`[capture] inbox unavailable: ${error?.message || error}`); captureBox = null }
@@ -4299,22 +4303,30 @@ function buildWizardServer(options, lifetime) {
     const batch = captureInbox()?.batch(batchId)
     const record = batch?.record_id ? agentInbox.get(batch.record_id) : null
     if (!record) return null
-    if (batch.state === 'undone' || batch.undone_at) {
-      const back = batch.items.length
-      return agentInbox.update(record.id, { last_update: captureClip(`Undone: ${back} item${back === 1 ? '' : 's'} back in Inbox.`, 140), title: captureClip(`Undone: ${batch.outcome || `${back} from Inbox`}`, 100) })
+    if (batch.undone_at) {
+      const done = batch.undo_result || { back: batch.items.length, of: batch.items.length, problems: 0 }
+      // Only a whole batch put back reads as undone; a partial undo says what is still out and waits on the owner.
+      if (batch.state === 'undone') return agentInbox.update(record.id, { last_update: captureClip(`Undone: ${done.back} item${done.back === 1 ? '' : 's'} back in Inbox.`, 140), title: captureClip(`Undone: ${batch.outcome || `${done.back} from Inbox`}`, 100) })
+      return agentInbox.update(record.id, { state: 'new', kind: 'needs_you', title: captureClip(`Undo not finished: ${batch.outcome || `${done.of} from Inbox`}`, 100),
+        last_update: captureClip(`Undo not finished: ${done.back} of ${done.of} back in Inbox; ${done.problems} step${done.problems === 1 ? '' : 's'} could not be put back. Open it to see which.`, 140),
+        ask: captureClip(`${done.problems} step${done.problems === 1 ? '' : 's'} of this batch could not be put back`, 140) })
     }
     if (!batch.outcome || record.kind === 'needs_you') return null
     return agentInbox.update(record.id, { title: captureClip(batch.outcome, 100), last_update: batch.outcome })
   }
+  const captureRetries = new Map()
   const startCaptureBatch = batch => {
     const box = captureInbox()
     const count = batch.items.length
-    const { record } = agentInbox.capture({
+    const { record, created } = agentInbox.capture({
       agent: MAIN_AGENT_ID, thread_id: mintDailyThreadId(), source: CAPTURE_SOURCE, kind: 'note',
       title: `${count} new in Inbox`, ask: `File ${count} new item${count === 1 ? '' : 's'} from Inbox by your capture rules`,
       privacy_class: 'private', dedupe_hash: createHash('sha256').update(`${MAIN_AGENT_ID}\ncapture\n${batch.id}`).digest('hex').slice(0, 32),
     }, { fields: { worker: true, capture: { batch: batch.id, source: batch.source, count } } })
     box.link(batch.id, { record_id: record.id, thread_id: record.thread_id })
+    captureRetries.set(record.id, Date.now())
+    // The same batch's record written before a restart: its worker is left to its own status (or the stall rule).
+    if (!created) return record
     const started = startDumpWorker(record, batchTurnText(batch, { agentRoot: box.agentRoot, rules: box.rules() }))
     dumpRuns.set(record.id, started)
     started.finally(() => dumpRuns.delete(record.id)).catch(() => undefined)
@@ -4333,6 +4345,11 @@ function buildWizardServer(options, lifetime) {
     // A batch whose worker could not start (Hermes busy or restarting) starts again every few minutes, never lost.
     const t = Date.now()
     for (const view of box.list(10)) {
+      // A batch made just before a restart (or whose record could not be written) gets its record and worker now.
+      if (view.state === 'open' && !view.record_id) {
+        try { startCaptureBatch(box.batch(view.batch)) } catch (error) { console.warn(`[capture] batch not started: ${error?.message || error}`) }
+        continue
+      }
       if (view.state !== 'open' || !view.record_id || dumpRuns.has(view.record_id)) continue
       if (t - (captureRetries.get(view.record_id) || 0) < (options.captureRetryMs ?? 5 * 60_000)) continue
       const retry = agentInbox.retryStart(view.record_id)
@@ -4344,7 +4361,6 @@ function buildWizardServer(options, lifetime) {
       started.finally(() => dumpRuns.delete(retry.id)).catch(() => undefined)
     }
   }
-  const captureRetries = new Map()
   captureTools = captureTool({ inbox: () => captureInbox(), on: captureOn, mainAgent: MAIN_AGENT_ID,
     listen: async path => {
       const box = captureInbox()

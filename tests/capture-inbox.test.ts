@@ -160,6 +160,17 @@ describe('filing, notes and undo (module)', () => {
     expect(existsSync(join(root, 'Documents', 'taxi-receipt.pdf'))).toBe(true)
   })
 
+  it('a mark on a file that left Inbox goes, so a new drop reusing the inode is still new', async () => {
+    const { root, c, inbox, batch } = await batchOfFive()
+    inbox.file(batch.id, 'taxi-receipt.pdf', { folder: 'Documents' })
+    const id = batch.items.find((i: any) => i.name === 'taxi-receipt.pdf').file_id
+    inbox.scan()
+    const state = JSON.parse(readFileSync(join(root, '..', 'capture.json'), 'utf8'))
+    expect(state.handled[id]).toBeUndefined()
+    expect(Object.keys(state.handled)).toHaveLength(4) // the four still in Inbox
+    void c
+  })
+
   it('writes the default rules into Files once and keeps the owner\'s own text', async () => {
     const { root, inbox } = await batchOfFive()
     expect(inbox.rules().text).toBe(DEFAULT_RULES)
@@ -203,8 +214,9 @@ describe('the wizard_capture tool', () => {
 
 describe('capture inbox on the Agent Service', () => {
   const TOKEN = 'fixture-main-gateway-token'
-  async function start(extra: any = {}) {
-    const d = home(), media = join(d, 'media')
+  const start = (extra: any = {}) => startIn(home(), extra)
+  async function startIn(d: string, extra: any = {}) {
+    const media = join(d, 'media')
     mkdirSync(join(media, 'Inbox'), { recursive: true })
     writeFileSync(join(d, 'apps.json'), JSON.stringify({ schema: 1, apps: [] }))
     const calls: any[] = []
@@ -251,6 +263,36 @@ describe('capture inbox on the Agent Service', () => {
     }
     return { d, media, calls, base, mcp, tool, batched, store: () => new AgentInboxStore(join(d, 'agent-inbox.json'), { log: () => undefined }) }
   }
+
+  it('a batch left without its record (a restart right after the scan) still gets its record and worker', async () => {
+    const d = home(), media = join(d, 'media')
+    mkdirSync(join(media, 'Inbox'), { recursive: true })
+    const c = clock()
+    const pre: any = createCaptureInbox({ root: media, statePath: join(d, 'capture-inbox.json'), now: c.now, quietMs: 1 })
+    pre.scan(); await arrived(media, { 'a.pdf': '%PDF' }); pre.scan(); c.at += 10
+    const made = pre.scan()
+    expect(made.record_id).toBeNull()
+    const s = await startIn(d, { captureInbox: true, filesRoot: '/owner-files' })
+    const records = await s.batched()
+    expect(records).toHaveLength(1)
+    expect(records[0].capture.batch).toBe(made.id)
+    expect(JSON.stringify(s.calls.find(c => c.url === '/v1/runs').body)).toContain('/owner-files/Inbox/2026-11-25/a.pdf')
+  })
+
+  it('a partial undo never reads as undone: the record says what is still out and waits on the owner', async () => {
+    const { media, batched, tool, base, store } = await start({ captureInbox: true })
+    await sleep(250)
+    await arrived(media, { 'a.pdf': '%PDF a', 'b.pdf': '%PDF b' })
+    const [record] = await batched()
+    const batch = record.capture.batch
+    await tool({ action: 'file', batch, item: 'a.pdf', folder: 'Docs' })
+    await tool({ action: 'file', batch, item: 'b.pdf', folder: 'Docs' })
+    await tool({ action: 'done', batch, outcome: '2 filed from Inbox: 2 documents' })
+    writeFileSync(join(media, 'Inbox', '2026-11-25', 'b.pdf'), 'a new drop with the same name')
+    const undo = await (await fetch(`${base}/wizard/v1/capture/${batch}/undo`, { method: 'POST' })).json()
+    expect(undo).toMatchObject({ items_back_in_inbox: 1, of: 2, problems: [expect.stringContaining('b.pdf')] })
+    expect(store().get(record.id)).toMatchObject({ kind: 'needs_you', state: 'new', last_update: expect.stringContaining('Undo not finished: 1 of 2 back in Inbox') })
+  })
 
   it('switch off: nothing is watched, moved or written, no tool, and the routes answer 404', async () => {
     const { d, media, calls, base, mcp } = await start()
