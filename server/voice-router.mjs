@@ -101,9 +101,10 @@ const SEP = String.raw`[\s,;:.!—–-]`
 const NO_REPLY = String.raw`note to self|no reply(?: needed)?|no need to reply|(?:you )?don'?t (?:need to )?reply|just do it`
 const NO_REPLY_LEAD = new RegExp(`${LEAD}(${NO_REPLY}|note)(?=${SEP}|$)`, 'iu')
 const NO_REPLY_TAIL = new RegExp(`(?:^|${SEP})(${NO_REPLY})${SEP}*$`, 'iu')
-// "reply" said to the Wizard. Never "a reply", "the reply", "draft / write / send a reply", "no reply", and never "reply
-// to Sam" or "reply all" (a reply someone else gets is a task); "reply to me" and "reply when you're done" are.
-const REPLY_WORD = /(?<!\b(?:a|an|the|my|your|his|her|their|our|its|draft|write|send|no|quick|short|any|email|text)\s)\brepl(?:y|y back)\b(?!\s+(?:to|all)\b(?!\s+me\b))/iu
+// "reply" said to the Wizard ("reply", "keep replying", "replies with updates"). Never "a reply", "the reply", "draft /
+// write / send a reply", "no reply", and never "reply to Sam" or "reply all" (a reply someone else gets is a task);
+// "reply to me" and "reply when you're done" are.
+const REPLY_WORD = /(?<!\b(?:a|an|the|my|your|his|her|their|our|its|draft|write|send|no|quick|short|any|email|text)\s)\brepl(?:y|ies|ying)(?: back)?\b(?!\s+(?:to|all)\b(?!\s+me\b))/iu
 const WANTS = /\b(?:tell me|answer me|let'?s (?:talk|chat|discuss)|talk (?:to|with) me|chat (?:to|with) me|walk me through|explain to me)\b/iu
 const URGENT = String.raw`(?:it'?s |this is )?(?:urgent|high priority|top priority|priority)|asap`
 const URGENT_LEAD = new RegExp(`${LEAD}(${URGENT})(?=${SEP}|$)${SEP}*`, 'iu')

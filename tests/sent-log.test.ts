@@ -29,7 +29,7 @@ describe('reply rules (whole phrases the owner says to the Wizard)', () => {
     expect(intent('Note to self: tell me about it later')).toBe('dump')
   })
   it('wants-reply phrases and short questions keep a visible thread', () => {
-    for (const t of ['Research flights to Lisbon and reply', 'Look into flights, tell me what you find', 'Answer me this: is it raining', "Let's talk about the trip", 'Walk me through the budget', 'Explain to me how solar works', 'What time is it in Tokyo?', 'reply to me when done'])
+    for (const t of ['Research flights to Lisbon and reply', 'Look into flights, tell me what you find', 'Answer me this: is it raining', "Let's talk about the trip", 'Walk me through the budget', 'Explain to me how solar works', 'What time is it in Tokyo?', 'reply to me when done', 'Research flights and keep replying with updates', 'Look into it and send me replies as you go'])
       expect([t, intent(t)]).toEqual([t, 'agent'])
   })
   it('words inside a task are never a reply rule', () => {
@@ -108,6 +108,10 @@ describe('the Sent log store', () => {
     c.at += 1000
     expect(log.linkTurn({ thread: 'wizard_t1', text: 'Walk me through the budget', run_key: 'k1' })).toMatchObject({ id: orb.id, thread_id: 'wizard_t1', run_key: 'k1' })
     expect(log.linkTurn({ thread: 'wizard_t2', text: 'Walk me through the budget' })).toBeNull()
+    // Only exactly the same words link: a longer first message is a capture of its own.
+    const orb2 = log.open({ text: 'Plan the trip' }).row
+    log.finish(orb2.id, { route: 'agent' })
+    expect(log.linkTurn({ thread: 'wizard_t4', text: 'Plan the trip to Porto next year' })).toBeNull()
     const late = log.open({ text: 'Plan dinner' }).row
     log.finish(late.id, { route: 'agent' })
     c.at += SENT_LINK_MS

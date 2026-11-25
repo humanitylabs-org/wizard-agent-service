@@ -1203,6 +1203,7 @@ export const serverChecks = {
       assert.equal(s.sessions.get(note.cmd.thread_id)?.hidden, false, 'should have replied shows the thread')
       const sent = await (await s.raw(`/wizard/v1/sent/${typed.id}/correct`, json({ should_reply: false }))).json()
       assert.equal(sent.changed, true, JSON.stringify(sent))
+      assert.match(sent.row.record_id, /^inbox_[a-f0-9]{24}$/u, 'the corrected row reads its state from the new inbox record')
       assert.equal(s.sessions.get('wizard_sent_typed')?.hidden, true, 'didn\'t need a reply moves it to the background')
       // The same words again follow the owner's correction.
       const again = (await (await say('Note to self call mom')).json())

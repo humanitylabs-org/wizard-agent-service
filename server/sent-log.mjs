@@ -138,7 +138,7 @@ export class SentLog {
   }
 
   /** A new thread's first owner turn: the row it came from, linked to this thread. That is the row the shell named
-   *  this thread for, else an orb / side / new chat row with the same words, sent within SENT_LINK_MS, routed to a
+   *  this thread for, else an orb / side / new chat row with exactly the same words, sent within SENT_LINK_MS, routed to a
    *  visible thread and not linked yet. Returns the row, or null (then it is a typed message). */
   linkTurn({ agent = 'hermes', thread = '', text = '', run_key: runKey = '' } = {}) {
     if (!THREAD_ID.test(String(thread))) return null
@@ -147,7 +147,7 @@ export class SentLog {
     let row = this.data.rows.find(r => r.agent === agent && r.thread_id === thread)
     if (!row && words) {
       row = this.data.rows.find(r => r.agent === agent && r.source !== 'typed' && !r.thread_id && !r.record_id && t - (r.at || 0) < SENT_LINK_MS
-        && (r.route === 'agent' || r.route === 'command' || r.route == null) && (sameWords(r.text) === words || words.startsWith(`${sameWords(r.text)} `)))
+        && (r.route === 'agent' || r.route === 'command' || r.route == null) && sameWords(r.text) === words)
       if (row) row.thread_id = thread
     }
     if (!row) return null

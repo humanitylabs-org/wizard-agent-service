@@ -4203,7 +4203,9 @@ function buildWizardServer(options, lifetime) {
     } else if (shouldReply && row.source === 'typed' && (row.would_route === 'dump' || row.would_route === 'reminder')) {
       moved = { record: null, example: agentInbox.addRouteExample({ utterance: row.text, chosen: 'dump', wanted: 'agent' }) }
     } else return { row: sentView(row), changed: false }
-    const updated = sentLog.update(row.id, { correction_id: moved.example?.id || row.correction_id || null, corrected: { should_reply: shouldReply, at: Date.now() } })
+    // A thread sent to the background now has an inbox record: the row's state is read from it from here on.
+    const updated = sentLog.update(row.id, { correction_id: moved.example?.id || row.correction_id || null, corrected: { should_reply: shouldReply, at: Date.now() },
+      ...(moved.record?.id && !row.record_id ? { record_id: moved.record.id } : {}) })
     return { row: sentView(updated), changed: true, ...(moved.record ? { record: moved.record } : {}) }
   }
   const runSweep = async () => {
