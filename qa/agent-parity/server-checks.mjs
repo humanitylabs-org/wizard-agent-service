@@ -1173,11 +1173,16 @@ export const serverChecks = {
     if (s.kind !== 'main') {
       const other = await s.raw('/wizard/v1/agent-events', as(MAIL, 'POST', { event: 'new_mail', agent: s.id }))
       assert.deepEqual([other.status, (await other.json()).error], [403, 'not_granted'])
+      // A merged event waiting for its window is dropped when the app is taken away meanwhile.
+      const answer = { ...event, event: 'agent_chat_answer' }
+      assert.equal((await s.raw('/wizard/v1/agent-events', as(MESSENGER, 'POST', answer))).status, 202)
+      assert.equal((await s.raw('/wizard/v1/agent-events', as(MESSENGER, 'POST', answer))).status, 200)
       grant(['parity-qa'])
-      const revoked = await s.raw('/wizard/v1/agent-events', as(MESSENGER, 'POST', { ...event, event: 'agent_chat_answer' }))
+      const revoked = await s.raw('/wizard/v1/agent-events', as(MESSENGER, 'POST', answer))
       assert.deepEqual([revoked.status, (await revoked.json()).error], [403, 'not_granted'], 'taking the app away stops its wakes at once')
-    }
-    assert.equal(runs().length, 2)
+      await new Promise(r => setTimeout(r, 700))
+      assert.equal(runs().length, 3, 'no follow-up wake after the grant was taken away')
+    } else assert.equal(runs().length, 2)
   },
   'agent-inbox-doors': async s => {
     const tokens = join(s.root, 'os', 'app-tokens')

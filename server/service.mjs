@@ -4175,8 +4175,9 @@ function buildWizardServer(options, lifetime) {
     // orb dump's way). The wake thread is the app's, not a chat the owner started.
     if (wake.agent === MAIN_AGENT_ID) await hermesJson(`/api/sessions/${encodeURIComponent(thread)}`, { method: 'PATCH', body: JSON.stringify({ hidden: true }) })
     else {
+      // A thread that could not be hidden gets no turn (a failed start): it stays empty, and an empty thread lists nowhere.
       const hidden = await deliveryCall(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(thread)}${agentQuery}`, { hidden: true }, '', 'PATCH')
-      if (!hidden.ok) console.warn(`[app-wake] ${app} wake thread of ${wake.agent} not hidden (${hidden.status})`)
+      if (!hidden.ok) throw new Error(`hide ${hidden.status}`)
     }
     const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${agentQuery}`, { session_id: thread, input: wakeTurnText({ app, appName: appName(app), event: wake.event, data: wake.data }) }, key)
     if (!run.ok) throw new Error(`run ${run.status}`)
@@ -4195,7 +4196,8 @@ function buildWizardServer(options, lifetime) {
           appWakeAgain.delete(key)
           const again = slot.merged.again
           slot.merged.again = null
-          if (again && appWakeOn()) void deliverAppWake(app, again).catch(error => console.warn(`[app-wake] ${app} follow-up wake not sent: ${error?.code || error?.message || error}`))
+          // The owner's grant is read again: an app taken away from the agent during the window wakes nobody.
+          if (again && appWakeOn() && appWakeAgents(app).includes(again.agent)) void deliverAppWake(app, again).catch(error => console.warn(`[app-wake] ${app} follow-up wake not sent: ${error?.code || error?.message || error}`))
         }, slot.dueIn + 50)
         timer.unref?.()
         appWakeAgain.set(key, timer)
