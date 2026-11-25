@@ -339,7 +339,7 @@ describe('Remove, undo and recipes (wizard-files issue 15)', () => {
     for (const bad of [{ base: 'Bad Base' }, { tweaks: { nope: true } }, { tweaks: { 'wizard/a': 'yes' } }, { tweaks: [] }]) expect(() => skins.patch(id, bad)).toThrow()
     expect(() => skins.create({ name: 'X', activate: 'yes' as any })).toThrow('invalid_activate')
   })
-  it('never follows a linked trash folder, refuses edits while publishing and bounds tweak ids', async () => {
+  it('never follows a linked trash folder and bounds tweak ids', async () => {
     const { skins, root } = local(), outside = scratch(), victim = join(outside, 'a'.repeat(32))
     mkdirSync(victim); writeFileSync(join(victim, 'trash.json'), JSON.stringify({ id: 'x', removed_at: 1 }))
     skins.list()
