@@ -18,6 +18,12 @@
 // Existing installs are not migrated: a box that already has agents, an owner app choice for the main agent or a
 // main model the first time this runs gets only what it asks for (a private Tinfoil agent, the provider attached),
 // never a new default, new app lists or new bindings.
+// Standard first (wizard-ux issue 1800, the Welcome's switch `wizard/standard-first-setup`): the Welcome asks once,
+// after Connect your AI, whether to set up private AI (POST /wizard/v1/private-first {offer}). `setup` records an
+// opt-in that turns private first on for this box (an env `0` still wins). During the first run (the Welcome not
+// finished, no other agent) it also marks the box fresh, so the Tinfoil hand-off that follows makes the private agent
+// the default with every app (DECISIONS 115), also when Claude or ChatGPT gave the standard agent a model first; that
+// standard agent then stays shown with its apps. `later` and `declined` are only remembered (`offer` in the state).
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { MAIN_AGENT_ID, isConfidentialProvider, isStandardOnlyApp } from './agents.mjs'
@@ -44,7 +50,13 @@ const refusal = (status, error, detail = '') => Object.assign(new Error(detail |
  * owner's default agent. bindings(): the app bindings (or null). attach: the main-agent provider attach store.
  * runtime(): true when the box has an agent runtime that can create container agents (issue 582).
  */
-export function createPrivateFirst({ on, registry, agentsDir, mainOptions, setDefaultAgent, bindings = () => null, attach = () => null, runtime = () => true, log = () => {} }) {
+export const PRIVATE_FIRST_OFFERS = ['setup', 'later', 'declined']
+
+/**
+ * firstRun(): true while the box's first run is not finished (the Welcome has not posted setup/seen). blocked(): true
+ * when the box forces private first off (env WIZARD_PRIVATE_FIRST=0), which an opt-in never overrides.
+ */
+export function createPrivateFirst({ on, registry, agentsDir, mainOptions, setDefaultAgent, bindings = () => null, attach = () => null, runtime = () => true, firstRun = () => false, blocked = () => false, log = () => {} }) {
   const recordPath = join(agentsDir, '.private-first.json')
   const record = () => {
     const value = readJson(recordPath)
@@ -52,6 +64,8 @@ export function createPrivateFirst({ on, registry, agentsDir, mainOptions, setDe
   }
   const save = (patch) => writeJson(recordPath, { ...(record() ?? { schema: 1 }), ...patch, schema: 1 })
   const isOn = () => { try { return on() === true } catch { return false } }
+  /** The owner chose Set up private AI in the Welcome (issue 1800): private first is on for this box. */
+  const optedIn = () => record()?.opt_in === true
   const hasRuntime = () => { try { return runtime() === true } catch { return false } }
   let toldNoRuntime = false
   const noRuntime = (what) => {
@@ -103,6 +117,8 @@ export function createPrivateFirst({ on, registry, agentsDir, mainOptions, setDe
     return {
       schema: PRIVATE_FIRST_SCHEMA, on: switchOn, ...(switchOn && !ready ? { reason: 'runtime_unavailable' } : {}),
       standard_agent: MAIN_AGENT_ID, private_agent: privateAgentId(),
+      // The Welcome's private AI offer (issue 1800): 'setup', 'later', 'declined', or null while not answered.
+      offer: PRIVATE_FIRST_OFFERS.includes(kept?.offer) ? kept.offer : null,
       // Off only on a fresh box whose private agent was set up and no Claude or ChatGPT sign-in has come yet.
       standard_on: !(privateAgentId() && kept?.fresh === true && kept?.standard_on !== true),
     }
@@ -170,7 +186,9 @@ export function createPrivateFirst({ on, registry, agentsDir, mainOptions, setDe
       if (model && !MODEL_RE.test(model)) throw refusal(400, 'invalid_model')
       // Claude or ChatGPT connected before Tinfoil: the box now runs on the standard agent, so a later Tinfoil sign-in
       // is no first run any more and never takes over the default, the apps or the bindings (Codex review on PR 547).
-      if (await freshness() && !privateAgentId()) save({ fresh: false })
+      // Not after the owner chose Set up private AI in the first run (issue 1800): the private agent they asked for
+      // still becomes the default, and this standard agent stays on beside it.
+      if (await freshness() && !privateAgentId() && !optedIn()) save({ fresh: false })
       const main = registry.read(MAIN_AGENT_ID)
       // After a private first run the standard agent is shown again with the no apps it was left with; the owner
       // ticks each one (spec section 5).
@@ -185,5 +203,33 @@ export function createPrivateFirst({ on, registry, agentsDir, mainOptions, setDe
     })
   }
 
-  return { on: isOn, state, privateAgentId, ensurePrivateAgent, ensureStandardAgent }
+  /** The Welcome's answer to its private AI offer (issue 1800): {offer: 'setup' | 'later' | 'declined'}. */
+  function answerOffer(body) {
+    return serial(async () => {
+      const choice = body?.offer
+      if (!PRIVATE_FIRST_OFFERS.includes(choice)) throw refusal(400, 'invalid_offer')
+      const at = Math.floor(Date.now() / 1000)
+      if (choice !== 'setup') { save({ offer: choice, offer_at: at }); return state() }
+      let isBlocked = false
+      try { isBlocked = blocked() === true } catch { isBlocked = false }
+      if (isBlocked) throw refusal(409, 'private_first_off')
+      const patch = { offer: 'setup', offer_at: at, opt_in: true, opt_in_at: at }
+      let first = false
+      try { first = firstRun() === true } catch { first = false }
+      if (!privateAgentId() && first && !otherAgents().length) {
+        let options = null
+        try { options = await mainOptions() } catch { options = null }
+        if (!options || typeof options !== 'object') throw refusal(503, 'main_agent_unavailable')
+        patch.fresh = true
+        patch.decided_at = at
+        // Claude or ChatGPT already answers on the standard agent: it stays shown, with its apps.
+        if (String(options.model ?? '').trim()) { patch.standard_on = true; patch.standard_at = record()?.standard_at ?? at }
+      }
+      save(patch)
+      log(`offer: set up private AI${patch.fresh ? ' (first run)' : ''}`)
+      return state()
+    })
+  }
+
+  return { on: isOn, optedIn, state, privateAgentId, ensurePrivateAgent, ensureStandardAgent, answerOffer }
 }
