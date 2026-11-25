@@ -1139,6 +1139,84 @@ export const serverChecks = {
   // Issue 569: an app (Messenger's Agent chat) is a second door to the one agent inbox. Its own app token (the
   // delivery route's app-tokens/<id> file) opens capture, sweep, answer on its card and the door probe; a sweep from
   // the Daily and then from the app is one sweep event (same card, each item seen once).
+  'app-wake-events': async s => {
+    // wizard-os issue 634: an installed app's own token wakes this kind's agent with a small typed event.
+    const osHome = join(s.root, 'os'), tokens = join(osHome, 'app-tokens')
+    mkdirSync(tokens, { recursive: true })
+    const MESSENGER = `parity-messenger-${'w'.repeat(32)}`, MAIL = `parity-mail-${'x'.repeat(32)}`
+    writeFileSync(join(tokens, 'messenger'), `${MESSENGER}\n`)
+    writeFileSync(join(tokens, 'wizard-mail'), `${MAIL}\n`)
+    const parityQa = { id: 'parity-qa', name: 'Synthetic Parity App', view: '/parity/', agent_binding: true }
+    const messenger = { id: 'messenger', name: 'Messenger', status: 'running', mcp: { url: 'http://127.0.0.1:9/mcp' } }
+    const mail = { id: 'wizard-mail', name: 'Mail', status: 'running', mcp: { url: 'http://127.0.0.1:9/mcp' } }
+    const grant = apps => {
+      if (s.kind === 'main') return
+      const file = join(osHome, 'agents', s.id, 'agent.json'), agent = JSON.parse(readFileSync(file, 'utf8'))
+      agent.permissions.wizard_apps = apps
+      writeFileSync(file, JSON.stringify(agent))
+    }
+    grant(['parity-qa', 'messenger'])
+    writeFileSync(join(s.root, 'apps.json'), JSON.stringify({ schema: 1, apps: [parityQa, messenger, mail] }))
+    await s.restart()
+    const as = (token, method, body) => ({ method, headers: { Authorization: `Bearer ${token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
+    const runs = () => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && String(r.headers['idempotency-key'] || '').startsWith('wizard-wake-'))
+    const until = async (read, label) => {
+      let last
+      for (let n = 0; n < 120; n++) { last = await read(); if (last) return last; await new Promise(r => setTimeout(r, 25)) }
+      assert.fail(label)
+    }
+    // The probe: on, the contract, and this kind's agent among the agents Messenger may wake.
+    const probe = await s.raw('/wizard/v1/agent-events', as(MESSENGER, 'GET'))
+    assert.equal(probe.status, 200, await probe.clone().text())
+    const probed = await probe.json()
+    assert.deepEqual([probed.on, probed.contract, probed.app], [true, 'wizard.app-wake/1', 'messenger'])
+    assert.ok(probed.agents.includes(s.id), `Messenger may wake ${s.id}: ${JSON.stringify(probed.agents)}`)
+    // Only an app's own token: the owner's call is refused, and nothing runs.
+    assert.equal((await s.raw('/wizard/v1/agent-events', { method: 'GET' })).status, 403, 'the owner is not an app')
+    // The event is typed and small: no free text, no other app's name, no unknown agent.
+    const event = { event: 'agent_chat', agent: s.id, data: { reason: 'note', waiting: { notes: 1, sweep_requests: 0, answers: 0 } } }
+    for (const [body, status, code] of [
+      [{ ...event, event: 'Agent chat!' }, 400, 'invalid_event'],
+      [{ ...event, event: 'wizard-mail.inbox' }, 400, 'invalid_event'],
+      [{ ...event, data: { text: 'x'.repeat(201) } }, 400, 'invalid_data'],
+      [{ ...event, data: { a: { b: { c: 1 } } } }, 400, 'invalid_data'],
+      [{ ...event, agent: 'nobody-here' }, 404, 'agent_not_found'],
+    ]) {
+      const refused = await s.raw('/wizard/v1/agent-events', as(MESSENGER, 'POST', body))
+      assert.deepEqual([refused.status, (await refused.json()).error], [status, code], JSON.stringify(body))
+    }
+    assert.equal(runs().length, 0, 'a refused event wakes nobody')
+    // A wake: one turn in a new hidden thread of this kind's agent, saying it is an app's signal.
+    const woke = await s.raw('/wizard/v1/agent-events', as(MESSENGER, 'POST', event))
+    assert.equal(woke.status, 202, await woke.clone().text())
+    const first = await woke.json()
+    assert.deepEqual([first.woken, first.event, first.agent], [true, 'messenger.agent_chat', s.id])
+    const run = await until(() => runs().find(r => r.body?.session_id === first.thread_id), 'the wake turn is admitted')
+    const input = String(run.body.input || '')
+    assert.ok(input.startsWith('App wake: the Messenger (messenger) app sent event messenger.agent_chat {"reason":"note"'), input)
+    assert.ok(input.includes('not the owner\'s words'), 'the turn says it is an app\'s signal')
+    assert.equal(s.sessions.get(first.thread_id)?.hidden, true, 'the wake thread is hidden from Chats')
+    // The same event again inside the window is merged, then woken once more when the window ends (never lost).
+    const merged = await s.raw('/wizard/v1/agent-events', as(MESSENGER, 'POST', { ...event, data: { reason: 'sweep' } }))
+    assert.deepEqual([merged.status, (await merged.json()).merged], [200, true])
+    assert.equal(runs().length, 1, 'a merged event starts no second turn at once')
+    const again = await until(() => runs().find(r => r.body?.session_id !== first.thread_id), 'the merged event is woken when the window ends')
+    assert.ok(String(again.body.input).includes('{"reason":"sweep"}'), 'the follow-up carries the newest event')
+    // An app the owner did not give this agent can't wake it (main sees every installed app).
+    if (s.kind !== 'main') {
+      const other = await s.raw('/wizard/v1/agent-events', as(MAIL, 'POST', { event: 'new_mail', agent: s.id }))
+      assert.deepEqual([other.status, (await other.json()).error], [403, 'not_granted'])
+      // A merged event waiting for its window is dropped when the app is taken away meanwhile.
+      const answer = { ...event, event: 'agent_chat_answer' }
+      assert.equal((await s.raw('/wizard/v1/agent-events', as(MESSENGER, 'POST', answer))).status, 202)
+      assert.equal((await s.raw('/wizard/v1/agent-events', as(MESSENGER, 'POST', answer))).status, 200)
+      grant(['parity-qa'])
+      const revoked = await s.raw('/wizard/v1/agent-events', as(MESSENGER, 'POST', answer))
+      assert.deepEqual([revoked.status, (await revoked.json()).error], [403, 'not_granted'], 'taking the app away stops its wakes at once')
+      await new Promise(r => setTimeout(r, 700))
+      assert.equal(runs().length, 3, 'no follow-up wake after the grant was taken away')
+    } else assert.equal(runs().length, 2)
+  },
   'agent-inbox-doors': async s => {
     const tokens = join(s.root, 'os', 'app-tokens')
     mkdirSync(tokens, { recursive: true })

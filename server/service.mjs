@@ -61,6 +61,7 @@ const INTERFACE_MANUAL_SWITCH = 'wizard/interface-manual'
 const INTERFACE_MANUAL_APPS = new Set(['wizard-ux'])
 import { LOCAL_APP_ROUTES_SWITCH, createRouteTable, launcherPath as localLauncherPath, loopbackRequest, serveLocalAppRoute, upgradeLocalAppRoute } from './local-app-routes.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
+import { APP_WAKE_SWITCH, APP_WAKE_CONTRACT, APP_WAKE_RUN_PREFIX, createWakeLedger, parseWakeEvent, wakeTurnText } from './app-wake.mjs'
 import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, appDoor, recordApp } from './agent-inbox.mjs'
 import { isSweepPhrase, isScheduledSweep, withCardRow, WAITING_CAP, DONE_CAP } from './agent-sweep.mjs'
 import { AlertRulesFile, createAlertGate, privateRouter } from './agent-alerts.mjs'
@@ -4146,6 +4147,74 @@ function buildWizardServer(options, lifetime) {
     }
     return { record: agentInbox.get(record.id) || record, created, ...(retry ? { restarted: true } : {}) }
   }
+  // App wake events (wizard-os issue 634, spec/APP_WAKE.md; owner switch wizard/app-wake, off by default; env
+  // WIZARD_APP_WAKE '1'/'0' forces it). The box is the agent's event inbox: an app's own token wakes an agent that the
+  // owner gave this app, with one turn in a new hidden background thread. Switch off: the routes are 404.
+  const appWakeSwitchOn = createChannelsSwitch({ id: APP_WAKE_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.appWakeSwitchTtlMs ?? 3000 })
+  const appWakeOn = () => channelPart(options.appWake, appWakeSwitchOn)
+  const wakeLedger = createWakeLedger({ mergeMs: options.appWakeMergeMs ?? undefined, hourlyCap: options.appWakeHourlyCap ?? undefined })
+  // The agents this app may wake: the main agent and every standard agent whose app grant includes it. Without the
+  // agent bridge (no apps.json) there is no owner grant to read, so nobody can be woken.
+  const appWakeAgents = app => {
+    if (!bridge) return []
+    const ids = [MAIN_AGENT_ID, ...(agents ? agents.list().map(agent => agent.id).filter(id => id !== MAIN_AGENT_ID) : [])]
+    return ids.filter(id => {
+      if (id !== MAIN_AGENT_ID && (!agents?.read(id) || agents.read(id).role === 'recovery')) return false
+      if (id === MAIN_AGENT_ID && agents?.read(MAIN_AGENT_ID)?.role === 'recovery') return false
+      try { return bridge.apps(id).some(entry => entry.id === app) } catch { return false }
+    })
+  }
+  const appName = app => { try { return String(bridge?.apps().find(entry => entry.id === app)?.name || '') } catch { return '' } }
+  const startAppWake = async (app, wake) => {
+    const agentQuery = agents ? `?agent=${encodeURIComponent(wake.agent)}` : ''
+    const thread = mintDailyThreadId()
+    const key = `${APP_WAKE_RUN_PREFIX}${createHash('sha256').update(`${app}\n${wake.agent}\n${thread}`).digest('hex').slice(0, 24)}`
+    const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${agentQuery}`, { id: thread, title: `${appName(app) || app} wake`, source: 'wizard-mobile', hidden: true })
+    if (!created.ok && created.status !== 409) throw new Error(`session ${created.status}`)
+    // Stock Hermes keeps `hidden` out of a create body; the PATCH is what hides it from every list and count (the
+    // orb dump's way). The wake thread is the app's, not a chat the owner started.
+    if (wake.agent === MAIN_AGENT_ID) await hermesJson(`/api/sessions/${encodeURIComponent(thread)}`, { method: 'PATCH', body: JSON.stringify({ hidden: true }) })
+    else {
+      // A thread that could not be hidden gets no turn (a failed start): it stays empty, and an empty thread lists nowhere.
+      const hidden = await deliveryCall(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(thread)}${agentQuery}`, { hidden: true }, '', 'PATCH')
+      if (!hidden.ok) throw new Error(`hide ${hidden.status}`)
+    }
+    const run = await deliveryCall(`${PROXY_PREFIX}/v1/runs${agentQuery}`, { session_id: thread, input: wakeTurnText({ app, appName: appName(app), event: wake.event, data: wake.data }) }, key)
+    if (!run.ok) throw new Error(`run ${run.status}`)
+    return { thread_id: thread, run_id: String(run.payload?.run_id || run.payload?.id || '') }
+  }
+  const appWakeAgain = new Map()
+  lifetime.own(() => { for (const timer of appWakeAgain.values()) clearTimeout(timer); appWakeAgain.clear() })
+  const deliverAppWake = async (app, wake) => {
+    const slot = wakeLedger.reserve(app, wake.agent, wake.name, Date.now(), wake)
+    if (slot.capped) throw inboxError(429, 'wake_limit')
+    if (slot.merged) {
+      // Merged into the wake just made; the newest event of the window is woken once more when the window ends.
+      const key = `${app}\n${wake.agent}\n${wake.name}`
+      if (slot.first && !appWakeAgain.has(key)) {
+        const timer = setTimeout(() => {
+          appWakeAgain.delete(key)
+          const again = slot.merged.again
+          slot.merged.again = null
+          // The owner's grant is read again: an app taken away from the agent during the window wakes nobody.
+          if (again && appWakeOn() && appWakeAgents(app).includes(again.agent)) void deliverAppWake(app, again).catch(error => console.warn(`[app-wake] ${app} follow-up wake not sent: ${error?.code || error?.message || error}`))
+        }, slot.dueIn + 50)
+        timer.unref?.()
+        appWakeAgain.set(key, timer)
+      }
+      return { status: 200, body: { woken: true, merged: true, event: wake.event, agent: wake.agent } }
+    }
+    try {
+      const woke = await startAppWake(app, wake)
+      slot.settle(woke)
+      console.log(`[app-wake] ${wake.event} woke ${wake.agent}`)
+      return { status: 202, body: { woken: true, event: wake.event, agent: wake.agent, ...woke } }
+    } catch (error) {
+      slot.cancel()
+      console.warn(`[app-wake] ${wake.event} did not wake ${wake.agent}: ${error?.message || error}`)
+      throw inboxError(503, 'wake_not_started')
+    }
+  }
   // A tap on the card: that token's full resume message goes into the record's own thread as the owner's next turn,
   // through the same run admission every Service-made turn uses (queued behind a running turn, idempotent per tap).
   const postInboxAnswer = async (record, option) => {
@@ -6616,6 +6685,8 @@ function buildWizardServer(options, lifetime) {
         || (request.method === 'POST' && /^\/wizard\/internal\/(?:agents|schedules|supervisor|private-first|messaging-replies)\//u.test(url.pathname) && mainPluginCredential(request))
         // An app's door to the agent inbox (issue 569) with its own app token; the route still checks its scope.
         || (url.pathname.startsWith('/wizard/v1/agent-inbox') && agentInboxOn() && Boolean(inboxAppOf(request)))
+        // An app's wake event (wizard-os issue 634) with its own app token; the route still checks the app's grants.
+        || (url.pathname === '/wizard/v1/agent-events' && appWakeOn() && Boolean(inboxAppOf(request)))
       )
       // Passive owner media (<img>/<video>/<audio>, a download link) of a known attachment or saved file id.
       const mediaRequest = browserBoundary.enabled && passiveMediaPath(request.method, url.pathname)
@@ -6926,6 +6997,35 @@ function buildWizardServer(options, lifetime) {
         if (!source) { sendJson(response, 404, { error: 'run_not_found' }); return }
         const child = runQueue.byIdempotencyKey(source.runtime, 'wizard-saved-retry-' + source.publicRunId)
         sendJson(response, 200, { status: child?.status || source.status, resent: !!child, sent: child?.status === 'completed' })
+        return
+      }
+      // App wake events (wizard-os issue 634, spec/APP_WAKE.md, switch wizard/app-wake): GET is the app's probe
+      // (on, and the agents it may wake), POST wakes one agent with a small typed event. Only an installed app's own
+      // app token, never the owner or an agent. Switch off: 404, nothing runs.
+      if (url.pathname === '/wizard/v1/agent-events') {
+        if (!appWakeOn()) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (!['GET', 'POST'].includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' }); return }
+        const app = tailnetIngress || principalOf(request).kind === 'agent' ? '' : inboxAppOf(request)
+        if (!app) { sendJson(response, 403, { error: 'app_token_required' }); return }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        const may = appWakeAgents(app)
+        if (request.method === 'GET') { sendJson(response, 200, { on: true, contract: APP_WAKE_CONTRACT, app, agents: may }); return }
+        if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
+        let input
+        try { input = JSON.parse((await readBoundedBody(request, 8 * 1024)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+        if (!input || typeof input !== 'object' || Array.isArray(input)) { sendJson(response, 400, { error: 'invalid_request' }); return }
+        try {
+          const wake = parseWakeEvent(app, input, MAIN_AGENT_ID)
+          if (!may.includes(wake.agent)) {
+            const known = wake.agent === MAIN_AGENT_ID || Boolean(agents?.read(wake.agent))
+            sendJson(response, known ? 403 : 404, { error: known ? 'not_granted' : 'agent_not_found' }); return
+          }
+          const result = await deliverAppWake(app, wake)
+          sendJson(response, result.status, result.body)
+        } catch (error) {
+          const status = Number(error?.status) || 500
+          sendJson(response, status, { error: error?.code || 'wake_failed' }, status === 429 ? { 'Retry-After': '60' } : {})
+        }
         return
       }
       // Agent inbox (issue 549): GET /wizard/v1/agent-inbox[?state=new,running&kind=&agent=&limit=] lists records (plus
