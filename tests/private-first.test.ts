@@ -447,6 +447,16 @@ describe('the Welcome\'s private AI offer (wizard-ux issue 1800)', () => {
     expect((await offer(b, { offer: 'setup' })).json).toMatchObject({ on: true, offer: 'setup' })
   })
 
+  it('after the first run with no AI connected: still no new default (Codex P2)', async () => {
+    const b = await box({ on: null })
+    expect((await b.call('POST', '/wizard/v1/setup/seen', {})).status).toBe(200)
+    expect((await offer(b, { offer: 'setup' })).json).toMatchObject({ on: true })
+    await b.call('GET', '/wizard/v1/private-first')
+    expect(JSON.parse(readFileSync(join(b.dir, 'agents', '.private-first.json'), 'utf8')).fresh).toBe(false)
+    expect((await b.internal('private-agent', TINFOIL)).json).toMatchObject({ ok: true, agent: 'private' })
+    expect((await b.agents()).find((a) => a.id === 'hermes')).toMatchObject({ is_default: true })
+  })
+
   it('after the first run (Welcome finished): an opt-in adds a private agent, never a new default', async () => {
     const b = await box({ on: null, mainModel: 'gpt-6.1-sol' })
     expect((await b.call('POST', '/wizard/v1/setup/seen', {})).status).toBe(200)
@@ -467,6 +477,9 @@ describe('the Welcome\'s private AI offer (wizard-ux issue 1800)', () => {
     expect((await offer(b, { offer: 'setup' }, { 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403)
     expect((await offer(b, { offer: 'setup' }, { 'Sec-Fetch-Site': 'same-site' })).status).toBe(403)
     expect((await b.call('PUT', '/wizard/v1/private-first', { offer: 'setup' })).status).toBe(405)
+    // Fetch Metadata left out (an older webview): a text/plain body or another page's Origin is still refused.
+    expect((await b.call('POST', '/wizard/v1/private-first', { offer: 'setup' }, { 'Content-Type': 'text/plain' })).status).toBe(415)
+    expect((await offer(b, { offer: 'setup' }, { Origin: 'http://evil.example' })).status).toBe(403)
     expect(existsSync(join(b.dir, 'agents', '.private-first.json'))).toBe(false)
     expect((await b.call('GET', '/wizard/v1/private-first')).json).toMatchObject({ on: false, offer: null })
   })

@@ -7869,7 +7869,10 @@ function buildWizardServer(options, lifetime) {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         if (request.method === 'POST') {
-          if (request.headers['sec-fetch-site'] !== undefined && !['same-origin', 'none'].includes(request.headers['sec-fetch-site'])) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+          // A write from the owner's own page only, the same rule as the setup writes: JSON (a cross-site form or
+          // text/plain POST can't send it without a preflight), never cross-site, and an Origin, when named, is this box.
+          const refused = setupWriteRefusal(request, tailnetIngress)
+          if (refused) { sendJson(response, refused, { error: refused === 415 ? 'json_required' : 'cross_origin_request' }); return }
           let value
           try { value = JSON.parse((await readBoundedBody(request, 4 * 1024)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid body' }); return }
           if (!value || typeof value !== 'object' || Array.isArray(value)) { sendJson(response, 400, { error: 'invalid body' }); return }

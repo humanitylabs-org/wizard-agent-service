@@ -224,6 +224,11 @@ export function createPrivateFirst({ on, registry, agentsDir, mainOptions, setDe
         patch.decided_at = at
         // Claude or ChatGPT already answers on the standard agent: it stays shown, with its apps.
         if (String(options.model ?? '').trim()) { patch.standard_on = true; patch.standard_at = record()?.standard_at ?? at }
+      } else if (typeof record()?.fresh !== 'boolean') {
+        // After the first run (or with another agent there) an opt-in is never a first run: decided now, so a later
+        // state read can't call the box fresh because its main agent happens to have no model.
+        patch.fresh = false
+        patch.decided_at = at
       }
       save(patch)
       log(`offer: set up private AI${patch.fresh ? ' (first run)' : ''}`)
