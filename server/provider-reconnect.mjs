@@ -24,6 +24,8 @@ const CLAUDE_SIGNALS = [
   /\bClaudeCodeLoggedOut\b/,
   /OAuth session expired and could not be refreshed/i,
   /\bclaude auth login\b/i,
+  // hermes_cli/runtime_provider.py _NO_ANTHROPIC_CREDENTIALS_MSG (the Claude login Hermes reads is gone).
+  /\bNo Anthropic credentials found\b/,
 ]
 const CHATGPT_SIGNALS = [
   /\bcodex_auth_(?:expired|refresh_failed|missing(?:_access_token|_refresh_token)?)\b/,
@@ -39,7 +41,20 @@ const GENERIC_SIGNALS = [
   /\bHTTP 401\b/,
   /\bFailed to authenticate\b/i,
   /\bauthentication_error\b/,
+  // hermes_cli/runtime_provider.py: the route resolved with no credential at all.
+  /\bNo usable credentials found\b/i,
 ]
+
+// Issue 615: Hermes' gateway copy for a turn that failed because no AI sign-in is usable
+// (locales/*.yaml gateway.errors.no_credentials, gateway/run_turn_runner.py). GET /v1/runs then has
+// `status: failed`, no `error`, no `runtime`, and this one line as `output`. It is translated, but every
+// language starts with the warning sign and names /login, /model and `hermes doctor` in that order, and
+// it is the WHOLE output, so an ordinary answer that mentions those words never matches.
+const NO_CREDENTIALS_COPY = /^⚠️[^\n]{0,300}\/login[^\n]{0,200}\/model[^\n]{0,300}`hermes doctor`[^\n]{0,80}$/u
+export function hermesNoCredentialsCopy(payload) {
+  if (!payload || typeof payload !== 'object') return false
+  return [payload.output, payload.final_response].some((v) => typeof v === 'string' && NO_CREDENTIALS_COPY.test(v.trim()))
+}
 // An API key problem is not a sign-in the connection app can repair; usage limits are not sign-outs.
 const NOT_SIGN_IN = [/rejected your API key/i, /\brate[- ]limit/i, /\busage[_ ]limit/i, /\bquota\b/i]
 
@@ -65,9 +80,10 @@ export function classifyProviderSignOut(payload, body = null) {
   const known = reconnectOf(payload.wizard_reconnect)
   if (known) return known
   if (!text.trim()) return null
+  const noCredentials = hermesNoCredentialsCopy(payload)
   if (CLAUDE_SIGNALS.some((re) => re.test(text))) return RECONNECT_APPS.claude
   if (CHATGPT_SIGNALS.some((re) => re.test(text))) return RECONNECT_APPS.chatgpt
-  if (NOT_SIGN_IN.some((re) => re.test(text)) || !GENERIC_SIGNALS.some((re) => re.test(text))) return null
+  if (!noCredentials && (NOT_SIGN_IN.some((re) => re.test(text)) || !GENERIC_SIGNALS.some((re) => re.test(text)))) return null
   const routes = routeOf(payload, body)
   if (routes.some((r) => CLAUDE_ROUTES.has(r))) return RECONNECT_APPS.claude
   if (routes.some((r) => CHATGPT_ROUTES.has(r))) return RECONNECT_APPS.chatgpt

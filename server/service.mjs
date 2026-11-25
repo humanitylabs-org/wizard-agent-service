@@ -5466,18 +5466,21 @@ function buildWizardServer(options, lifetime) {
   // A thread whose last run failed on an expired provider sign-in gets the connection app to open
   // (installed or not) and that app's current reading. The usage read is cached and bounded here,
   // so a slow connection app never holds up Chats.
+  const decorateReconnectList = async (rows) => {
+    const installedApps = readApps({ appsJsonPath, launcherPath }).apps
+    const usage = await Promise.race([
+      aiUsageReader.read().catch(() => null),
+      new Promise((done) => setTimeout(() => done(null), 400).unref?.()),
+    ])
+    decorateReconnect(rows, { installedApps, usage })
+  }
   const decorateReconnectRows = async (result) => {
     try {
       const payload = JSON.parse(result.toString('utf8'))
       const rows = ['data', 'sessions'].flatMap((key) => Array.isArray(payload?.[key]) ? payload[key] : [])
         .filter((row) => row && row.wizard_reconnect)
       if (!rows.length) return result
-      const installedApps = readApps({ appsJsonPath, launcherPath }).apps
-      const usage = await Promise.race([
-        aiUsageReader.read().catch(() => null),
-        new Promise((done) => setTimeout(() => done(null), 400).unref?.()),
-      ])
-      decorateReconnect(rows, { installedApps, usage })
+      await decorateReconnectList(rows)
       return Buffer.from(JSON.stringify(payload))
     } catch { return result }
   }
@@ -8741,6 +8744,17 @@ function buildWizardServer(options, lifetime) {
                 delete detailed.wizard_safe_error
                 delete detailed.wizard_reconnect
                 delete detailed.wizard_last_run_error
+              } else if (saved.status === 'failed' && !providerFailureDismissed(saved)) {
+                // Issue 615: the open thread's detail read replaces the list row's sign-in state in the shell, so it
+                // carries the same diagnosis as the list (sign-in card + reason), not a bare failed status.
+                const latest = runQueue.latestProjections([row.id])[0]
+                if (latest?.publicRunId === saved.publicRunId) {
+                  if (latest.reconnect) {
+                    detailed.wizard_reconnect = { ...latest.reconnect }; detailed.wizard_safe_error = ''
+                    try { await decorateReconnectList([detailed]) } catch { /* the plain diagnosis still shows */ }
+                  }
+                  if (latest.runError) detailed.wizard_last_run_error = latest.runError
+                }
               }
             }
             result = Buffer.from(JSON.stringify(payload.session ? { ...payload, session: detailed } : detailed))

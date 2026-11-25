@@ -56,8 +56,10 @@ export async function loadAgentSessionRows(ctx, agent, { headers = {}, secrets =
 // Every runtime uses the same Wizard status/title projection. Fetch through the
 // registry so a restricted ingress stays on its mode-0600 Unix socket.
 // A routed agent's failed run carries the same structured reason as a main-agent row.
-const runErrorField = (run) => {
-  const value = classifyRunError(run)
+// Hermes' failed run may name no route at all (issue 615: the no-credentials copy has no runtime), so the
+// agent's own configured provider names it then.
+const runErrorField = (run, agent) => {
+  const value = classifyRunError(run, typeof agent?.model?.provider === 'string' ? { provider: agent.model.provider } : null)
   return value ? { wizard_last_run_error: value } : {}
 }
 
@@ -159,7 +161,7 @@ export async function projectProfileSessions(ctx, agent, rows, headers, secrets)
           wizard_assigned_at: run.created_at, wizard_last_user_at: run.created_at,
           ...(run.runtime?.model ? { model: run.runtime.model, provider: run.runtime.provider || '' } : {}),
           // Why it failed (run-error.mjs), same field as the main agent's rows.
-          ...runErrorField(run),
+          ...runErrorField(run, agent),
           ...(!active && run.output ? { wizard_last_assistant_at: run.updated_at,
             latest_message: { role: 'assistant', content: stripStatus(run.output), timestamp: run.updated_at } } : {}),
         } : row
