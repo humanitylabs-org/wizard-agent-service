@@ -134,6 +134,10 @@ server = createWizardServer({
   agentInbox: envChoice(process.env.WIZARD_AGENT_INBOX),
   // App wake events (wizard-os issue 634): unset follows the owner's wizard/app-wake switch; 1 on, 0 off.
   appWake: envChoice(process.env.WIZARD_APP_WAKE),
+  // Capture inboxes (wizard-os issue 696): unset follows the owner's wizard/capture-inbox switch; 1 on, 0 off. The
+  // batch state sits next to the agent inbox. WIZARD_CAPTURE_QUIET_MS: how long Inbox must be still before a batch.
+  captureInbox: envChoice(process.env.WIZARD_CAPTURE_INBOX),
+  captureQuietMs: /^\d{1,9}$/u.test(process.env.WIZARD_CAPTURE_QUIET_MS || '') ? Number(process.env.WIZARD_CAPTURE_QUIET_MS) : undefined,
   // Replies into messaging-app chats (issue 427, owner switch wizard/messaging-chat-replies; '1'/'0' forces it).
   messagingReplies: envChoice(process.env.WIZARD_MESSAGING_REPLIES),
   // Capability registry (issue 463): unset follows the owner's wizard/capability-registry switch; 1 on, 0 off.
