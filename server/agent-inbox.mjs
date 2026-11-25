@@ -17,7 +17,6 @@ import { atomicStoreWrite, validAgentId } from './thread-reference.mjs'
 import { normalizeStatus, parseStatusObject } from './thread-status.mjs'
 import { planSweep, composeCard, cardView, yesToAllTargets, DEFAULT_LINKS } from './agent-sweep.mjs'
 
-export const AGENT_INBOX_SWITCH = 'wizard/agent-inbox'
 // Worker runs admitted by capture carry this idempotency-key prefix, so the nightly check can find finished worker
 // runs that have no record without reading the record first.
 export const INBOX_RUN_PREFIX = 'wizard-inbox-'

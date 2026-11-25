@@ -87,7 +87,8 @@ it.each(['explicit', 'origin-opt-in'])('enforces Tailscale through the real entr
       expect((await call(port, path, { ...headers, 'content-type': 'application/json' }, 'POST', '{}')).status).toBe(403)
     }
   }
-  const allowed = await call(port, '/wizard-os-home/api/route', { ...owner, origin, 'content-type': 'application/json' }, 'POST', '{}')
+  // A capture with words (the agent inbox and Sent log are on for everyone since wizard-ux issue 1778: an empty one is a 400).
+  const allowed = await call(port, '/wizard-os-home/api/route', { ...owner, origin, 'content-type': 'application/json' }, 'POST', '{"text":"Synthetic words"}')
   expect(allowed.status).toBe(404)
   expect(allowed.body).toContain('router_not_configured')
 })

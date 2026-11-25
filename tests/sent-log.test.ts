@@ -163,8 +163,8 @@ describe('Sent log over HTTP', () => {
   }
   const say = (base: string, text: string, extra = {}) => fetch(`${base}/wizard/v1/route`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ text, accept_dump: true, ...extra }) })
 
-  it('switch off: routing is exactly as before, no row, every Sent route is 404', async () => {
-    const d = home(), { base } = await start(d)
+  it('WIZARD_AGENT_INBOX=0: routing is exactly as before, no row, every Sent route is 404', async () => {
+    const d = home(), { base } = await start(d, { agentInbox: false })
     const r = await say(base, 'Note to self call mom')
     expect(r.status).toBe(200)
     const body = await r.json()

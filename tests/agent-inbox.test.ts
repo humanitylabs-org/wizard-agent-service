@@ -239,8 +239,8 @@ describe('agent inbox HTTP and switch', () => {
   }
   const json = (method: string, value: any, headers = {}) => ({ method, headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(value) })
 
-  it('switch off: every inbox route is 404 and nothing is written', async () => {
-    const d = home(), u = await start(d)
+  it('WIZARD_AGENT_INBOX=0: every inbox route is 404 and nothing is written', async () => {
+    const d = home(), u = await start(d, { agentInbox: false })
     expect((await fetch(u)).status).toBe(404)
     expect((await fetch(u, json('POST', { thread_id: 'wizard_w', title: 'x' }))).status).toBe(404)
     expect((await fetch(`${u}/inbox_000000000000000000000000`)).status).toBe(404)
@@ -270,15 +270,15 @@ describe('agent inbox HTTP and switch', () => {
     expect((await fetch(`${u}/sweep`, json('POST', {}, { 'sec-fetch-site': 'cross-site' }))).status).toBe(403)
   })
 
-  it('the owner switch in the Look file turns it on at runtime; the env/option choice wins', async () => {
+  it('on for everyone (wizard-ux issue 1778): no Look file needed, an old switch-off value is ignored, env 0 turns it off', async () => {
     const d = home(), pages = join(d, 'Pages')
-    const look = (on: boolean) => { mkdirSync(join(pages, 'wizard-look'), { recursive: true }); writeFileSync(join(pages, 'wizard-look', 'look.json'), JSON.stringify({ version: 1, tweaks: { 'wizard/agent-inbox': { on } } })) }
-    look(false)
-    const u = await start(d, { pagesRoot: pages, pagesGitDir: join(d, 'pages.git'), pagesWatch: false, agentInboxSwitchTtlMs: 0 })
-    expect((await fetch(u)).status).toBe(404)
-    look(true)
-    expect((await fetch(u)).status).toBe(200)
-    const forcedOff = await start(home(), { agentInbox: false, pagesRoot: pages, pagesGitDir: join(d, 'pages2.git'), pagesWatch: false, agentInboxSwitchTtlMs: 0 })
+    mkdirSync(join(pages, 'wizard-look'), { recursive: true })
+    writeFileSync(join(pages, 'wizard-look', 'look.json'), JSON.stringify({ version: 1, tweaks: { 'wizard/agent-inbox': { on: false } } }))
+    const plain = await start(home())
+    expect((await fetch(plain)).status).toBe(200)
+    const oldOff = await start(d, { pagesRoot: pages, pagesGitDir: join(d, 'pages.git'), pagesWatch: false })
+    expect((await fetch(oldOff)).status).toBe(200)
+    const forcedOff = await start(home(), { agentInbox: false })
     expect((await fetch(forcedOff)).status).toBe(404)
   })
 

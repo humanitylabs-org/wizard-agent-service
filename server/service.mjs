@@ -63,7 +63,7 @@ import { LOCAL_APP_ROUTES_SWITCH, createRouteTable, launcherPath as localLaunche
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { APP_WAKE_SWITCH, APP_WAKE_CONTRACT, APP_WAKE_RUN_PREFIX, createWakeLedger, parseWakeEvent, wakeTurnText } from './app-wake.mjs'
 import { APP_BATCH, APP_BATCH_MAX, CAPTURE_SOURCE, CAPTURE_SWITCH, SCAN_MS as CAPTURE_SCAN_MS, batchTurnText, captureTool, createCaptureInbox } from './capture-inbox.mjs'
-import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, START_FAILED, appDoor, recordApp } from './agent-inbox.mjs'
+import { AgentInboxStore, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, START_FAILED, appDoor, recordApp } from './agent-inbox.mjs'
 import { SentLog } from './sent-log.mjs'
 import { isSweepPhrase, isScheduledSweep, withCardRow, WAITING_CAP, DONE_CAP } from './agent-sweep.mjs'
 import { AlertRulesFile, createAlertGate, privateRouter } from './agent-alerts.mjs'
@@ -3976,11 +3976,10 @@ function buildWizardServer(options, lifetime) {
   // reads exactly as with the tweak off; its stored ledger rows are kept, just never served.
   const trackerFor = agent => trackerOn() && (agent || MAIN_AGENT_ID) === MAIN_AGENT_ID
   const trackerNote = (agent, thread) => trackerFor(agent) ? [ITEMS_INSTRUCTIONS, threadItems.runNote(agent, thread)].filter(Boolean).join('\n') : ''
-  // Agent inbox (issue 549; owner switch wizard/agent-inbox, off by default; env WIZARD_AGENT_INBOX '1'/'0' forces it).
-  // One record per background task, updated from every finished run on its thread. Switch off: nothing is written.
+  // Agent inbox (issue 549): on for everyone (wizard-ux issue 1778, the wizard/agent-inbox switch is gone); only a box's
+  // env WIZARD_AGENT_INBOX=0 turns it off. One record per background task, updated from every finished run on its thread.
   const agentInbox = new AgentInboxStore(options.agentInboxStatePath ? resolve(String(options.agentInboxStatePath)) : '', { now: options.agentInboxNow ?? Date.now })
-  const agentInboxSwitchOn = createChannelsSwitch({ id: AGENT_INBOX_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.agentInboxSwitchTtlMs ?? 3000 })
-  const agentInboxOn = () => channelPart(options.agentInbox, agentInboxSwitchOn)
+  const agentInboxOn = () => channelOn(options.agentInbox)
   // Alert rules (issue 552, same switch): fixed rules, the owner's examples, then the fast private model decide which
   // candidate events reach Alerts; everything else waits for the sweep. The rules file sits next to the inbox store.
   const alertRules = new AlertRulesFile(options.alertRulesPath ? resolve(String(options.alertRulesPath))
