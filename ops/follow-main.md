@@ -15,7 +15,9 @@ Every 5 minutes, `ops/wizard-agent-service-follow-main.py` runs these steps:
    `RELEASE_SHA` and `SERVER_TREE`. It is built beside the other releases and renamed into place only when complete.
 4. Deploy it with the box's own helper: `~/.local/bin/wizard-agent-service-deploy` if installed, otherwise the
    release's copy. The helper skips the drain while `wizard-run-keeper.service` is up, refuses rewinds and rolls
-   back a release that fails its health check.
+   back a release that fails its health check. While any heavy job is queued or running the helper refuses to
+   restart, so the pass does not call it: it writes `waiting` / `heavy-busy` (naming the oldest active job) and tries
+   again on the next pass (issue 644). The wait is no failure and tells nobody.
 5. Write `follow-main.json` beside the releases with `state`, `live`, `main`, `behind_by`, `behind_since` and `reason`.
 
 If a prepare or deploy of the same commit fails, it is retried after 30 min (`WIZARD_FOLLOW_MAIN_RETRY_S`).
@@ -28,12 +30,16 @@ The Agent Service reads that file (`WIZARD_FOLLOW_MAIN_STATUS` overrides the pat
   - the timer stopped running: the `systemctl --user enable --now ...` command that restarts it;
   - a prepare or deploy of main still fails after its 30-min retry: ask his agent to run the box's deploy helper
     and fix what it reports.
+  - the heavy queue has kept the update waiting longer than any heavy job may run (max(4 h, the job's own timeout)
+    + 1 h, `heavy-stuck`): the notice names the job holding the queue and asks his agent to cancel it if it is stuck.
 - Everything else is not the owner's and sends nothing; `follow_main.reason` and `follow_main.cause` in health still
   say why the box is behind:
   - `red-main`: a required check failed on main. The **Red main** workflow (`.github/workflows/red-main.yml`) reruns
     the failed jobs once, so a flaky test heals and the box installs the commit on its next pass. If the rerun fails
     too, it files one `bug` issue "Main is red: ..." here for the builder (later red commits comment on it).
   - `checks-pending`: main's checks are still running; `github`: GitHub could not be read.
+  - `heavy-busy`: the deploy waits for the heavy queue to go idle (`heavy_since`, `heavy_job`). An older host step
+    that filed this as a `deploy` failure ("heavy queue not idle") is read as `heavy-busy` too.
 - At most one notice per cause until the box is current again, never one per merge.
 
 With the switch off, health has no `follow_main` field, the timer pass changes nothing and no notice is sent.

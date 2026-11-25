@@ -6,12 +6,14 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from contextlib import closing
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -221,6 +223,82 @@ class FollowMainTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"WIZARD_FOLLOW_MAIN_RETRY_S": "0"}):
             out = fm.follow_once()
         self.assertEqual((out["cause"], out["failures"]), ("deploy", 1))
+
+    def heavy_job(self, state="running", age_s=3600, timeout=14400, job_id="heavy_mac644"):
+        db = self.tmp / "home/.hermes/state/wizard-mobile/heavy.sqlite3"
+        db.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(db)) as c, c:
+            c.execute("CREATE TABLE IF NOT EXISTS heavy_jobs(id TEXT PRIMARY KEY, session TEXT, origin TEXT, key TEXT, hash TEXT, data TEXT, agent_id TEXT)")
+            job = {"job_id": job_id, "state": state, "created_at": int((time.time() - age_s) * 1000),
+                   "spec": {"cwd": "/w", "argv": ["./mac-acceptance.sh", "--full"], "timeout_seconds": timeout}}
+            c.execute("INSERT OR REPLACE INTO heavy_jobs VALUES(?,?,?,?,?,?,?)", (job_id, "s", "o", job_id, "h", json.dumps(job), "hermes"))
+        return db
+
+    def test_a_busy_heavy_queue_is_a_wait_never_a_deploy_failure(self):
+        # Issue 644: the deploy helper refuses while a heavy job runs; that is a wait for nobody, retried every pass.
+        db = self.heavy_job()
+        sha = self.merge()
+        Checks.runs[sha] = green()
+        for _ in range(3):
+            out = fm.follow_once()
+            self.assertEqual((out["state"], out["cause"]), ("waiting", "heavy-busy"), out)
+            self.assertNotIn("failures", out)
+            self.assertNotIn("failed_sha", out)
+            self.assertIn("waiting for 1 heavy job to finish (heavy_mac644 (./mac-acceptance.sh --full))", out["reason"])
+            self.assertEqual(out["heavy_job"], "heavy_mac644 (./mac-acceptance.sh --full)")
+        self.assertFalse(self.deploy_log.exists())  # the helper is never asked to restart while it would refuse
+        self.assertTrue((self.root / "releases" / f"was-{sha}").is_dir())  # prepared, ready for the idle moment
+        with closing(sqlite3.connect(db)) as c, c:
+            c.execute("UPDATE heavy_jobs SET data=json_set(data, '$.state', 'succeeded')")
+        done = fm.follow_once()
+        self.assertEqual((done["state"], done["live"]), ("current", sha))
+        self.assertNotIn("cause", done)
+
+    def test_the_helpers_own_heavy_refusal_is_a_wait_too(self):
+        # A job that starts between our look and the helper's: the refusal still reads as a heavy wait.
+        sha = self.merge()
+        Checks.runs[sha] = green()
+        refuse = self.tmp / "bin/refuse-heavy"
+        refuse.write_text("#!/bin/sh\necho 'wizard-agent-service-deploy: heavy queue not idle: 1 active jobs; retry after completion' >&2\nexit 1\n")
+        refuse.chmod(0o755)
+        with mock.patch.dict(os.environ, {"WAS_DEPLOY": str(refuse), "WIZARD_FOLLOW_MAIN_RETRY_S": "0"}):
+            for _ in range(2):
+                out = fm.follow_once()
+                self.assertEqual((out["state"], out["cause"]), ("waiting", "heavy-busy"), out)
+                self.assertNotIn("failures", out)
+
+    def test_a_heavy_wait_longer_than_any_job_may_run_names_the_job(self):
+        self.heavy_job(age_s=6 * 3600)
+        sha = self.merge()
+        Checks.runs[sha] = green()
+        first = fm.follow_once()
+        self.assertEqual(first["cause"], "heavy-busy")
+        # 4 h 59 min into the wait (4 h limit + 1 h grace) it is still only a wait.
+        status = {**self.status(), "heavy_since": fm.datetime.fromtimestamp(time.time() - 4 * 3600 - 59 * 60, fm.timezone.utc).isoformat(timespec="seconds")}
+        (self.root / "follow-main.json").write_text(json.dumps(status))
+        self.assertEqual(fm.follow_once()["state"], "waiting")
+        status["heavy_since"] = fm.datetime.fromtimestamp(time.time() - 5 * 3600 - 60, fm.timezone.utc).isoformat(timespec="seconds")
+        (self.root / "follow-main.json").write_text(json.dumps(status))
+        out = fm.follow_once()
+        self.assertEqual((out["state"], out["cause"]), ("behind", "heavy-stuck"), out)
+        self.assertIn("heavy job heavy_mac644 (./mac-acceptance.sh --full) has held the heavy queue for 5 h", out["reason"])
+        self.assertEqual(out["heavy_since"], status["heavy_since"])
+        self.assertFalse(self.deploy_log.exists())
+
+    def test_a_job_with_a_longer_own_timeout_gets_its_own_limit(self):
+        self.heavy_job(timeout=10 * 3600)
+        sha = self.merge()
+        Checks.runs[sha] = green()
+        fm.follow_once()
+        status = {**self.status(), "heavy_since": fm.datetime.fromtimestamp(time.time() - 8 * 3600, fm.timezone.utc).isoformat(timespec="seconds")}
+        (self.root / "follow-main.json").write_text(json.dumps(status))
+        self.assertEqual(fm.follow_once()["cause"], "heavy-busy")  # 8 h < 10 h + 1 h
+
+    def test_finished_heavy_jobs_do_not_hold_the_deploy(self):
+        self.heavy_job(state="succeeded")
+        sha = self.merge()
+        Checks.runs[sha] = green()
+        self.assertEqual(fm.follow_once()["live"], sha)
 
     def test_unreachable_github_is_behind_not_a_crash(self):
         sha = self.merge()

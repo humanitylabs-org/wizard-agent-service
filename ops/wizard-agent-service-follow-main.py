@@ -20,6 +20,10 @@ A failed prepare or deploy of the same commit is retried after WIZARD_FOLLOW_MAI
 Every status names its `cause` (issue 638), so the Service tells the owner only what is his to act on:
 red-main (a required check failed on main: CI's "Red main" workflow reruns it once and files a bug for the
 builder), checks-pending, github (GitHub unreachable), prepare and deploy (`failures` counts tries in a row).
+
+A deploy that only waits for the heavy queue to go idle (issue 644) is `waiting` / `heavy-busy`: no failure, retried
+on the next pass, told to nobody. Only a wait longer than any active job may run (max(4 h, its own timeout) + 1 h)
+turns `behind` / `heavy-stuck`, which names the job holding the queue.
 """
 from __future__ import annotations
 
@@ -30,6 +34,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sqlite3
 import sys
 import tarfile
 import time
@@ -42,6 +47,11 @@ REPO = os.environ.get("WIZARD_FOLLOW_MAIN_REPO", "humanitylabs-org/wizard-agent-
 REPO_URL = f"https://github.com/{REPO}.git"
 REQUIRED_CHECKS = ("test", "gitleaks", "validate")
 CHECKS_WAIT_S = 3600
+# The deploy helper refuses while any heavy job is in one of these states (require_heavy_idle in the deploy helper).
+HEAVY_ACTIVE = {"queued", "running", "cancelling", "cancellation_pending", "submitting"}
+HEAVY_REFUSAL = "heavy queue not idle"
+HEAVY_LIMIT_S = 4 * 3600  # heavy jobs are expected to finish within 4 h
+HEAVY_GRACE_S = 3600
 
 
 def env_path(name: str, default: Path) -> Path:
@@ -61,6 +71,7 @@ def settings() -> dict:
         "retry_s": float(os.environ.get("WIZARD_FOLLOW_MAIN_RETRY_S", "1800")),
         "deploy": os.environ.get("WAS_DEPLOY", ""),
         "npm": os.environ.get("WIZARD_FOLLOW_MAIN_NPM", "npm"),
+        "heavy_db": env_path("WIZARD_FOLLOW_MAIN_HEAVY_DB", home / ".hermes/state/wizard-mobile/heavy.sqlite3"),
         "env": {**os.environ, "PATH": f"{home / '.local/bin'}:{os.environ.get('PATH', '')}"},
     }
 
@@ -212,6 +223,58 @@ def deploy(cfg: dict, sha: str, release: Path) -> None:
         raise RuntimeError(last_line(result.stderr) or last_line(result.stdout) or f"deploy exited {result.returncode}")
 
 
+def heavy_active(cfg: dict) -> list[dict]:
+    """The heavy jobs that make the deploy helper refuse, oldest first (empty when there is no queue)."""
+    path = cfg["heavy_db"]
+    if not path.exists():
+        return []
+    try:
+        db = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=5)
+        try:
+            rows = db.execute("SELECT id,data FROM heavy_jobs ORDER BY rowid").fetchall()
+        finally:
+            db.close()
+    except sqlite3.Error:
+        return []  # unreadable: the deploy helper decides, and its refusal is still read as a heavy wait
+    jobs = []
+    for job_id, data in rows:
+        try:
+            job = json.loads(data)
+        except ValueError:
+            continue
+        if isinstance(job, dict) and job.get("state") in HEAVY_ACTIVE:
+            jobs.append({**job, "job_id": job.get("job_id") or job_id})
+    return sorted(jobs, key=lambda j: j.get("created_at") if isinstance(j.get("created_at"), (int, float)) else 0)
+
+
+def heavy_label(job: dict) -> str:
+    """`heavy_<id> (<command>)`: the job id plus the start of its command, enough for the owner's agent to find it."""
+    argv = (job.get("spec") or {}).get("argv") if isinstance(job.get("spec"), dict) else None
+    command = " ".join(str(a) for a in argv[:4]) if isinstance(argv, list) and argv else ""
+    command = command.replace("\n", " ")[:80]
+    return f"{job.get('job_id')}" + (f" ({command})" if command else "")
+
+
+def heavy_wait(cfg: dict, prior: dict, base: dict, jobs: list[dict]) -> dict:
+    """Status while the deploy waits for the heavy queue: `waiting`, or `behind` / heavy-stuck once overdue."""
+    since = prior.get("heavy_since") if prior.get("cause") in {"heavy-busy", "heavy-stuck"} and prior.get("heavy_since") else now_iso()
+    waited = time.time() - datetime.fromisoformat(since).timestamp()
+    limits = [int((j.get("spec") or {}).get("timeout_seconds") or 0) for j in jobs if isinstance(j.get("spec"), dict)]
+    limit = max([HEAVY_LIMIT_S, *[x for x in limits if x > 0]]) + HEAVY_GRACE_S
+    count = len(jobs)
+    who = heavy_label(jobs[0]) if jobs else ""
+    if waited > limit and who:
+        hours = int(waited // 3600)
+        return write_status(cfg, {**base, "state": "behind", "cause": "heavy-stuck", "heavy_since": since, "heavy_job": who,
+                                  "reason": f"heavy job {who} has held the heavy queue for {hours} h, longer than any heavy job may run, so the update can't install"})
+    what = f"{count} heavy job{'s' if count != 1 else ''} to finish" if count else "a heavy job to finish"
+    status = {**base, "state": "waiting", "cause": "heavy-busy", "heavy_since": since,
+              "reason": f"waiting for {what}" + (f" ({who})" if who else "") + "; installs when the heavy queue is idle"}
+    if who:
+        status["heavy_job"] = who
+    return write_status(cfg, status)
+
+
 def plain(text: str) -> str:
     return text.removeprefix("wizard-agent-service-deploy: ").strip()[:300]
 
@@ -259,10 +322,15 @@ def follow_once(cfg: dict | None = None) -> dict:
     except Exception as exc:  # noqa: BLE001
         return write_status(cfg, {**base, "state": "behind", "reason": f"couldn't prepare the release: {plain(str(exc))}",
                                   **failed("prepare")})
+    jobs = heavy_active(cfg)
+    if jobs:
+        return heavy_wait(cfg, prior, base, jobs)
     write_status(cfg, {**base, "state": "deploying", "reason": "installing the release"})
     try:
         deploy(cfg, main, release)
     except Exception as exc:  # noqa: BLE001
+        if HEAVY_REFUSAL in str(exc):  # a heavy job started between our look and the helper's: still only a wait
+            return heavy_wait(cfg, prior, base, heavy_active(cfg))
         return write_status(cfg, {**base, "live": live_sha(cfg), "state": "behind",
                                   "reason": f"the deploy stopped: {plain(str(exc))}", **failed("deploy")})
     now_live = live_sha(cfg)
