@@ -62,7 +62,7 @@ const INTERFACE_MANUAL_APPS = new Set(['wizard-ux'])
 import { LOCAL_APP_ROUTES_SWITCH, createRouteTable, launcherPath as localLauncherPath, loopbackRequest, serveLocalAppRoute, upgradeLocalAppRoute } from './local-app-routes.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { APP_WAKE_SWITCH, APP_WAKE_CONTRACT, APP_WAKE_RUN_PREFIX, createWakeLedger, parseWakeEvent, wakeTurnText } from './app-wake.mjs'
-import { CAPTURE_SOURCE, CAPTURE_SWITCH, SCAN_MS as CAPTURE_SCAN_MS, batchTurnText, captureTool, createCaptureInbox } from './capture-inbox.mjs'
+import { APP_BATCH, CAPTURE_SOURCE, CAPTURE_SWITCH, SCAN_MS as CAPTURE_SCAN_MS, batchTurnText, captureTool, createCaptureInbox } from './capture-inbox.mjs'
 import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, START_FAILED, appDoor, recordApp } from './agent-inbox.mjs'
 import { SentLog } from './sent-log.mjs'
 import { isSweepPhrase, isScheduledSweep, withCardRow, WAITING_CAP, DONE_CAP } from './agent-sweep.mjs'
@@ -4112,8 +4112,11 @@ function buildWizardServer(options, lifetime) {
     const record = agentInbox.linked(MAIN_AGENT_ID, sessionId)
     // A capture batch (issue 696): the owner dropped these items in his Files Inbox.
     if (record?.capture && record.state === 'running' && captureOn()) {
-      return 'Background capture: the owner dropped the items in this message into his Files Inbox and is not watching this thread; your reply is read later, if at all. '
-        + 'File every item now with wizard_capture, by his capture rules, and finish with wizard_capture action done and a short reply. '
+      const fromApp = record.capture.source && record.capture.source !== 'files' ? record.capture.source : ''
+      return (fromApp ? `Background capture: the items in this message arrived in the owner's ${fromApp} app and he is not watching this thread; your reply is read later, if at all. `
+        + `Handle every item now with the logged tools this message names (${fromApp}'s capture tools and wizard_capture), by his capture rules, and finish with wizard_capture action done and a short reply. `
+        : 'Background capture: the owner dropped the items in this message into his Files Inbox and is not watching this thread; your reply is read later, if at all. '
+        + 'File every item now with wizard_capture, by his capture rules, and finish with wizard_capture action done and a short reply. ')
         + 'If you need the owner, end with a needs_you status whose ask is one plain question, with a recommendation and short answer options. Never delete anything.'
     }
     if (!agentInboxOn()) return ''
@@ -4299,6 +4302,7 @@ function buildWizardServer(options, lifetime) {
     return captureBox
   }
   const captureClip = (value, max) => { const text = String(value ?? '').replace(/\s+/gu, ' ').trim(); return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text }
+  const captureAppName = app => { try { return String(bridge?.apps().find(entry => entry.id === app)?.name || '') } catch { return '' } }
   // The batch's one-line outcome is what the sweep shows (title) and the record's last update.
   const captureOutcome = batchId => {
     const batch = captureInbox()?.batch(batchId)
@@ -4307,7 +4311,8 @@ function buildWizardServer(options, lifetime) {
     if (batch.undone_at) {
       const done = batch.undo_result || { back: batch.items.length, of: batch.items.length, problems: 0 }
       // Only a whole batch put back reads as undone; a partial undo says what is still out and waits on the owner.
-      if (batch.state === 'undone') return agentInbox.update(record.id, { last_update: captureClip(`Undone: ${done.back} item${done.back === 1 ? '' : 's'} back in Inbox.`, 140), title: captureClip(`Undone: ${batch.outcome || `${done.back} from Inbox`}`, 100) })
+      const where = batch.app ? `left in ${captureAppName(batch.app) || batch.app} as they were` : 'back in Inbox'
+      if (batch.state === 'undone') return agentInbox.update(record.id, { last_update: captureClip(`Undone: ${done.back} item${done.back === 1 ? '' : 's'} ${where}.`, 140), title: captureClip(`Undone: ${batch.outcome || `${done.back} from ${batch.app ? captureAppName(batch.app) || batch.app : 'Inbox'}`}`, 100) })
       return agentInbox.update(record.id, { state: 'new', kind: 'needs_you', title: captureClip(`Undo not finished: ${batch.outcome || `${done.of} from Inbox`}`, 100),
         last_update: captureClip(`Undo not finished: ${done.back} of ${done.of} back in Inbox; ${done.problems} step${done.problems === 1 ? '' : 's'} could not be put back. Open it to see which.`, 140),
         ask: captureClip(`${done.problems} step${done.problems === 1 ? '' : 's'} of this batch could not be put back`, 140) })
@@ -4318,17 +4323,18 @@ function buildWizardServer(options, lifetime) {
   const captureRetries = new Map()
   const startCaptureBatch = batch => {
     const box = captureInbox()
-    const count = batch.items.length
+    const count = batch.app ? batch.count : batch.items.length
+    const where = batch.app ? (captureAppName(batch.app) || batch.app) : 'Inbox'
     const { record, created } = agentInbox.capture({
-      agent: MAIN_AGENT_ID, thread_id: mintDailyThreadId(), source: CAPTURE_SOURCE, kind: 'note',
-      title: `${count} new in Inbox`, ask: `File ${count} new item${count === 1 ? '' : 's'} from Inbox by your capture rules`,
+      agent: MAIN_AGENT_ID, thread_id: mintDailyThreadId(), source: batch.app ? `capture:${batch.source}` : CAPTURE_SOURCE, kind: 'note',
+      title: `${count} new in ${where}`, ask: `File ${count} new item${count === 1 ? '' : 's'} from ${where} by your capture rules`,
       privacy_class: 'private', dedupe_hash: createHash('sha256').update(`${MAIN_AGENT_ID}\ncapture\n${batch.id}`).digest('hex').slice(0, 32),
     }, { fields: { worker: true, capture: { batch: batch.id, source: batch.source, count } } })
     box.link(batch.id, { record_id: record.id, thread_id: record.thread_id })
     captureRetries.set(record.id, Date.now())
     // The same batch's record written before a restart: its worker is left to its own status (or the stall rule).
     if (!created) return record
-    const started = startDumpWorker(record, batchTurnText(batch, { agentRoot: box.agentRoot, rules: box.rules() }))
+    const started = startDumpWorker(record, batchTurnText(batch, { agentRoot: box.agentRoot, rules: box.rules(), appName: captureAppName(batch.app) }))
     dumpRuns.set(record.id, started)
     started.finally(() => dumpRuns.delete(record.id)).catch(() => undefined)
     return record
@@ -4357,7 +4363,7 @@ function buildWizardServer(options, lifetime) {
       if (!retry) continue
       captureRetries.set(view.record_id, t)
       const batch = box.batch(view.batch)
-      const started = startDumpWorker(retry, batchTurnText(batch, { agentRoot: box.agentRoot, rules: box.rules() }))
+      const started = startDumpWorker(retry, batchTurnText(batch, { agentRoot: box.agentRoot, rules: box.rules(), appName: captureAppName(batch.app) }))
       dumpRuns.set(retry.id, started)
       started.finally(() => dumpRuns.delete(retry.id)).catch(() => undefined)
     }
@@ -6920,6 +6926,8 @@ function buildWizardServer(options, lifetime) {
         || (url.pathname.startsWith('/wizard/v1/agent-inbox') && agentInboxOn() && Boolean(inboxAppOf(request)))
         // An app's wake event (wizard-os issue 634) with its own app token; the route still checks the app's grants.
         || (url.pathname === '/wizard/v1/agent-events' && appWakeOn() && Boolean(inboxAppOf(request)))
+        // An app inbox's capture events (wizard-os issue 696: Photos) with its own app token; the route checks the rest.
+        || (url.pathname === '/wizard/v1/capture/events' && captureOn() && Boolean(inboxAppOf(request)))
       )
       // Passive owner media (<img>/<video>/<audio>, a download link) of a known attachment or saved file id.
       const mediaRequest = browserBoundary.enabled && passiveMediaPath(request.method, url.pathname)
@@ -7297,6 +7305,34 @@ function buildWizardServer(options, lifetime) {
       // Capture inboxes (issue 696): GET /wizard/v1/capture -> the newest batches with their log and the rules file;
       // POST /wizard/v1/capture/<batch>/undo puts a whole batch back (the owner's own "undo that", same as the agent's
       // tool). Owner only. Switch off: 404.
+      // App inboxes (Photos first): GET /wizard/v1/capture/events is the app's probe (404 while the switch is off; on:
+      // the app's own batches and which were undone, so it reverts its own part), POST {event: 'items_arrived', data:
+      // {batch, count}} hands one batch of the app's to the main agent. Only an installed app's own app token.
+      if (url.pathname === '/wizard/v1/capture/events') {
+        if (!captureOn() || !captureInbox()) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (!['GET', 'POST'].includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' }); return }
+        const app = tailnetIngress || principalOf(request).kind === 'agent' ? '' : inboxAppOf(request)
+        if (!app) { sendJson(response, 403, { error: 'app_token_required' }); return }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        const box = captureInbox()
+        if (request.method === 'GET') { sendJson(response, 200, { on: true, contract: 'wizard.capture-inbox/1', app, batches: box.appBatches(app) }, { 'Cache-Control': 'no-store' }); return }
+        if (!/^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))) { sendJson(response, 415, { error: 'json_required' }); return }
+        let input
+        try { input = JSON.parse((await readBoundedBody(request, 4096)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+        const data = input?.data
+        if (!input || typeof input !== 'object' || input.event !== 'items_arrived' || !data || typeof data !== 'object' || Array.isArray(data)) { sendJson(response, 400, { error: 'invalid_event' }); return }
+        if (data.source !== undefined && data.source !== app) { sendJson(response, 400, { error: 'invalid_source', detail: 'an app sends only its own items' }); return }
+        if (!APP_BATCH.test(String(data.batch ?? '')) || !Number.isInteger(data.count) || data.count < 1 || data.count > 500) { sendJson(response, 400, { error: 'invalid_data' }); return }
+        try {
+          const { batch, created } = box.appBatch({ app, source: app, batch: data.batch, count: data.count })
+          let record = batch.record_id ? agentInbox.get(batch.record_id) : null
+          if (!record) record = startCaptureBatch(batch)
+          sendJson(response, created ? 202 : 200, { accepted: true, created, batch: batch.id, app_batch: batch.app_batch, record_id: record?.id || null })
+        } catch (error) {
+          sendJson(response, error?.capture ? 400 : 503, { error: error?.code || 'capture_failed' })
+        }
+        return
+      }
       const captureRoute = /^\/wizard\/v1\/capture(?:\/(cap_[a-f0-9]{16})\/(undo))?$/u.exec(url.pathname)
       if (captureRoute || url.pathname.startsWith('/wizard/v1/capture/')) {
         if (!captureRoute || !captureOn() || !captureInbox()) { sendJson(response, 404, { error: 'not_found' }); return }

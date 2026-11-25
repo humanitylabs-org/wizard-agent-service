@@ -15,8 +15,12 @@
 //   batches, only into folders of the files root (never into Inbox, never a hidden or `..` segment), never over
 //   another file. Undo moves back only when the original place is free and the file is still where it was filed.
 // - The owner's rules are one plain file in Files (`Capture rules.md`), written with the default set on first use.
+// - App inboxes (Photos first): the app sends `items_arrived` with its own app token and its own batch id; the batch
+//   here holds no item list (the agent reads the items through the app's tools). Its items stay in the app: the agent
+//   only adds copies to Files (action copy) and notes, logged and undoable here; the app keeps its own log (tags,
+//   albums, processed marks) and reverts it when it reads that the batch was undone.
 
-import { appendFileSync, closeSync, existsSync, rmdirSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, constants as fsConstants, copyFileSync, existsSync, rmdirSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
 import { atomicStoreWrite } from './thread-reference.mjs'
@@ -34,6 +38,8 @@ const MAX_DEPTH = 6
 const MAX_BATCHES = 200
 const MAX_NOTE_CHARS = 20_000
 const BATCH_ID = /^cap_[a-f0-9]{16}$/u
+const APP_ITEM = /^[A-Za-z0-9._:-]{1,128}$/u
+export const APP_BATCH = /^[A-Za-z0-9._:-]{1,64}$/u
 
 export const DEFAULT_RULES = `# Capture rules
 
@@ -45,6 +51,7 @@ Your agent files whatever you drop in Inbox by these rules, one batch at a time,
 - Photos of book pages: write the highlighted passages into Reading/<book title>.md (one note per book, newest at the end), and file the photos in Reading/<book title>.
 - Screenshots: file in Pictures/Screenshots/<year>.
 - Personal photos and videos: file in Pictures/<year>/<month>.
+- Photos from my phone's camera roll (the Photos app): personal photos stay in Photos; tag them (people, places, events) and add them to an album for the event or trip. Photos of documents (book pages, receipts, whiteboards) follow the rules above with a copy in Files; the original stays in Photos, marked processed.
 - Other documents (letters, forms, contracts, manuals): file in Documents/<what it is>.
 - Not sure what something is: leave it in Inbox and ask me one question.
 - Never delete anything.
@@ -226,7 +233,12 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
   function itemOf(batch, ref) {
     const text = String(ref ?? '').trim()
     const rel = text.startsWith(agentBase) ? relative(agentBase, text).split(sep).join('/') : text.replace(/^\/+/u, '')
-    const item = batch.items.find(i => i.item === text || i.path === rel || i.name === text)
+    let item = batch.items.find(i => i.item === text || i.path === rel || i.name === text)
+    // An app batch learns its items as the agent names them (the app's own ids, e.g. a Photos asset id).
+    if (!item && batch.app && APP_ITEM.test(text) && batch.items.length < 500) {
+      item = { item: text, path: '', name: text, size: 0, kind: 'app', app_item: true }
+      batch.items.push(item)
+    }
     if (!item) refuse(`Batch ${batch.id} has no item ${clip(text, 80)}. Items: ${batch.items.map(i => `${i.item} ${i.name}`).join(', ')}.`, 'not_found')
     return item
   }
@@ -236,8 +248,8 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
     return moved ? moved.to : item.path
   }
   const stateOf = (batch, item) => {
-    const last = [...batch.log].reverse().find(e => e.item === item.item && !e.undone && (e.action === 'file' || e.action === 'keep'))
-    return last ? last.action === 'file' ? 'filed' : 'kept' : 'waiting'
+    const last = [...batch.log].reverse().find(e => e.item === item.item && !e.undone && ['file', 'keep', 'copy'].includes(e.action))
+    return last ? { file: 'filed', keep: 'kept', copy: 'copied' }[last.action] : 'waiting'
   }
   /** A real, regular file at rel inside the root (no symlink escape), or null. */
   const fileAt = rel => {
@@ -256,9 +268,72 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
     return {
       batch: batch.id, source: batch.source, at: new Date(batch.at).toISOString(), state: batch.state, outcome: batch.outcome || '',
       record_id: batch.record_id, thread_id: batch.thread_id,
-      items: batch.items.map(i => ({ item: i.item, name: i.name, kind: i.kind, size: i.size, arrived: i.path, now: agentPath(placeOf(batch, i)), state: stateOf(batch, i) })),
-      log: batch.log.map(e => ({ item: e.item, action: e.action, judged_as: e.judged_as || '', rule: e.rule || '', ...(e.to ? { to: e.to } : {}), ...(e.note_path ? { note: e.note_path } : {}), ...(e.reason ? { reason: e.reason } : {}), ...(e.undone ? { undone: true } : {}) })),
+      ...(batch.app ? { app: batch.app, app_batch: batch.app_batch, count: batch.count } : {}),
+      items: batch.items.map(i => ({ item: i.item, name: i.name, kind: i.kind, size: i.size, ...(i.app_item ? { in_app: batch.app } : { arrived: i.path, now: agentPath(placeOf(batch, i)) }), state: stateOf(batch, i) })),
+      log: batch.log.map(e => ({ item: e.item, action: e.action, judged_as: e.judged_as || '', rule: e.rule || '', ...(e.to ? { to: e.to } : {}), ...(e.action === 'copy' ? { from: e.from } : {}), ...(e.note_path ? { note: e.note_path } : {}), ...(e.reason ? { reason: e.reason } : {}), ...(e.undone ? { undone: true } : {}) })),
     }
+  }
+
+  /**
+   * An app inbox's batch (Photos first): the app's own batch id and count, no item list. The same app batch twice is
+   * the same batch (an app that resends after a lost answer), so it never runs twice.
+   */
+  function appBatch({ app, source, batch: appBatchId, count }, t = now()) {
+    const name = String(app ?? ''), key = String(appBatchId ?? '')
+    if (!APP_ITEM.test(name) || !APP_BATCH.test(key)) refuse('An app batch needs the app and its own batch id.', 'invalid')
+    const n = Math.max(1, Math.min(BATCH_MAX, Math.floor(Number(count) || 0)))
+    const was = data.batches.find(b => b.app === name && b.app_batch === key)
+    if (was) return { batch: structuredClone(was), created: false }
+    const id = `cap_${randomBytes(8).toString('hex')}`
+    const batch = { id, source: String(source || name), app: name, app_batch: key, count: n, at: t, items: [], log: [], state: 'open', outcome: '', record_id: null, thread_id: null }
+    data.batches.push(batch)
+    save()
+    log(`batch ${id}: ${n} item(s) from ${name} (${key})`)
+    return { batch: structuredClone(batch), created: true }
+  }
+
+  /** An app's own batches, newest first, with what the app needs to know (undone: revert your own part). */
+  const appBatches = app => [...data.batches].reverse().filter(b => b.app === app).slice(0, 50)
+    .map(b => ({ batch: b.id, app_batch: b.app_batch, state: b.state, ...(b.undone_at ? { undone_at: new Date(b.undone_at).toISOString() } : {}) }))
+
+  /** A regular file anywhere in the owner's Files (agent path or path relative to the root), for a copy. */
+  function sourceFile(value) {
+    const text = String(value ?? '').trim()
+    if (!text) refuse('Name the file to copy (from), e.g. the path the app gave for the item.')
+    const rel = text.startsWith(`${agentBase}/`) ? relative(agentBase, text) : text.replace(/^\/+/u, '')
+    const parts = rel.split(/[\\/]+/u).filter(Boolean)
+    if (!parts.length || parts.some(part => part === '..' || part.startsWith('.'))) refuse('That file is not inside the owner\'s Files.')
+    const clean = parts.join('/')
+    const at = fileAt(clean)
+    if (!at) refuse(`There is no file at ${agentPath(clean)}.`, 'missing')
+    return { rel: clean, ...at }
+  }
+  const digest = path => createHash('sha256').update(readFileSync(path)).digest('hex').slice(0, 32)
+
+  /**
+   * Add a copy of a file to a folder of the owner's Files; the original stays where it is (Photos originals stay in
+   * Photos). Never overwrites; one log line; undo takes the copy away again while it is unchanged.
+   */
+  function copy(batchId, ref, { from = '', folder, name = '', judged_as = '', rule = '' } = {}) {
+    const batch = pick(batchId), item = itemOf(batch, ref)
+    if (batch.state === 'undone') refuse('That batch was undone; nothing more is filed from it.')
+    const src = sourceFile(from || (item.path ? placeOf(batch, item) : ''))
+    const st = lstatSync(src.path)
+    if (st.size > 512 * 1048576) refuse('That file is too big to copy here (512 MB at most).')
+    const target = cleanFolder(folder, { agentRoot: agentBase })
+    const dir = join(base, target)
+    const real = realBase()
+    const made = missingDirs(base, dir)
+    mkdirSync(dir, { recursive: true, mode: 0o755 })
+    let dirReal
+    try { dirReal = realpathSync(dir) } catch { refuse('That folder could not be made.') }
+    if (!real || !within(real, dirReal)) refuse('That folder resolves outside the owner\'s Files.')
+    const finalName = freeName(dirReal, cleanName(name, basename(src.rel)))
+    const to = `${target}/${finalName}`
+    copyFileSync(src.path, join(dirReal, finalName), fsConstants.COPYFILE_EXCL)
+    batch.log.push({ item: item.item, action: 'copy', from: src.rel, to, made, size: st.size, sha: digest(join(dirReal, finalName)), judged_as: clip(judged_as, 80), rule: clip(rule, 200), at: now() })
+    save()
+    return { item: item.item, copied: agentPath(to), original: agentPath(src.rel), folder: target }
   }
 
   /** The owner's rules text; the default set is written into Files the first time it is needed. */
@@ -284,6 +359,7 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
   function file(batchId, ref, { folder, name = '', judged_as = '', rule = '' } = {}) {
     const batch = pick(batchId), item = itemOf(batch, ref)
     if (batch.state === 'undone') refuse('That batch was undone; nothing more is filed from it.')
+    if (item.app_item) refuse(`${item.name} stays in ${batch.app}: use action copy (from = the path ${batch.app} gave) to add a copy to Files, and ${batch.app}'s own tools to tag it or mark it processed.`)
     const target = cleanFolder(folder, { agentRoot: agentBase })
     const from = placeOf(batch, item)
     const src = fileAt(from)
@@ -361,12 +437,22 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
 
   /** Put a whole batch back: every filed item to where it arrived, every note without the added text. Newest first. */
   function undo(batchId) {
-    const batch = batchId ? pick(batchId) : newest(b => b.log.some(e => !e.undone))
+    const batch = batchId ? pick(batchId) : newest(b => b.log.some(e => !e.undone) || (b.app && b.state !== 'undone' && !b.undone_at))
     if (!batch) refuse('There is no capture batch to undo.', 'not_found')
     const restored = [], problems = []
     for (const entry of [...batch.log].reverse()) {
       if (entry.undone) continue
       if (entry.action === 'keep') { entry.undone = true; continue }
+      if (entry.action === 'copy') {
+        const at = fileAt(entry.to)
+        if (!at) { entry.undone = true; restored.push(entry.to); unmake(entry.made); continue }
+        if (at.st.size !== entry.size || digest(at.path) !== entry.sha) { problems.push(`${entry.to}: changed since, left as it is`); continue }
+        unlinkSync(at.path)
+        entry.undone = true
+        restored.push(entry.to)
+        unmake(entry.made)
+        continue
+      }
       if (entry.action === 'file') {
         const at = fileAt(entry.to)
         const name = basename(entry.from)
@@ -404,6 +490,13 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
     }
     if (!problems.length) batch.state = 'undone'
     batch.undone_at = now()
+    if (batch.app) {
+      // App items never left the app: the app reverts its own part (tags, albums, processed marks) when it reads this.
+      const of = Math.max(batch.count || 0, batch.items.length)
+      batch.undo_result = { restored: restored.length, problems: problems.length, back: problems.length ? 0 : of, of }
+      save()
+      return { batch: batch.id, restored: restored.length, problems, app: batch.app, app_batch: batch.app_batch, items_left_in_app: of, of, app_reverts: `${batch.app} takes away its own tags, albums and processed marks for this batch within a minute` }
+    }
     const back = batch.items.filter(i => placeOf(batch, i) === i.path && existsSync(join(base, i.path))).length
     batch.undo_result = { restored: restored.length, problems: problems.length, back, of: batch.items.length }
     save()
@@ -419,7 +512,7 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
   }
 
   return {
-    root: base, agentRoot: agentBase, scan, pause, makeBatch, rules, setRules, file, keep, note, finish, undo, link, view,
+    root: base, agentRoot: agentBase, scan, pause, makeBatch, appBatch, appBatches, rules, setRules, file, copy, keep, note, finish, undo, link, view,
     active: () => data.active === true,
     batch: id => { const b = BATCH_ID.test(String(id)) ? batchById(String(id)) : null; return b ? structuredClone(b) : null },
     byThread: thread => { const b = newest(x => x.thread_id === thread); return b ? structuredClone(b) : null },
@@ -440,7 +533,8 @@ function readSyncAt(fd, buffer, position) {
 }
 
 /** The worker turn for one batch: what arrived, where the agent sees it, and the owner's rules. */
-export function batchTurnText(batch, { agentRoot, rules }) {
+export function batchTurnText(batch, { agentRoot, rules, appName = '' }) {
+  if (batch.app) return appBatchTurnText(batch, { agentRoot, rules, appName })
   const size = n => n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`
   const lines = batch.items.map(i => `- ${i.item}: ${i.name} (${i.kind}, ${size(i.size)}) at ${join(agentRoot, i.path)}`)
   return [
@@ -463,12 +557,42 @@ export function batchTurnText(batch, { agentRoot, rules }) {
   ].join('\n')
 }
 
-const ACTIONS = ['list', 'listen', 'file', 'keep', 'note', 'done', 'undo', 'rules']
+/** The worker turn for an app inbox's batch (Photos first): the items stay in the app and are read with its tools. */
+function appBatchTurnText(batch, { agentRoot, rules, appName = '' }) {
+  const app = batch.app, name = appName || app, n = batch.count || 0
+  const photos = app === 'photos'
+  return [
+    `Capture batch ${batch.id}: ${n} new item${n === 1 ? '' : 's'} arrived in the owner's ${name} app (${name}'s batch ${batch.app_batch}). Handle each one by the owner's capture rules below.`,
+    '',
+    photos
+      ? `List them with the Photos tool photos_capture_batch (batch ${batch.app_batch}): every photo's asset id, when it was taken, and its original file (files_path, inside the owner's Files, which you see at ${agentRoot}). Look at each original with vision.`
+      : `List them with ${name}'s own tools for its batch ${batch.app_batch}.`,
+    '',
+    `The owner's capture rules (the file ${rules.path}):`,
+    '"""',
+    rules.text.trim(),
+    '"""',
+    '',
+    'How:',
+    ...(photos ? [
+      '1. Personal photos and videos stay in Photos: call photos_capture_file (batch, asset_id, judged_as, rule, tags for the people, places or event you see, album for the event or trip). That also marks the photo processed.',
+      `2. Photos of documents (book pages, receipts, whiteboards): add a copy to the folder the rules name with ${CAPTURE_TOOL} action copy (batch ${batch.id}, item = the asset id, from = its files_path, folder, judged_as, rule); never move the original. Text you take out of a photo (the highlighted passages of a book page) goes in with ${CAPTURE_TOOL} action note (batch ${batch.id}, item = the asset id, path like Reading/<book title>.md, text). Then call photos_capture_file for it too (judged_as, rule, and the album the rules name, if any), so the original is marked processed.`,
+    ] : [
+      `1. Add copies to the owner's Files only with ${CAPTURE_TOOL} action copy, and notes with action note (batch ${batch.id}, item = the app's id for the item); use ${name}'s own tools for everything inside ${name}.`,
+      '2. Never move or delete the originals in the app.',
+    ]),
+    '3. Use only these logged tools for these items, so the owner can undo the batch with one word. Never delete anything.',
+    '4. With no rule for an item: make your best guess only for a low-risk step (a tag, an album); otherwise leave it as it is and ask the owner one question (needs_you status with a recommendation and short options).',
+    `5. Finish with ${CAPTURE_TOOL} action done (batch ${batch.id}, outcome): one line like "3 photos from ${name}: 3 book pages of <title> to Reading/<title>.md".`,
+  ].join('\n')
+}
+
+const ACTIONS = ['list', 'listen', 'file', 'copy', 'keep', 'note', 'done', 'undo', 'rules']
 export const CAPTURE_TOOL_DEF = {
   name: CAPTURE_TOOL,
   description: '[WizardOS] Capture inbox: file what the owner drops in his Files Inbox, by his own capture rules, with a log he can undo. '
     + 'Actions: list (a batch, or the newest batches, with every item and where it is now), listen (transcribe an audio item of a batch: the owner\'s instructions for that batch), '
-    + 'file (move one item into a folder of the owner\'s Files: folder like Documents/Receipts/2026, judged_as, rule), keep (leave an item in Inbox, with reason), '
+    + 'file (move one item into a folder of the owner\'s Files: folder like Documents/Receipts/2026, judged_as, rule), copy (add a copy of a file to a folder of the owner\'s Files and leave the original where it is: from = the file, e.g. the files_path Photos gave for a photo), keep (leave an item where it is, with reason), '
     + 'note (append text such as book-page highlights to a .md note in Files), done (the batch\'s one-line outcome), '
     + 'undo (put a whole batch back exactly: every item back where it arrived, notes without the added text; newest batch when none is named; use it when the owner says "undo that" about a filing), '
     + 'rules (read the owner\'s capture rules, or replace them with text when he asks to change a rule). Never move these files any other way.',
@@ -477,7 +601,8 @@ export const CAPTURE_TOOL_DEF = {
     properties: {
       action: { type: 'string', enum: ACTIONS },
       batch: { type: 'string', description: 'The batch id (cap_…) from the batch message. Optional for list and undo (newest).' },
-      item: { type: 'string', description: 'The item (i1, i2 …), its name or its path.' },
+      item: { type: 'string', description: 'The item (i1, i2 …), its name or its path; in an app batch (Photos) the app\'s id for it (the asset id).' },
+      from: { type: 'string', description: 'copy: the file to copy, inside the owner\'s Files (e.g. the files_path Photos gave). Default: the item itself.' },
       folder: { type: 'string', description: 'file: target folder inside the owner\'s Files, e.g. Documents/Receipts/2026 (never Inbox).' },
       name: { type: 'string', description: 'file: optional new file name (the extension is kept).' },
       judged_as: { type: 'string', description: 'What you judged the item to be (receipt, article, book page, personal photo …).' },
@@ -517,6 +642,7 @@ export function captureTool({ inbox, on = () => false, mainAgent = 'hermes', lis
           return heard || bad('Transcription is not available on this Wizard right now; treat the batch without the voice note and keep the voice note in Inbox.')
         }
         if (action === 'file') return ok(box.file(args.batch, args.item, { folder: args.folder, name: args.name, judged_as: args.judged_as, rule: args.rule }))
+        if (action === 'copy') return ok(box.copy(args.batch, args.item, { from: args.from, folder: args.folder, name: args.name, judged_as: args.judged_as, rule: args.rule }))
         if (action === 'keep') return ok(box.keep(args.batch, args.item, { judged_as: args.judged_as, rule: args.rule, reason: args.reason }))
         if (action === 'note') return ok(box.note(args.batch, args.item, { path: args.path, text: args.text, judged_as: args.judged_as, rule: args.rule }))
         if (action === 'done') { const r = box.finish(args.batch, args.outcome); finished(r.batch); return ok(r) }
