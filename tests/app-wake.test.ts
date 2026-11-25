@@ -1,6 +1,6 @@
 // wizard-os issue 634 (spec/APP_WAKE.md, wizard.app-wake/1): an installed app wakes the owner's agent with a small
 // typed event through the box. The per-kind HTTP behaviour (probe, wake turn, hidden thread, merge, grants) is the
-// parity check `app-wake-events`; here: the event check, the merge/cap ledger and the switch off.
+// parity check `app-wake-events`; here: the event check, the merge/cap ledger, on by default and a box's WIZARD_APP_WAKE=0.
 import { afterEach, describe, expect, it } from 'vitest'
 import { createServer } from 'node:http'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -93,16 +93,16 @@ describe('the route', () => {
   const as = (method: string, body?: any) => ({ method, headers: { authorization: `Bearer ${MESSENGER}`, ...(body ? { 'content-type': 'application/json' } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) })
   const runs = (calls: any[]) => calls.filter(c => c.method === 'POST' && String(c.url).startsWith('/v1/runs'))
 
-  it('switch off: probe and wake answer 404 and nothing runs', async () => {
-    const { u, calls } = await start()
+  it("a box's WIZARD_APP_WAKE=0 (appWake false): probe and wake answer 404 and nothing runs", async () => {
+    const { u, calls } = await start({ appWake: false })
     expect((await fetch(u, as('GET'))).status).toBe(404)
     expect((await fetch(u, as('POST', { event: 'agent_chat', data: { reason: 'note' } }))).status).toBe(404)
     await new Promise(r => setTimeout(r, 100))
     expect(runs(calls)).toEqual([])
   })
 
-  it('switch on without any app grant to read (no apps.json): nobody may be woken', async () => {
-    const { u, calls } = await start({ appWake: true })
+  it('on for everyone with no option and no Look file; without any app grant to read (no apps.json) nobody may be woken', async () => {
+    const { u, calls } = await start()
     const probe = await fetch(u, as('GET'))
     expect(probe.status).toBe(200)
     expect(await probe.json()).toEqual({ on: true, contract: 'wizard.app-wake/1', app: 'messenger', agents: [] })

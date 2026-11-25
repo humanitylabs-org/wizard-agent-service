@@ -133,7 +133,7 @@ server = createWizardServer({
   agentInboxStatePath: process.env.WIZARD_AGENT_INBOX_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'agent-inbox.json'),
   // The agent inbox and Sent log are on for everyone (wizard-ux issue 1778); WIZARD_AGENT_INBOX=0 turns them off.
   agentInbox: envChoice(process.env.WIZARD_AGENT_INBOX),
-  // App wake events (wizard-os issue 634): unset follows the owner's wizard/app-wake switch; 1 on, 0 off.
+  // App wake events (wizard-os issue 634): on for everyone (switch removed); a box's WIZARD_APP_WAKE=0 turns it off.
   appWake: envChoice(process.env.WIZARD_APP_WAKE),
   // Capture inboxes (wizard-os issue 696): unset follows the owner's wizard/capture-inbox switch; 1 on, 0 off. The
   // batch state sits next to the agent inbox. WIZARD_CAPTURE_QUIET_MS: how long Inbox must be still before a batch.

@@ -1,5 +1,5 @@
-// App wake events (wizard-os issue 634, contract wizard.app-wake/1 in wizard-os spec/APP_WAKE.md; owner switch
-// wizard/app-wake, off by default; env WIZARD_APP_WAKE '1'/'0' forces it).
+// App wake events (wizard-os issue 634, contract wizard.app-wake/1 in wizard-os spec/APP_WAKE.md). On for everyone:
+// the owner switch wizard/app-wake is removed; only a box's env WIZARD_APP_WAKE=0 turns it off.
 //
 // An installed app wakes one of the owner's agents with a small typed event: `POST /wizard/v1/agent-events` with the
 // app's own app token (<wizard-os home>/app-tokens/<app id>, handed to the app by the App Manager). The box is the
@@ -10,7 +10,6 @@
 // This module is the pure part: the event check, the merge/cap ledger and the turn's words. service.mjs owns the
 // route, the grant check and the run admission.
 
-export const APP_WAKE_SWITCH = 'wizard/app-wake'
 export const APP_WAKE_CONTRACT = 'wizard.app-wake/1'
 export const APP_WAKE_RUN_PREFIX = 'wizard-wake-'
 export const MERGE_MS = 60_000
