@@ -694,6 +694,39 @@ export const serverChecks = {
     if (s.kind === 'main') assert.equal((await race.json()).error.code, 'saved_retry_route_changed')
     assert.equal(s.seen.filter(r => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path)).length, sends.length, 'race never dispatches a second request')
   },
+  // Issue 615: stock Hermes v0.23 fails a turn with no usable AI sign-in as status failed, no error, no runtime and
+  // only its translated no_credentials copy as output. The thread must name the sign-in (Claude, from the send's
+  // route) on the run, the full row and the compact row, not fall back to a plain Needs retry.
+  'provider-no-credentials-copy': async s => {
+    const first = await admit(s, { input: 'Synthetic owner words sent while signed out.', model: 'fixture-model', provider: 'anthropic' })
+    s.sessions.get('wizard_parity').hidden = false
+    const upstream = [...s.runs.values()].at(-1)
+    delete upstream.runtime; delete upstream.error
+    Object.assign(upstream, { status: 'failed', updated_at: Date.now() / 1000, usage: {},
+      output: "\u26a0\ufe0f Ich konnte keine Verbindung zum KI-Modelldienst herstellen, daher wurde diese Nachricht nicht verarbeitet. Verwenden Sie /login, um sich erneut anzumelden, oder /model, um ein anderes Modell zu wählen. Falls es weiterhin fehlschlägt, führen Sie `hermes doctor` auf dem Host aus." })
+    const read = await (await s.request('/v1/runs/' + first.run_id)).json()
+    assert.equal(read.status, 'failed', `${s.kind}: the run reads failed`)
+    const find = async (view) => {
+      for (let n = 0; n < 40; n++) {
+        const item = (await (await s.request('/api/sessions' + view)).json()).data.find(x => x.id === 'wizard_parity')
+        if (item?.status === 'failed' && (view ? item.runError : item.wizard_last_run_error)) return item
+        await new Promise(r => setTimeout(r, 25))
+      }
+      assert.fail(`${s.kind}: the failed run lists with a reason (${view || 'full'})`)
+    }
+    const full = await find(''), list = await find('?view=list')
+    assert.deepEqual({ code: full.wizard_last_run_error.code, provider: full.wizard_last_run_error.provider }, { code: 'provider_auth', provider: 'anthropic' }, `${s.kind}: full row reason`)
+    assert.deepEqual({ code: list.runError.code, provider: list.runError.provider }, { code: 'provider_auth', provider: 'anthropic' }, `${s.kind}: compact row reason`)
+    if (s.kind === 'main') {
+      assert.equal(full.wizard_reconnect?.app_id, 'wizard-claude', 'main: full row names the Claude app')
+      assert.equal(list.reconnect?.appId ?? list.reconnect?.app_id, 'wizard-claude', 'main: compact row names the Claude app')
+      // The open thread's detail read replaces the row's sign-in state in the shell: it must carry it too.
+      const detail = await (await s.request('/api/sessions/wizard_parity?view=detail')).json()
+      const row = detail.session || detail
+      assert.equal(row.wizard_reconnect?.app_id, 'wizard-claude', 'main: the detail read names the Claude app')
+      assert.equal(row.wizard_last_run_error?.code, 'provider_auth', 'main: the detail read names the reason')
+    }
+  },
   'claude-model-limit-saved-turn': async s => {
     const first = await admit(s, { input: 'Synthetic saved owner words for a capped Claude model.', model: 'fixture-model', provider: 'anthropic' })
     const upstream = [...s.runs.values()].at(-1)

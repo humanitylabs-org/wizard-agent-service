@@ -454,6 +454,27 @@
       "policy_exemptions": []
     },
     {
+      "id": "provider-no-credentials-copy",
+      "description": "A send that stock Hermes fails because no AI sign-in is usable (issue 615: status failed, no error, no runtime, its translated gateway.errors.no_credentials copy as output) names the sign-in on the thread: wizard_last_run_error provider_auth with the send's route on every kind, and on main the connection app that fixes it (wizard_reconnect, also on the open thread's detail read), so the shell shows its sign-in card instead of Needs retry or Not sent.",
+      "layer": "server",
+      "fixture": "provider-no-credentials-copy",
+      "how_to_test": "Fail a real HTTP admission on the anthropic route with the exact Hermes v0.23 no_credentials run shape (German copy, no error, no runtime, usage {}) on main, host-profile, container and restricted; list the thread in the full and ?view=list shapes and require runError/wizard_last_run_error provider_auth with provider anthropic, and on main wizard_reconnect naming wizard-claude on the list rows and on the open thread's ?view=detail read (the shell replaces the row's sign-in state with it). Synthetic HTTP fixture evidence; the payload shape was read from stock Hermes v0.23 with no Claude sign-in.",
+      "source_refs": [
+        "server/provider-reconnect.mjs",
+        "server/run-error.mjs",
+        "server/run-queue.mjs",
+        "server/agents-http.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/provider-no-credentials.test.ts",
+        "tests/provider-reconnect.test.ts",
+        "tests/run-error.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "policy_exemptions": []
+    },
+    {
       "id": "claude-model-limit-saved-turn",
       "description": "A send Hermes refuses before any request because a Claude model is on a usage cooldown (issue 505) fails as a saved turn that says the usage limit was reached and that Retry works after the reset or once extra usage is on and funded; it never claims an expired sign-in.",
       "layer": "server",

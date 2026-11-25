@@ -5,7 +5,7 @@
 // Classified from the provider's HTTP status (401/403 auth, 402 billing, 429 quota) and its
 // error body, with the same wording families Hermes' agent/error_classifier.py uses.
 // The field only appears on a failed run with provider evidence; ordinary failures get none.
-import { classifyProviderSignOut } from './provider-reconnect.mjs'
+import { classifyProviderSignOut, hermesNoCredentialsCopy } from './provider-reconnect.mjs'
 
 export const RUN_ERROR_CODES = Object.freeze(['provider_auth', 'provider_billing', 'provider_quota', 'network', 'unknown'])
 
@@ -26,6 +26,7 @@ const QUOTA = [
 const AUTH = [
   /\binvalid[_ ]api[_ ]key\b/i, /\brejected your (?:sign-in|API key)\b/i, /\bunauthori[sz]ed\b/i, /\bauthentication[_ ](?:error|failed)\b/i,
   /\bFailed to authenticate\b/i, /\b(?:token[_ ](?:expired|revoked)|expired_token|invalid_grant)\b/i, /\baccess denied\b/i,
+  /\bNo (?:Anthropic|usable) credentials found\b/i,
 ]
 // The connection to the provider failed before it answered (the account is fine).
 const NETWORK = [
@@ -84,6 +85,8 @@ export function classifyRunError(payload, body = null) {
   const provider = routeOf(payload, body) || signedOut?.provider || ''
   const field = (code) => ({ code, provider, message: messageOf(payload) })
   if (signedOut) return field('provider_auth')
+  // Hermes' no-credentials copy (issue 615) names no provider; the route does, when the send carried one.
+  if (hermesNoCredentialsCopy(payload)) return field('provider_auth')
   if (!text.trim()) return null
   const status = httpStatusOf(text)
   if (status === 402 || BILLING.some((re) => re.test(text))) return field('provider_billing')
