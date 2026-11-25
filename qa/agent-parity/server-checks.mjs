@@ -62,6 +62,50 @@ export const dailyScheduleToken = crypto.randomUUID() + crypto.randomUUID() // g
 export const serverChecks = {
   // wizard-ux issue 1766: a chat started in another app (Hermes source telegram) keeps that source on every Chats list
   // shape, so the shell says it lives in Telegram instead of offering a Retry Hermes always refuses.
+  // Issue 518 (switch wizard/plain-chat-titles, off by default): a title the Service dated because another chat holds
+  // it is served without the date; Hermes keeps its unique stored title, and an owner's own title keeps every word.
+  'plain-chat-titles': async s => {
+    const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/plain-chat-titles': { on, at: Date.now() } } })) }
+    const other = await s.request('/api/sessions', post({ id: 'wizard_parity_vespa', title: 'Synthetic Vespa', source: 'wizard-mobile' }))
+    assert.ok(other.ok, `${s.kind}: a second chat holds the title`)
+    const row = s.sessions.get('wizard_parity'); row.hidden = false
+    const before = row.title
+    row.messages.push({ role: 'assistant', content: `Synthetic answer\n[WIZARD_STATUS_V1] ${JSON.stringify({ state: 'done', ask: 'Synthetic outcome', title: 'Synthetic Vespa', subject: 'Parity QA' })}[/WIZARD_STATUS_V1]`, timestamp: Date.now() / 1000 })
+    const listed = async () => {
+      const r = await s.request('/api/sessions?view=list'); assert.equal(r.status, 200)
+      return (await r.json()).data.find(x => x.id === 'wizard_parity')
+    }
+    look(false)
+    await listed()
+    const dated = /^Synthetic Vespa \(\d{1,2} [A-Z][a-z]{2}\)$/u
+    if (s.kind === 'main') for (let n = 0; n < 40 && !dated.test(row.title); n++) await new Promise(resolve => setTimeout(resolve, 25))
+    else await new Promise(resolve => setTimeout(resolve, 100))
+    if (s.kind === 'main') {
+      // Main dates a clashing agent title in Hermes (clashCandidates); the switch only changes what is shown.
+      assert.match(row.title, dated, 'main: Hermes holds the dated, unique title')
+      assert.equal((await listed()).title, row.title, 'switch off: the dated title, as before')
+      look(true)
+      assert.equal((await listed()).title, 'Synthetic Vespa', 'switch on: the plain title')
+      assert.match(row.title, dated, 'switch on: Hermes still holds the unique title')
+      const detail = await (await s.request('/api/sessions/wizard_parity?view=detail')).json()
+      assert.equal((detail.session ?? detail).title, 'Synthetic Vespa', 'switch on: the thread view shows the plain title')
+      await admit(s, { input: 'Synthetic next ask' })
+      assert.ok(sent(s).instructions.includes('This thread is currently titled “Synthetic Vespa”.'), 'switch on: the agent is reminded of the plain title')
+      look(false)
+      assert.match((await listed()).title, dated, 'switch off again: the dated title comes back')
+    } else {
+      // Routed agents never date a clashing title: Hermes refuses it and the chat keeps its title, switch or not.
+      assert.equal(row.title, before, `${s.kind}: a refused clash leaves the title`)
+      const shown = (await listed()).title
+      look(true)
+      assert.equal((await listed()).title, shown, `${s.kind}: switch on changes nothing here`)
+    }
+    // An owner who types a date keeps it, on every kind.
+    look(true)
+    const rename = await s.request('/api/sessions/wizard_parity', { ...post({ title: 'Synthetic trip (14 Nov)' }), method: 'PATCH' })
+    assert.equal(rename.status, 200)
+    assert.equal((await listed()).title, 'Synthetic trip (14 Nov)', `${s.kind}: an owner's own dated title keeps its date`)
+  },
   'chat-source-list': async s => {
     const row = s.sessions.get('wizard_parity')
     Object.assign(row, { hidden: false, source: 'telegram' })
