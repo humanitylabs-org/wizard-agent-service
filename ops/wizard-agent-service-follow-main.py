@@ -232,12 +232,15 @@ def follow_once(cfg: dict | None = None) -> dict:
         return write_status(cfg, {"state": "current", "live": live, "main": main})
     since = prior.get("behind_since") if prior.get("state") != "current" and prior.get("behind_since") else now_iso()
     base = {"live": live, "main": main, "behind_by": behind_by(cfg, live, main), "behind_since": since}
-    failures = int(prior.get("failures") or 0) if prior.get("cause") in {"prepare", "deploy"} else 0
     if prior.get("failed_sha") == main and time.time() - float(prior.get("failed_at_s") or 0) < cfg["retry_s"]:
         return write_status(cfg, {**base, "state": "behind", "reason": prior.get("reason") or "the last try failed",
-                                  "cause": prior.get("cause") or "deploy", "failures": max(failures, 1),
+                                  "cause": prior.get("cause") or "deploy", "failures": max(int(prior.get("failures") or 0), 1),
                                   "failed_sha": main, "failed_at_s": prior.get("failed_at_s")})
-    failed = {"failed_sha": main, "failures": failures + 1}
+
+    def failed(cause: str) -> dict:
+        """Tries of this stage failed in a row: a prepare failure followed by a first deploy failure is 1, not 2."""
+        count = int(prior.get("failures") or 0) if prior.get("cause") == cause else 0
+        return {"cause": cause, "failed_sha": main, "failures": count + 1, "failed_at_s": time.time()}
     try:
         verdict, detail = checks(cfg, main)
     except Exception as exc:  # noqa: BLE001
@@ -255,17 +258,17 @@ def follow_once(cfg: dict | None = None) -> dict:
         release = prepare(cfg, main)
     except Exception as exc:  # noqa: BLE001
         return write_status(cfg, {**base, "state": "behind", "reason": f"couldn't prepare the release: {plain(str(exc))}",
-                                  "cause": "prepare", **failed, "failed_at_s": time.time()})
+                                  **failed("prepare")})
     write_status(cfg, {**base, "state": "deploying", "reason": "installing the release"})
     try:
         deploy(cfg, main, release)
     except Exception as exc:  # noqa: BLE001
         return write_status(cfg, {**base, "live": live_sha(cfg), "state": "behind",
-                                  "reason": f"the deploy stopped: {plain(str(exc))}", "cause": "deploy", **failed, "failed_at_s": time.time()})
+                                  "reason": f"the deploy stopped: {plain(str(exc))}", **failed("deploy")})
     now_live = live_sha(cfg)
     if now_live != main:
         return write_status(cfg, {**base, "live": now_live, "state": "behind", "reason": "the deploy finished but the box is not on main",
-                                  "cause": "deploy", **failed, "failed_at_s": time.time()})
+                                  **failed("deploy")})
     return write_status(cfg, {"state": "current", "live": now_live, "main": main, "deployed_at": now_iso()})
 
 

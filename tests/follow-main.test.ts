@@ -73,6 +73,10 @@ describe('the behind notice', () => {
     // A new cause is a new notice; catching up sends nothing and makes the next episode news again.
     writeStatus(p, { state: 'behind', behind_by: 1, behind_since: at(T0), checked_at: at(now), cause: 'prepare', failures: 2, reason: "couldn't prepare the release: npm failed" })
     await fm.tick(); expect(n.sent).toHaveLength(2)
+    // Back to the deploy failure in the same episode: already told.
+    writeStatus(p, { state: 'behind', behind_by: 1, behind_since: at(T0), checked_at: at(now), cause: 'deploy', failures: 2, reason: 'the deploy stopped: x' })
+    expect(await fm.tick()).toBeNull(); expect(n.sent).toHaveLength(2)
+    expect(await createFollowMain({ statusPath: p, on: () => true, notifier: n, now: () => now, log: () => undefined }).tick()).toBeNull()
     writeStatus(p, { state: 'current', live: B, checked_at: at(now) })
     expect(await fm.tick()).toBeNull(); expect(n.sent).toHaveLength(2)
     writeStatus(p, { state: 'behind', behind_by: 1, behind_since: at(T0), checked_at: at(now), cause: 'prepare', failures: 2, reason: "couldn't prepare the release: npm failed" })

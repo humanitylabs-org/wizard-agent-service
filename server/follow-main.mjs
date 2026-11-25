@@ -75,18 +75,22 @@ export function behindMessage(status) {
 export function createFollowMain({ statusPath, on, notifier = null, now = Date.now, noticeMs = FOLLOW_MAIN_NOTICE_MS, staleMs = FOLLOW_MAIN_STALE_MS, busyStaleMs = FOLLOW_MAIN_BUSY_STALE_MS, log = console.error } = {}) {
   const enabled = () => { try { return Boolean(statusPath) && on?.() === true } catch { return false } }
   const sentPath = statusPath ? join(dirname(statusPath), 'follow-main-notified.json') : ''
+  // The causes the owner already heard about in this behind episode (cleared once the box is current again).
   let sent = null
-  const sentKey = () => {
+  const sentKeys = () => {
     if (sent !== null) return sent
-    try { sent = String(JSON.parse(readFileSync(sentPath, 'utf8')).key || '') } catch { sent = '' }
+    try {
+      const data = JSON.parse(readFileSync(sentPath, 'utf8'))
+      sent = new Set((Array.isArray(data.keys) ? data.keys : []).map(String))
+    } catch { sent = new Set() }
     return sent
   }
-  const remember = key => {
-    sent = key
+  const remember = keys => {
+    sent = keys
     try {
       mkdirSync(dirname(sentPath), { recursive: true })
       const tmp = `${sentPath}.${process.pid}.tmp`
-      writeFileSync(tmp, JSON.stringify({ key, at: new Date(now()).toISOString() }) + '\n')
+      writeFileSync(tmp, JSON.stringify({ keys: [...keys], at: new Date(now()).toISOString() }) + '\n')
       renameSync(tmp, sentPath)
     } catch { /* kept in memory; at worst one repeat after a restart */ }
   }
@@ -112,17 +116,17 @@ export function createFollowMain({ statusPath, on, notifier = null, now = Date.n
       if (!enabled()) return null
       const s = status()
       if (s.state === 'current') {
-        if (sentKey()) remember('') // caught up: the next episode of the same cause is news again
+        if (sentKeys().size) remember(new Set()) // caught up: the next episode of the same cause is news again
         return null
       }
       const behindAt = Date.parse(s.behind_since ?? '')
       const late = s.state === 'stale' || (Number.isFinite(behindAt) && now() - behindAt >= noticeMs)
       const key = ownerCause(s)
       if (!late || !key) return null
-      if (sentKey() === key || !notifier?.available?.('main')) return null
+      if (sentKeys().has(key) || !notifier?.available?.('main')) return null
       try {
         await notifier.send({ agent: 'main', title: 'Wizard is behind', message: behindMessage(s) })
-        remember(key)
+        remember(new Set([...sentKeys(), key]))
         log('[follow-main] owner told the box is behind main')
         return key
       } catch {

@@ -216,6 +216,11 @@ class FollowMainTest(unittest.TestCase):
         self.assertEqual((out["cause"], out["failures"]), ("prepare", 1))
         self.assertEqual([p.name for p in (self.root / "releases").iterdir()], [f"was-{self.v1}"])
         self.assertFalse(self.deploy_log.exists())
+        # The retry prepares fine and its first deploy fails: a first failure of a new stage, not "failed again".
+        (self.tmp / "refuse").write_text("")
+        with mock.patch.dict(os.environ, {"WIZARD_FOLLOW_MAIN_RETRY_S": "0"}):
+            out = fm.follow_once()
+        self.assertEqual((out["cause"], out["failures"]), ("deploy", 1))
 
     def test_unreachable_github_is_behind_not_a_crash(self):
         sha = self.merge()
