@@ -62,11 +62,12 @@ const INTERFACE_MANUAL_APPS = new Set(['wizard-ux'])
 import { LOCAL_APP_ROUTES_SWITCH, createRouteTable, launcherPath as localLauncherPath, loopbackRequest, serveLocalAppRoute, upgradeLocalAppRoute } from './local-app-routes.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { APP_WAKE_SWITCH, APP_WAKE_CONTRACT, APP_WAKE_RUN_PREFIX, createWakeLedger, parseWakeEvent, wakeTurnText } from './app-wake.mjs'
-import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, appDoor, recordApp } from './agent-inbox.mjs'
+import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, START_FAILED, appDoor, recordApp } from './agent-inbox.mjs'
+import { SentLog } from './sent-log.mjs'
 import { isSweepPhrase, isScheduledSweep, withCardRow, WAITING_CAP, DONE_CAP } from './agent-sweep.mjs'
 import { AlertRulesFile, createAlertGate, privateRouter } from './agent-alerts.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
-import { routeUtterance } from './voice-router.mjs'
+import { replyRules, routeUtterance } from './voice-router.mjs'
 import { createFollowMain, FOLLOW_MAIN_SWITCH } from './follow-main.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER, NEEDS_YOU_REASON_SWITCH } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX, resolveHelperAttempt, MAX_HELPER_ATTEMPTS } from './delegation-follow-through.mjs'
@@ -4023,7 +4024,7 @@ function buildWizardServer(options, lifetime) {
       return ''
     }
   }
-  const captureDump = (text, cmd) => {
+  const captureDump = (text, cmd, { urgent = false, tags = [] } = {}) => {
     const words = String(text ?? '').replace(/\s+/gu, ' ').trim().slice(0, 4000)
     const day = new Date().toISOString().slice(0, 10)
     const { record, created } = agentInbox.capture({
@@ -4031,7 +4032,8 @@ function buildWizardServer(options, lifetime) {
       deadline: cmd.deadline || null, privacy_class: 'private',
       // The same words said twice the same day are one task (a double capture); the same chore next week is a new one.
       dedupe_hash: createHash('sha256').update(`${MAIN_AGENT_ID}\norb\n${day}\n${words.toLowerCase()}`).digest('hex').slice(0, 32),
-    }, { fields: { worker: true } })
+      // Issue 607: "urgent" / "priority" puts it at the top of Inbox; tags said in the take ride on the record too.
+    }, { fields: { worker: true, ...(urgent ? { urgent: true } : {}), ...(tags.length ? { tags } : {}) } })
     // Said again after its worker could not start: the same record starts again (same idempotency key).
     const retry = created ? null : agentInbox.retryStart(record.id)
     if (created || retry) {
@@ -4099,10 +4101,111 @@ function buildWizardServer(options, lifetime) {
     return `Background task: the owner handed you this ${app ? `as a note in the ${app} app` : 'by voice'} and is not watching this thread; your reply is read later, if at all. `
       + 'Do the whole task now without stopping to ask unless you must. End with a short reply: what you did and the result. '
       + 'If you need the owner, end with a needs_you status whose ask is one plain question, with a recommendation and short answer options.'
+      // Issue 607: quiet never means acting alone.
+      + ' Never send, book, buy, publish or delete anything on your own: prepare it, then stop with a needs_you status with "confirm": true whose ask names exactly what you would do.'
       + (record.deadline ? ` Deadline: ${record.deadline}.` : '')
   }
   // Signal sweep (issue 550, same switch): one capped card at the bottom of today's Daily thread of the main agent.
   const inboxError = (status, code) => Object.assign(new Error(code), { status, code })
+  // Sent log (issue 607, same switch): one row per capture the owner sends, written before the router runs. It sits
+  // next to the inbox store. A row's state is read live from its inbox record or its thread's queue rows.
+  const sentLog = new SentLog(options.sentLogPath ? resolve(String(options.sentLogPath))
+    : options.agentInboxStatePath ? join(dirname(resolve(String(options.agentInboxStatePath))), 'sent-log.json') : '', { now: options.agentInboxNow ?? Date.now })
+  const sentState = row => {
+    if (!row?.route) return 'routing'
+    if (row.record_id) {
+      const record = agentInbox.get(row.record_id)
+      if (!record) return row.final_state || 'unknown'
+      if (record.failed === true || record.state === 'stale' || (record.kind === 'needs_you' && record.last_update === START_FAILED)) return 'failed'
+      if (record.state === 'running') return 'running'
+      if (record.kind === 'needs_you' && ['new', 'surfaced', 'parked'].includes(record.state)) return 'needs_you'
+      return 'done'
+    }
+    if (row.thread_id) {
+      let turns = []
+      try { turns = inboxQueue(row.agent)?.queuedForSession('direct', row.thread_id) || [] } catch { turns = [] }
+      if (!turns.length) return row.final_state || (row.route === 'command' ? 'done' : 'unknown')
+      if (turns.some(turn => turn.terminalAt == null)) return 'running'
+      return turns.at(-1).status === 'completed' ? 'done' : 'failed'
+    }
+    return row.route === 'command' ? 'done' : row.final_state || 'unknown'
+  }
+  const sentView = row => {
+    const out = {
+      id: row.id, idempotency_key: row.idempotency_key ?? null, at: row.at, source: row.source, text: row.text, route: row.route,
+      decided_by: row.decided_by, rules_matched: row.rules_matched || [], model: row.model || '', tags: row.tags || [], urgent: row.urgent === true,
+      correction_id: row.correction_id ?? null, thread_id: row.thread_id ?? null, record_id: row.record_id ?? null, state: sentState(row),
+    }
+    if (row.confidence != null) out.confidence = row.confidence
+    if (row.source === 'typed') Object.assign(out, { would_route: row.would_route ?? null, would_decided_by: row.would_decided_by ?? null, would_rules: row.would_rules || [] })
+    if (row.corrected) out.corrected = row.corrected
+    if (row.flag) out.flag = row.flag
+    if (row.error) out.error = row.error
+    return out
+  }
+  // Where a routed take went, in the Sent log's words.
+  const sentRouteOf = routed => routed?.cmd?.route === 'dump' ? (routed.why?.reminder ? 'reminder' : 'dump') : routed?.cmd?.route === 'command' ? 'command' : 'agent'
+  // A typed first message opened its visible thread as always; what would the router have done with it? The owner's
+  // words and an earlier correction decide first; the model is asked only when it is a private router (his typed words
+  // never go to any other model), within 15 s, in the background.
+  const classifyTyped = async row => {
+    const { settings } = readSettings(settingsPath)
+    let fast = null
+    try { fast = resolveFastRouter(settings, router) } catch { fast = null }
+    const usable = fast && privateRouter(fast) ? fast : null
+    const words = replyRules(row.text)
+    let fields
+    try {
+      const routed = await routeUtterance({ input: { text: row.text }, settings, router: usable, fetchImpl, dump: true,
+        correction: agentInbox.correctionFor(row.text), examples: usable ? agentInbox.routeExamples(8) : [], timeoutMs: 15_000 })
+      fields = { would_route: sentRouteOf(routed), would_decided_by: routed.why.decided_by, would_rules: routed.why.rules }
+    } catch (error) {
+      // No private router (or it failed): the owner's words alone, else nothing to say.
+      const why = error?.status === 404 ? (fast ? 'no_private_router' : 'router_not_configured') : 'router_error'
+      fields = words.intent
+        ? { would_route: words.intent === 'dump' ? (words.reminder ? 'reminder' : 'dump') : 'agent', would_decided_by: 'owner_words', would_rules: [...words.rules, why] }
+        : { would_route: null, would_decided_by: 'fallback', would_rules: [...words.rules, why] }
+    }
+    sentLog.update(row.id, fields)
+  }
+  // A new thread's first owner turn on the main agent: the orb row it came from (same words, minutes ago) gets its
+  // thread, else it is a typed (or untouched voice) row of its own. Never blocks or changes the send.
+  const sentTurn = (sessionId, bodyText, runKey, voice) => {
+    if (!agentInboxOn()) return
+    try {
+      let input
+      try { input = JSON.parse(bodyText)?.input } catch { return }
+      const text = visibleInputText(input).trim()
+      if (!text || (typeof input === 'string' && MACHINE_INPUT.test(text))) return
+      if (sentLog.linkTurn({ agent: MAIN_AGENT_ID, thread: sessionId, text, run_key: runKey })) return
+      const row = sentLog.typed({ agent: MAIN_AGENT_ID, thread: sessionId, text, run_key: runKey, source: voice ? 'new_chat' : 'typed' })
+      if (!row) return
+      const words = replyRules(text)
+      if (words.tags.length || words.urgent) sentLog.update(row.id, { tags: words.tags, urgent: words.urgent })
+      if (row.source === 'typed') void lifetime.track(classifyTyped(row).catch(error => console.warn(`[sent-log] typed message not classified: ${error?.message || error}`)))
+    } catch (error) { console.warn(`[sent-log] sent row not written: ${error?.message || error}`) }
+  }
+  // The owner's "Should have replied" / "Didn't need a reply" on a Sent row: the existing Open / Send to inbox move
+  // (one route example, its id on the row). A typed row that already has its visible thread only teaches the router.
+  const correctSent = async (id, shouldReply) => {
+    const row = sentLog.get(id)
+    if (!row) throw inboxError(404, 'not_found')
+    if (!row.route) throw inboxError(409, 'still_routing')
+    const background = row.route === 'dump' || row.route === 'reminder'
+    let moved = null
+    if (shouldReply && background) {
+      const thread = (row.record_id && agentInbox.get(row.record_id)?.thread_id) || row.thread_id
+      if (!thread) throw inboxError(409, 'no_thread')
+      moved = await moveInboxThread('open', { thread_id: thread, utterance: row.text })
+    } else if (!shouldReply && !background) {
+      if (!row.thread_id) throw inboxError(409, 'no_thread')
+      moved = await moveInboxThread('send', { thread_id: row.thread_id, utterance: row.text })
+    } else if (shouldReply && row.source === 'typed' && (row.would_route === 'dump' || row.would_route === 'reminder')) {
+      moved = { record: null, example: agentInbox.addRouteExample({ utterance: row.text, chosen: 'dump', wanted: 'agent' }) }
+    } else return { row: sentView(row), changed: false }
+    const updated = sentLog.update(row.id, { correction_id: moved.example?.id || row.correction_id || null, corrected: { should_reply: shouldReply, at: Date.now() } })
+    return { row: sentView(updated), changed: true, ...(moved.record ? { record: moved.record } : {}) }
+  }
   const runSweep = async () => {
     if (!agentInboxOn()) throw inboxError(404, 'not_found')
     const channel = channelDailyOn() ? channelStoreNow()?.dailyChannel(MAIN_AGENT_ID) : null
@@ -6301,7 +6404,7 @@ function buildWizardServer(options, lifetime) {
     notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
     agentId: agent => (agent === 'main' ? MAIN_AGENT_ID : agent),
     channels: () => channelAgentFilingOn(),
-    nightly: now => { if (agentInboxOn()) agentInbox.nightly(now, inboxWorkerRuns(now)) },
+    nightly: now => { if (agentInboxOn()) { agentInbox.nightly(now, inboxWorkerRuns(now)); sentLog.nightly(now, sentState) } },
     daily: { on: () => channelDailyOn(), thread: dailyScheduleThread, isDaily: (agent, channel) => !!channel && channelDailyOn() && channelStoreNow().dailyChannel(agent === 'main' ? MAIN_AGENT_ID : agent)?.id === channel },
     lookup: lookupBackgroundOccurrence,
     // The queue's own record of a scheduled run, read when the run lookup fails (issue 564): a finished run must
@@ -7027,6 +7130,39 @@ function buildWizardServer(options, lifetime) {
         } catch (error) {
           const status = Number(error?.status) || 500
           sendJson(response, status, { error: error?.code || 'wake_failed' }, status === 429 ? { 'Retry-After': '60' } : {})
+        }
+        return
+      }
+      // Sent log (issue 607): GET /wizard/v1/sent[?limit=&before=<row id>] lists every capture newest first (owner
+      // only), GET /wizard/v1/sent/<id> reads one row, POST /wizard/v1/sent/<id>/correct {should_reply} applies the
+      // owner's correction (Open / Send to inbox). Switch off: 404.
+      const sentRoute = /^\/wizard\/v1\/sent(?:\/([^/]+))?(?:\/(correct))?$/u.exec(url.pathname)
+      if (sentRoute) {
+        if (!agentInboxOn()) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        const one = sentRoute[1] ? decodeURIComponent(sentRoute[1]) : ''
+        const correct = sentRoute[2] === 'correct'
+        const methods = correct ? ['POST'] : ['GET']
+        if (!methods.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: methods.join(', ') }); return }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        try {
+          if (correct) {
+            let input
+            try { input = JSON.parse((await readBoundedBody(request, 4096)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+            if (typeof input?.should_reply !== 'boolean') { sendJson(response, 400, { error: 'invalid_request', detail: 'should_reply must be true or false' }); return }
+            sendJson(response, 200, await correctSent(one, input.should_reply), { 'Cache-Control': 'no-store' })
+          } else if (one) {
+            const row = sentLog.get(one)
+            if (!row) { sendJson(response, 404, { error: 'not_found' }); return }
+            sendJson(response, 200, { row: sentView(row) }, { 'Cache-Control': 'no-store' })
+          } else {
+            const page = sentLog.list({ limit: url.searchParams.get('limit') || 50, before: url.searchParams.get('before') || '' })
+            sendJson(response, 200, { rows: page.rows.map(sentView), next: page.next, check: sentLog.lastCheck() }, { 'Cache-Control': 'no-store' })
+          }
+        } catch (error) {
+          const status = [400, 404, 409].includes(error?.status) ? error.status : 503
+          sendJson(response, status, { error: error?.code || (status === 503 ? 'sent_unavailable' : 'invalid_request') })
         }
         return
       }
@@ -7791,7 +7927,10 @@ function buildWizardServer(options, lifetime) {
       if ((url.pathname === '/wizard/v1/route' || (uxApi && url.pathname === `${uxPrefix}api/route`)) && request.method === 'POST') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         const fast = resolveFastRouter(readSettings(settingsPath).settings, router)
-        if (!fast) { sendJson(response, 404, { error: 'router_not_configured' }); return }
+        // Sent log (issue 607): with the agent inbox switch on, every owner capture gets its row first, also when no
+        // router is configured. Switch off: exactly today's route.
+        const sentOn = agentInboxOn() && ownerLike(principalOf(request)) && !skinOriginRefused(request)
+        if (!fast && !sentOn) { sendJson(response, 404, { error: 'router_not_configured' }); return }
         let input
         try { input = JSON.parse((await readBoundedBody(request, 8192)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
         const { settings } = readSettings(settingsPath)
@@ -7799,18 +7938,43 @@ function buildWizardServer(options, lifetime) {
         // request may start a background task. Anything else routes exactly as before.
         const dump = input?.accept_dump === true && agentInboxOn() && ownerLike(principalOf(request)) && !skinOriginRefused(request)
           && /^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))
+        const said = typeof input?.text === 'string' ? input.text.replace(/\s+/gu, ' ').trim() : ''
+        let sent = null
+        if (sentOn && said) {
+          try {
+            sent = sentLog.open({ text: said, source: typeof input.source === 'string' ? input.source : 'orb', agent: MAIN_AGENT_ID,
+              idempotency_key: typeof input.idempotency_key === 'string' ? input.idempotency_key : String(request.headers['idempotency-key'] || ''),
+              thread_id: typeof input.thread_id === 'string' ? input.thread_id : '' }).row
+          } catch (error) { console.warn(`[sent-log] sent row not written: ${error?.message || error}`) }
+        }
+        const sentFinish = fields => { if (sent) { try { sentLog.finish(sent.id, fields) } catch (error) { console.warn(`[sent-log] sent row not updated: ${error?.message || error}`) } } }
+        const sentId = sent ? { sent_id: sent.id } : {}
+        // Router missing, failing or slow: the take opens a visible thread (the shell's fallback), and its row says so.
+        const fallback = (reason, words = said ? replyRules(said) : null) => sentFinish({ route: 'agent', decided_by: 'fallback', rules: [...(words?.rules || []), reason], tags: words?.tags, urgent: words?.urgent, model: fast?.model || '', error: reason })
         try {
           // The owner's own Open / Send to inbox taps (wizard-ux issue 1570) are few-shot examples, and they are his
           // private words: only a private router (checked by endpoint host) ever sees them.
-          const examples = dump && privateRouter(fast) ? agentInbox.routeExamples(8) : []
-          const routed = await routeUtterance({ input, settings, router: fast, fetchImpl, dump, examples })
+          const examples = dump && fast && privateRouter(fast) ? agentInbox.routeExamples(8) : []
+          // Issue 607: an earlier correction of exactly these words routes them the way the owner wanted.
+          const correction = dump ? agentInbox.correctionFor(said) : null
+          // A background task must be decided before the shell gives up waiting (it opens a visible thread at 6 s).
+          const routed = await routeUtterance({ input, settings, router: fast, fetchImpl, dump, examples, correction, ...(dump ? { timeoutMs: 5_000 } : {}) })
           if (routed.cmd?.route === 'dump') {
-            try { routed.cmd = { ...routed.cmd, ...captureDump(input.text, routed.cmd) } }
-            catch (error) { console.warn(`[agent-inbox] dump capture failed: ${error?.message || error}`); routed.cmd = { route: 'agent', summary: routed.cmd.summary } }
+            try { routed.cmd = { ...routed.cmd, ...captureDump(input.text, routed.cmd, { urgent: routed.why?.urgent === true, tags: routed.why?.tags || [] }) } }
+            catch (error) {
+              console.warn(`[agent-inbox] dump capture failed: ${error?.message || error}`)
+              routed.cmd = { route: 'agent', summary: routed.cmd.summary }
+              routed.why = { ...routed.why, decided_by: 'fallback', rules: [...(routed.why?.rules || []), 'capture_failed'] }
+            }
           }
-          sendJson(response, 200, routed)
+          const { why, ...answer } = routed
+          sentFinish({ route: sentRouteOf(routed), decided_by: why?.decided_by, rules: why?.rules, model: answer.model, confidence: why?.confidence,
+            tags: why?.tags, urgent: why?.urgent, correction_id: why?.correction_id, record_id: answer.cmd?.record_id, thread_id: answer.cmd?.thread_id })
+          sendJson(response, 200, { ...answer, ...sentId })
         } catch (error) {
-          sendJson(response, error?.status === 400 ? 400 : 502, { error: error?.status === 400 ? 'invalid_request' : 'router_unavailable' })
+          if (error?.status === 404) { fallback('router_not_configured'); sendJson(response, 404, { error: 'router_not_configured', ...sentId }); return }
+          if (error?.status !== 400) fallback(error?.name === 'AbortError' ? 'router_timeout' : 'router_error')
+          sendJson(response, error?.status === 400 ? 400 : 502, { error: error?.status === 400 ? 'invalid_request' : 'router_unavailable', ...sentId })
         }
         return
       }
@@ -8600,6 +8764,11 @@ function buildWizardServer(options, lifetime) {
             return
           }
           heavyWork?.supersede(queuedAdmission.sessionId)
+          // Issue 607: the owner's first turn in a new thread (no queue rows, no Hermes title yet) is a Sent row.
+          let firstOwnerTurn = false
+          if (queuedAdmission.runtime === 'direct' && principal.kind === 'owner' && !queuedAdmission.continuation && agentInboxOn()) {
+            try { firstOwnerTurn = runQueue.queuedForSession('direct', queuedAdmission.sessionId).length === 0 && !readSessionTitle(titleDbPath(), queuedAdmission.sessionId)?.title } catch { firstOwnerTurn = false }
+          }
           if (queuedAdmission.runtime === 'direct' && !quietWatcherAdmission && !queuedAdmission.continuation) noteProvisionalTitle(queuedAdmission.sessionId, body.toString('utf8'))
           // A "signal sweep" turn: the card is posted first (the queue may dispatch at once), then its run note says so.
           const sweepAsked = queuedAdmission.runtime === 'direct' ? noteSweepRequest(queuedAdmission.sessionId, body, principal, request) : null
@@ -8607,6 +8776,7 @@ function buildWizardServer(options, lifetime) {
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
           if (sweepAsked && admitted.replayed) sweepNotes.delete(queuedAdmission.sessionId)
           if (queuedAdmission.runtime === 'direct' && principal.kind === 'owner' && !queuedAdmission.continuation) inboxOwnerTurn(MAIN_AGENT_ID, queuedAdmission.sessionId)
+          if (firstOwnerTurn && !admitted.replayed) sentTurn(queuedAdmission.sessionId, body.toString('utf8'), queuedAdmission.idempotencyKey, audioPaths.length > 0)
           // A durable queue receipt is not proof that Hermes has materialized this session.
           if (await agents?.catalogContains(MAIN_AGENT_ID, queuedAdmission.sessionId) === true) agents.pin(queuedAdmission.sessionId, MAIN_AGENT_ID, 'runtime_verified')
           if (!quietWatcherAdmission) threadDispositionStore.clearSession(queuedAdmission.runtime, queuedAdmission.sessionId)

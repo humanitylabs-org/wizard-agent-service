@@ -57,6 +57,8 @@ const envelope = text => [...String(text).matchAll(/<helm_attachments>([\s\S]*?)
 
 // Issue 527: the Daily channel's fake clock (the scene's dailyNow and schedulerNow read it).
 export const dailyClock = { at: null }
+// The Sent log check's clock (issue 607): the agent inbox store reads it, so a task can be 6 h old at once.
+export const sentClock = { at: null }
 // Issue 532: the synthetic loopback capability of the main agent's schedule tool in the Daily scene.
 export const dailyScheduleToken = crypto.randomUUID() + crypto.randomUUID() // generated per run, never a fixed value
 export const serverChecks = {
@@ -1080,6 +1082,142 @@ export const serverChecks = {
       await settle(async () => [200, 202].includes((await s.request(`/v1/runs/${encodeURIComponent(publicRun)}/steer`, post({ input: 'Make it 8 pm' }))).status), 'the owner can steer the hidden worker')
       await settle(() => s.sessions.get(second.thread_id)?.hidden === false, 'the owner steering the worker shows its thread again')
     } finally { await new Promise(r => fake.close(r)) }
+  },
+  // Issue 607: the Sent log. Every capture the owner sends to /wizard/v1/route gets a row written before the router
+  // runs; a router that throws, says unsure or is missing still leaves a row (decided_by fallback, a visible thread);
+  // the owner's no-reply words dump a task without the model; "draft a reply to Sam" is a task; a stalled task shows
+  // failed. On main a new thread's first typed message is a typed row with would_route, an orb row links to the
+  // visible thread it opened, and /correct is Open / Send to inbox. On every other kind the orb's main agent is not in
+  // the scene: dumps cannot start (the row shows failed) and that kind's own turns never make main Sent rows.
+  'sent-log': async s => {
+    const { createServer } = await import('node:http')
+    let reply = { route: 'agent', summary: 'x' }
+    const fake = createServer((req, res) => { req.resume(); req.on('end', () => {
+      if (reply === 'throw') { res.statusCode = 500; res.end('{}'); return }
+      res.setHeader('Content-Type', 'application/json'); res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify(reply) } }] }))
+    }) })
+    await new Promise(r => fake.listen(0, '127.0.0.1', r))
+    try {
+      const settingsPath = join(s.root, 'os', 'settings.json')
+      const current = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {}
+      mkdirSync(dirname(settingsPath), { recursive: true })
+      const withRouter = () => writeFileSync(settingsPath, JSON.stringify({ ...current, fast_router: { endpoint: `http://127.0.0.1:${fake.address().port}/v1/chat/completions`, model: 'fixture-router' } }))
+      withRouter()
+      const say = (text, extra = {}) => s.raw('/wizard/v1/route', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, timezone: 'UTC', accept_dump: true, ...extra }) })
+      const rows = async () => (await (await s.raw('/wizard/v1/sent')).json()).rows
+      const row = async id => (await (await s.raw(`/wizard/v1/sent/${id}`)).json()).row
+      const settle = async (ok, label) => {
+        for (let n = 0; n < 120; n++) { const got = await ok(); if (got) return got; await new Promise(r => setTimeout(r, 25)) }
+        assert.fail(label)
+      }
+      const json = body => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      assert.deepEqual(await rows(), [], `${s.kind}: nothing sent yet`)
+      // A router that throws: the row was written first, it says fallback, and the shell opens its visible thread.
+      reply = 'throw'
+      let r = await say('Book a dentist appointment for next week')
+      assert.equal(r.status, 502, 'the router error answers as before')
+      const thrown = (await r.json()).sent_id
+      assert.match(thrown, /^sent_[a-f0-9]{24}$/u, 'the answer names the row')
+      assert.deepEqual(Object.fromEntries(Object.entries(await row(thrown)).filter(([k]) => ['route', 'decided_by', 'source', 'text'].includes(k))),
+        { route: 'agent', decided_by: 'fallback', source: 'orb', text: 'Book a dentist appointment for next week' }, `${s.kind}: a router crash leaves a fallback row`)
+      assert.ok((await row(thrown)).rules_matched.includes('router_error'))
+      // "Note to self ..." is a background task from the owner's words alone, whatever the model would say.
+      reply = { route: 'agent', summary: 'call mom' }
+      const note = (await (await say('Note to self call mom')).json())
+      assert.equal(note.cmd.route, 'dump', 'note to self never opens a visible thread')
+      let got = await row(note.sent_id)
+      assert.deepEqual([got.route, got.decided_by, got.rules_matched[0], got.record_id], ['dump', 'owner_words', 'no_reply:note to self', note.cmd.record_id])
+      // "Draft a reply to Sam" is a task, never a reply rule, even when the model says agent.
+      const draft = (await (await say('Draft a reply to Sam')).json())
+      assert.equal(draft.cmd.route, 'dump', 'draft a reply to Sam routes as a task')
+      assert.deepEqual((await row(draft.sent_id)).rules_matched, ['task_verb'])
+      // Unclear: the model's unsure opens a visible thread.
+      reply = { route: 'unsure', confidence: 0.4 }
+      const unsure = (await (await say('Sam and the garden thing')).json())
+      assert.equal(unsure.cmd.route, 'agent', 'unsure opens a visible thread')
+      got = await row(unsure.sent_id)
+      assert.deepEqual([got.route, got.decided_by, got.confidence, got.rules_matched], ['agent', 'fallback', 0.4, ['unsure']])
+      // Urgent and tags: on the row, and the task sits at the top of Inbox.
+      reply = { route: 'dump', title: 'Car insurance' }
+      const urgent = (await (await say('Urgent: sort out the car insurance #car')).json())
+      got = await row(urgent.sent_id)
+      assert.deepEqual([got.route, got.urgent, got.tags], ['dump', true, ['car']])
+      const inbox = (await (await s.raw('/wizard/v1/agent-inbox')).json()).records
+      assert.equal(inbox[0].id, urgent.cmd.record_id, 'an urgent task is first in Inbox')
+      // No router configured: a fallback row (the 404 the shell already handles), and no-reply words still dump.
+      writeFileSync(settingsPath, JSON.stringify(current))
+      r = await say('Plan the weekend')
+      assert.equal(r.status, 404)
+      const none = (await r.json()).sent_id
+      assert.deepEqual([(await row(none)).decided_by, (await row(none)).rules_matched], ['fallback', ['task_verb', 'router_not_configured']])
+      const milk = await say('Note to self buy milk')
+      assert.equal(milk.status, 200, 'the owner\'s no-reply words need no router')
+      assert.equal((await milk.json()).cmd.route, 'dump')
+      withRouter()
+      const list = await rows()
+      assert.equal(list.length, 7, `${s.kind}: one row per capture`)
+      assert.ok(list.every((x, n) => n === 0 || list[n - 1].at >= x.at), 'newest first')
+      const page = await (await s.raw(`/wizard/v1/sent?limit=2&before=${list[1].id}`)).json()
+      assert.deepEqual(page.rows.map(x => x.id), [list[2].id, list[3].id], 'paged with before')
+      if (s.kind !== 'main') {
+        // The main agent is not in this scene: the dump's worker cannot start, so its row shows failed.
+        await settle(async () => (await row(note.sent_id)).state === 'failed', `${s.kind}: a dump that cannot start shows failed`)
+        const typed = await s.request('/v1/runs', post({ session_id: `wizard_sent_${s.kind}`, input: 'Typed hello to this agent' }))
+        assert.ok([200, 202].includes(typed.status))
+        await new Promise(r => setTimeout(r, 100))
+        assert.equal((await rows()).length, 7, `${s.kind}: this agent's own turns are not main Sent rows`)
+        return
+      }
+      assert.equal((await row(note.sent_id)).state, 'running', 'the hidden worker runs')
+      // The worker would send something: it stops at needs-you (confirm), never done.
+      const draftRecord = (await row(draft.sent_id)).record_id
+      const draftThread = (await (await s.raw(`/wizard/v1/agent-inbox/${draftRecord}`)).json()).record.thread_id
+      const run = await settle(() => [...s.runs.values()].find(x => x.session_id === draftThread), 'the draft worker runs')
+      Object.assign(run, { status: 'completed', updated_at: Date.now() / 1000, output: `Drafted.\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'done', ask: 'Reply to Sam is drafted. Reply send to send it', confirm: true })}[/WIZARD_STATUS_V1]` })
+      assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
+      await settle(async () => (await row(draft.sent_id)).state === 'needs_you', 'a task that would send waits at needs you')
+      // An orb take routed to a visible thread links to the thread the shell opens with the same words.
+      reply = { route: 'agent', summary: 'budget' }
+      const walk = (await (await say('Walk me through the budget')).json())
+      assert.equal(walk.cmd.route, 'agent')
+      assert.deepEqual([(await row(walk.sent_id)).decided_by, (await row(walk.sent_id)).rules_matched], ['owner_words', ['wants_reply:walk me through']])
+      assert.equal((await s.request('/v1/runs', post({ session_id: 'wizard_sent_orb', input: 'Walk me through the budget' }))).status, 202)
+      await settle(async () => (await row(walk.sent_id)).thread_id === 'wizard_sent_orb', 'the orb row links to its visible thread')
+      // A typed first message is a typed row: visible thread, classified silently.
+      reply = { route: 'dump', title: 'New phone', confidence: 0.8 }
+      // (the shell makes a new chat's session, untitled, before its first turn)
+      assert.ok([200, 201].includes((await s.request('/api/sessions', post({ id: 'wizard_sent_typed', source: 'wizard-mobile' }))).status))
+      assert.equal((await s.request('/v1/runs', post({ session_id: 'wizard_sent_typed', input: 'Research a new phone for me' }))).status, 202)
+      const typed = await settle(async () => (await rows()).find(x => x.thread_id === 'wizard_sent_typed' && x.would_route), 'the typed row is classified')
+      assert.deepEqual([typed.source, typed.route, typed.would_route, typed.would_decided_by], ['typed', 'agent', 'dump', 'owner_words'])
+      assert.equal((await rows()).filter(x => x.thread_id === 'wizard_sent_orb').length, 1, 'the orb take is one row, not a typed one too')
+      // A second turn in the same thread is no new row.
+      assert.equal((await s.request('/v1/runs', post({ session_id: 'wizard_sent_typed', input: 'And a case' }))).status, 202)
+      await new Promise(r => setTimeout(r, 100))
+      assert.equal((await rows()).filter(x => x.thread_id === 'wizard_sent_typed').length, 1, 'later turns are not captures')
+      // Corrections: "Should have replied" on the note opens its hidden thread; "Didn't need a reply" sends the typed
+      // thread to the background. Each is one route example, whose id is on the row.
+      const opened = await (await s.raw(`/wizard/v1/sent/${note.sent_id}/correct`, json({ should_reply: true }))).json()
+      assert.equal(opened.changed, true)
+      assert.match(opened.row.correction_id, /^ex_[a-f0-9]{16}$/u)
+      assert.equal(s.sessions.get(note.cmd.thread_id)?.hidden, false, 'should have replied shows the thread')
+      const sent = await (await s.raw(`/wizard/v1/sent/${typed.id}/correct`, json({ should_reply: false }))).json()
+      assert.equal(sent.changed, true, JSON.stringify(sent))
+      assert.equal(s.sessions.get('wizard_sent_typed')?.hidden, true, 'didn\'t need a reply moves it to the background')
+      // The same words again follow the owner's correction.
+      const again = (await (await say('Note to self call mom')).json())
+      assert.equal(again.cmd.route, 'dump', 'the owner\'s own words still beat his earlier correction')
+      reply = { route: 'agent', summary: 'x' }
+      const corrected = (await (await say('Research a new phone for me')).json())
+      assert.equal(corrected.cmd.route, 'dump', 'an earlier correction of these words routes them his way')
+      assert.equal((await row(corrected.sent_id)).decided_by, 'correction')
+      // A task with no news for 6 h fails and waits in Inbox.
+      sentClock.at = Date.now() + 6 * 3600_000 + 1000
+      const stalled = await row(urgent.sent_id)
+      assert.equal(stalled.state, 'failed', 'a task stuck past 6 h shows failed')
+      const record = (await (await s.raw(`/wizard/v1/agent-inbox/${urgent.cmd.record_id}`)).json()).record
+      assert.deepEqual([record.state, record.kind, record.failed], ['new', 'needs_you', true], 'and lands in Inbox')
+    } finally { sentClock.at = null; await new Promise(r => fake.close(r)) }
   },
   // Wizard-ux issue 1570: Open (a hidden worker thread moves into the chat list) and Send to inbox (a visible thread
   // moves into the background), each tap one route example for the orb router. Main agent only: a routed thread is
