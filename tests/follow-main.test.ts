@@ -106,6 +106,32 @@ describe('the behind notice', () => {
     }
     expect(n.sent).toEqual([])
   })
+  it('a deploy only waiting for the heavy queue tells nobody, for any number of passes or hours (issue 644)', async () => {
+    const d = home(), p = join(d, 'follow-main.json'), n = notifier(); let now = T0
+    const fm = createFollowMain({ statusPath: p, on: () => true, notifier: n, now: () => now, log: () => undefined })
+    for (let i = 0; i < 5; i++) {
+      now = T0 + (31 + i * 60) * 60_000
+      writeStatus(p, { state: 'waiting', behind_by: 1, behind_since: at(T0), heavy_since: at(T0), heavy_job: 'heavy_x (./mac.sh)', checked_at: at(now), cause: 'heavy-busy', reason: 'waiting for 1 heavy job to finish (heavy_x (./mac.sh)); installs when the heavy queue is idle' })
+      expect(fm.health()).toMatchObject({ state: 'waiting', cause: 'heavy-busy', heavy_since: at(T0), heavy_job: 'heavy_x (./mac.sh)' })
+      expect(await fm.tick()).toBeNull()
+      // What an older host step wrote for the same wait: a deploy failure with the helper's heavy refusal.
+      writeStatus(p, { state: 'behind', behind_by: 1, behind_since: at(T0), checked_at: at(now), cause: 'deploy', failures: i + 2, reason: 'the deploy stopped: heavy queue not idle: 1 active jobs; retry after completion' })
+      expect(fm.health()).toMatchObject({ state: 'behind', cause: 'heavy-busy' })
+      expect(fm.health()).not.toHaveProperty('failures')
+      expect(await fm.tick()).toBeNull()
+    }
+    expect(n.sent).toEqual([])
+  })
+  it('a heavy wait past every job limit tells the owner once, naming the job, not the deploy command', async () => {
+    const d = home(), p = join(d, 'follow-main.json'), n = notifier(), now = T0 + 5 * 3600_000 + 60_000
+    writeStatus(p, { state: 'behind', behind_by: 1, behind_since: at(T0), heavy_since: at(T0), heavy_job: 'heavy_x (./mac.sh)', checked_at: at(now), cause: 'heavy-stuck', reason: 'heavy job heavy_x (./mac.sh) has held the heavy queue for 5 h, longer than any heavy job may run, so the update can\'t install' })
+    const fm = createFollowMain({ statusPath: p, on: () => true, notifier: n, now: () => now, log: () => undefined })
+    expect(await fm.tick()).toBe('heavy-stuck')
+    expect(await fm.tick()).toBeNull()
+    expect(n.sent).toHaveLength(1)
+    expect(n.sent[0].message).toBe("Updates can't install on this Wizard: heavy job heavy_x (./mac.sh) has held the heavy queue since 2026-11-24 10:00 UTC, longer than any heavy job may run. Ask your agent to check that job and cancel it if it is stuck; the update then installs by itself.")
+    expect(n.sent[0].message).not.toMatch(/wizard-agent-service-deploy/)
+  })
   it('waits 30 min: a merge still in its checks is no news', async () => {
     const d = home(), p = join(d, 'follow-main.json'), n = notifier(), now = T0 + 10 * 60_000
     writeStatus(p, { state: 'waiting', behind_since: at(T0), checked_at: at(now), reason: "waiting for main's checks (test)" })

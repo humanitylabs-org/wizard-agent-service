@@ -6,6 +6,8 @@
 // retry. A red check on main, checks still running or GitHub unreachable is CI's and the builder's (the "Red main"
 // workflow reruns it once, then files a bug), so it shows in health and tells nobody. One notice per cause until
 // the box catches up, never one per merge. With the switch off, health carries no field and nothing is sent.
+// A deploy that only waits for the heavy queue (issue 644) is `heavy-busy`: shown in health, sent to nobody. Only a
+// wait longer than any heavy job may run is `heavy-stuck`, and that notice names the job holding the queue.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
@@ -17,9 +19,11 @@ export const FOLLOW_MAIN_NOTICE_MS = 30 * 60_000
 export const FOLLOW_MAIN_STALE_MS = 30 * 60_000
 export const FOLLOW_MAIN_BUSY_STALE_MS = 75 * 60_000
 const STATES = new Set(['current', 'waiting', 'preparing', 'deploying', 'behind', 'unknown'])
-const CAUSES = new Set(['red-main', 'checks-pending', 'github', 'prepare', 'deploy'])
+const CAUSES = new Set(['red-main', 'checks-pending', 'github', 'prepare', 'deploy', 'heavy-busy', 'heavy-stuck'])
 // The owner hears only about these, and only once the try has failed again after its 30-min retry.
 const OWNER_CAUSES = new Set(['prepare', 'deploy'])
+// The deploy helper's refusal while a heavy job runs: a wait, never a failure (an older host step filed it as deploy).
+const HEAVY_REFUSAL = /heavy queue not idle/
 export const FOLLOW_MAIN_OWNER_FAILURES = 2
 const SHA = /^[0-9a-f]{40}$/
 const text = (v, max = 300) => typeof v === 'string' ? v.replace(/[\x00-\x1f]/g, ' ').slice(0, max) : undefined
@@ -33,11 +37,13 @@ export function readFollowMainStatus(path) {
   const out = { state: data.state }
   for (const key of ['live', 'main']) if (SHA.test(data[key] ?? '')) out[key] = data[key]
   if (Number.isSafeInteger(data.behind_by) && data.behind_by >= 0) out.behind_by = data.behind_by
-  for (const key of ['behind_since', 'checked_at', 'deployed_at']) if (iso(data[key])) out[key] = data[key]
+  for (const key of ['behind_since', 'checked_at', 'deployed_at', 'heavy_since']) if (iso(data[key])) out[key] = data[key]
   if (text(data.reason)) out.reason = text(data.reason)
-  const cause = CAUSES.has(data.cause) ? data.cause : causeOf(out)
+  if (text(data.heavy_job, 120)) out.heavy_job = text(data.heavy_job, 120)
+  let cause = CAUSES.has(data.cause) ? data.cause : causeOf(out)
+  if (cause === 'deploy' && HEAVY_REFUSAL.test(out.reason ?? '')) cause = 'heavy-busy'
   if (cause) out.cause = cause
-  if (Number.isSafeInteger(data.failures) && data.failures > 0) out.failures = data.failures
+  if (cause !== 'heavy-busy' && Number.isSafeInteger(data.failures) && data.failures > 0) out.failures = data.failures
   return out
 }
 
@@ -55,6 +61,7 @@ function causeOf({ state, reason = '' }) {
 /** The owner-notice key for this status, or '' when nothing in it is the owner's to act on. */
 export function ownerCause(status) {
   if (status.state === 'stale') return 'stale'
+  if (status.state === 'behind' && status.cause === 'heavy-stuck') return 'heavy-stuck'
   if (status.state !== 'behind' || !OWNER_CAUSES.has(status.cause)) return ''
   return (status.failures ?? 0) >= FOLLOW_MAIN_OWNER_FAILURES ? status.cause : ''
 }
@@ -64,6 +71,12 @@ export function behindMessage(status) {
   if (status.state === 'stale') {
     return `This Wizard has stopped following main: ${status.reason}. Merged changes won't go live until it runs again. ` +
       'To restart it, run: systemctl --user enable --now wizard-agent-service-follow-main.timer'
+  }
+  if (status.cause === 'heavy-stuck') {
+    const job = status.heavy_job ? `heavy job ${status.heavy_job}` : 'a heavy job'
+    const since = status.heavy_since ? ` since ${status.heavy_since.slice(0, 16).replace('T', ' ')} UTC` : ''
+    return `Updates can't install on this Wizard: ${job} has held the heavy queue${since}, longer than any heavy job may run. ` +
+      'Ask your agent to check that job and cancel it if it is stuck; the update then installs by itself.'
   }
   const count = status.behind_by ? `${status.behind_by} merged change${status.behind_by === 1 ? '' : 's'}` : 'The newest merged changes'
   const since = status.behind_since ? ` since ${status.behind_since.slice(0, 16).replace('T', ' ')} UTC` : ''
