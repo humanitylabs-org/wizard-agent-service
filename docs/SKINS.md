@@ -18,7 +18,10 @@ All `/wizard/v1/skins` endpoints require the existing owner principal and access
 | Method | Suffix under `/wizard/v1/skins` | Body / result |
 | --- | --- | --- |
 | GET | (none) | `{active, skins}` |
-| POST | (none) | `{name, css?}` → `{id}` (unique new folder, no overwrite) |
+| POST | (none) | `{name, css?, base?, tweaks?, activate?}` → `{id}` (unique new folder, no overwrite; base defaults to nebula; `activate: true` wears it) |
+| PATCH | `/<encoded-id>` | `{name?, base?, tweaks?}` → updated listing; tweak keys merge into the stored map; the folder, CSS and scripts stay |
+| DELETE | `/<encoded-id>` | `{}` → `{trash, list}`; moves the whole folder to the hidden `Skins/.trash/<trash>/` and clears `active` if it was worn |
+| POST | `/restore` | `{trash}` → `{id, list}`; Undo: puts the folder back (409 `skin_exists` if the name is taken), does not wear it |
 | PUT | `/active` | `{id: string|null}` → updated listing |
 | GET | `/store?refresh=1&authors=<hex,hex>` | Verified Store; normal cache TTL 300 seconds |
 | GET | `/store/blob/<sha256>` | Verified local bytes; advertised MIME, immutable private cache |
@@ -26,6 +29,8 @@ All `/wizard/v1/skins` endpoints require the existing owner principal and access
 | POST | `/store/report` | `{a, reason}` → `{ok:true}`; kind 1984 signed by box upload key |
 | POST | `/<encoded-id>/pack` | `{slug?, summary?, preview_webp_b64?}` → `{unsigned, slug}` |
 | POST | `/<encoded-id>/publish` | `{event}` → `{event_id, a, relays}` |
+
+Each folder's `skin.json` holds the recipe Settings › Look saves: `base` (`/^[a-z0-9-]{1,32}$/`) and `tweaks` (up to 64 ids matching `/^[a-z0-9-]+\/[a-z0-9-]+$/` mapped to booleans). Lists include `tweaks` and `has_recipe`, so the shell hides only the empty legacy `My skin` bootstrap. Removed skins wait in `Skins/.trash` (a dot folder: never a skin id, hidden by Files) and are deleted for good after seven days. Skin folders are group-writable (0775, like Files' own folders) so the owner can also delete or rename one in the Files app; folders made 0755 by older versions are opened once at Service start.
 
 Pack uploads sanitized CSS, optional bounded WebP, and optional composition JSON. It stores an exact pending template. Publish rejects any changed template, bad signature, stale local CSS or tampered/missing remote blob before broadcasting. Remote availability is checked with HEAD plus a fresh hash-verified GET. Successful publication persists the event privately and the specified `published` metadata in `skin.json`; the next pack derives its version and original `published_at` from the prior event. A moved folder with publication metadata can retrieve the prior event from relays; an unavailable prior event is an explicit refusal rather than a guessed version. Per-folder pack/publish calls are mutually exclusive within one service process.
 

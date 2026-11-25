@@ -229,6 +229,13 @@ export function createMySkin({ root = '', path = '' } = {}) {
     write,
     reset() { write(MY_SKIN_TEMPLATE) },
     /** Best effort at start: an owner opening Files finds the (empty, commented) file to edit. */
-    ensure() { try { if (!selected()) return true; if (!readRaw().exists) write(MY_SKIN_TEMPLATE); return true } catch { return false } },
+    // A worn skin whose folder is gone was deleted by the owner (in Files): never bring it back.
+    ensure() {
+      try {
+        const file = selected(); if (!file) return true
+        if (active() && file !== legacy) { try { lstatSync(dirname(file)) } catch { return true } }
+        if (!readRaw().exists) write(MY_SKIN_TEMPLATE); return true
+      } catch { return false }
+    },
   }
 }
