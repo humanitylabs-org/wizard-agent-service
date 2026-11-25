@@ -132,6 +132,8 @@ server = createWizardServer({
   // Agent inbox (issue 549): next to the Thread tracker ledger, in the agent's private data and the normal backup.
   agentInboxStatePath: process.env.WIZARD_AGENT_INBOX_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'agent-inbox.json'),
   agentInbox: envChoice(process.env.WIZARD_AGENT_INBOX),
+  // App wake events (wizard-os issue 634): unset follows the owner's wizard/app-wake switch; 1 on, 0 off.
+  appWake: envChoice(process.env.WIZARD_APP_WAKE),
   // Replies into messaging-app chats (issue 427, owner switch wizard/messaging-chat-replies; '1'/'0' forces it).
   messagingReplies: envChoice(process.env.WIZARD_MESSAGING_REPLIES),
   // Capability registry (issue 463): unset follows the owner's wizard/capability-registry switch; 1 on, 0 off.
