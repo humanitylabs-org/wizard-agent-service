@@ -15,6 +15,12 @@ export const FOLLOW_THROUGH_DISPLAY_KIND = 'async_delegation_complete'
 const HUMAN_SESSION_SOURCES = new Set(['webui', 'telegram', 'discord', 'slack', 'whatsapp', 'signal', 'wizard-mobile'])
 const HUMAN_ID_PREFIXES = ['wizard_', 'wizard-assistant-', 'wizardop_user_']
 const SESSION_PAGE = 200
+// A parent ended at one of these is a conversation boundary: the child after a /new (/reset, daily or
+// idle reset) or a /branch is its own conversation, as stock Hermes lists it (hermes_state_common.py
+// _RESET_END_REASONS + 'branched'). Any other child (a sub-agent run) stays out of Chats.
+const BOUNDARY_END_REASONS = new Set(['session_reset', 'session_switch', 'idle', 'daily', 'suspended', 'resume_pending_expired', 'branched'])
+const PARENT_LOOKUPS = 50
+const PARENT_RECHECK_MS = 60_000
 const MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 
 const enc = encodeURIComponent
@@ -200,35 +206,67 @@ function isHumanSession(session) {
 }
 
 /**
- * Wizard-visible sessions from GET /api/sessions: top-level, not hidden, not delegate children,
- * with messages, active in the last 30 days, human sources or Wizard ids. A compression chain is
- * listed under its root id with its live tip's fields (title, activity, count), the same identity
- * Wizard threads already use. Archived threads come from `archived()` (Hermes lists only live ones).
+ * Wizard-visible sessions from GET /api/sessions: top-level or their own conversation (the one after
+ * a /new or a /branch), not hidden, not delegate children, with messages, active in the last 30 days,
+ * human sources or Wizard ids. A compression chain is listed under its root id with its live tip's
+ * fields (title, activity, count), the same identity Wizard threads already use. Archived threads
+ * come from `archived()` (Hermes lists only live ones). `parents` caches parent end reasons between
+ * calls (a parent not on the page is read once with GET /api/sessions/<id>).
  */
-/** @param {{ limit?: number, archived?: () => Array<Record<string, any>>, now?: number }} [options] */
-export async function readCanonicalSessionsHttp(request, { limit = 2_000, archived = () => [], now = Date.now() } = {}) {
+/** @param {{ limit?: number, archived?: () => Array<Record<string, any>>, now?: number, parents?: Map<string, { boundary: boolean, at: number }> }} [options] */
+export async function readCanonicalSessionsHttp(request, { limit = 2_000, archived = () => [], now = Date.now(), parents = new Map() } = {}) {
   const cutoff = now / 1000 - MAX_AGE_SECONDS
   const out = []
   const known = new Set()
+  const endReasons = new Map()
+  const children = []
+  let lookups = 0
+  const ownConversation = async (session) => {
+    const parent = String(session.parent_session_id)
+    if (endReasons.has(parent)) return BOUNDARY_END_REASONS.has(endReasons.get(parent))
+    const cached = parents.get(parent)
+    if (cached && (cached.boundary || now - cached.at < PARENT_RECHECK_MS)) return cached.boundary
+    if (lookups >= PARENT_LOOKUPS) return false
+    lookups += 1
+    let row = null
+    try { row = (await request(`/api/sessions/${enc(parent)}`))?.session ?? null } catch { row = null }
+    const boundary = BOUNDARY_END_REASONS.has(String(row?.end_reason ?? ''))
+    parents.set(parent, { boundary, at: now })
+    if (parents.size > 5_000) parents.delete(parents.keys().next().value)
+    return boundary
+  }
   for (let offset = 0; out.length < limit; offset += SESSION_PAGE) {
     const page = listOf(await request(`/api/sessions?limit=${SESSION_PAGE}&offset=${offset}`))
     let older = false
     for (const session of page) {
+      if (session?.id != null) endReasons.set(String(session.id), String(session.end_reason ?? ''))
+    }
+    for (const session of page) {
       const lastActive = Number(session?.last_active ?? session?.started_at ?? 0)
       if (lastActive < cutoff) { older = true; continue }
-      if (session?.hidden || session?.is_internal_child || session?.parent_session_id || !(Number(session?.message_count) > 0) || !isHumanSession(session)) continue
+      if (session?.hidden || session?.is_internal_child || !(Number(session?.message_count) > 0) || !isHumanSession(session)) continue
+      if (session.parent_session_id) { children.push(session); continue }
       const id = String(session._lineage_root_id ?? session.id)
       if (known.has(id)) continue
       known.add(id)
       const { _lineage_root_id: _root, _lineage_ids: _ids, ...rest } = session
       out.push({ ...rest, id, last_active: lastActive, pinned: Boolean(session.pinned), archived: Boolean(session.archived), hidden: false })
-      if (out.length >= limit) break
     }
-    if (page.length < SESSION_PAGE || older) break
+    for (const session of children.splice(0)) {
+      if (!(await ownConversation(session))) continue
+      const id = String(session._lineage_root_id ?? session.id)
+      if (known.has(id)) continue
+      known.add(id)
+      const { _lineage_root_id: _root, _lineage_ids: _ids, ...rest } = session
+      out.push({ ...rest, id, last_active: Number(session.last_active ?? session.started_at ?? 0), pinned: Boolean(session.pinned), archived: Boolean(session.archived), hidden: false })
+    }
+    if (out.length >= limit || page.length < SESSION_PAGE || older) break
   }
+  const byActivity = (a, b) => Number(b.last_active ?? b.started_at ?? 0) - Number(a.last_active ?? a.started_at ?? 0)
+  if (out.length > limit) out.sort(byActivity).length = limit
   for (const session of archived()) {
     if (out.length >= limit) break
     if (!known.has(session.id) && Number(session.last_active ?? session.started_at ?? 0) >= cutoff) { known.add(session.id); out.push(session) }
   }
-  return out.sort((a, b) => Number(b.last_active ?? b.started_at ?? 0) - Number(a.last_active ?? a.started_at ?? 0))
+  return out.sort(byActivity)
 }
