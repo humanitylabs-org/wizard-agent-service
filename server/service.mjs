@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url'
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 import { contentDisposition } from './content-disposition.mjs'
 import { createDevices, devicesTool } from './devices.mjs'
-import { transcribeTool } from './transcribe.mjs'
+import { TRANSCRIBE_TOOL, transcribeTool } from './transcribe.mjs'
 import { collapseSpeechRepeats } from './speech-repeats.mjs'
 import { projectOpenAskSession, backgroundHelperStatus, threadBackground, liveWorker, ENDED_WITH_ERROR, replyEpoch } from './open-ask.mjs'
 import { searchHermesSessionTextAsync } from './session-text-search-worker.mjs'
@@ -62,6 +62,7 @@ const INTERFACE_MANUAL_APPS = new Set(['wizard-ux'])
 import { LOCAL_APP_ROUTES_SWITCH, createRouteTable, launcherPath as localLauncherPath, loopbackRequest, serveLocalAppRoute, upgradeLocalAppRoute } from './local-app-routes.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { APP_WAKE_SWITCH, APP_WAKE_CONTRACT, APP_WAKE_RUN_PREFIX, createWakeLedger, parseWakeEvent, wakeTurnText } from './app-wake.mjs'
+import { CAPTURE_SOURCE, CAPTURE_SWITCH, SCAN_MS as CAPTURE_SCAN_MS, batchTurnText, captureTool, createCaptureInbox } from './capture-inbox.mjs'
 import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, START_FAILED, appDoor, recordApp } from './agent-inbox.mjs'
 import { SentLog } from './sent-log.mjs'
 import { isSweepPhrase, isScheduledSweep, withCardRow, WAITING_CAP, DONE_CAP } from './agent-sweep.mjs'
@@ -3181,7 +3182,12 @@ function buildWizardServer(options, lifetime) {
   // wizard_transcribe on the gateway (server/transcribe.mjs): the box's Wizard Voice Service on loopback, for the
   // agent's own audio files. Bound with the agent registry (it resolves each agent's home).
   let transcribeTools = null
-  const builtinTools = (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(reachOut?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId), ...(transcribeTools?.list(agentId) || [])]
+  // wizard_capture (server/capture-inbox.mjs, wizard-os issue 696): the main agent files what the owner drops in his
+  // Files Inbox, with a log he can undo. Listed only while the owner's wizard/capture-inbox switch is on.
+  let captureTools = null
+  // The same Voice Service, reading the owner's Files root instead of the agent's home: a voice note in a batch.
+  let captureListen = null
+  const builtinTools = (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(reachOut?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId), ...(transcribeTools?.list(agentId) || []), ...(captureTools?.list(agentId) || [])]
   // System capability registry (issue 463, capabilities.mjs): the owner's `wizard/capability-registry` switch in the
   // Look file; option capabilityRegistry (env WIZARD_CAPABILITY_REGISTRY, '1' on / '0' off) wins. Off = no
   // wizard_capabilities tool, the old kernel line and no run note: nothing changes.
@@ -3204,7 +3210,7 @@ function buildWizardServer(options, lifetime) {
     ? createAgentBridge({
       builtins: {
         list: (agentId) => [...builtinTools(agentId), ...capabilities.list(agentId)],
-        call: async (name, args, agentId) => (await capabilities.call(name, args, agentId)) ?? (await transcribeTools?.call(name, args, agentId)) ?? (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await reachOut?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
+        call: async (name, args, agentId) => (await capabilities.call(name, args, agentId)) ?? (await transcribeTools?.call(name, args, agentId)) ?? (await captureTools?.call(name, args, agentId)) ?? (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await reachOut?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
       },
       capabilities: (agentId) => capabilities.jobs(agentId),
       appSkillOn: (appId) => (INTERFACE_MANUAL_APPS.has(appId) ? interfaceManualOn() : true),
@@ -3326,6 +3332,7 @@ function buildWizardServer(options, lifetime) {
     transcribeTools = transcribeTool({ homeOf: id => agents.stateHome(id), allowed: id => agents.read(id)?.privacy !== 'private', sttOrigin, fetchImpl, modelInfo: () => sttModelInfo(), readingOf: speechText, enabled: () => options.sttConfigured !== false, log: line => process.stdout.write(`[transcribe] ${line}\n`) })
     bridge.appsChanged()
   }
+  if (bridge && (options.userFilesRoot || options.mediaRoot)) captureListen = transcribeTool({ homeOf: () => String(options.userFilesRoot || options.mediaRoot), sttOrigin, fetchImpl, modelInfo: () => sttModelInfo(), readingOf: speechText, enabled: () => options.sttConfigured !== false, log: line => process.stdout.write(`[capture] ${line}\n`) })
   // Switch WIZARD_MAIN_PROVIDER_ATTACH (issue 428): a provider sign-in joins the box's pool only; the main agent
   // uses just the providers the owner attached to it (the onboarding choice is attached first).
   // Private first (issue 545) turns the protection on too, without the env setting.
@@ -3990,15 +3997,19 @@ function buildWizardServer(options, lifetime) {
   })
   const inboxQueue = agent => (agent || MAIN_AGENT_ID) === MAIN_AGENT_ID ? runQueue : routedQueues?.loaded().find(queue => queue.agentId === agent)
   const inboxNoteRun = (agent, sessionId, run, runId = '') => {
-    if (typeof sessionId !== 'string' || !sessionId || !run || !agentInboxOn()) return
+    if (typeof sessionId !== 'string' || !sessionId || !run || !(agentInboxOn() || captureOn())) return
     try {
       const id = agent || MAIN_AGENT_ID
-      if (!agentInbox.linked(id, sessionId)) return
+      const linked = agentInbox.linked(id, sessionId)
+      if (!linked) return
+      // Capture batches (issue 696) keep their record up to date with only the capture switch on.
+      if (!agentInboxOn() && !linked.capture) return
       // More work still on its way for this thread (another queued or running turn): a fyi is progress, not the end.
       // Owed heavy work is probed through the same guard: it would hold a done back as fyi.
       const continues = heavyStatus(id, sessionId, { state: 'done', ask: 'probe' })?.state !== 'done'
         || Boolean(inboxQueue(id)?.queuedForSession('direct', sessionId).some(record => record.terminalAt == null && record.publicRunId !== runId && record.upstreamRunId !== runId))
-      const noted = agentInbox.noteRun(id, sessionId, { id: runId, status: run.status, output: run.output }, { continues, guard: status => heavyStatus(id, sessionId, status) })
+      let noted = agentInbox.noteRun(id, sessionId, { id: runId, status: run.status, output: run.output }, { continues, guard: status => heavyStatus(id, sessionId, status) })
+      if (noted?.capture) noted = captureOutcome(noted.capture.batch) || noted
       // A finished task with a high or urgent severity is an alert candidate (issue 552), checked once.
       if (noted) void alertGate.considerRecord(noted).catch(error => console.warn(`[agent-alerts] record not checked: ${error?.message || error}`))
     } catch (error) { console.warn(`[agent-inbox] status update failed: ${error?.message || error}`) }
@@ -4097,8 +4108,15 @@ function buildWizardServer(options, lifetime) {
   }
   // The worker's run note: nobody is watching this thread, so it works the task through and reports in its status line.
   const dumpRunNote = sessionId => {
-    if (!sessionId || !agentInboxOn()) return ''
+    if (!sessionId || !(agentInboxOn() || captureOn())) return ''
     const record = agentInbox.linked(MAIN_AGENT_ID, sessionId)
+    // A capture batch (issue 696): the owner dropped these items in his Files Inbox.
+    if (record?.capture && record.state === 'running' && captureOn()) {
+      return 'Background capture: the owner dropped the items in this message into his Files Inbox and is not watching this thread; your reply is read later, if at all. '
+        + 'File every item now with wizard_capture, by his capture rules, and finish with wizard_capture action done and a short reply. '
+        + 'If you need the owner, end with a needs_you status whose ask is one plain question, with a recommendation and short answer options. Never delete anything.'
+    }
+    if (!agentInboxOn()) return ''
     // An app door's note (issue 569) is a background task the same way, left as a note in that app.
     const app = record?.worker === true ? recordApp(record) : ''
     if (!record || (record.source !== 'orb:dump' && !app) || record.state !== 'running') return ''
@@ -4256,6 +4274,104 @@ function buildWizardServer(options, lifetime) {
     }
     return { record: agentInbox.get(record.id) || record, created, ...(retry ? { restarted: true } : {}) }
   }
+  // Capture inboxes (wizard-os issue 696, spec/CAPTURE_INBOXES.md; owner switch wizard/capture-inbox, off by default;
+  // env WIZARD_CAPTURE_INBOX '1'/'0' forces it). The Service watches Inbox/ of the owner's Files; after a quiet period
+  // a batch is one agent-inbox record (source capture:files, private) and one hidden main-agent worker turn, filed
+  // with wizard_capture only (logged, undoable). Switch off: no scan, no tool, the routes are 404, nothing is moved.
+  const captureSwitchOn = createChannelsSwitch({ id: CAPTURE_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.captureInboxSwitchTtlMs ?? 3000 })
+  const captureOn = () => channelPart(options.captureInbox, captureSwitchOn)
+  const captureRoot = String(options.userFilesRoot || options.mediaRoot || '')
+  // Where the agent sees the same folder: WIZARD_FILES_ROOT (the agent's view of owner Files) when the box names it;
+  // otherwise the attachments' agent root, unless the attachments live in a different folder than the Files root
+  // (then the agent's view of attachments is not this folder, and the Files root itself is used).
+  const captureSeparate = Boolean(options.mediaRoot && options.userFilesRoot && resolve(String(options.userFilesRoot)) !== resolve(String(options.mediaRoot)))
+  const captureAgentRoot = String(options.filesRoot || (captureSeparate ? captureRoot : (options.mediaAgentRoot || captureRoot)))
+  const captureStatePath = options.captureInboxStatePath ? resolve(String(options.captureInboxStatePath))
+    : options.agentInboxStatePath ? join(dirname(resolve(String(options.agentInboxStatePath))), 'capture-inbox.json') : ''
+  let captureBox = null
+  const captureInbox = () => {
+    if (captureBox || !captureRoot) return captureBox
+    try {
+      captureBox = createCaptureInbox({ root: captureRoot, agentRoot: captureAgentRoot, statePath: captureStatePath,
+        now: options.captureInboxNow ?? Date.now, quietMs: options.captureQuietMs ?? undefined,
+        chatFiles: () => (mediaFiles ? mediaFiles.rels() : new Set()), log: line => console.log(`[capture] ${line}`) })
+    } catch (error) { console.warn(`[capture] inbox unavailable: ${error?.message || error}`); captureBox = null }
+    return captureBox
+  }
+  const captureClip = (value, max) => { const text = String(value ?? '').replace(/\s+/gu, ' ').trim(); return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text }
+  // The batch's one-line outcome is what the sweep shows (title) and the record's last update.
+  const captureOutcome = batchId => {
+    const batch = captureInbox()?.batch(batchId)
+    const record = batch?.record_id ? agentInbox.get(batch.record_id) : null
+    if (!record) return null
+    if (batch.undone_at) {
+      const done = batch.undo_result || { back: batch.items.length, of: batch.items.length, problems: 0 }
+      // Only a whole batch put back reads as undone; a partial undo says what is still out and waits on the owner.
+      if (batch.state === 'undone') return agentInbox.update(record.id, { last_update: captureClip(`Undone: ${done.back} item${done.back === 1 ? '' : 's'} back in Inbox.`, 140), title: captureClip(`Undone: ${batch.outcome || `${done.back} from Inbox`}`, 100) })
+      return agentInbox.update(record.id, { state: 'new', kind: 'needs_you', title: captureClip(`Undo not finished: ${batch.outcome || `${done.of} from Inbox`}`, 100),
+        last_update: captureClip(`Undo not finished: ${done.back} of ${done.of} back in Inbox; ${done.problems} step${done.problems === 1 ? '' : 's'} could not be put back. Open it to see which.`, 140),
+        ask: captureClip(`${done.problems} step${done.problems === 1 ? '' : 's'} of this batch could not be put back`, 140) })
+    }
+    if (!batch.outcome || record.kind === 'needs_you') return null
+    return agentInbox.update(record.id, { title: captureClip(batch.outcome, 100), last_update: batch.outcome })
+  }
+  const captureRetries = new Map()
+  const startCaptureBatch = batch => {
+    const box = captureInbox()
+    const count = batch.items.length
+    const { record, created } = agentInbox.capture({
+      agent: MAIN_AGENT_ID, thread_id: mintDailyThreadId(), source: CAPTURE_SOURCE, kind: 'note',
+      title: `${count} new in Inbox`, ask: `File ${count} new item${count === 1 ? '' : 's'} from Inbox by your capture rules`,
+      privacy_class: 'private', dedupe_hash: createHash('sha256').update(`${MAIN_AGENT_ID}\ncapture\n${batch.id}`).digest('hex').slice(0, 32),
+    }, { fields: { worker: true, capture: { batch: batch.id, source: batch.source, count } } })
+    box.link(batch.id, { record_id: record.id, thread_id: record.thread_id })
+    captureRetries.set(record.id, Date.now())
+    // The same batch's record written before a restart: its worker is left to its own status (or the stall rule).
+    if (!created) return record
+    const started = startDumpWorker(record, batchTurnText(batch, { agentRoot: box.agentRoot, rules: box.rules() }))
+    dumpRuns.set(record.id, started)
+    started.finally(() => dumpRuns.delete(record.id)).catch(() => undefined)
+    return record
+  }
+  const captureTick = () => {
+    if (!captureRoot) return
+    if (!captureOn()) { if (captureBox || (captureStatePath && existsSync(captureStatePath))) captureInbox()?.pause(); return }
+    const box = captureInbox()
+    if (!box) return
+    for (let n = 0; n < 5; n += 1) {
+      const batch = box.scan()
+      if (!batch) break
+      try { startCaptureBatch(batch) } catch (error) { console.warn(`[capture] batch not started: ${error?.message || error}`) }
+    }
+    // A batch whose worker could not start (Hermes busy or restarting) starts again every few minutes, never lost.
+    const t = Date.now()
+    for (const view of box.list(10)) {
+      // A batch made just before a restart (or whose record could not be written) gets its record and worker now.
+      if (view.state === 'open' && !view.record_id) {
+        try { startCaptureBatch(box.batch(view.batch)) } catch (error) { console.warn(`[capture] batch not started: ${error?.message || error}`) }
+        continue
+      }
+      if (view.state !== 'open' || !view.record_id || dumpRuns.has(view.record_id)) continue
+      if (t - (captureRetries.get(view.record_id) || 0) < (options.captureRetryMs ?? 5 * 60_000)) continue
+      const retry = agentInbox.retryStart(view.record_id)
+      if (!retry) continue
+      captureRetries.set(view.record_id, t)
+      const batch = box.batch(view.batch)
+      const started = startDumpWorker(retry, batchTurnText(batch, { agentRoot: box.agentRoot, rules: box.rules() }))
+      dumpRuns.set(retry.id, started)
+      started.finally(() => dumpRuns.delete(retry.id)).catch(() => undefined)
+    }
+  }
+  captureTools = captureTool({ inbox: () => captureInbox(), on: captureOn, mainAgent: MAIN_AGENT_ID,
+    listen: async path => {
+      const box = captureInbox()
+      if (!captureListen || !box) return null
+      const local = path.startsWith(box.agentRoot) ? join(box.root, path.slice(box.agentRoot.length)) : path
+      return captureListen.call(TRANSCRIBE_TOOL, { path: local, mode: 'verbatim' }, MAIN_AGENT_ID)
+    },
+    finished: batchId => { captureOutcome(batchId) },
+    undone: result => { captureOutcome(result.batch) },
+  })
   // App wake events (wizard-os issue 634, spec/APP_WAKE.md; owner switch wizard/app-wake, off by default; env
   // WIZARD_APP_WAKE '1'/'0' forces it). The box is the agent's event inbox: an app's own token wakes an agent that the
   // owner gave this app, with one turn in a new hidden background thread. Switch off: the routes are 404.
@@ -6469,6 +6585,12 @@ function buildWizardServer(options, lifetime) {
     followMainTimer.unref()
     lifetime.own(() => clearInterval(followMainTimer))
   }
+  // Capture inboxes (issue 696): one look at the Files Inbox every 30 s, only while the switch is on.
+  if (captureRoot && options.captureScanMs !== 0) {
+    const captureTimer = setInterval(() => { void trackWork('capture inbox scan', async () => captureTick()).catch(error => console.warn(`[capture] scan failed: ${error?.message || error}`)) }, options.captureScanMs || CAPTURE_SCAN_MS)
+    captureTimer.unref()
+    lifetime.own(() => clearInterval(captureTimer))
+  }
   const supervisor = options.supervisorStatePath ? new Supervisor({ statePath: resolve(options.supervisorStatePath),
     deliver: deliverBackgroundOccurrence, lookup: lookupBackgroundOccurrence, now: options.supervisorNow || Date.now,
     canReadSource: id => id === MAIN_AGENT_ID || Boolean(agents?.readableSources(MAIN_AGENT_ID).some(s => s.source === id && s.scope === 'read')),
@@ -7169,6 +7291,33 @@ function buildWizardServer(options, lifetime) {
         } catch (error) {
           const status = [400, 404, 409].includes(error?.status) ? error.status : 503
           sendJson(response, status, { error: error?.code || (status === 503 ? 'sent_unavailable' : 'invalid_request') })
+        }
+        return
+      }
+      // Capture inboxes (issue 696): GET /wizard/v1/capture -> the newest batches with their log and the rules file;
+      // POST /wizard/v1/capture/<batch>/undo puts a whole batch back (the owner's own "undo that", same as the agent's
+      // tool). Owner only. Switch off: 404.
+      const captureRoute = /^\/wizard\/v1\/capture(?:\/(cap_[a-f0-9]{16})\/(undo))?$/u.exec(url.pathname)
+      if (captureRoute || url.pathname.startsWith('/wizard/v1/capture/')) {
+        if (!captureRoute || !captureOn() || !captureInbox()) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        const undoRoute = captureRoute[2] === 'undo'
+        const allow = undoRoute ? 'POST' : 'GET'
+        if (request.method !== allow) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: allow }); return }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        const box = captureInbox()
+        if (!undoRoute) {
+          sendJson(response, 200, { on: true, active: box.active(), pending: box.pending(), rules: box.rules({ write: false }).path, batches: box.list(Number(url.searchParams.get('limit')) || 20) }, { 'Cache-Control': 'no-store' })
+          return
+        }
+        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_site_write' }); return }
+        try {
+          const result = box.undo(captureRoute[1])
+          captureOutcome(result.batch)
+          sendJson(response, 200, result, { 'Cache-Control': 'no-store' })
+        } catch (error) {
+          sendJson(response, error?.code === 'not_found' ? 404 : 409, { error: error?.code || 'refused', detail: String(error?.message || '') })
         }
         return
       }
