@@ -43,3 +43,19 @@ test('declared permissions pass on (geolocation only); absent when the app decla
     for (const id of ['money', 'notes', 'odd', 'cam']) expect(Object.hasOwn(apps[id], 'permissions')).toBe(false)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
+
+test('the installed source repo passes on as owner/repo only (telegram#68); absent otherwise', () => {
+  const root = mkdtempSync(join(tmpdir(), 'app-repo-'))
+  try {
+    const appsJsonPath = join(root, 'apps.json')
+    writeFileSync(appsJsonPath, JSON.stringify({ apps: [
+      { id: 'tg-style', name: 'TG style', view: { url: '/tg-style/' }, repo: 'humanitylabs-org/telegram' },
+      { id: 'money', name: 'Money', view: { url: '/money/' } },
+      { id: 'odd', name: 'Odd', view: { url: '/odd/' }, repo: 'https://github.com/x/y' },
+      { id: 'local', name: 'Local', view: { url: '/local/' }, repo: 7 },
+    ] }))
+    const apps = Object.fromEntries(readApps({ appsJsonPath, launcherPath: join(root, 'missing.json') }).apps.map((a: any) => [a.id, a]))
+    expect(apps['tg-style'].repo).toBe('humanitylabs-org/telegram')
+    for (const id of ['money', 'odd', 'local']) expect(Object.hasOwn(apps[id], 'repo')).toBe(false)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
