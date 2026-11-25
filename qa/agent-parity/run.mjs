@@ -33,15 +33,20 @@ const timed = (kind, check) => {
   const limit = new Promise(resolve => { timer = setTimeout(() => resolve({ feature: check, kind, status: 'fail', reason: `Cell did not finish within ${cellBudgetMs} ms`, evidence: 'fixture HTTP boundary', failure_kind: 'timeout' }), cellBudgetMs) })
   return Promise.race([runCheck(kind, check), limit]).finally(() => clearTimeout(timer))
 }
+// A timed-out check is not cancelled; running more cells next to it could make them fail for its sake, so the rest are
+// recorded as not run and the gate fails on the one that hung.
+let hung = ''
 for (const feature of manifest.features) {
   for (const kind of kinds) {
     const started = Date.now()
-    let cell = feature.fixture ? await timed(kind, feature.fixture) : {
+    let cell = feature.fixture && hung ? { feature: feature.fixture, kind, status: 'fail', reason: `Not run: ${hung} did not finish within ${cellBudgetMs} ms`, evidence: 'fixture HTTP boundary', failure_kind: 'timeout' }
+      : feature.fixture ? await timed(kind, feature.fixture) : {
       feature: feature.id, kind, status: 'fail', reason: `No per-kind ${feature.layer} evidence implemented`, evidence: 'not-run', failure_kind: 'coverage-gap',
     }
     cell = applyPolicyExemption(cell, feature.policy_exemptions.find(e => e.kind === kind), manifest)
     cell.feature = feature.id
     cell.duration_ms = Date.now() - started
+    if (!hung && cell.failure_kind === 'timeout') hung = `${feature.id}/${kind}`
     rows.push(cell)
     writeFileSync(join(reportDir, 'cells.jsonl'), JSON.stringify(cell) + '\n', { flag: 'a' })
     if (cell.evidence !== 'not-run') console.log(`${cell.status} ${feature.id}/${kind}${cell.reason ? ': ' + cell.reason.replace(/\s+/g, ' ') : ''}`)
