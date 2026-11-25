@@ -236,9 +236,6 @@ server = createWizardServer({
   // Chats channels phase 2 (issue 440): channels and thread membership in ~/.wizard-os/channels.sqlite, served at
   // /wizard/v1/channels; ui-preferences `spaces` becomes a read-only projection.
   channelStore: envChoice(process.env.WIZARD_CHANNEL_STORE),
-  // Chats channels phase 3 (issue 441): agents file chats with the status line's `channel`, titles become post names,
-  // and chats the scheduler opens go to their job's channel or Alerts. Needs the channel store.
-  channelAgentFiling: envChoice(process.env.WIZARD_CHANNEL_AGENT_FILING),
   // Daily channel (issue 527): one pinned channel per agent with one real thread per day (05:00 boundary), the
   // /wizard/v1/channels/<id>/days and /today routes, and schedule thread 'daily'. Needs the channel store.
   channelDaily: envChoice(process.env.WIZARD_CHANNEL_DAILY),

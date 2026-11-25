@@ -1788,7 +1788,7 @@ export const serverChecks = {
     assert.equal((await move(null, s.id)).status, 200)
     assert.equal((await listed(false)).channel, undefined)
   },
-  // Issue 441 (WIZARD_CHANNEL_AGENT_FILING=1 on top of the channel store): agent filing and the Alerts channel.
+  // Issue 441 (on wherever the channel store is): agent filing and the Alerts channel.
   'chats-agent-filing': async s => {
     const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const make = async (name, agent) => { const r = await s.raw('/wizard/v1/channels', json('POST', { name, agent })); assert.equal(r.status, 201); return r.json() }

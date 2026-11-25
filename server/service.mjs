@@ -3455,8 +3455,8 @@ function buildWizardServer(options, lifetime) {
   if (options.channelStore === true) openChannelStore()
   // Chats channels phase 3 (issue 441, needs the channel store): the status line's `channel` files a chat, titles
   // become post names, and a chat the scheduler opens (a reminder, a report, an agent's new chat) is filed into its
-  // job's channel or, by default, the main agent's Alerts channel.
-  const channelAgentFilingOn = () => channelOn(options.channelAgentFiling) && !!channelStoreNow()
+  // job's channel or, by default, the main agent's Alerts channel. On for everyone wherever the store is (switch removed).
+  const channelAgentFilingOn = () => !!channelStoreNow()
   // Channel read watermarks (issue 471, needs the channel store): the shell's per-channel read point, shared by the
   // owner's devices, forward only.
   const channelReadSyncOn = () => channelOn(options.channelReadSync) && !!channelStoreNow()

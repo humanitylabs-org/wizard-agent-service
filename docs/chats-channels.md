@@ -75,8 +75,8 @@ also carries the post itself: `firstRequest` from the whole first owner message 
 
 ## Agent filing and Alerts (phase 3)
 
-On, with the channel store; `WIZARD_CHANNEL_AGENT_FILING=0` (option `channelAgentFiling`) turns it off, and
-phase 2 above is then unchanged. Issue:
+On for everyone wherever the channel store is (the switch was removed after show-and-tell; with
+`WIZARD_CHANNEL_STORE=0` none of this exists). Issue:
 humanitylabs-org/wizard-agent-service#441.
 
 - **Status line `channel`.** `WIZARD_STATUS_V1` takes an optional `channel`: one exact channel id from the agent's
@@ -92,8 +92,8 @@ humanitylabs-org/wizard-agent-service#441.
   channel of the job's agent, otherwise into the main agent's Alerts channel. A routed agent's job with no channel stays
   unfiled. A job that posts into an existing thread never files or moves it, and later occurrences never re-file the
   chat, so an owner's move or unfile stands. A notification-delivery job's hidden thread is not filed.
-- **Per-job channel.** `POST/PATCH /wizard/v1/schedules` accept `channel` (a channel id or `null`) while agent filing
-  is on; with it off (`WIZARD_CHANNEL_AGENT_FILING=0`) the field is an unknown-field 400, as before.
+- **Per-job channel.** `POST/PATCH /wizard/v1/schedules` accept `channel` (a channel id or `null`) while the channel
+  store is on; with the store off (`WIZARD_CHANNEL_STORE=0`) the field is an unknown-field 400.
 
 - **Agent posts.** With channel posts on as well, a thread whose first message is the agent's (an
   alert) carries no `firstRequest` even after the owner replies, so the shell keeps showing the agent's post.
