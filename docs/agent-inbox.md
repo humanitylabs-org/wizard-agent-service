@@ -180,3 +180,18 @@ Routes (owner only; switch off -> 404):
 
 The nightly check flags rows still without a final state (done, needs_you, failed) 6 h after they were sent
 (`flag: no_final_state`, `check.unfinished`).
+
+### Replies inside a thread (wizard-ux issue 1808)
+
+Every later owner turn in an existing main-agent thread (a typed or voice message, or a steer while a turn runs) is a
+`reply` row: route `thread`, `decided_by: owner_words`, the thread id and the turn's run, written before the turn is
+admitted. `wants_reply` comes from the same reply rules (a wants-reply phrase, a greeting, a short question) or any
+`?`; a voice note with no words yet wants a reply. When the turn's run ends, the row keeps the agent's final status
+(`outcome`: done | fyi | needs_you | check | none, or failed) and its one-line `answer` (the status ask). `quiet` is
+true only when `wants_reply` is false and the outcome is done or fyi; `state` is then done. `/correct` on a reply row
+changes nothing.
+
+The chat list row of a thread whose newest run is a quiet reply carries `wizard_quiet_reply: true` (`quietReply` in
+`view=list`), never while a turn runs or while the row shows needs_you / check. The shell keeps such a thread out of
+Inbox / Ready (wizard/chats-inbox). A question, needs_you, check or a failed run goes to Inbox as before. Switch off:
+no reply rows and no flag.
