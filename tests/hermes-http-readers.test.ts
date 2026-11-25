@@ -88,8 +88,12 @@ describe('canonical session listing over Hermes HTTP', () => {
       add.run('continuation', 'telegram', null, 5, 'compressed', 31, 1, null)
       add.run('helper', 'telegram', null, 2, 'compressed', 32, 1, JSON.stringify({ _delegate_from: 'compressed' }))
       add.run('helper_of_reset', 'telegram', null, 2, 'old', 33, 1, JSON.stringify({ _delegate_from: 'old' }))
+      // A compression descendant of the after-/new chat inherits its marker (naming an older ancestor).
+      db.prepare("UPDATE sessions SET end_reason = 'compression' WHERE id = 'after_new'").run()
+      add.run('after_new_tip', 'telegram', null, 3, 'after_new', 25, 1, JSON.stringify({ _reset_from: 'old' }))
       db.close()
       expect(readArchivedSessions(path).map((s) => s.id)).toEqual(['compressed', 'after_new', 'legacy_reset', 'old'])
+      expect(readArchivedSessions(path).map((s) => s.id)).not.toContain('after_new_tip')
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

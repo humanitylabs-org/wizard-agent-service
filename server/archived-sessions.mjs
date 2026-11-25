@@ -13,11 +13,12 @@ export function readArchivedSessions(sessionDbPath, { all = false, limit = all ?
   try {
     const columns = new Set(database.prepare('PRAGMA table_info(sessions)').all().map((column) => column.name))
     // The chat after a /new or a /branch is its own conversation (Hermes keeps parent_session_id only
-    // for lineage); sub-agent runs and compression continuations stay out, as in Hermes' own listing.
+    // for lineage): its marker names its immediate parent, or the parent ended at a boundary. Sub-agent
+    // runs and compression continuations (inherited markers name an older ancestor) stay out.
     const ownConversation = columns.has('model_config') && columns.has('end_reason')
       ? `OR (COALESCE(json_extract(CASE WHEN json_valid(model_config) THEN model_config END, '$._delegate_from'), '') = ''
-             AND (json_extract(CASE WHEN json_valid(model_config) THEN model_config END, '$._reset_from') IS NOT NULL
-               OR json_extract(CASE WHEN json_valid(model_config) THEN model_config END, '$._branched_from') IS NOT NULL
+             AND (json_extract(CASE WHEN json_valid(model_config) THEN model_config END, '$._reset_from') = sessions.parent_session_id
+               OR json_extract(CASE WHEN json_valid(model_config) THEN model_config END, '$._branched_from') = sessions.parent_session_id
                OR EXISTS (SELECT 1 FROM sessions parent WHERE parent.id = sessions.parent_session_id
                             AND parent.end_reason IN (${BOUNDARY_END_REASONS}))))`
       : ''
