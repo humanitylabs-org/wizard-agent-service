@@ -26,13 +26,27 @@ mkdirSync(reportDir, { recursive: true })
 const rows = []
 // Checkpoint every cell, so a crash never looks like a completed matrix.
 writeFileSync(join(reportDir, 'cells.jsonl'), '')
+// One hung cell fails as that cell, by name, instead of eating the whole run's budget (issue 637).
+const cellBudgetMs = Number(process.env.PARITY_CELL_TIMEOUT_MS) || 90_000
+const timed = (kind, check) => {
+  let timer
+  const limit = new Promise(resolve => { timer = setTimeout(() => resolve({ feature: check, kind, status: 'fail', reason: `Cell did not finish within ${cellBudgetMs} ms`, evidence: 'fixture HTTP boundary', failure_kind: 'timeout' }), cellBudgetMs) })
+  return Promise.race([runCheck(kind, check), limit]).finally(() => clearTimeout(timer))
+}
+// A timed-out check is not cancelled; running more cells next to it could make them fail for its sake, so the rest are
+// recorded as not run and the gate fails on the one that hung.
+let hung = ''
 for (const feature of manifest.features) {
   for (const kind of kinds) {
-    let cell = feature.fixture ? await runCheck(kind, feature.fixture) : {
+    const started = Date.now()
+    let cell = feature.fixture && hung ? { feature: feature.fixture, kind, status: 'fail', reason: `Not run: ${hung} did not finish within ${cellBudgetMs} ms`, evidence: 'fixture HTTP boundary', failure_kind: 'timeout' }
+      : feature.fixture ? await timed(kind, feature.fixture) : {
       feature: feature.id, kind, status: 'fail', reason: `No per-kind ${feature.layer} evidence implemented`, evidence: 'not-run', failure_kind: 'coverage-gap',
     }
     cell = applyPolicyExemption(cell, feature.policy_exemptions.find(e => e.kind === kind), manifest)
     cell.feature = feature.id
+    cell.duration_ms = Date.now() - started
+    if (!hung && cell.failure_kind === 'timeout') hung = `${feature.id}/${kind}`
     rows.push(cell)
     writeFileSync(join(reportDir, 'cells.jsonl'), JSON.stringify(cell) + '\n', { flag: 'a' })
     if (cell.evidence !== 'not-run') console.log(`${cell.status} ${feature.id}/${kind}${cell.reason ? ': ' + cell.reason.replace(/\s+/g, ' ') : ''}`)
@@ -56,3 +70,5 @@ console.log(JSON.stringify({ reportDir, summary: report.summary, fixture_summary
 // CI/deploy mode tests every server contract, not just the selected green cells.
 const gateRows = flags.has('--fixture-only') ? rows.filter(row => manifest.features.find(f => f.id === row.feature).layer === 'server') : rows
 if (gateRows.some(row => row.status === 'fail')) process.exitCode = 1
+// A timed-out cell may leave its scene's timers behind; the report is written, so end the run here.
+if (rows.some(row => row.failure_kind === 'timeout')) process.exit(process.exitCode)
