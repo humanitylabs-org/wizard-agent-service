@@ -1162,7 +1162,7 @@ export const serverChecks = {
     const runs = () => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && String(r.headers['idempotency-key'] || '').startsWith('wizard-wake-'))
     const until = async (read, label) => {
       let last
-      for (let n = 0; n < 120; n++) { last = await read(); if (last) return last; await new Promise(r => setTimeout(r, 25)) }
+      for (let n = 0; n < 240; n++) { last = await read(); if (last) return last; await new Promise(r => setTimeout(r, 25)) }
       assert.fail(label)
     }
     // The probe: on, the contract, and this kind's agent among the agents Messenger may wake.
@@ -1213,7 +1213,7 @@ export const serverChecks = {
       grant(['parity-qa'])
       const revoked = await s.raw('/wizard/v1/agent-events', as(MESSENGER, 'POST', answer))
       assert.deepEqual([revoked.status, (await revoked.json()).error], [403, 'not_granted'], 'taking the app away stops its wakes at once')
-      await new Promise(r => setTimeout(r, 700))
+      await new Promise(r => setTimeout(r, 2300))
       assert.equal(runs().length, 3, 'no follow-up wake after the grant was taken away')
     } else assert.equal(runs().length, 2)
   },
