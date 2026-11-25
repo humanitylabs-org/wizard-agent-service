@@ -40,6 +40,7 @@ const MAX_NOTE_CHARS = 20_000
 const BATCH_ID = /^cap_[a-f0-9]{16}$/u
 const APP_ITEM = /^[A-Za-z0-9._:-]{1,128}$/u
 export const APP_BATCH = /^[A-Za-z0-9._:-]{1,64}$/u
+export const APP_BATCH_MAX = 500
 
 export const DEFAULT_RULES = `# Capture rules
 
@@ -235,7 +236,7 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
     const rel = text.startsWith(agentBase) ? relative(agentBase, text).split(sep).join('/') : text.replace(/^\/+/u, '')
     let item = batch.items.find(i => i.item === text || i.path === rel || i.name === text)
     // An app batch learns its items as the agent names them (the app's own ids, e.g. a Photos asset id).
-    if (!item && batch.app && APP_ITEM.test(text) && batch.items.length < 500) {
+    if (!item && batch.app && APP_ITEM.test(text) && batch.items.length < APP_BATCH_MAX) {
       item = { item: text, path: '', name: text, size: 0, kind: 'app', app_item: true }
       batch.items.push(item)
     }
@@ -281,7 +282,8 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
   function appBatch({ app, source, batch: appBatchId, count }, t = now()) {
     const name = String(app ?? ''), key = String(appBatchId ?? '')
     if (!APP_ITEM.test(name) || !APP_BATCH.test(key)) refuse('An app batch needs the app and its own batch id.', 'invalid')
-    const n = Math.max(1, Math.min(BATCH_MAX, Math.floor(Number(count) || 0)))
+    // The count the app sent (the route accepts 1 to 500); the Files inbox's 50-item batch limit is not an app's.
+    const n = Math.max(1, Math.min(APP_BATCH_MAX, Math.floor(Number(count) || 0)))
     const was = data.batches.find(b => b.app === name && b.app_batch === key)
     if (was) return { batch: structuredClone(was), created: false }
     const id = `cap_${randomBytes(8).toString('hex')}`

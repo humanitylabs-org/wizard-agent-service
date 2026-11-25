@@ -187,7 +187,9 @@ describe('app inboxes: Photos (module)', () => {
     expect(a).toMatchObject({ created: true, batch: { app: 'photos', app_batch: 'pb_1', count: 3, source: 'photos', items: [] } })
     expect(inbox.appBatch({ app: 'photos', batch: 'pb_1', count: 3 })).toMatchObject({ created: false, batch: { id: a.batch.id } })
     expect(() => inbox.appBatch({ app: 'photos', batch: '../x', count: 3 })).toThrow()
-    expect(inbox.appBatches('photos')).toEqual([{ batch: a.batch.id, app_batch: 'pb_1', state: 'open' }])
+    // The app's own count is kept (Files batches stop at 50; an app batch the route accepted is not cut).
+    expect(inbox.appBatch({ app: 'photos', batch: 'pb_big', count: 120 }).batch.count).toBe(120)
+    expect(inbox.appBatches('photos').map((b: any) => b.app_batch)).toEqual(['pb_big', 'pb_1'])
     expect(inbox.appBatches('messenger')).toEqual([])
   })
 

@@ -62,7 +62,7 @@ const INTERFACE_MANUAL_APPS = new Set(['wizard-ux'])
 import { LOCAL_APP_ROUTES_SWITCH, createRouteTable, launcherPath as localLauncherPath, loopbackRequest, serveLocalAppRoute, upgradeLocalAppRoute } from './local-app-routes.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { APP_WAKE_SWITCH, APP_WAKE_CONTRACT, APP_WAKE_RUN_PREFIX, createWakeLedger, parseWakeEvent, wakeTurnText } from './app-wake.mjs'
-import { APP_BATCH, CAPTURE_SOURCE, CAPTURE_SWITCH, SCAN_MS as CAPTURE_SCAN_MS, batchTurnText, captureTool, createCaptureInbox } from './capture-inbox.mjs'
+import { APP_BATCH, APP_BATCH_MAX, CAPTURE_SOURCE, CAPTURE_SWITCH, SCAN_MS as CAPTURE_SCAN_MS, batchTurnText, captureTool, createCaptureInbox } from './capture-inbox.mjs'
 import { AgentInboxStore, AGENT_INBOX_SWITCH, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, START_FAILED, appDoor, recordApp } from './agent-inbox.mjs'
 import { SentLog } from './sent-log.mjs'
 import { isSweepPhrase, isScheduledSweep, withCardRow, WAITING_CAP, DONE_CAP } from './agent-sweep.mjs'
@@ -7327,7 +7327,7 @@ function buildWizardServer(options, lifetime) {
         const data = input?.data
         if (!input || typeof input !== 'object' || input.event !== 'items_arrived' || !data || typeof data !== 'object' || Array.isArray(data)) { sendJson(response, 400, { error: 'invalid_event' }); return }
         if (data.source !== undefined && data.source !== app) { sendJson(response, 400, { error: 'invalid_source', detail: 'an app sends only its own items' }); return }
-        if (!APP_BATCH.test(String(data.batch ?? '')) || !Number.isInteger(data.count) || data.count < 1 || data.count > 500) { sendJson(response, 400, { error: 'invalid_data' }); return }
+        if (!APP_BATCH.test(String(data.batch ?? '')) || !Number.isInteger(data.count) || data.count < 1 || data.count > APP_BATCH_MAX) { sendJson(response, 400, { error: 'invalid_data' }); return }
         try {
           const { batch, created } = box.appBatch({ app, source: app, batch: data.batch, count: data.count })
           let record = batch.record_id ? agentInbox.get(batch.record_id) : null
