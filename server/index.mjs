@@ -210,7 +210,6 @@ server = createWizardServer({
   mediaAgentRoot: process.env.WIZARD_MEDIA_AGENT_ROOT || process.env.WIZARD_MEDIA_ROOT || '',
   mediaIndexPath: process.env.WIZARD_MEDIA_INDEX_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'media-files.json'),
   // Issue 423: serve old Wizard Uploads files (drop_ ids) that scripts/import-inbox-uploads.mjs adopted. Off by default.
-  mediaLegacyIds: process.env.WIZARD_MEDIA_LEGACY_IDS === '1',
   // Resumable uploads and shares (server/uploads.mjs). Size is bounded only by free disk minus the reserve.
   uploadStatePath: process.env.WIZARD_UPLOAD_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'uploads.sqlite3'),
   uploadStagingDir: process.env.WIZARD_UPLOAD_STAGING_DIR || resolve(hermesHome, 'state', 'wizard-mobile', 'upload-staging'),

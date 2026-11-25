@@ -79,12 +79,8 @@ describe('import old Wizard Uploads into the built-in store (issue 423)', () => 
     // Same inode as the old blob: no file bytes were written.
     expect(statSync(join(f.media, first.rel)).ino).toBe(statSync(photo.blob).ino)
 
-    // Off by default: the store still refuses drop_ ids.
-    const off = createMediaFiles({ mediaRoot: f.media, agentRoot: '/files', indexPath: f.indexPath })
-    expect(off.get(photo.id)).toBeNull()
-    expect(off.open(photo.id)).toBeNull()
-
-    const on = createMediaFiles({ mediaRoot: f.media, agentRoot: '/files', indexPath: f.indexPath, legacyIds: true })
+    // The store serves imported drop_ ids with no switch.
+    const on = createMediaFiles({ mediaRoot: f.media, agentRoot: '/files', indexPath: f.indexPath })
     expect(on.get(photo.id, true)).toMatchObject({ id: photo.id, mime: 'image/jpeg', trusted_path: '/files/Inbox/2026-03-04/photo.jpg' })
     const opened = on.open(photo.id)
     expect((await bytesOf(opened.stream)).equals(image)).toBe(true)
