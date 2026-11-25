@@ -308,7 +308,7 @@ export function readApps({ appsJsonPath, launcherPath, localPath = null }) {
     if (id.startsWith('agent-') && (app.type === 'agent' || app.category === 'agent')) continue
     const listed = typeof app.view === 'string' && SAFE_URL.test(app.view) ? app.view
       : app.view && typeof app.view.url === 'string' && SAFE_URL.test(app.view.url) ? app.view.url : ''
-    // `localPath` (switch wizard/local-app-routes, loopback requests only): the app's local Wizard path when it has no
+    // `localPath` (local app routes, loopback requests only): the app's local Wizard path when it has no
     // openable view; still checked by the same rule.
     const local = !listed && typeof localPath === 'function' ? localPath(app) : ''
     const view = listed || (typeof local === 'string' && SAFE_URL.test(local) ? local : '')

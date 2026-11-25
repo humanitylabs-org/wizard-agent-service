@@ -1,8 +1,7 @@
-// Local app routes (wizard-app-manager issue 629, switch wizard/local-app-routes, off by default): on a box that is not
+// Local app routes (wizard-app-manager issue 629, on for everyone; env WIZARD_LOCAL_APP_ROUTES=0 turns them off): on a box that is not
 // on Tailscale (yet), app screens open inside Wizard. Tailscale Serve is what normally puts an installed app's page on
 // the Wizard origin (`/<app id>/`, or the app's own view path such as `/files/`); without it the launcher only has the
-// app's raw loopback port, which the view-URL check rightly refuses, so the app shows as backend-only. With the switch
-// on, this module serves the same paths on the box's own loopback Wizard address and nothing else:
+// app's raw loopback port, which the view-URL check rightly refuses, so the app shows as backend-only. This module serves the same paths on the box's own loopback Wizard address and nothing else:
 //   - only a request that came straight to the box's loopback address (Host 127.0.0.1 / localhost / [::1]), never one
 //     through Tailscale Serve or with any Tailscale or Cloudflare identity header, and only from the owner principal;
 //   - never cross-site (Sec-Fetch-Site), and a write needs no Origin or this same loopback origin;
@@ -14,8 +13,6 @@
 // MCP addresses (`appsMcpAddress`).
 import { request as httpRequest } from 'node:http'
 import { readFileSync, statSync } from 'node:fs'
-
-export const LOCAL_APP_ROUTES_SWITCH = 'wizard/local-app-routes'
 
 const ID = /^[a-z0-9][a-z0-9-]{0,62}$/u
 // Top-level paths the shell or this service answer itself; an app route never shadows them (WAM links.RESERVED_PATHS
@@ -113,7 +110,7 @@ function matchRoute(routes, pathname) {
   return null
 }
 
-/** The path the launcher gets for an app with no openable view, or '' (switch on, loopback request only). */
+/** The path the launcher gets for an app with no openable view, or '' (routes on, loopback request only). */
 export function launcherPath(routes, app) {
   return routes.find(r => r.id === app?.id)?.path || ''
 }
@@ -149,8 +146,8 @@ function upstreamPath(route, rawUrl) {
 }
 
 /**
- * Serve an installed app's page at its Wizard path when the switch is on. Returns true when it answered.
- * `on()` reads the switch, `routes()` the table, `owner` says the request's principal is the owner.
+ * Serve an installed app's page at its Wizard path when local app routes are on. Returns true when it answered.
+ * `on()` says whether routes are on (only env 0 turns them off), `routes()` the table, `owner` says the request's principal is the owner.
  */
 export function serveLocalAppRoute(request, response, { on, routes, tailnetIngress = false, owner = false } = {}) {
   const rawUrl = String(request.url || '/')
