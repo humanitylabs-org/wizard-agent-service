@@ -1,6 +1,6 @@
 # Capture inbox
 
-Wizard-os issue 696, contract `spec/CAPTURE_INBOXES.md` in wizard-os. Owner switch `wizard/capture-inbox` in the
+Issue humanitylabs-org/wizard-os#696, contract `spec/CAPTURE_INBOXES.md` in wizard-os. Owner switch `wizard/capture-inbox` in the
 synced Look file, off by default; `WIZARD_CAPTURE_INBOX=1` / `0` forces it on or off. With the switch off nothing is
 scanned, moved or written, the agent has no `wizard_capture` tool and the routes below answer 404.
 
