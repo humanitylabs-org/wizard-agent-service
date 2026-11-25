@@ -1,7 +1,7 @@
 // Build-local list evidence only. Never cache truth across projections or start
 // queue/recovery controllers here: all database readers are read-only. The one
 // exception is owned-work evidence, reused only while its session revision holds.
-import { createHermesSessionTruthReader, readHermesFirstRequests, readHermesListRevision, readHermesSessionTruth } from './session-truth.mjs'
+import { createHermesSessionTruthReader, readHermesFirstRequests, readHermesListRevision, readHermesMessageDelta, readHermesSessionTruth, readRecentHermesRootIds } from './session-truth.mjs'
 import { readFirstPostPages } from './first-post.mjs'
 import { readArchivedSessions } from './archived-sessions.mjs'
 import { createOwnedOpenWorkReader } from './owned-open-work-follow-through.mjs'
@@ -14,15 +14,17 @@ export function createListEvidenceReader(hermesStatePath) {
   const ownedWork = createOwnedOpenWorkReader(hermesStatePath)
   return {
     close: () => { listTruthReader.close(); ownedWork.close() },
-    read({ kind, ids, activeSessionIds, heavyJobs, supervisorStatePath, operator, now, posts, path, limit }) {
+    read({ kind, ids, activeSessionIds, heavyJobs, supervisorStatePath, operator, now, posts, path, limit, mark, since }) {
       // Chats list reads of Hermes' state.db (issue 584). A cold read of a large state.db waits on the disk for
       // seconds; here it waits off the HTTP thread. A failure comes back as { failed } (the caller re-throws it for
       // its health report), so one bad read never takes the worker down.
       // `path` names a routed agent's own state.db; without it, the main one.
-      if (kind === 'revision' || kind === 'first-posts' || kind === 'first-requests' || kind === 'archive') {
+      if (kind === 'revision' || kind === 'first-posts' || kind === 'first-requests' || kind === 'archive' || kind === 'hot') {
         const db = path || hermesStatePath
         try {
           if (kind === 'revision') return { value: readHermesListRevision(db) }
+          // The list cache's change set: threads with new messages since `mark`, and threads active since `since`.
+          if (kind === 'hot') return { value: { delta: readHermesMessageDelta(db, mark), recent: readRecentHermesRootIds(db, since) } }
           if (kind === 'first-posts') return { value: readFirstPostPages(db, posts) }
           if (kind === 'archive') return { value: readArchivedSessions(db, { limit }) }
           return { value: readHermesFirstRequests(db, ids) }

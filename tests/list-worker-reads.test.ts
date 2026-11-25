@@ -1,6 +1,6 @@
 // Issue 584 round 3: with the per-row schedule reads and the snapshot decoration fixed, the live box still logged
 // event-loop stalls of 1.5 to 11 s with a Chats list read running. The list read's queries of Hermes' state.db
-// (the list revision, each row's first post, the archive and a routed agent's open-ask evidence) ran on the HTTP
+// (the list revision and change set, each row's first post, the archive and a routed agent's open-ask evidence) ran on the HTTP
 // thread, and a cold read of a 2 GB state.db waits on the disk for seconds. They run in the list worker now.
 import { afterEach, expect, it } from 'vitest'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
@@ -80,6 +80,7 @@ it('a Chats list read queries Hermes\' state.db in the list worker, for the main
   const afterMain = await kinds()
   expect(afterMain.revision).toBeGreaterThanOrEqual(1)
   expect(afterMain['first-posts']).toBeGreaterThanOrEqual(1)
+  expect(afterMain.hot).toBeGreaterThanOrEqual(1)
 
   const agent = await list('research')
   expect(agent.map(row => row.id).sort()).toEqual(['wizard_research_0', 'wizard_research_1', 'wizard_research_2', 'wizard_research_archived'])

@@ -6058,10 +6058,12 @@ function buildWizardServer(options, lifetime) {
     }
     // Threads that must be re-projected on this build. reset=true: the change set is unknown.
     const hotIds = async () => {
-      const delta = readHermesMessageDelta(hermesStatePath, messageMark)
-      if (!delta) throw new Error('hermes message delta unavailable')
       const nowSeconds = Date.now() / 1000
-      const recent = readRecentHermesRootIds(hermesStatePath, nowSeconds - hotWindowSeconds)
+      // Both walk Hermes' state.db (thread lineage per row): in the list worker (issue 584).
+      let delta = null, recent = null
+      if (hermesStatePath) ({ delta, recent } = await hermesListRead('hot', { mark: messageMark, since: nowSeconds - hotWindowSeconds }))
+      else { delta = readHermesMessageDelta(hermesStatePath, messageMark); recent = readRecentHermesRootIds(hermesStatePath, nowSeconds - hotWindowSeconds) }
+      if (!delta) throw new Error('hermes message delta unavailable')
       if (!recent) throw new Error('recent hermes threads unavailable')
       // Recently active threads are "warm" (rebuilt once a minute); only threads with a live signal
       // are rebuilt on every build. Before, ~300 recent threads were rebuilt on every message anywhere.
