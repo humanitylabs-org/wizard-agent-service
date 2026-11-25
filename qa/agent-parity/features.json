@@ -626,6 +626,24 @@
       "policy_exemptions": []
     },
     {
+      "id": "chats-tags",
+      "description": "Tags (issue 608, owner switch wizard/chat-tags, off by default; env WIZARD_CHANNEL_TAGS 1/0 forces it): a chat carries several of its agent's channels as tags. The first time it is on, every chat's channel becomes its first tag; the one-channel membership keeps the primary tag (dual write), so Daily and older shells keep working and switching off loses nothing. /wizard/v1/channels/tags adds or removes one tag, list rows carry `tags`, a tag's feed lists every chat carrying it, the status-line channel adds a tag (never one the owner removed), and tags said in a capture go on its thread.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile, container TCP, restricted Unix ingress) with a Pages root and no tags option: with no Look file the tags route is 404 and rows carry no tags; write the switch on, see the filed channel become the first tag, add a second, see both on the list row and in both tag feeds, refuse another agent's channel (409), remove the primary and see the other become the membership channel, route a take with #philosopher for the thread and see the main agent's Philosopher tag on it, switch off and see the primary as the channel again. tests/channel-tags.test.ts covers the store rules (migration once, promote, owner removals, agent tagging, channel delete). Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/channel-store.mjs",
+        "server/thread-spaces.mjs",
+        "server/session-list-view.mjs",
+        "server/agents-http.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/channel-tags.test.ts"
+      ],
+      "fixture": "chats-tags",
+      "policy_exemptions": []
+    },
+    {
       "id": "chats-read-marks",
       "description": "Channel read watermarks (issue 471, WIZARD_CHANNEL_READ_SYNC=1 with WIZARD_CHANNEL_STORE=1): /wizard/v1/channels/read keeps the shell's read point per channel (and General per agent) in channels.sqlite, forward only, so reading a channel to the bottom on one device clears it on the owner's other devices.",
       "layer": "server",
@@ -2528,6 +2546,24 @@
         "wizard-ux/tests/graceful-restart.test.mjs",
         "wizard-ux/tests/qa-graceful-restart-held-send.cjs",
         "tests/restart-gate.test.ts"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
+      "id": "chat-tags",
+      "description": "Tags in Chats (wizard-ux, the shell half of issue 608; the service half is chats-tags): with the box's Tags on (owner switch wizard/chat-tags; the channel list says tags: true) a chat is in every channel it carries (its row's tags), a tag's feed keeps chats whose first tag is another one, a chat's Tags… sheet ticks every tag it carries and a tap adds or removes one through PUT /wizard/v1/channels/tags with the row's own agent (never a move; the sheet stays open), the Tags tab lists the tags plus an Archived tag view, and Back from a tag returns to Tags. With Tags off: today's Channels, one channel per chat, Move to channel.",
+      "layer": "ux",
+      "how_to_test": "wizard-ux tests/chat-channel-store.test.mjs (tags cases) runs the real live.js channel store and chats.js Space and Channels code against a fake box with main and routed (host-profile, container, restricted) rows: rows' tags put a chat in every tag and never in another agent's, a tap is one PUT tags with the row's agent, a tag's feed keeps chats whose first tag is another one, and tags off moves as before; tests/qa-chat-tags.cjs proves it in a real browser (phone 412 px, Nebula and Obsidian Light, tags on and off). Synthetic fixture evidence, not live box proof.",
+      "source_refs": [
+        "wizard-ux/web/core/chats.js",
+        "wizard-ux/web/core/chats-channels.js",
+        "wizard-ux/web/core/chats-spaces.js",
+        "wizard-ux/web/live-channels.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/chat-channel-store.test.mjs",
+        "wizard-ux/tests/qa-chat-tags.cjs"
       ],
       "fixture": null,
       "policy_exemptions": []

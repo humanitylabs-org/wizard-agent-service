@@ -2,6 +2,9 @@
 // restart (private first, agent inbox). Channels are on for everyone (wizard-ux issue 1258, switch removed): every
 // Channels part (store, posts, agent filing, read marks, Daily) is on unless a box's WIZARD_CHANNEL_* env sets `0`.
 
+// Tags (issue 608): a chat carries several channels as tags. Off by default; the owner's switch or WIZARD_CHANNEL_TAGS.
+export const CHAT_TAGS_SWITCH = 'wizard/chat-tags'
+
 /** Is tweak `id` on in the owner's Look file text (version 1, `tweaks[id].on === true`)? */
 export function lookSwitchOn(lookText, id) {
   try {

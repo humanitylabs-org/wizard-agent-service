@@ -142,7 +142,7 @@ export const FIRST_REQUEST_MAX = 400;
 // Channel posts (issue 446, WIZARD_CHANNEL_FIRST_POSTS=1): with `firstPosts`, firstRequest and firstAttachments come
 // only from the Service's read of the whole first owner message (`wizard_first_post`: { text, attachments }, or null
 // for a thread the agent started). Hermes' 60-character preview is never used for them; an unread row has neither.
-/** @param {any} item @param {string} [q] @param {any} [channels] @param {{ firstPosts?: boolean } | null} [opts] */
+/** @param {any} item @param {string} [q] @param {any} [channels] @param {{ firstPosts?: boolean, tags?: boolean } | null} [opts] */
 export function listRow(item, q = '', channels = null, opts = null) {
   const s = normalizeFull(item);
   if (!s) return null;
@@ -157,7 +157,9 @@ export function listRow(item, q = '', channels = null, opts = null) {
     // Hermes' own `preview` is the head of the thread's first user message; the main agent reads the whole one.
     // A main row carries wizard_first_request ('' when it has no visible owner message); routed rows fall back.
     const firstRequest = clean(text(Object.hasOwn(item, 'wizard_first_request') ? item.wizard_first_request : item.preview)).slice(0, FIRST_REQUEST_MAX);
-    channelFields = { ...(channel ? { channel } : {}), ...(firstRequest && !opts?.firstPosts ? { firstRequest } : {}) };
+    // Tags (issue 608, switch wizard/chat-tags): every channel the chat carries, primary (= `channel`) first.
+    const tags = opts?.tags && channels.tagsOf ? channels.tagsOf(s.agent || s.agent_id || 'hermes', s.id) : null;
+    channelFields = { ...(channel ? { channel } : {}), ...(tags ? { tags } : {}), ...(firstRequest && !opts?.firstPosts ? { firstRequest } : {}) };
   }
   const post = opts?.firstPosts ? item.wizard_first_post : null;
   if (post && typeof post === 'object' && typeof post.text === 'string' && Array.isArray(post.attachments)) {
@@ -169,7 +171,7 @@ export function listRow(item, q = '', channels = null, opts = null) {
     ...(body ? { searchSnippet: (at ? '…' : '') + body.slice(at, at+140) } : {}) };
 
 }
-/** @param {any} payload @param {string | null} [q] @param {any} [channels] @param {{ firstPosts?: boolean } | null} [opts] */
+/** @param {any} payload @param {string | null} [q] @param {any} [channels] @param {{ firstPosts?: boolean, tags?: boolean } | null} [opts] */
 export function listPayload(payload, q = '', channels = null, opts = null) {
   if (payload.mode === 'body' || payload.mode === 'titles' || payload.fields === 'slim') { const {window_projected,...visible}=payload; return { ...visible, view:'list', list_version:1 }; }
   for (const key of ['data', 'sessions', 'items']) if (Array.isArray(payload[key])) payload[key] = payload[key].map(row => listRow(row, q, channels, opts)).filter(Boolean);

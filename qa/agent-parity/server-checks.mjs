@@ -1614,6 +1614,63 @@ export const serverChecks = {
   // wizard-ux issue 1258: Channels are on for everyone (the wizard/chat-channels switch is gone). With no Look file, and
   // with an old Look file that still says the switch is off, the channel store, read marks and list fields answer
   // through each runtime's real Service route.
+  // Tags (issue 608, switch wizard/chat-tags, off by default): a chat carries several of its agent's channels.
+  'chats-tags': async s => {
+    const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/chat-tags': { on, at: Date.now() } } })) }
+    const row = s.sessions.get('wizard_parity'); row.hidden = false
+    row.preview = 'Synthetic tags request'
+    row.messages.push({ role: 'user', timestamp: Date.now() / 1000 - 5, content: 'Synthetic tags request' })
+    const listed = async want => {
+      let last
+      for (let attempt = 0; attempt < 40; attempt++) {
+        if (s.kind === 'main') await (await s.request('/api/sessions?limit=100')).json()
+        last = (await (await s.request('/api/sessions?view=list')).json()).data.find(x => x.id === 'wizard_parity')
+        if (last && want(last)) return last
+        await new Promise(r => setTimeout(r, 25))
+      }
+      return last
+    }
+    const make = async (name, agent = s.id) => { const r = await s.raw('/wizard/v1/channels', json('POST', { name, agent })); assert.equal(r.status, 201); return r.json() }
+    const tagsOf = async (agent = s.id) => (await (await s.raw(`/wizard/v1/channels/tags?sessionId=wizard_parity&agent=${agent}`)).json())
+    const tag = async body => s.raw('/wizard/v1/channels/tags', json('PUT', { sessionId: 'wizard_parity', agent: s.id, ...body }))
+    const feed = async id => (await (await s.request(`/api/sessions?view=list&channel=${id}`)).json()).data.map(x => x.id)
+    // Off (no Look file): today's one-channel Chats, no tags route, no tags on rows.
+    const philosopher = await make('🧠 Philosopher'), wizardos = await make('WizardOS')
+    assert.equal((await s.raw('/wizard/v1/channels/membership', json('PUT', { sessionId: 'wizard_parity', channelId: philosopher.id }))).status, 200)
+    assert.equal((await s.raw('/wizard/v1/channels/tags?sessionId=wizard_parity')).status, 404, `${s.kind}: no tags route while the switch is off`)
+    assert.equal((await (await s.raw('/wizard/v1/channels')).json()).tags, undefined, `${s.kind}: the channel list says nothing about tags while off`)
+    const off = await listed(x => x.channel === philosopher.id)
+    assert.equal(off?.channel, philosopher.id); assert.equal(off.tags, undefined, `${s.kind}: rows carry no tags while off`)
+    // On: the chat's channel is its first tag, and it can carry a second one.
+    look(true)
+    assert.equal((await (await s.raw('/wizard/v1/channels')).json()).tags, true, `${s.kind}: the channel list says tags are on`)
+    assert.deepEqual((await tagsOf()).tags, [philosopher.id], `${s.kind}: the channel became the first tag`)
+    let r = await tag({ add: wizardos.id }); assert.equal(r.status, 200)
+    assert.deepEqual(await r.json(), { sessionId: 'wizard_parity', agent: s.id, channel: philosopher.id, tags: [philosopher.id, wizardos.id] })
+    const on = await listed(x => x.tags?.length === 2)
+    assert.deepEqual([on?.channel, on?.tags], [philosopher.id, [philosopher.id, wizardos.id]], `${s.kind}: list rows carry every tag, primary first`)
+    assert.deepEqual(await feed(philosopher.id), ['wizard_parity'], `${s.kind}: the first tag's view lists the chat`)
+    assert.deepEqual(await feed(wizardos.id), ['wizard_parity'], `${s.kind}: the second tag's view lists it too`)
+    assert.equal((await tag({ add: wizardos.id, remove: philosopher.id })).status, 400, 'one change per request')
+    const other = await make('FOREIGN_TAG_CANARY', s.id === 'hermes' ? 'other-agent' : 'hermes')
+    assert.equal((await tag({ add: other.id })).status, 409, `${s.kind}: a chat takes only its own agent's channels as tags`)
+    // Removing the primary tag promotes the other one; the old one-channel table follows (Daily, older shells).
+    r = await tag({ remove: philosopher.id }); assert.equal(r.status, 200)
+    assert.deepEqual((await r.json()).tags, [wizardos.id])
+    assert.equal((await (await s.raw(`/wizard/v1/channels/membership?sessionId=wizard_parity&agent=${s.id}`)).json()).channel, wizardos.id, `${s.kind}: dual write keeps the primary tag`)
+    assert.deepEqual(await feed(philosopher.id), [], `${s.kind}: a removed tag's view no longer lists it`)
+    // A tag said in a capture (kept on its Sent row) goes on the thread it ran in: the main agent's Sent log.
+    const mainTag = s.id === 'hermes' ? philosopher : await make('Philosopher', 'hermes')
+    const said = await s.raw('/wizard/v1/route', json('POST', { text: 'Free will again #philosopher', timezone: 'UTC', thread_id: 'wizard_parity' }))
+    assert.ok([200, 404].includes(said.status), `${s.kind}: the route answers as before (${said.status})`)
+    assert.ok((await tagsOf('hermes')).tags.includes(mainTag.id), `${s.kind}: #philosopher tagged the main agent's thread`)
+    // Off again: the one-channel view of the same data, nothing lost.
+    look(false)
+    assert.equal((await s.raw('/wizard/v1/channels/tags?sessionId=wizard_parity')).status, 404, `${s.kind}: off again hides the route`)
+    const back = await listed(x => x.tags === undefined)
+    assert.deepEqual([back?.channel, back?.tags], [wizardos.id, undefined], `${s.kind}: off again shows the primary tag as the channel`)
+  },
   'chats-channels-switch': async s => {
     const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/chat-channels': { on, at: Date.now() } } })) }
