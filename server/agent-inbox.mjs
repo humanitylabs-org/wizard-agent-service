@@ -25,6 +25,10 @@ export const INBOX_KINDS = new Set(['result', 'needs_you', 'alert', 'fyi', 'note
 export const INBOX_STATES = new Set(['running', 'new', 'surfaced', 'answered', 'parked', 'archived', 'stale'])
 export const NO_SUMMARY = 'Finished without a summary. Open it to read.'
 export const STALE_NOTE = 'No news for 6 h.'
+// Stalls are failures (issue 607): a running task with no news for 6 h, or past its deadline, waits on the owner in
+// Inbox, marked failed. A late status line from its worker still applies as usual.
+export const STALLED_NOTE = 'Stalled: no news for 6 h. Open it to see what happened.'
+export const LATE_NOTE = 'Stalled: past its deadline with no news. Open it to see what happened.'
 export const START_FAILED = 'Could not start this task. Open it or say it again.'
 export const SENT_NOTE = 'Sent here from Chats. Open it to read.'
 export const ROUTE_EXAMPLES = 50
@@ -259,10 +263,19 @@ export class AgentInboxStore {
     const text = clip(utterance, 200)
     const ok = route => route === 'agent' || route === 'dump'
     if (!text || !ok(chosen) || !ok(wanted) || chosen === wanted) return null
-    const example = { at: this.now(), utterance: text, chosen, wanted, privacy_class: privacy_class === 'general' ? 'general' : 'private' }
+    // The id is the Sent row's correction_id (issue 607).
+    const example = { id: `ex_${randomUUID().replaceAll('-', '').slice(0, 16)}`, at: this.now(), utterance: text, chosen, wanted, privacy_class: privacy_class === 'general' ? 'general' : 'private' }
     this.data.route_examples = [example, ...(Array.isArray(this.data.route_examples) ? this.data.route_examples : [])].slice(0, ROUTE_EXAMPLES)
     this.#save()
     return { ...example }
+  }
+
+  /** The newest correction of exactly these words (issue 607: an earlier correction routes them again), or null. */
+  correctionFor(utterance = '') {
+    const words = clip(utterance, 200).toLowerCase().replace(/[\s.!?…]+$/u, '')
+    if (!words) return null
+    const found = (Array.isArray(this.data.route_examples) ? this.data.route_examples : []).find(e => String(e.utterance || '').toLowerCase().replace(/[\s.!?…]+$/u, '') === words)
+    return found ? { ...found } : null
   }
 
   /** The latest route examples, newest first. */
@@ -312,6 +325,7 @@ export class AgentInboxStore {
       // An answered record archives at the worker's next status line (issue 550); a run with none counts as one.
       record.state = record.state === 'answered' ? 'archived' : 'new'
       record.kind = 'result'
+      delete record.failed
       record.last_update = NO_SUMMARY
       record.updated_at = this.now()
     }
@@ -338,6 +352,11 @@ export class AgentInboxStore {
     // later one. The deadline is the task's (often set at capture), so it stays unless a line names a new one.
     Object.assign(record, { recommendation: '', options: {}, default_option: null, confirm: false })
     withExtras(record, extrasOf(raw))
+    // News from the worker: a stalled record is no longer failed (issue 607).
+    const stalled = record.failed === true && Boolean(record.stale_at)
+    delete record.failed
+    // A line that asks the owner to confirm (send, book, buy, publish, delete) is never done: it waits on him.
+    if (record.confirm === true && (status.state === 'done' || status.state === 'fyi')) status = { ...status, state: 'needs_you' }
     if (status.state === 'needs_you' || status.state === 'check') {
       record.state = 'new'; record.kind = 'needs_you'; record.ask = status.ask
       // A new question after an answer is a fresh ask: it starts its own sweep count.
@@ -352,14 +371,19 @@ export class AgentInboxStore {
       // A worker that ends on fyi with nothing still on its way has finished: an FYI for the sweep.
       record.state = 'new'; record.kind = 'fyi'
     } else if (record.state === 'stale') record.state = 'running' // news again
+    else if (stalled) { record.state = 'running'; record.kind = 'note' } // a stalled task that sends progress runs again
   }
 
-  /** Running records with no update for 6 hours become `stale` ("no news for 6 h"). Returns their ids. */
+  /** Running records with no update for 6 hours, or past their deadline, have stalled: they fail and wait on the
+   *  owner in Inbox (issue 607: `state` new, `kind` needs_you, `failed` true). Returns their ids. */
   markStale(now = this.now()) {
     const ids = []
     for (const r of Object.values(this.data.records)) {
-      if (r.state !== 'running' || now - (r.updated_at || 0) < STALE_MS) continue
-      r.state = 'stale'; r.last_update = STALE_NOTE; r.stale_at = now
+      if (r.state !== 'running') continue
+      const deadline = r.deadline ? Date.parse(r.deadline) : NaN
+      const late = Number.isFinite(deadline) && now > deadline
+      if (!late && now - (r.updated_at || 0) < STALE_MS) continue
+      Object.assign(r, { state: 'new', kind: 'needs_you', failed: true, last_update: late ? LATE_NOTE : STALLED_NOTE, stale_at: now, updated_at: now })
       ids.push(r.id)
     }
     if (ids.length) this.#save()
@@ -393,7 +417,8 @@ export class AgentInboxStore {
     const states = String(state || '').split(',').filter(s => INBOX_STATES.has(s))
     return Object.values(this.data.records)
       .filter(r => (!states.length || states.includes(r.state)) && (!kind || r.kind === kind) && (!agent || r.agent === agent))
-      .sort((a, b) => b.updated_at - a.updated_at || a.id.localeCompare(b.id))
+      // An urgent task (issue 607: the owner said "urgent" or "priority") sits at the top until it is archived.
+      .sort((a, b) => Number(b.urgent === true && b.state !== 'archived') - Number(a.urgent === true && a.state !== 'archived') || b.updated_at - a.updated_at || a.id.localeCompare(b.id))
       .slice(0, Math.max(1, Math.min(1000, Number(limit) || 200)))
       .map(r => ({ ...r }))
   }

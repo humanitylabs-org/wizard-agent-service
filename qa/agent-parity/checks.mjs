@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { scene, image, png, post } from './fixture.mjs'
-import { serverChecks, dailyClock, dailyScheduleToken } from './server-checks.mjs'
+import { serverChecks, dailyClock, dailyScheduleToken, sentClock } from './server-checks.mjs'
 import { queueChecks } from './queue-checks.mjs'
 import { trackerChecks } from './tracker-checks.mjs'
 import { STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
@@ -23,6 +23,7 @@ const featureScenes = {
   'agent-inbox': kind => scene(kind, ({ root }) => ({ agentInbox: true, agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'orb-dump': kind => scene(kind, ({ root }) => ({ agentInbox: true, agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'agent-inbox-move': kind => scene(kind, ({ root }) => ({ agentInbox: true, agentInboxStatePath: join(root, 'agent-inbox.json') })),
+  'sent-log': kind => scene(kind, ({ root }) => ({ agentInbox: true, agentInboxStatePath: join(root, 'agent-inbox.json'), agentInboxNow: () => sentClock.at ?? Date.now() })),
   'agent-alerts': kind => scene(kind, ({ root }) => ({ agentInbox: true, agentInboxStatePath: join(root, 'agent-inbox.json'), channelStore: true, channelDaily: true, dailyTimezone: 'UTC', schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),
   'agent-sweep': kind => scene(kind, ({ root }) => ({ agentInbox: true, agentInboxStatePath: join(root, 'agent-inbox.json'), channelStore: true, channelDaily: true, dailyTimezone: 'UTC', schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),
   'app-wake-events': kind => scene(kind, { appWake: true, fixtureUniqueTitles: true, appWakeMergeMs: 2000, agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp', bridgeWatchMs: 0 }),

@@ -44,6 +44,8 @@ const DUMP_RULE = `If it hands the agent a NEW task to do on its own (research, 
 compare, follow up, ...), reply {"route":"dump","title": the task in at most 8 words}. That is the default for a new task.
 Keep {"route":"agent"} instead when the words say "reply" or "tell me", ask for a conversation, or are a short direct
 question with a short answer (\"what time is it in Tokyo?\").
+If you cannot tell whether the owner wants an answer in front of him or a task done in the background, reply {"route":"unsure"}.
+You may add "confidence" (0 to 1) to a dump, agent or unsure answer.
 
 `
 
@@ -79,8 +81,6 @@ export function routerSystemPrompt({ settings, apps, timezone, view, force, now,
 
 const clip = (value, max) => (typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim().slice(0, max) : '')
 
-// Words that keep a thread visible: the owner wants an answer in front of them.
-const VISIBLE = /\b(?:(?<!\b(?:a|the|my|your|his|her|their|draft|write|send) )repl(?:y|ies|ying)\b|tell me|let'?s (?:talk|chat|discuss)|talk (?:to|with) me|chat (?:to|with) me|walk me through|explain to me)\b/iu
 const GREETING = /^(?:hi|hello|hey|thanks|thank you|good (?:morning|afternoon|evening|night))\b/iu
 const QUESTION = /^(?:what(?:'s| is| are| was)?|who(?:'s)?|whom|whose|when|where(?:'s)?|which|why|how(?:'s)?|is|are|was|were|do|does|did|can|could|will|would|should|shall|has|have|am)\b/iu
 // A clear task lead: an optional polite opener, then a verb that starts work with no short answer.
@@ -89,13 +89,70 @@ const TASK = new RegExp(`^${POLITE}(?:research|look into|dig into|investigate|wr
 const words = text => text.split(/\s+/u).filter(Boolean).length
 
 /** From the words alone: 'agent' (keep it visible), 'dump' (a plain new task), or '' (the model decides). */
-export function dumpIntent(text) {
+export function dumpIntent(text) { return replyRules(text).intent }
+
+// Reply rules (issue 607, Sent log; switch wizard/agent-inbox). The owner's own words about a reply win over the model.
+// They count as whole phrases said to the Wizard, never as words inside the task itself: "draft a reply to Sam" is a
+// task. Order: no-reply phrases first (background; only at the start or the end of the take), then wants-reply phrases
+// (a visible thread), a greeting, the plain task lead, then a short question. "urgent" / "priority" at the start or the
+// end put the task at the top of Inbox; "#x" / "hashtag x" anywhere are tags.
+const LEAD = String.raw`^(?:(?:hey |ok(?:ay)? )?(?:wizard,? )?)?`
+const SEP = String.raw`[\s,;:.!—–-]`
+const NO_REPLY = String.raw`note to self|no reply(?: needed)?|no need to reply|(?:you )?don'?t (?:need to )?reply|just do it`
+const NO_REPLY_LEAD = new RegExp(`${LEAD}(${NO_REPLY}|note)(?=${SEP}|$)`, 'iu')
+const NO_REPLY_TAIL = new RegExp(`(?:^|${SEP})(${NO_REPLY})${SEP}*$`, 'iu')
+// "reply" said to the Wizard ("reply", "keep replying", "replies with updates"). Never "a reply", "the reply", "draft /
+// write / send a reply", "no reply", and never "reply to Sam" or "reply all" (a reply someone else gets is a task);
+// "reply to me" and "reply when you're done" are.
+const REPLY_WORD = /(?<!\b(?:a|an|the|my|your|his|her|their|our|its|draft|write|send|no|quick|short|any|email|text)\s)\brepl(?:y|ies|ying)(?: back)?\b(?!\s+(?:to|all)\b(?!\s+me\b))/iu
+const WANTS = /\b(?:tell me|answer me|let'?s (?:talk|chat|discuss)|talk (?:to|with) me|chat (?:to|with) me|walk me through|explain to me)\b/iu
+const URGENT = String.raw`(?:it'?s |this is )?(?:urgent|high priority|top priority|priority)|asap`
+const URGENT_LEAD = new RegExp(`${LEAD}(${URGENT})(?=${SEP}|$)${SEP}*`, 'iu')
+const URGENT_TAIL = new RegExp(`(?:^|${SEP})(${URGENT})${SEP}*$`, 'iu')
+const TAG = /(?:^|[\s(,])#([\p{L}\p{N}][\p{L}\p{N}_-]{0,31})|\bhash ?tag\s+([\p{L}\p{N}][\p{L}\p{N}_-]{0,31})/giu
+const REMINDER = new RegExp(`^${POLITE}remind me\\b`, 'iu')
+const trimEdges = text => text.replace(/^[\s,;:.!—–-]+|[\s,;:—–-]+$/gu, '').trim()
+
+/** The owner's words about how to route a take: `{ intent: 'dump'|'agent'|'', rules, urgent, tags, reminder }`.
+ *  `intent` is what the words alone settle ('' = the model decides); each rule names what matched. */
+export function replyRules(text) {
+  const out = { intent: '', rules: [], urgent: false, tags: [], reminder: false }
   const t = clip(text, 600).replace(/^[\s"'“]+|[\s"'”.!]+$/gu, '')
-  if (!t) return ''
-  if (VISIBLE.test(t) || GREETING.test(t)) return 'agent'
-  if (TASK.test(t)) return 'dump'
-  if ((t.endsWith('?') || QUESTION.test(t)) && words(t) <= 12) return 'agent'
-  return ''
+  if (!t) return out
+  for (const m of t.matchAll(TAG)) {
+    const tag = (m[1] || m[2] || '').toLowerCase()
+    if (tag && !out.tags.includes(tag) && out.tags.length < 8) out.tags.push(tag)
+  }
+  // The routing words are read without the tags and without the urgency the owner put at the start or the end.
+  let core = trimEdges(t.replace(TAG, ' ').replace(/\s+/gu, ' '))
+  const lead = URGENT_LEAD.exec(core), tail = lead ? null : URGENT_TAIL.exec(core)
+  if (lead || tail) {
+    out.urgent = true
+    out.rules.push(`urgent:${(lead || tail)[1].toLowerCase()}`)
+    core = trimEdges(core.replace(lead ? URGENT_LEAD : URGENT_TAIL, ' '))
+  }
+  for (const tag of out.tags) out.rules.push(`tag:${tag}`)
+  if (!core) return out
+  const quietLead = NO_REPLY_LEAD.exec(core), quiet = quietLead || NO_REPLY_TAIL.exec(core)
+  if (quiet) {
+    out.intent = 'dump'
+    out.rules.unshift(`no_reply:${quiet[1].toLowerCase()}`)
+    out.reminder = REMINDER.test(trimEdges(core.replace(quietLead ? NO_REPLY_LEAD : NO_REPLY_TAIL, ' ')))
+    return out
+  }
+  const wants = REPLY_WORD.exec(core) || WANTS.exec(core)
+  if (wants) { out.intent = 'agent'; out.rules.unshift(`wants_reply:${wants[0].toLowerCase()}`); return out }
+  if (GREETING.test(core)) { out.intent = 'agent'; out.rules.unshift('greeting'); return out }
+  if (TASK.test(core)) { out.intent = 'dump'; out.reminder = REMINDER.test(core); out.rules.unshift(out.reminder ? 'reminder' : 'task_verb'); return out }
+  if ((core.endsWith('?') || QUESTION.test(core)) && words(core) <= 12) { out.intent = 'agent'; out.rules.unshift('short_question') }
+  return out
+}
+
+/** The take without the routing words the owner said to the Wizard (tags, no-reply and urgency phrases): the task. */
+export function taskWords(text) {
+  let t = trimEdges(clip(text, 600).replace(TAG, ' ').replace(/\s+/gu, ' '))
+  for (let n = 0; n < 2; n++) t = trimEdges(t.replace(URGENT_LEAD, '').replace(NO_REPLY_LEAD, ''))
+  return trimEdges(t.replace(NO_REPLY_TAIL, '').replace(URGENT_TAIL, '')) || clip(text, 600)
 }
 
 const WEEKDAYS = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
@@ -132,11 +189,15 @@ export function deadlineFrom(text, timezone, now = Date.now()) {
 export function dumpTitle(cmd, text) {
   const given = clip(cmd?.title, 60)
   if (given) return given
-  const bare = clip(text, 600).replace(new RegExp(`^${POLITE}`, 'iu'), '').replace(/[?.!]+$/u, '')
+  const bare = taskWords(text).replace(new RegExp(`^${POLITE}`, 'iu'), '').replace(/[?.!]+$/u, '')
   return clip(bare.charAt(0).toUpperCase() + bare.slice(1), 60)
 }
 
-export async function routeUtterance({ input, settings, router, fetchImpl = fetch, now, dump = false, examples = [] }) {
+/** Route one take. `why` says how it was decided (issue 607): `decided_by` owner_words | correction | model | fallback,
+ *  the reply rules that matched, the model's confidence. With `dump`, the owner's no-reply words and an exact earlier
+ *  correction settle a take without the model; with `router: null` (none configured) only those settle it, anything
+ *  else is the 404 it always was. The model's `unsure`, like an answer it could not give, opens a visible thread. */
+export async function routeUtterance({ input, settings, router, fetchImpl = fetch, now, dump = false, examples = [], correction = null, timeoutMs = 30_000 }) {
   const text = clip(input?.text, 600)
   if (!text) throw Object.assign(new Error('empty'), { status: 400 })
   const apps = (Array.isArray(input?.apps) ? input.apps : []).map((name) => clip(name, 40)).filter(Boolean).slice(0, 60)
@@ -144,10 +205,28 @@ export async function routeUtterance({ input, settings, router, fetchImpl = fetc
   const view = input?.view && typeof input.view === 'object'
     ? { name: clip(input.view.name, 80), kind: clip(input.view.kind, 40) } : null
   const timezone = clip(input?.timezone, 64)
+  const rules = replyRules(text)
+  const why = { decided_by: 'model', rules: [...rules.rules], urgent: rules.urgent, tags: [...rules.tags], reminder: false }
+  const at = now ? +new Date(now) : Date.now()
+  const dumpCmd = (cmd = {}) => ({ route: 'dump', title: dumpTitle(cmd, text), deadline: deadlineFrom(text, timezone || settings?.clock?.timezone, at), summary: clip(cmd.summary, 200) || text })
+  // The owner's words win before any model: a no-reply phrase is a background task. An earlier correction of exactly
+  // these words routes them the way he wanted, unless a reply phrase of his says otherwise.
+  if (dump && rules.intent === 'dump' && rules.rules[0]?.startsWith('no_reply:')) {
+    Object.assign(why, { decided_by: 'owner_words', reminder: rules.reminder })
+    return { cmd: dumpCmd(), ms: 0, model: '', why }
+  }
+  // His explicit reply words beat a correction; a correction beats the plain task / question heuristics.
+  const explicit = /^(?:no_reply|wants_reply):/u.test(rules.rules[0] || '')
+  const wanted = correction?.wanted === 'dump' || correction?.wanted === 'agent' ? correction.wanted : ''
+  if (dump && wanted && !explicit) {
+    Object.assign(why, { decided_by: 'correction', correction_id: String(correction.id || '') || null, reminder: wanted === 'dump' && REMINDER.test(taskWords(text)) })
+    return { cmd: wanted === 'dump' ? dumpCmd() : { route: 'agent', summary: text }, ms: 0, model: '', why }
+  }
+  if (!router) throw Object.assign(new Error('router_not_configured'), { status: 404 })
   const system = routerSystemPrompt({ settings, apps, timezone, view, force, now, dump, examples })
   const started = Date.now()
   const controller = new AbortController()
-  const timer = setTimeout(() => controller.abort(), 30_000)
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
   let content = ''
   try {
     const upstream = await fetchImpl(router.url, {
@@ -165,14 +244,27 @@ export async function routeUtterance({ input, settings, router, fetchImpl = fetc
   const match = content.match(/\{[\s\S]*\}/u)
   let cmd = {}
   try { cmd = match ? JSON.parse(match[0]) : {} } catch { cmd = {} }
+  const confidence = Number(cmd?.confidence)
+  if (cmd?.confidence != null && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1) why.confidence = confidence
+  if (dump && cmd.route === 'unsure') {
+    // Unclear: a visible thread, unless the owner's own words settle it.
+    why.rules.push('unsure')
+    if (!rules.intent) why.decided_by = 'fallback'
+    cmd = { route: rules.intent || 'agent', summary: text }
+  }
   if (cmd.route === 'view' && !(view && !force)) cmd = { route: 'agent', summary: text }
   if (!dump && cmd.route === 'dump') cmd = { route: 'agent', summary: text }
-  if (!['command', 'agent', 'view', ...(dump ? ['dump'] : [])].includes(cmd.route)) cmd = { route: 'agent', summary: text }
-  if (dump && (cmd.route === 'agent' || cmd.route === 'dump')) {
-    const route = dumpIntent(text) || cmd.route
-    cmd = route === 'dump'
-      ? { route: 'dump', title: dumpTitle(cmd, text), deadline: deadlineFrom(text, timezone || settings?.clock?.timezone, now ? +new Date(now) : Date.now()), summary: clip(cmd.summary, 200) || text }
-      : { route: 'agent', summary: clip(cmd.summary, 200) || text }
+  if (!['command', 'agent', 'view', ...(dump ? ['dump'] : [])].includes(cmd.route)) {
+    // No usable answer from the model: the visible thread it always was.
+    why.rules.push('no_answer')
+    if (!rules.intent || !dump) why.decided_by = 'fallback'
+    cmd = { route: 'agent', summary: text }
   }
-  return { cmd, ms: Date.now() - started, model: router.model }
+  if (dump && (cmd.route === 'agent' || cmd.route === 'dump')) {
+    const route = rules.intent || cmd.route
+    if (rules.intent) why.decided_by = 'owner_words'
+    cmd = route === 'dump' ? dumpCmd(cmd) : { route: 'agent', summary: clip(cmd.summary, 200) || text }
+    why.reminder = route === 'dump' && REMINDER.test(taskWords(text))
+  }
+  return { cmd, ms: Date.now() - started, model: router.model, why }
 }

@@ -22,8 +22,12 @@ overrides it). Code: `server/agent-inbox.mjs`.
     `last_update` "Finished without a summary. Open it to read."
   - optional status keys `recommendation`, `options` (token -> full resume message), `default_option`,
     `deadline`, `confirm` are read when present.
-- **Stale:** a `running` record with no update for 6 hours becomes `stale` ("No news for 6 h.") on the next read
-  and in the nightly check.
+- **Stalled = failed (issue 607):** a `running` record with no update for 6 hours, or past its `deadline`, fails on
+  the next read and in the nightly check: `state` `new`, `kind` `needs_you`, `failed: true`, `last_update`
+  "Stalled: ...". It waits on the owner in Inbox. A later status line from its worker still applies (and clears
+  `failed`). Records stored as `stale` before this stay readable.
+- **Confirm:** a status line with `confirm: true` (the worker would send, book, buy, publish or delete) is never done:
+  the record waits as `needs_you`. The background run note tells the worker to stop there.
 - **Nightly check** (scheduler tick, once a day): marks stale records and counts finished worker runs (queue runs
   whose idempotency key starts with `wizard-inbox-`, finished in the last 7 days) that have no record. The target is
   zero; a non-zero count is logged (`[agent-inbox] nightly check: ...`) and returned as `check` by the list route.
@@ -135,3 +139,44 @@ after the hour, is a new sweep. When the Daily draws a card an app made, the car
 there as its last row.
 
 Handing the token to the app (an env var or file in its container) is the App Manager's part.
+
+## Sent log (issue 607)
+
+Every capture the owner sends to `POST /wizard/v1/route` (orb take, side button, new chat) gets one row in
+`sent-log.json` beside the inbox store, written **before** the router runs, so a router that throws, hangs or is
+missing still leaves a row. The shell may send `source` (`orb` | `side` | `new_chat`), `idempotency_key` (one row per
+take; without one, the same words from the same source within 60 s are the same row) and the `thread_id` it will use.
+The answer keeps its old status codes and adds `sent_id`.
+
+Routing order, whole phrases only (never words inside a task: "draft a reply to Sam" is a task):
+
+1. no-reply phrases at the start or the end ("note", "note to self", "no reply", "just do it") -> background
+   (`dump`), without asking the model, also when no router is configured;
+2. wants-reply phrases ("reply", "tell me", "answer me", "let's talk", "walk me through", "explain to me"), a greeting
+   -> visible thread;
+3. an exact earlier correction of the same words (Open / Send to inbox, or `/correct`) -> the route the owner wanted;
+4. the plain task lead / short question heuristics, then the model. The model may answer `unsure`.
+
+"urgent" / "priority" at the start or the end set `urgent` (the record sorts first in Inbox); `#x` / "hashtag x" are
+`tags`. Router missing, failing, slower than 5 s for a dump, `unsure` or no usable answer -> route `agent`,
+`decided_by: fallback`, which the shell opens as a visible thread.
+
+A new main-agent thread's first owner turn links to the orb row with the same words (within 10 min), else it is a
+`typed` row (route `agent`, always a visible thread) that is classified in the background into `would_route`. The
+model is asked only when the fast router is private (the owner's typed words never reach any other model).
+
+Routes (owner only; switch off -> 404):
+
+- `GET /wizard/v1/sent?limit=50&before=<row id>` -> `{ rows, next, check }`, newest first. A row: `id`,
+  `idempotency_key`, `at`, `source` (orb | side | new_chat | typed), `text`, `route` (dump | agent | command |
+  reminder), `decided_by` (owner_words | model | correction | fallback), `rules_matched[]`, `model`, `confidence?`,
+  `would_route?` (typed only, with `would_decided_by`, `would_rules`), `tags[]`, `urgent`, `correction_id`,
+  `thread_id`, `record_id`, and `state` read live: from the inbox record (running, needs_you, failed, done) or from the
+  thread's queue rows (running, done, failed).
+- `GET /wizard/v1/sent/<id>` -> `{ row }`.
+- `POST /wizard/v1/sent/<id>/correct {should_reply: true|false}`: "Should have replied" on a background row is Open,
+  "Didn't need a reply" on a visible row is Send to inbox (same refusals: pinned, Daily, Alerts, main only). Each is
+  one route example; its id is the row's `correction_id`. Already right -> `{ changed: false }`.
+
+The nightly check flags rows still without a final state (done, needs_you, failed) 6 h after they were sent
+(`flag: no_final_state`, `check.unfinished`).

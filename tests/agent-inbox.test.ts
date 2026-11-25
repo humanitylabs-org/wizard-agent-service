@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { AgentInboxStore, INBOX_RUN_PREFIX, NO_SUMMARY, STALE_NOTE, START_FAILED, textForModel } from '../server/agent-inbox.mjs'
+import { AgentInboxStore, INBOX_RUN_PREFIX, NO_SUMMARY, STALLED_NOTE, LATE_NOTE, START_FAILED, textForModel } from '../server/agent-inbox.mjs'
 import { DurableRunQueue } from '../server/run-queue.mjs'
 import { Scheduler } from '../server/scheduler.mjs'
 import { createWizardServer, listen } from '../server/service.mjs'
@@ -121,18 +121,35 @@ describe('agent inbox store', () => {
     expect(s.get(r.id)).toMatchObject({ state: 'new', kind: 'needs_you', ask: 'Pick a slot' })
   })
 
-  it('a worker killed mid-run shows as no news for 6 h at the next read (fake clock)', () => {
+  it('a worker killed mid-run fails after 6 h with no news and waits in Inbox (fake clock, issue 607)', () => {
     const c = clock(), s = store('', c)
     const r = task(s)
     s.noteStatus('hermes', 'wizard_worker_1', line({ state: 'fyi', ask: 'Working on it' }))
     c.at += 6 * 3600_000 - 1
-    expect(s.list({ state: 'stale' })).toHaveLength(0)
+    expect(s.get(r.id)).toMatchObject({ state: 'running' })
     c.at += 1
-    const [stale] = s.list({ state: 'stale' })
-    expect(stale).toMatchObject({ id: r.id, state: 'stale', last_update: STALE_NOTE })
-    // News again brings it back to running.
+    const [failed] = s.list({ state: 'new' })
+    expect(failed).toMatchObject({ id: r.id, state: 'new', kind: 'needs_you', failed: true, last_update: STALLED_NOTE })
+    // News again brings it back to running, no longer failed.
     s.noteStatus('hermes', 'wizard_worker_1', line({ state: 'fyi', ask: 'Back on it' }))
+    expect(s.get(r.id)).toMatchObject({ state: 'running', kind: 'note' })
+    expect(s.get(r.id).failed).toBeUndefined()
+  })
+
+  it('a running task past its deadline fails before 6 h (issue 607)', () => {
+    const c = clock(), s = store('', c)
+    const r = s.capture({ thread_id: 'wizard_worker_9', title: 'Book it', ask: 'Book it', deadline: new Date(c.at + 3600_000).toISOString() }).record
+    c.at += 3600_000
     expect(s.get(r.id).state).toBe('running')
+    c.at += 1
+    expect(s.get(r.id)).toMatchObject({ state: 'new', kind: 'needs_you', failed: true, last_update: LATE_NOTE })
+  })
+
+  it('a status line that asks to confirm is never done (issue 607)', () => {
+    const c = clock(), s = store('', c)
+    const r = task(s)
+    s.noteRun('hermes', 'wizard_worker_1', { id: 'run_c', status: 'completed', output: line({ state: 'done', ask: 'Email to Sam is ready', confirm: true }) })
+    expect(s.get(r.id)).toMatchObject({ state: 'new', kind: 'needs_you', confirm: true, ask: 'Email to Sam is ready' })
   })
 
   it('records survive a restart, in the state file the backup already covers', () => {
