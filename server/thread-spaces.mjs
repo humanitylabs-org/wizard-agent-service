@@ -6,7 +6,7 @@ const THREAD_ID = /^[A-Za-z0-9._:-]{1,180}(?![\s\S])/u
 export const normalizeSpaceId = v => typeof v === 'string' && SPACE_ID.test(v) ? v : null
 export const spaceAgent = s => s.agent || 'hermes'
 export const SPACE_INSTRUCTIONS = 'Space filing is optional: add space (one exact existing Space ID from this agent’s catalogue) to the final WIZARD_STATUS_V1 JSON only when this thread clearly belongs to that Space. Omit it when uncertain or no Space fits; never invent Spaces or IDs. A thread is in one Space at a time: the service files only a thread that is in none of your Spaces yet and never moves one the owner (or an earlier status) already filed. '
-// Chats channels phase 3 (issue 441, WIZARD_CHANNEL_AGENT_FILING=1 with the channel store, off by default): the
+// Chats channels phase 3 (issue 441, on wherever the channel store is): the
 // status line's `channel` field files the thread (`space` stays an alias for one release), the catalogue and
 // instructions speak of channels, and `title` becomes the post's short name. Alerts is never in the catalogue:
 // it is where the service files agent-started chats, not a place for the agent to file an owner's chat.

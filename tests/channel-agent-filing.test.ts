@@ -1,4 +1,4 @@
-// Chats channels phase 3 (issue 441, WIZARD_CHANNEL_AGENT_FILING=1 with the channel store): the status line's
+// Chats channels phase 3 (issue 441, on wherever the channel store is): the status line's
 // `channel` field (with `space` as an alias), its refusal rules, the run note, and the scheduler's per-job channel.
 import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
