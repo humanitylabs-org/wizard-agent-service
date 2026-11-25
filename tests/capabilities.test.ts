@@ -47,14 +47,13 @@ describe('capability registry (issue 463)', () => {
   const make = (over: Record<string, unknown> = {}) => {
     const dir = mkdtempSync(join(tmpdir(), 'caps-'))
     const all = bridgeApps({ apps: [app('notes'), app('calendar'), app('vault', { privacy: 'private' }), app('video', { status: 'stopped' })] })
-    let on = true
     const caps = createCapabilities(<any>{
-      on: () => on, allApps: () => all, apps: (id: string) => all.filter((a) => (id === 'hermes' ? true : ['notes', 'video'].includes(a.id))),
+      allApps: () => all, apps: (id: string) => all.filter((a) => (id === 'hermes' ? true : ['notes', 'video'].includes(a.id))),
       builtins: (id: string) => [tool('wizard_remind'), tool('wizard_devices'), ...(id === 'sealed' ? [] : [tool('wizard_transcribe')])],
       isPrivate: (id: string) => id === 'sealed', agentLabel: (id: string) => (id === 'hermes' ? 'Wizard' : 'Philosopher'),
       voice: async () => ({ ready: true, reachable: true }), statePath: join(dir, 'capabilities.json'), ...over,
     })
-    return { caps, dir, off: () => { on = false } }
+    return { caps, dir }
   }
   const json = async (caps: ReturnType<typeof createCapabilities>, agent: string, args: Record<string, unknown> = { format: 'json' }) => JSON.parse((await caps.call(CAPABILITY_TOOL, args, agent))!.content[0].text)
 
@@ -97,8 +96,8 @@ describe('capability registry (issue 463)', () => {
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 
-  it('records a gap (words + agent, no content), lets the owner turn the guard off per agent, and is silent when off', async () => {
-    const { caps, dir, off } = make()
+  it('records a gap (words + agent, no content), lets the owner turn the guard off per agent, and always serves the tool', async () => {
+    const { caps, dir } = make()
     try {
       const text = (await caps.call(CAPABILITY_TOOL, { job: 'OCR this scanned PDF for me' }, 'philosopher'))!.content[0].text
       expect(text).toMatch(/^Nothing on this box does "OCR this scanned PDF for me" yet\. Tell the owner plainly/u)
@@ -109,11 +108,10 @@ describe('capability registry (issue 463)', () => {
       expect((await json(caps, 'hermes')).guard).toBe(true)
       expect(() => caps.setGuard('../x', false)).toThrow()
       expect(JSON.parse(readFileSync(join(dir, 'capabilities.json'), 'utf8')).guard_off).toEqual(['philosopher'])
-      off()
-      expect((<any>caps).list('philosopher')).toEqual([])
-      expect(caps.jobs('philosopher')).toBe(null)
-      expect(caps.runNote('philosopher')).toBe('')
-      expect(await caps.call(CAPABILITY_TOOL, {}, 'philosopher')).toBeUndefined()
+      // On for everyone (the wizard/capability-registry switch was removed): the tool, the index and the run note stay.
+      expect((<any>caps).list('philosopher').map((t: any) => t.name)).toEqual([CAPABILITY_TOOL])
+      expect(caps.runNote('philosopher')).toMatch(/^Built into this box for you: transcription, /u)
+      expect(view.on).toBe(true)
     } finally { rmSync(dir, { recursive: true, force: true }) }
   })
 })
@@ -148,7 +146,7 @@ describe('install guard (hermes-plugin capability_guard.py, issue 463)', () => {
     expect(allowed).toEqual([null, null, null, null, null, null, null])
   })
 
-  it('not-granted asks the owner; guard off, switch off or no gateway: nothing is refused', () => {
+  it('not-granted asks the owner; guard off or no gateway: nothing is refused', () => {
     const notGranted = guard([['terminal', { command: 'pip install vosk' }]], `{"guard": True, "capabilities": [{"job": "transcription", "status": "not-granted", "ask": "Ask the owner.", "equivalents": ["vosk"], "provider": {"name": "x"}}]}`)
     expect(notGranted[0]).toEqual({ action: 'block', message: 'WizardOS: not run. Ask the owner.' })
     expect(guard([['terminal', { command: 'pip install faster-whisper' }]], `{"guard": False, "capabilities": json.loads(sys.stdin.read())}`)).toEqual([null])
@@ -156,7 +154,7 @@ describe('install guard (hermes-plugin capability_guard.py, issue 463)', () => {
     // A refusal is decided on a fresh read: the owner's guard-off is honoured on the very next try (Codex P2).
     const fresh = JSON.parse(py(`on = {"guard": True, "capabilities": json.loads(sys.stdin.read())}; off = {**on, "guard": False}; g.registry = lambda fresh=False: off if fresh else on; print(json.dumps(g.pre_tool_call('terminal', {'command': 'pip install faster-whisper'})))`, records))
     expect(fresh).toBe(null)
-    // No gateway configured at all (switch state unknown): the real lookup returns None and the call runs.
+    // No gateway configured at all: the real lookup returns None and the call runs.
     const env = { ...process.env, HERMES_HOME: mkdtempSync(join(tmpdir(), 'hh-')), WIZARD_MCP_TOKEN: '' }
     const out = execFileSync('python3', ['-c', `import sys; sys.path.insert(0, ${JSON.stringify(PLUGIN)}); import capability_guard as g; print(g.registry(), g.index_jobs(), g.pre_tool_call('terminal', {'command': 'pip install faster-whisper'}))`], { env }).toString().trim()
     expect(out).toBe('None None None')

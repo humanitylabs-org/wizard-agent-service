@@ -2888,7 +2888,7 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
   },
   'capability-registry': async s => {
     // Issue 463: agents find what the box already does (built-ins, host voice service, app jobs) before installing
-    // their own. One owner switch (wizard/capability-registry in the Look file): off = no tool, the old kernel line.
+    // their own. On for everyone (the wizard/capability-registry switch was removed), whatever the Look file holds.
     const osHome = join(s.root, 'os')
     const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/capability-registry': { on, at: Date.now() } } })) }
     const video = { id: 'parity-video', name: 'Synthetic Video', status: 'running', provides: ['short-form-video'], mcp: { url: 'http://127.0.0.1:9/mcp' } }
@@ -2906,26 +2906,9 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     const names = async () => { const r = await s.agentMcp('tools/list'); assert.equal(r.status, 200, 'own gateway credential and transport'); return (await r.json()).result.tools.map(t => t.name) }
     const call = async args => (await (await s.agentMcp('tools/call', { name: 'wizard_capabilities', arguments: args })).json()).result
     const kernel = async () => (await (await s.agentMcp('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'parity' } })).json()).result.instructions
-    // Off: nothing changes.
+    // A stored off value from the old switch changes nothing: the tool, the index line and the owner route stay.
     look(false)
-    assert.ok(!(await names()).includes('wizard_capabilities'), 'switch off: no lookup tool')
-    assert.match((await call({})).content[0].text, /^No installed app has a tool called wizard_capabilities/u)
-    const off = await kernel()
-    assert.ok(off.includes('never install speech models') && !off.includes('Built in:'), 'switch off: the old kernel')
-    assert.equal((await s.raw('/wizard/v1/capabilities')).status, 404, 'switch off: no owner route')
-    if (s.kind !== 'main') { await admit(s, { input: 'Synthetic: switch off' }); assert.ok(!sent(s).instructions.includes('wizard_capabilities'), 'switch off: no run note') }
-    // On: an open MCP session is told its tool list changed (a cached list would miss the tool), then lists it.
-    const init = await s.agentMcp('initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'parity' } })
-    const sid = init.headers.get('mcp-session-id')
-    const stream = await s.agentMcpStream(sid)
-    try {
-      assert.equal(stream.status, 200, 'session event stream on this kind\'s transport')
-      look(true)
-      const changed = () => stream.frames.join('').includes('notifications/tools/list_changed')
-      for (let n = 0; n < 100 && !changed(); n++) await new Promise(resolve => setTimeout(resolve, 50))
-      assert.ok(changed(), 'switching on sends tools/list_changed to open sessions')
-    } finally { stream.close() }
-    assert.ok((await names()).includes('wizard_capabilities'), 'switch on: the lookup tool is served')
+    assert.ok((await names()).includes('wizard_capabilities'), 'the lookup tool is served')
     const index = (await call({})).content[0].text
     assert.match(index, /- transcription: Wizard Voice Service \(host-service\), tool `wizard_transcribe`, ready/u)
     assert.match(index, /- short form video: Synthetic Video \(app\), tool `parity_video__\*`/u)
@@ -2937,7 +2920,7 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.equal(data.schema, 'wizard.capabilities/1'); assert.equal(data.guard, true)
     assert.ok(data.capabilities.find(r => r.job === 'transcription').equivalents.includes('faster-whisper'), 'the guard reads known duplicates')
     const on = await kernel()
-    assert.ok(on.includes('Built in: transcription') && on.includes('wizard_capabilities') && !on.includes('never install speech models'), 'switch on: one generated index line')
+    assert.ok(on.includes('Built in: transcription') && on.includes('wizard_capabilities') && !on.includes('never install speech models'), 'one generated index line, the old speech line gone')
     assert.ok(on.split('\nJobs on this box:')[0].length <= 1300, 'the kernel stays within its budget')
     // A gap is said plainly and recorded (words + agent id); the owner sees it and can turn the guard off per agent.
     assert.match((await call({ job: 'ocr a scanned pdf' })).content[0].text, /^Nothing on this box does "ocr a scanned pdf" yet\. Tell the owner plainly/u)
@@ -2960,8 +2943,6 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
         assert.ok(!sealed.includes('Synthetic Notes'), 'private agent: no not-granted names')
       } finally { s.setSupervisorSeal('standard', true) }
     }
-    look(false)
-    assert.ok(!(await names()).includes('wizard_capabilities'), 'switched off again: gone')
   },
   'tools-list-cache-hints': async s => {
     // Issue 435: tools/list carries SEP-2549 cache hints so Hermes `lazy: true` can register app tools at chat start.

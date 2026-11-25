@@ -56,7 +56,7 @@ import { dayOf, mintDailyThreadId, dailyTitle, openerOf, dailyRunNote, validDay,
 import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigration } from './channel-spaces.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
 import { createChannelsSwitch, channelOn, channelPart, CHAT_TAGS_SWITCH } from './channels-switch.mjs'
-import { createCapabilities, CAPABILITY_SWITCH } from './capabilities.mjs'
+import { createCapabilities } from './capabilities.mjs'
 // wizard-ux issue 1437: the shell app whose skill is the generated interface manual, and the switch that lets it in.
 const INTERFACE_MANUAL_SWITCH = 'wizard/interface-manual'
 const INTERFACE_MANUAL_APPS = new Set(['wizard-ux'])
@@ -3189,15 +3189,11 @@ function buildWizardServer(options, lifetime) {
   // The same Voice Service, reading the owner's Files root instead of the agent's home: a voice note in a batch.
   let captureListen = null
   const builtinTools = (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(reachOut?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId), ...(transcribeTools?.list(agentId) || []), ...(captureTools?.list(agentId) || [])]
-  // System capability registry (issue 463, capabilities.mjs): the owner's `wizard/capability-registry` switch in the
-  // Look file; option capabilityRegistry (env WIZARD_CAPABILITY_REGISTRY, '1' on / '0' off) wins. Off = no
-  // wizard_capabilities tool, the old kernel line and no run note: nothing changes.
-  const capabilitySwitchOn = createChannelsSwitch({ id: CAPABILITY_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.capabilityRegistryTtlMs ?? 3000 })
-  const capabilityOn = () => channelPart(options.capabilityRegistry, capabilitySwitchOn)
+  // System capability registry (issue 463, capabilities.mjs), on for everyone: the wizard_capabilities tool, the
+  // generated kernel index line and the routed run note.
   const interfaceManualSwitchOn = createChannelsSwitch({ id: INTERFACE_MANUAL_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.interfaceManualTtlMs ?? 3000 })
   const interfaceManualOn = () => channelPart(options.interfaceManual, interfaceManualSwitchOn)
   const capabilities = createCapabilities({
-    on: capabilityOn,
     apps: (agentId) => bridge?.apps(agentId) || [],
     allApps: () => bridge?.apps() || [],
     builtins: builtinTools,
@@ -3226,17 +3222,6 @@ function buildWizardServer(options, lifetime) {
     })
     : null
   if (bridge) lifetime.own(() => bridge.close())
-  // The switch decides whether wizard_capabilities is in the tool list: when the owner flips it, tell every open MCP
-  // session (tools/list_changed), so a client holding a cached list re-asks instead of missing the tool the kernel names.
-  if (bridge) {
-    let capabilityWas = capabilityOn()
-    const capabilityWatch = setInterval(() => {
-      const now = capabilityOn()
-      if (now !== capabilityWas) { capabilityWas = now; bridge.appsChanged() }
-    }, options.capabilitySwitchWatchMs ?? 3000)
-    capabilityWatch.unref?.()
-    lifetime.own(() => clearInterval(capabilityWatch))
-  }
   // The shell's interface manual (wizard-ux issue 1437): the wizard-ux app's skill reaches the agent only while the
   // owner's `wizard/interface-manual` switch is on (option interfaceManual, env WIZARD_INTERFACE_MANUAL '1'/'0',
   // wins). Off = the agent's skills are what they were; turning it off removes the copy again.
@@ -8192,7 +8177,7 @@ function buildWizardServer(options, lifetime) {
       // Capability registry (issue 463): the owner reads what the main agent finds, the recorded gaps and which agents
       // have the install guard off; PATCH {agent, guard} turns the guard off or on for one agent. Owner settings gate.
       if (url.pathname === '/wizard/v1/capabilities') {
-        if (!bridge || !capabilityOn()) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (!bridge) { sendJson(response, 404, { error: 'not_found' }); return }
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
         if (!['GET', 'PATCH'].includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'GET, PATCH' }); return }
