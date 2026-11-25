@@ -276,9 +276,9 @@ class RestrictedDriverTest(unittest.TestCase):
         self.assertEqual(len(commands), 2)
 
     def test_bad_networks_are_refused(self):
-        for network in (None, {"uplink": "10.250.0.16/27", "sandbox": "10.251.0.16/28"}, {"uplink": "172.17.0.0/28", "sandbox": "10.251.0.16/28"},
-                        {"uplink": "10.250.0.17/28", "sandbox": "10.251.0.16/28"}, {"uplink": "10.251.0.16/28", "sandbox": "10.250.0.16/28"}):
-            agent = agent_folder(self.tmp / "agents", f"a{len(self.calls)}x{abs(hash(str(network))) % 1000}", network)
+        for i, network in enumerate((None, {"uplink": "10.250.0.16/27", "sandbox": "10.251.0.16/28"}, {"uplink": "172.17.0.0/28", "sandbox": "10.251.0.16/28"},
+                        {"uplink": "10.250.0.17/28", "sandbox": "10.251.0.16/28"}, {"uplink": "10.251.0.16/28", "sandbox": "10.250.0.16/28"})):
+            agent = agent_folder(self.tmp / "agents", f"bad{i}", network)
             with self.assertRaises(ar.RuntimeFailure) as raised:
                 self.driver.env(agent)
             self.assertEqual(raised.exception.code, "agent_network_invalid")
