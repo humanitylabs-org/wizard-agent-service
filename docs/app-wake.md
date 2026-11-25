@@ -14,7 +14,8 @@ The box is the agent's event inbox. An installed app calls the Service with its 
   - `createWakeLedger().reserve` takes the (app, agent, event) slot before any await: a repeat within `MERGE_MS`
     (60 s) answers `200 merged` and is kept as `again`; one timer wakes the newest merged event when the window ends.
     `HOURLY_CAP` (60) wakes per app per hour, then `429 wake_limit`.
-  - `startAppWake` creates a new session (`mintDailyThreadId`, title `<App name> wake`), hides it (main through
+  - `startAppWake` creates a new session (`mintDailyThreadId`, no title: stock Hermes refuses a second session with
+    a title another holds, so a fixed title failed every wake after the first), hides it (main through
     `hermesJson` PATCH like the orb dump; routed agents through the proxied PATCH), and admits one run through
     `deliveryCall` with key `wizard-wake-<hash>` and the words of `wakeTurnText` (an app's signal, never the owner's
     words). A failed start frees the slot (`503 wake_not_started`).

@@ -4169,7 +4169,9 @@ function buildWizardServer(options, lifetime) {
     const agentQuery = agents ? `?agent=${encodeURIComponent(wake.agent)}` : ''
     const thread = mintDailyThreadId()
     const key = `${APP_WAKE_RUN_PREFIX}${createHash('sha256').update(`${app}\n${wake.agent}\n${thread}`).digest('hex').slice(0, 24)}`
-    const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${agentQuery}`, { id: thread, title: `${appName(app) || app} wake`, source: 'wizard-mobile', hidden: true })
+    // No title: stock Hermes keeps titles unique and refuses a new session whose title another holds, so a fixed
+    // '<App> wake' title made every wake after the first fail (wizard-os issue 634 tester).
+    const created = await deliveryCall(`${PROXY_PREFIX}/api/sessions${agentQuery}`, { id: thread, source: 'wizard-mobile', hidden: true })
     if (!created.ok && created.status !== 409) throw new Error(`session ${created.status}`)
     // Stock Hermes keeps `hidden` out of a create body; the PATCH is what hides it from every list and count (the
     // orb dump's way). The wake thread is the app's, not a chat the owner started.
