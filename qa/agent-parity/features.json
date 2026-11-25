@@ -2551,6 +2551,24 @@
       "policy_exemptions": []
     },
     {
+      "id": "chat-tags",
+      "description": "Tags in Chats (wizard-ux, the shell half of issue 608; the service half is chats-tags): with the box's Tags on (owner switch wizard/chat-tags; the channel list says tags: true) a chat is in every channel it carries (its row's tags), a tag's feed keeps chats whose first tag is another one, a chat's Tags… sheet ticks every tag it carries and a tap adds or removes one through PUT /wizard/v1/channels/tags with the row's own agent (never a move; the sheet stays open), the Tags tab lists the tags plus an Archived tag view, and Back from a tag returns to Tags. With Tags off: today's Channels, one channel per chat, Move to channel.",
+      "layer": "ux",
+      "how_to_test": "wizard-ux tests/chat-channel-store.test.mjs (tags cases) runs the real live.js channel store and chats.js Space and Channels code against a fake box with main and routed (host-profile, container, restricted) rows: rows' tags put a chat in every tag and never in another agent's, a tap is one PUT tags with the row's agent, a tag's feed keeps chats whose first tag is another one, and tags off moves as before; tests/qa-chat-tags.cjs proves it in a real browser (phone 412 px, Nebula and Obsidian Light, tags on and off). Synthetic fixture evidence, not live box proof.",
+      "source_refs": [
+        "wizard-ux/web/core/chats.js",
+        "wizard-ux/web/core/chats-channels.js",
+        "wizard-ux/web/core/chats-spaces.js",
+        "wizard-ux/web/live-channels.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/chat-channel-store.test.mjs",
+        "wizard-ux/tests/qa-chat-tags.cjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "chat-daily-channel",
       "description": "The Daily channel in Chats (wizard-ux issue 1469, part of the Channels switch wizard/chat-channels; the service half is chats-daily-channel): a tap on the channel of kind daily opens its newest day thread in the ordinary thread view (an empty Today line under it before today's first post), each earlier day folded above it with its opener and message count, unfolding in place through the normal history read and paging older days from /days?cursor; a send from that view asks POST /wizard/v1/channels/<id>/today first and goes into the thread the box names (a send at 04:59 continues yesterday's, the first send after 05:00 moves the view to today's thread with the draft), for the channel's own agent: a routed agent's day threads are pinned to that agent so the history read and the send use its route.",
       "layer": "ux",
