@@ -3221,7 +3221,7 @@ function buildWizardServer(options, lifetime) {
       mcpAddress: options.appsMcpAddress || 'url', token: options.mcpToken ?? gatewayToken({ osHome: bridgeOsHome }),
       fetchImpl, writeSkills: !gatewayOnly && options.bridgeWriteSkills !== false, watchIntervalMs: options.bridgeWatchMs ?? 2000,
       log: options.bridgeLog ?? ((line) => process.stdout.write(`[agent-bridge] ${line}\n`)),
-      jobMap: Boolean(options.kernelJobMap), ...(options.filesRoot ? { filesRoot: String(options.filesRoot) } : {}),
+      jobMap: Boolean(options.kernelJobMap), ...(Array.isArray(options.bridgeRecheckMs) ? { recheckMs: options.bridgeRecheckMs } : {}), ...(options.filesRoot ? { filesRoot: String(options.filesRoot) } : {}),
     })
     : null
   if (bridge) lifetime.own(() => bridge.close())

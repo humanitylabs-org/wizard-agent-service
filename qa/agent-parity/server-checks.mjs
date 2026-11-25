@@ -1777,18 +1777,18 @@ export const serverChecks = {
       assert.equal((await s.request('/api/sessions', post({ id, source: 'wizard-mobile' }))).status, 201)
       const made = s.sessions.get(id); made.hidden = false; made.preview = msgs.find(m => m.role === 'user').content; made.messages.push(...msgs)
     }
-    const listed = async (id, want) => {
-      let last
-      for (let attempt = 0; attempt < 80; attempt++) {
-        if (s.kind === 'main') await (await s.request('/api/sessions?limit=100')).json()
-        last = (await (await s.request('/api/sessions?view=list&limit=100')).json()).data.find(x => x.id === id)
-        if (last && want(last)) return last
-        await new Promise(r => setTimeout(r, 25))
-      }
-      return last
+    // Both threads were made together: once the owner thread shows its firstRequest the list is fresh, so the alert
+    // row of that same list is the answer (polling for a field that must stay missing waited out every round).
+    let rows = []
+    for (let attempt = 0; attempt < 80; attempt++) {
+      if (s.kind === 'main') await (await s.request('/api/sessions?limit=100')).json()
+      rows = (await (await s.request('/api/sessions?view=list&limit=100')).json()).data
+      const ownerRow = rows.find(x => x.id === 'wizard_parity_owner'), alert = rows.find(x => x.id === 'wizard_parity_alert')
+      if (ownerRow && Object.hasOwn(ownerRow, 'firstRequest') && alert) break
+      await new Promise(r => setTimeout(r, 25))
     }
-    assert.equal((await listed('wizard_parity_owner', x => Object.hasOwn(x, 'firstRequest')))?.firstRequest, 'Synthetic owner opener')
-    const alertRow = await listed('wizard_parity_alert', x => Object.hasOwn(x, 'firstRequest'))
+    assert.equal(rows.find(x => x.id === 'wizard_parity_owner')?.firstRequest, 'Synthetic owner opener')
+    const alertRow = rows.find(x => x.id === 'wizard_parity_alert')
     assert.ok(alertRow && !Object.hasOwn(alertRow, 'firstRequest'), 'an agent-started thread with an owner reply carries no firstRequest')
   },
   'chats-first-posts': async s => {
@@ -2394,11 +2394,13 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
       assert.ok(!rows.some(r => r.wizard_background_result), `${s.kind}: routed lists carry no saved-result row`)
       return
     }
-    const list = async () => {
+    // `any` waits for a finished scan with results; after a Dismiss the expected list may be empty, so a finished scan
+    // alone is enough (waiting for results that were just dismissed burned 10 s per read).
+    const list = async (any = true) => {
       let listed
       for (let n = 0; n < 400; n++) {
         listed = await (await s.raw('/wizard/background-results', { headers: s.ownerHeaders })).json()
-        if (!listed.scanning && listed.scan_complete && listed.results?.length) return listed
+        if (!listed.scanning && listed.scan_complete && (!any || listed.results?.length)) return listed
         await new Promise(r => setTimeout(r, 25))
       }
       return listed
@@ -2414,7 +2416,7 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     const done = await dismiss({ session_id: 'wizard_parity_dismiss_a', id: a.id })
     assert.equal(done.status, 200, `Dismiss is accepted (${done.status})`)
     assert.deepEqual((await done.json()).ids, [a.id])
-    const after = await list()
+    const after = await list(false)
     assert.ok(!after.results.some(r => r.id === a.id) && !after.sessions.some(r => r.id === 'wizard_parity_dismiss_a'), 'a dismissed result is gone for every reader')
     const rows = (await (await s.request('/api/sessions?limit=200')).json()).data
     assert.ok(!rows.find(r => r.id === 'wizard_parity_dismiss_a')?.wizard_background_result, 'the thread row no longer carries it')
@@ -2427,7 +2429,7 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     s.sessions.get('wizard_parity_dismiss_c').archived = false
     // Let at least two fresh scans run (the scene rescans every 100 ms) so the restored thread is read again.
     let restored
-    for (let n = 0; n < 4; n++) { await new Promise(r => setTimeout(r, 250)); restored = await list() }
+    for (let n = 0; n < 4; n++) { await new Promise(r => setTimeout(r, 250)); restored = await list(false) }
     assert.ok(!restored.results.some(r => r.session_id === 'wizard_parity_dismiss_c'), 'a restored archived thread does not bring the result back')
     const last = await (await s.raw('/wizard/background-results', { headers: s.ownerHeaders })).json()
     assert.ok(!last.results.some(r => /wizard_parity_dismiss_/.test(r.session_id)), 'nothing of either thread is offered any more')

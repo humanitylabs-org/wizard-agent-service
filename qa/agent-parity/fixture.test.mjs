@@ -8,15 +8,25 @@ import { fileURLToPath } from 'node:url'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '../..')
 const reportDir = mkdtempSync(join(tmpdir(), 'parity-gate-'))
-// This is a serial whole-matrix process budget, not a per-contract latency assertion.
-const result = spawnSync(process.execPath, [join(root, 'qa/agent-parity/run.mjs'), '--fixture-only', '--report-dir', reportDir], { encoding: 'utf8', timeout: 180000, env: process.env })
+// A serial whole-matrix process budget with real headroom (the matrix runs about 2 min on CI, the job has 15), not a
+// per-contract latency assertion: run.mjs fails a single hung cell by name after its own per-cell budget (issue 637).
+const budgetMs = Number(process.env.PARITY_RUN_TIMEOUT_MS) || 600_000
+const started = Date.now()
+const result = spawnSync(process.execPath, [join(root, 'qa/agent-parity/run.mjs'), '--fixture-only', '--report-dir', reportDir], { encoding: 'utf8', timeout: budgetMs, maxBuffer: 64 * 1024 * 1024, env: process.env })
+const elapsed = Date.now() - started
 let report
 try {
   report = JSON.parse(readFileSync(join(reportDir, 'matrix.json'), 'utf8'))
   assert.equal(report.completed, true)
 } catch (error) {
-  throw new Error(`Parity runner did not complete: ${error.message}\n${result.stderr}\n${result.stdout}`)
+  let last = ''
+  try { last = readFileSync(join(reportDir, 'cells.jsonl'), 'utf8').trim().split('\n').filter(Boolean).at(-1) || '' } catch {}
+  const why = result.error?.code === 'ETIMEDOUT' ? `killed after ${elapsed} ms (budget ${budgetMs} ms)` : error.message
+  throw new Error(`Parity runner did not complete: ${why}; last finished cell: ${last ? JSON.parse(last).feature + '/' + JSON.parse(last).kind : 'none'}\n${result.stderr}\n${result.stdout}`)
 } finally { rmSync(reportDir, { recursive: true, force: true }) }
+// So creep is visible long before the budget: the run's time and its slowest cells, in the CI log.
+const slowest = [...report.cells].filter(c => typeof c.duration_ms === 'number').sort((a, b) => b.duration_ms - a.duration_ms).slice(0, 8)
+console.log(`# parity matrix ${elapsed} ms of ${budgetMs} ms budget; slowest cells: ${slowest.map(c => `${c.feature}/${c.kind} ${c.duration_ms} ms`).join(', ')}`)
 const manifest = JSON.parse(readFileSync(join(root, 'qa/agent-parity/features.json'), 'utf8'))
 for (const feature of manifest.features.filter(f => f.fixture)) {
   for (const kind of manifest.runtime_kinds) {
