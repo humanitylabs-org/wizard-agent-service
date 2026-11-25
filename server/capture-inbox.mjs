@@ -16,7 +16,7 @@
 //   another file. Undo moves back only when the original place is free and the file is still where it was filed.
 // - The owner's rules are one plain file in Files (`Capture rules.md`), written with the default set on first use.
 
-import { appendFileSync, closeSync, existsSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync, rmdirSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, readdirSync, realpathSync, renameSync, truncateSync, unlinkSync, writeFileSync } from 'node:fs'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
 import { atomicStoreWrite } from './thread-reference.mjs'
@@ -86,6 +86,13 @@ const cleanName = (wanted, original) => {
   if (!name) return original
   if (ext && extname(name).toLowerCase() !== ext.toLowerCase()) name += ext
   return name
+}
+
+/** The folders a mkdir -p of `dir` would make (deepest last), so undo can take away the empty ones it made. */
+const missingDirs = (root, dir) => {
+  const out = []
+  for (let at = dir; at !== root && within(root, at) && !existsSync(at); at = dirname(at)) out.unshift(relative(root, at).split(sep).join('/'))
+  return out
 }
 
 const freeName = (dir, name) => {
@@ -288,6 +295,7 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
     if (!src) refuse(`${item.name} is no longer at ${agentPath(from)}; nothing moved.`, 'missing')
     const dir = join(base, target)
     const real = realBase()
+    const made = missingDirs(base, dir)
     mkdirSync(dir, { recursive: true, mode: 0o755 })
     let dirReal
     try { dirReal = realpathSync(dir) } catch { refuse('That folder could not be made.') }
@@ -295,7 +303,7 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
     const finalName = freeName(dirReal, cleanName(name, item.name))
     const to = `${target}/${finalName}`
     renameSync(src.path, join(dirReal, finalName))
-    batch.log.push({ item: item.item, action: 'file', from, to, judged_as: clip(judged_as, 80), rule: clip(rule, 200), at: now() })
+    batch.log.push({ item: item.item, action: 'file', from, to, made, judged_as: clip(judged_as, 80), rule: clip(rule, 200), at: now() })
     save()
     return { item: item.item, name: item.name, filed: agentPath(to), folder: target }
   }
@@ -320,6 +328,7 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
     const folder = cleanFolder(dirname(rel) === '.' ? '' : dirname(rel) || '', { agentRoot: agentBase })
     const name = cleanName(basename(rel), basename(rel))
     const dir = join(base, folder)
+    const made = missingDirs(base, dir)
     mkdirSync(dir, { recursive: true, mode: 0o755 })
     const real = realBase()
     let dirReal
@@ -332,7 +341,7 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
     if (before < 0) writeFileSync(target, chunk, { flag: 'wx', mode: 0o644 })
     else appendFileSync(target, chunk)
     const notePath = `${folder}/${name}`
-    batch.log.push({ item: item?.item || '', action: 'note', note_path: notePath, created: before < 0, before: Math.max(0, before), added: chunk.length, sha: createHash('sha256').update(chunk).digest('hex').slice(0, 32), judged_as: clip(judged_as, 80), rule: clip(rule, 200), at: now() })
+    batch.log.push({ item: item?.item || '', action: 'note', note_path: notePath, made, created: before < 0, before: Math.max(0, before), added: chunk.length, sha: createHash('sha256').update(chunk).digest('hex').slice(0, 32), judged_as: clip(judged_as, 80), rule: clip(rule, 200), at: now() })
     save()
     return { note: agentPath(notePath), created: before < 0, added_chars: body.length }
   }
@@ -346,6 +355,13 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
     if (batch.state === 'open') batch.state = 'done'
     save()
     return { batch: batch.id, outcome: line, waiting: batch.items.filter(i => stateOf(batch, i) === 'waiting').map(i => i.name) }
+  }
+
+  // Folders a filing step made are taken away again on undo, only while they are empty (deepest first).
+  const unmake = made => {
+    for (const rel of [...(Array.isArray(made) ? made : [])].reverse()) {
+      try { rmdirSync(join(base, rel)) } catch { /* not empty, or already gone: leave it */ }
+    }
   }
 
   /** Put a whole batch back: every filed item to where it arrived, every note without the added text. Newest first. */
@@ -368,6 +384,7 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
         try { data.handled[idOf(lstatSync(back, { bigint: true }))] = { batch: batch.id, at: now(), undone: true } } catch { /* gone again */ }
         entry.undone = true
         restored.push(entry.from)
+        unmake(entry.made)
         continue
       }
       if (entry.action === 'note') {
@@ -387,6 +404,7 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
         else truncateSync(at.path, entry.before)
         entry.undone = true
         restored.push(entry.note_path)
+        unmake(entry.made)
       }
     }
     if (!problems.length) batch.state = 'undone'

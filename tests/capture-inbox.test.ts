@@ -128,6 +128,11 @@ describe('filing, notes and undo (module)', () => {
     expect(undone).toMatchObject({ batch: b, restored: 7, problems: [], items_back_in_inbox: 5, of: 5 })
     const after = Object.fromEntries(walk(root).map(p => [p, readFileSync(join(root, p), 'utf8')]))
     expect(after).toEqual(beforeAll)
+    // The folders filing made are gone again; the owner's own Reading folder stays.
+    expect(readdirSync(root).sort()).toEqual(['Capture rules.md', 'Inbox', 'Reading', 'Reading-existing.md'].filter(n => existsSync(join(root, n))).sort())
+    expect(existsSync(join(root, 'Documents'))).toBe(false)
+    expect(existsSync(join(root, 'Voice notes'))).toBe(false)
+    expect(readdirSync(join(root, 'Reading'))).toEqual(['Why We Sleep.md'])
     expect(Object.keys(before).filter(p => p.startsWith('Inbox/'))).toHaveLength(5)
     // Put back means left alone: the watcher does not batch them again.
     expect(inbox.scan()).toBeNull()
