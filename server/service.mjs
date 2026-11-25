@@ -3275,7 +3275,8 @@ function buildWizardServer(options, lifetime) {
   // option privateFirst (env WIZARD_PRIVATE_FIRST, '1' on / '0' off) wins, because a fresh box has no Look file yet.
   const needsYouReasonSwitchOn = createChannelsSwitch({ id: NEEDS_YOU_REASON_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.needsYouReasonTtlMs ?? 3000 })
   const privateFirstSwitchOn = createChannelsSwitch({ id: PRIVATE_FIRST_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.privateFirstTtlMs ?? 3000 })
-  const privateFirstOn = () => channelPart(options.privateFirst, privateFirstSwitchOn)
+  // Standard first (wizard-ux issue 1800): the owner's Set up private AI in the Welcome turns it on for this box too.
+  const privateFirstOn = () => channelPart(options.privateFirst, () => privateFirstSwitchOn() || privateFirst?.optedIn?.() === true)
   // Local app routes (wizard-app-manager issue 629, local-app-routes.mjs): the owner's `wizard/local-app-routes` switch
   // in the Look file; option localAppRoutes (env WIZARD_LOCAL_APP_ROUTES, '1' on / '0' off) wins.
   const localAppRoutesSwitchOn = createChannelsSwitch({ id: LOCAL_APP_ROUTES_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.localAppRoutesTtlMs ?? 3000 })
@@ -3349,6 +3350,9 @@ function buildWizardServer(options, lifetime) {
     bindings: () => appBindings, attach: () => mainProviderAttachStore,
     // Issue 582: with no runtime helper configured the private agent can't be made, so private first answers off.
     runtime: () => Boolean(agentRuntime),
+    // Issue 1800: the first run lasts until the Welcome posts setup/seen; env WIZARD_PRIVATE_FIRST=0 blocks an opt-in.
+    firstRun: () => Boolean(settingsPath) && !readSettings(settingsPath).settings.setup?.seen_at,
+    blocked: () => options.privateFirst === false,
     log: line => process.stdout.write(`[private-first] ${line}\n`),
     // The owner's default agent (settings.json agents.default_agent_id), written the way PUT /wizard/v1/settings does.
     setDefaultAgent: (id) => {
@@ -7990,11 +7994,26 @@ function buildWizardServer(options, lifetime) {
         return
       }
       if (url.pathname === '/wizard/v1/private-first') {
-        // Private first (issue 545): read-only, for the owner's Welcome and Agents views.
+        // Private first (issue 545): GET is read-only, for the owner's Welcome and Agents views. POST {offer} is the
+        // Welcome's answer to its private AI offer (wizard-ux issue 1800, standard first): setup / later / declined.
         if (!privateFirst) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        if (request.method === 'POST') {
+          // A write from the owner's own page only, the same rule as the setup writes: JSON (a cross-site form or
+          // text/plain POST can't send it without a preflight), never cross-site, and an Origin, when named, is this box.
+          const refused = setupWriteRefusal(request, tailnetIngress)
+          if (refused) { sendJson(response, refused, { error: refused === 415 ? 'json_required' : 'cross_origin_request' }); return }
+          let value
+          try { value = JSON.parse((await readBoundedBody(request, 4 * 1024)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid body' }); return }
+          if (!value || typeof value !== 'object' || Array.isArray(value)) { sendJson(response, 400, { error: 'invalid body' }); return }
+          try { sendJson(response, 200, await privateFirst.answerOffer(value), { 'Cache-Control': 'no-store' }) } catch (error) {
+            const status = error instanceof AgentError ? error.status : error?.status
+            sendJson(response, Number.isInteger(status) ? status : 500, { ok: false, error: error?.code || 'private_first_failed' })
+          }
+          return
+        }
         if (request.method !== 'GET') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
         sendJson(response, 200, privateFirst.state(), { 'Cache-Control': 'no-store' })
         return

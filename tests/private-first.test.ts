@@ -387,3 +387,100 @@ describe('private first (issue 545)', () => {
     expect(list.find((a) => a.id === 'private')).toMatchObject({ is_default: false, permissions: { wizard_apps: [] } })
   })
 })
+
+// wizard-ux issue 1800 (standard first): the Welcome asks once, after Connect your AI, whether to set up private AI.
+describe('the Welcome\'s private AI offer (wizard-ux issue 1800)', () => {
+  const offer = (b: Awaited<ReturnType<typeof box>>, value: unknown, headers: Record<string, string> = {}) => b.call('POST', '/wizard/v1/private-first', value, headers)
+
+  it('ChatGPT first, then Set up private AI: private on Tinfoil is the default, ChatGPT stays on the shown standard agent', async () => {
+    const b = await box({ on: null, mainModel: 'gpt-6.1-sol' })
+    expect((await b.call('GET', '/wizard/v1/private-first')).json).toMatchObject({ on: false, offer: null })
+    const r = await offer(b, { offer: 'setup' }, { 'Sec-Fetch-Site': 'same-origin' })
+    expect(r.status).toBe(200)
+    expect(r.json).toMatchObject({ on: true, offer: 'setup', private_agent: null })
+    // Tinfoil's hand-off after its sign-in (the wizard-tinfoil app asks the state, sees on, hands over).
+    expect((await b.internal('state')).json.on).toBe(true)
+    expect((await b.internal('private-agent', TINFOIL)).json).toMatchObject({ ok: true, agent: 'private', created: true })
+    const list = await b.agents()
+    expect(list.find((a) => a.id === 'private')).toMatchObject({ privacy: 'private', is_default: true, model: { provider: 'tinfoil' } })
+    expect([...list.find((a) => a.id === 'private').permissions.wizard_apps].sort()).toEqual(['meditate', 'messenger', 'photos', 'wizard-mail'])
+    const main = list.find((a) => a.id === 'hermes')
+    expect(main.hidden).toBeFalsy()
+    expect(main.is_default).toBe(false)
+    expect(b.settings().agents.default_agent_id).toBe('private')
+    expect((await b.call('GET', '/wizard/v1/app-bindings')).json.bindings.every((x: any) => x.agent === 'private')).toBe(true)
+    expect((await b.call('GET', '/wizard/v1/private-first')).json).toMatchObject({ on: true, offer: 'setup', private_agent: 'private', standard_on: true })
+    // ChatGPT's attach comes first: the private Tinfoil provider never joins the standard agent.
+    expect((await b.call('GET', '/wizard/v1/main-providers')).status).toBe(200)
+  })
+
+  it('Skip for now, then Set up private AI: the DECISIONS 115 first run (standard agent off until Claude or ChatGPT)', async () => {
+    const b = await box({ on: null })
+    expect((await offer(b, { offer: 'setup' })).json).toMatchObject({ on: true, offer: 'setup' })
+    expect((await b.internal('private-agent', TINFOIL)).json).toMatchObject({ ok: true, agent: 'private' })
+    const list = await b.agents()
+    expect(list.find((a) => a.id === 'private')).toMatchObject({ is_default: true })
+    expect(list.find((a) => a.id === 'hermes')).toMatchObject({ hidden: true, is_default: false })
+    expect((await b.call('GET', '/wizard/v1/private-first')).json).toMatchObject({ private_agent: 'private', standard_on: false })
+  })
+
+  it('private first forced on and Claude connected first: Set up private AI in the first run still makes it the default', async () => {
+    const b = await box({ on: true })
+    expect((await b.internal('standard-agent', { provider: 'anthropic', model: 'claude-opus-5-5' })).json).toMatchObject({ ok: true })
+    b.state.model = 'claude-opus-5-5'
+    b.setProvider('anthropic')
+    expect((await offer(b, { offer: 'setup' })).status).toBe(200)
+    expect((await b.internal('private-agent', TINFOIL)).json).toMatchObject({ ok: true, agent: 'private' })
+    const list = await b.agents()
+    expect(list.find((a) => a.id === 'private')).toMatchObject({ is_default: true })
+    expect(list.find((a) => a.id === 'hermes').hidden).toBeFalsy()
+  })
+
+  it('Later and No thanks are only remembered: private first stays off and a Tinfoil hand-off is refused', async () => {
+    const b = await box({ on: null, mainModel: 'gpt-6.1-sol' })
+    expect((await offer(b, { offer: 'later' })).json).toMatchObject({ on: false, offer: 'later' })
+    expect((await b.internal('private-agent', TINFOIL)).status).toBe(409)
+    expect((await offer(b, { offer: 'declined' })).json).toMatchObject({ on: false, offer: 'declined' })
+    expect((await b.call('GET', '/wizard/v1/private-first')).json).toMatchObject({ on: false, offer: 'declined' })
+    expect((await b.agents()).map((a) => a.id)).toEqual(['hermes'])
+    // Later, then Settings › Privacy › Finish setting up private AI: the same opt-in.
+    expect((await offer(b, { offer: 'setup' })).json).toMatchObject({ on: true, offer: 'setup' })
+  })
+
+  it('after the first run with no AI connected: still no new default (Codex P2)', async () => {
+    const b = await box({ on: null })
+    expect((await b.call('POST', '/wizard/v1/setup/seen', {})).status).toBe(200)
+    expect((await offer(b, { offer: 'setup' })).json).toMatchObject({ on: true })
+    await b.call('GET', '/wizard/v1/private-first')
+    expect(JSON.parse(readFileSync(join(b.dir, 'agents', '.private-first.json'), 'utf8')).fresh).toBe(false)
+    expect((await b.internal('private-agent', TINFOIL)).json).toMatchObject({ ok: true, agent: 'private' })
+    expect((await b.agents()).find((a) => a.id === 'hermes')).toMatchObject({ is_default: true })
+  })
+
+  it('after the first run (Welcome finished): an opt-in adds a private agent, never a new default', async () => {
+    const b = await box({ on: null, mainModel: 'gpt-6.1-sol' })
+    expect((await b.call('POST', '/wizard/v1/setup/seen', {})).status).toBe(200)
+    expect((await offer(b, { offer: 'setup' })).json).toMatchObject({ on: true })
+    expect((await b.internal('private-agent', TINFOIL)).json).toMatchObject({ ok: true, agent: 'private' })
+    const list = await b.agents()
+    expect(list.find((a) => a.id === 'hermes')).toMatchObject({ is_default: true })
+    expect(list.find((a) => a.id === 'private')).toMatchObject({ is_default: false })
+  })
+
+  it('env 0 wins, a bad answer or a cross-site page is refused, and nothing is written', async () => {
+    const forced = await box({ on: false })
+    expect((await offer(forced, { offer: 'setup' })).status).toBe(409)
+    expect((await forced.call('GET', '/wizard/v1/private-first')).json.on).toBe(false)
+    const b = await box({ on: null })
+    expect((await offer(b, { offer: 'yes' })).status).toBe(400)
+    expect((await offer(b, ['setup'])).status).toBe(400)
+    expect((await offer(b, { offer: 'setup' }, { 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403)
+    expect((await offer(b, { offer: 'setup' }, { 'Sec-Fetch-Site': 'same-site' })).status).toBe(403)
+    expect((await b.call('PUT', '/wizard/v1/private-first', { offer: 'setup' })).status).toBe(405)
+    // Fetch Metadata left out (an older webview): a text/plain body or another page's Origin is still refused.
+    expect((await b.call('POST', '/wizard/v1/private-first', { offer: 'setup' }, { 'Content-Type': 'text/plain' })).status).toBe(415)
+    expect((await offer(b, { offer: 'setup' }, { Origin: 'http://evil.example' })).status).toBe(403)
+    expect(existsSync(join(b.dir, 'agents', '.private-first.json'))).toBe(false)
+    expect((await b.call('GET', '/wizard/v1/private-first')).json).toMatchObject({ on: false, offer: null })
+  })
+})
