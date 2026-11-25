@@ -180,6 +180,55 @@ describe('filing, notes and undo (module)', () => {
   })
 })
 
+describe('app inboxes: Photos (module)', () => {
+  it('an app batch is the app\'s own id and count; the same app batch twice is one batch', () => {
+    const { inbox } = box()
+    const a = inbox.appBatch({ app: 'photos', batch: 'pb_1', count: 3 })
+    expect(a).toMatchObject({ created: true, batch: { app: 'photos', app_batch: 'pb_1', count: 3, source: 'photos', items: [] } })
+    expect(inbox.appBatch({ app: 'photos', batch: 'pb_1', count: 3 })).toMatchObject({ created: false, batch: { id: a.batch.id } })
+    expect(() => inbox.appBatch({ app: 'photos', batch: '../x', count: 3 })).toThrow()
+    // The app's own count is kept (Files batches stop at 50; an app batch the route accepted is not cut).
+    expect(inbox.appBatch({ app: 'photos', batch: 'pb_big', count: 120 }).batch.count).toBe(120)
+    expect(inbox.appBatches('photos').map((b: any) => b.app_batch)).toEqual(['pb_big', 'pb_1'])
+    expect(inbox.appBatches('messenger')).toEqual([])
+  })
+
+  it('3 book-page photos: copies into Files and the highlights note; the originals never move; undo takes copies and note away', () => {
+    const { root, inbox } = box()
+    const lib = join(root, 'Photos', 'Library', 'upload', 'u1', 'ab')
+    mkdirSync(lib, { recursive: true })
+    const assets = ['a1', 'a2', 'a3'].map((id, n) => { writeFileSync(join(lib, `${id}.jpg`), `jpeg page ${n + 1}`); return id })
+    const before = Object.fromEntries(walk(root).map(p => [p, readFileSync(join(root, p), 'utf8')]))
+    const { batch } = inbox.appBatch({ app: 'photos', batch: 'pb_2', count: 3 })
+    for (const id of assets) {
+      const r = inbox.copy(batch.id, id, { from: `Photos/Library/upload/u1/ab/${id}.jpg`, folder: 'Reading/Why We Sleep', judged_as: 'book page', rule: 'Photos of book pages' })
+      expect(r.copied).toContain(`Reading/Why We Sleep/${id}.jpg`)
+      inbox.note(batch.id, id, { path: 'Reading/Why We Sleep.md', text: `> highlight from ${id}` })
+    }
+    expect(() => inbox.file(batch.id, 'a1', { folder: 'Pictures' })).toThrow(/stays in photos/u)
+    expect(() => inbox.copy(batch.id, 'a1', { from: '../etc/passwd', folder: 'X' })).toThrow()
+    expect(readFileSync(join(root, 'Reading', 'Why We Sleep.md'), 'utf8')).toBe('> highlight from a1\n\n> highlight from a2\n\n> highlight from a3\n')
+    expect(inbox.view(inbox.batch(batch.id)).items.map((i: any) => [i.item, i.state])).toEqual([['a1', 'copied'], ['a2', 'copied'], ['a3', 'copied']])
+    inbox.finish(batch.id, '3 photos from Photos: 3 book pages of Why We Sleep to Reading/Why We Sleep.md')
+    // "Undo that" with no batch named picks this one.
+    const undo = inbox.undo()
+    expect(undo).toMatchObject({ batch: batch.id, problems: [], app: 'photos', app_batch: 'pb_2', items_left_in_app: 3 })
+    expect(Object.fromEntries(walk(root).map(p => [p, readFileSync(join(root, p), 'utf8')]))).toEqual(before)
+    expect(inbox.appBatches('photos')[0]).toMatchObject({ app_batch: 'pb_2', state: 'undone', undone_at: expect.any(String) })
+  })
+
+  it('the Photos batch turn says to read the items with Photos\'s tools and never move originals', () => {
+    const { inbox } = box()
+    const { batch } = inbox.appBatch({ app: 'photos', batch: 'pb_3', count: 3 })
+    const text = batchTurnText(batch, { agentRoot: '/media', rules: inbox.rules({ write: false }), appName: 'Photos' })
+    expect(text).toContain('photos_capture_batch (batch pb_3)')
+    expect(text).toContain('photos_capture_file')
+    expect(text).toContain(`${CAPTURE_TOOL} action copy (batch ${batch.id}`)
+    expect(text).toContain('never move the original')
+    expect(text).toContain('/media')
+  })
+})
+
 describe('the wizard_capture tool', () => {
   it('is listed for the main agent only while the switch is on, and answers plainly', async () => {
     const { root, c, inbox } = box({ quietMs: 1000 })
@@ -351,5 +400,58 @@ describe('capture inbox on the Agent Service', () => {
     await sleep(600)
     expect(store().list().filter(r => r.source === 'capture:files')).toHaveLength(1)
     expect(calls.filter(c => c.url === '/v1/runs')).toHaveLength(1)
+  })
+
+  it('Photos: switch off the app probe is 404; on, items_arrived is one private record and one hidden worker; undo is read back by the app', async () => {
+    const PHOTOS = 'photos-app-token-0123456789abcdefghijkl'
+    const ev = (base: string, body?: any, token = PHOTOS) => fetch(`${base}/wizard/v1/capture/events`, body === undefined
+      ? { headers: { Authorization: ['Bearer', token].join(' ') } }
+      : { method: 'POST', headers: { Authorization: ['Bearer', token].join(' '), 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const tokens = (d: string) => { mkdirSync(join(d, 'app-tokens'), { recursive: true }); writeFileSync(join(d, 'app-tokens', 'photos'), `${PHOTOS}\n`) }
+    const off = home(); tokens(off)
+    const o = await startIn(off)
+    expect((await ev(o.base)).status).toBe(404)
+    expect((await ev(o.base, { event: 'items_arrived', data: { batch: 'pb_1', count: 3 } })).status).toBe(404)
+    expect(o.calls).toEqual([])
+
+    const d = home(); tokens(d)
+    const { media, calls, base, tool, store } = await startIn(d, { captureInbox: true })
+    const lib = join(media, 'Photos', 'Library', 'upload', 'u1', 'ab')
+    mkdirSync(lib, { recursive: true })
+    for (const id of ['a1', 'a2', 'a3']) writeFileSync(join(lib, `${id}.jpg`), `jpeg ${id}`)
+    expect((await ev(base, undefined, 'not-the-photos-token-0123456789abcdef')).status).toBe(403)
+    expect((await fetch(`${base}/wizard/v1/capture/events`)).status).toBe(403) // the owner is not an app
+    expect(await (await ev(base)).json()).toEqual({ on: true, contract: 'wizard.capture-inbox/1', app: 'photos', batches: [] })
+    expect((await ev(base, { event: 'items_arrived', data: { source: 'messenger', batch: 'pb_1', count: 3 } })).status).toBe(400)
+    const sent = await ev(base, { event: 'items_arrived', data: { source: 'photos', batch: 'pb_1', count: 3, at: '2026-11-25T09:00:00Z' } })
+    const first = await sent.json()
+    expect([sent.status, first]).toEqual([202, expect.objectContaining({ accepted: true, created: true, app_batch: 'pb_1' })])
+    const again = await ev(base, { event: 'items_arrived', data: { source: 'photos', batch: 'pb_1', count: 3 } })
+    expect([again.status, (await again.json()).batch]).toEqual([200, first.batch])
+    for (let n = 0; n < 50 && !calls.some(c => c.url === '/v1/runs'); n += 1) await sleep(100)
+    const records = store().list().filter(r => r.source === 'capture:photos')
+    expect(records).toHaveLength(1)
+    expect(records[0]).toMatchObject({ privacy_class: 'private', worker: true, title: '3 new in Photos', capture: { batch: first.batch, source: 'photos', count: 3 } })
+    expect(calls.filter(c => c.url === '/v1/runs')).toHaveLength(1)
+    expect(calls.some(c => c.method === 'PATCH' && c.url === `/api/sessions/${records[0].thread_id}` && c.body?.hidden === true)).toBe(true)
+    const input = JSON.stringify(calls.find(c => c.url === '/v1/runs').body)
+    expect(input).toContain('photos_capture_batch (batch pb_1)')
+
+    // The agent: copies of the 3 book pages and the highlights, then done.
+    for (const id of ['a1', 'a2', 'a3']) {
+      expect((await tool({ action: 'copy', batch: first.batch, item: id, from: `/media/Photos/Library/upload/u1/ab/${id}.jpg`, folder: 'Reading/Why We Sleep', judged_as: 'book page' })).error).toBe(false)
+      expect((await tool({ action: 'note', batch: first.batch, item: id, path: 'Reading/Why We Sleep.md', text: `> ${id}` })).error).toBe(false)
+    }
+    await tool({ action: 'done', batch: first.batch, outcome: '3 photos from Photos: 3 book pages of Why We Sleep to Reading/Why We Sleep.md' })
+    expect(store().get(records[0].id)?.title).toBe('3 photos from Photos: 3 book pages of Why We Sleep to Reading/Why We Sleep.md')
+    expect(readFileSync(join(media, 'Reading', 'Why We Sleep.md'), 'utf8')).toBe('> a1\n\n> a2\n\n> a3\n')
+
+    // "Undo that" from the owner: copies and the note go, the originals stay, and the app reads that it was undone.
+    const undo = await (await fetch(`${base}/wizard/v1/capture/${first.batch}/undo`, { method: 'POST' })).json()
+    expect(undo).toMatchObject({ problems: [], app: 'photos', items_left_in_app: 3 })
+    expect(existsSync(join(media, 'Reading'))).toBe(false)
+    expect(walk(lib)).toEqual(['a1.jpg', 'a2.jpg', 'a3.jpg'])
+    expect((await (await ev(base)).json()).batches).toEqual([{ batch: first.batch, app_batch: 'pb_1', state: 'undone', undone_at: expect.any(String) }])
+    expect(store().get(records[0].id)?.last_update).toBe('Undone: 3 items left in Photos as they were.')
   })
 })

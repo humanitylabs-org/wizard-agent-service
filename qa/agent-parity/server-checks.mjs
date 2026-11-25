@@ -1083,6 +1083,55 @@ export const serverChecks = {
       await settle(() => s.sessions.get(second.thread_id)?.hidden === false, 'the owner steering the worker shows its thread again')
     } finally { await new Promise(r => fake.close(r)) }
   },
+  // wizard-os issue 696 (Photos slice): an app inbox hands a capture batch to the owner's main agent with its own app
+  // token. Same on every kind: the probe, the event, the private record, the dedupe and the owner's undo the app reads
+  // back. The batch always belongs to the main agent: on main its hidden worker turn is admitted; on every other kind
+  // the main agent is not in the scene, so the record waits on the owner and nothing reaches this kind's runtime.
+  'capture-inbox-apps': async s => {
+    const tokens = join(s.root, 'os', 'app-tokens')
+    mkdirSync(tokens, { recursive: true })
+    const PHOTOS = `parity-photos-${'p'.repeat(32)}`
+    writeFileSync(join(tokens, 'photos'), `${PHOTOS}\n`)
+    const as = (method, body) => ({ method, headers: { Authorization: ['Bearer', PHOTOS].join(' '), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
+    const settle = async (ok, label) => {
+      for (let n = 0; n < 120; n++) { const got = await ok(); if (got) return got; await new Promise(r => setTimeout(r, 25)) }
+      assert.fail(label)
+    }
+    const runsBefore = s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).length
+    assert.equal((await s.raw('/wizard/v1/capture/events', { method: 'GET' })).status, 403, 'the owner is not an app')
+    const probe = await s.raw('/wizard/v1/capture/events', as('GET'))
+    assert.equal(probe.status, 200, await probe.clone().text())
+    assert.deepEqual(await probe.json(), { on: true, contract: 'wizard.capture-inbox/1', app: 'photos', batches: [] })
+    const bad = await s.raw('/wizard/v1/capture/events', as('POST', { event: 'items_arrived', data: { source: 'messenger', batch: 'pb_1', count: 3 } }))
+    assert.equal(bad.status, 400, 'an app sends only its own items')
+    const sent = await s.raw('/wizard/v1/capture/events', as('POST', { event: 'items_arrived', data: { source: 'photos', batch: 'pb_parity', count: 3 } }))
+    assert.equal(sent.status, 202, await sent.clone().text())
+    const first = await sent.json()
+    assert.deepEqual([first.accepted, first.created, first.app_batch], [true, true, 'pb_parity'])
+    const again = await s.raw('/wizard/v1/capture/events', as('POST', { event: 'items_arrived', data: { source: 'photos', batch: 'pb_parity', count: 3 } }))
+    assert.deepEqual([again.status, (await again.json()).batch], [200, first.batch], 'the same app batch is the same batch')
+    const record = async () => (await (await s.raw(`/wizard/v1/agent-inbox/${first.record_id}`)).json()).record
+    const made = await record()
+    assert.deepEqual([made.source, made.privacy_class, made.capture?.batch, made.capture?.source, made.capture?.count], ['capture:photos', 'private', first.batch, 'photos', 3])
+    if (s.kind === 'main') {
+      const worker = await settle(() => s.seen.find(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === made.thread_id), 'the worker turn is admitted')
+      assert.equal(worker.headers['idempotency-key'], `wizard-inbox-${first.record_id}`)
+      assert.ok(String(worker.body.input || '').includes('photos_capture_batch (batch pb_parity)'), 'the turn says to read the batch with the Photos tools')
+      assert.ok(String(worker.body.instructions || '').includes("arrived in the owner's Photos app"), 'the worker is told nobody is watching')
+      assert.equal(s.sessions.get(made.thread_id)?.hidden, true, 'the worker thread is hidden')
+      assert.equal(s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === made.thread_id).length, 1, 'no second worker for the resend')
+    } else {
+      const waiting = await settle(async () => { const got = await record(); return got.state === 'new' ? got : null }, 'a batch whose worker cannot start waits on the owner')
+      assert.equal(waiting.kind, 'needs_you')
+      assert.equal(s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs')).length, runsBefore, `${s.kind}: nothing reaches this kind's runtime`)
+    }
+    // The owner's "undo that": the batch reads undone, and the app sees it on its probe (to take its own part away).
+    const undo = await s.raw(`/wizard/v1/capture/${first.batch}/undo`, { method: 'POST' })
+    assert.equal(undo.status, 200, await undo.clone().text())
+    assert.deepEqual((await undo.json()).problems, [])
+    const after = await (await s.raw('/wizard/v1/capture/events', as('GET'))).json()
+    assert.deepEqual([after.batches[0].batch, after.batches[0].state, typeof after.batches[0].undone_at], [first.batch, 'undone', 'string'])
+  },
   // Issue 607: the Sent log. Every capture the owner sends to /wizard/v1/route gets a row written before the router
   // runs; a router that throws, says unsure or is missing still leaves a row (decided_by fallback, a visible thread);
   // the owner's no-reply words dump a task without the model; "draft a reply to Sam" is a task; a stalled task shows
