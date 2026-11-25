@@ -16,8 +16,13 @@ import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { atomicStoreWrite, validAgentId } from './thread-reference.mjs'
 
-export const SENT_SOURCES = new Set(['orb', 'side', 'new_chat', 'typed'])
-export const SENT_ROUTES = new Set(['dump', 'agent', 'command', 'reminder'])
+// `reply`: a message the owner sent inside an existing thread (wizard-ux issue 1808), route `thread`.
+export const SENT_SOURCES = new Set(['orb', 'side', 'new_chat', 'typed', 'reply'])
+export const SENT_ROUTES = new Set(['dump', 'agent', 'command', 'reminder', 'thread'])
+// The agent's final status on a reply's run, as the row keeps it (`failed`: the run itself failed).
+const OUTCOMES = new Set(['done', 'fyi', 'needs_you', 'check', 'failed', 'none'])
+// A reply needs nothing from the owner: his words asked for no answer and the agent ended done or fyi.
+const QUIET_OUTCOMES = new Set(['done', 'fyi'])
 export const SENT_DECIDERS = new Set(['owner_words', 'model', 'correction', 'fallback'])
 export const SENT_STATES = new Set(['routing', 'running', 'done', 'needs_you', 'failed', 'unknown'])
 // A state the row can rest in: the take ran to an end, or it is waiting on the owner.
@@ -165,6 +170,55 @@ export class SentLog {
     if (existing) return { ...existing }
     const { row } = this.open({ text, source: SENT_SOURCES.has(source) ? source : 'typed', agent, thread_id: thread })
     return this.update(row.id, { route: 'agent', decided_by: 'owner_words', rules_matched: [source === 'typed' ? 'typed' : 'new_chat'], run_key: given || null, routed_at: this.now() })
+  }
+
+  /** A message the owner sent inside an existing thread (wizard-ux issue 1808): its row (source reply, route thread),
+   *  written before the turn is admitted. `wants_reply`: his words asked for an answer (the reply rules). The same run
+   *  key twice is one row. */
+  reply({ agent = 'hermes', thread = '', text = '', run_key: runKey = '', wants_reply: wants = true, rules = [], tags = [], urgent = false, steer = false, run_id: runId = '' } = {}) {
+    if (!THREAD_ID.test(String(thread))) return null
+    const given = typeof runKey === 'string' && KEY.test(runKey) ? runKey : ''
+    const existing = given ? this.data.rows.find(r => r.agent === agent && r.source === 'reply' && r.thread_id === thread && r.run_key === given) : null
+    if (existing) return { ...existing }
+    const words = clip(text, MAX_TEXT)
+    if (!words) return null
+    if (!validAgentId(agent)) return null
+    const t = this.now()
+    const row = {
+      id: `sent_${randomUUID().replaceAll('-', '').slice(0, 24)}`, idempotency_key: null, at: t, source: 'reply', agent, text: words,
+      route: 'thread', decided_by: 'owner_words', rules_matched: cleanRules(rules), model: '', tags: cleanTags(tags), urgent: urgent === true, correction_id: null,
+      thread_id: thread, record_id: null, run_key: given || null, run_id: typeof runId === 'string' && KEY.test(runId) ? runId : null, routed_at: t, wants_reply: wants !== false,
+      ...(steer ? { steer: true } : {}),
+    }
+    this.data.rows.unshift(row)
+    this.#save()
+    return { ...row }
+  }
+
+  /** A reply's run ended: its outcome (the agent's final status, or failed) and one-line answer, kept once. Matched by
+   *  the queue's public run id, else by the run key. Returns the rows it changed. */
+  noteRun({ agent = 'hermes', thread = '', run_id: runId = '', run_key: runKey = '', state = 'none', answer = '' } = {}) {
+    if (!THREAD_ID.test(String(thread))) return []
+    const outcome = OUTCOMES.has(state) ? state : 'none'
+    const changed = []
+    for (const row of this.data.rows) {
+      if (row.agent !== agent || row.source !== 'reply' || row.thread_id !== thread || row.outcome) continue
+      if (!((runId && row.run_id === runId) || (runKey && row.run_key === runKey))) continue
+      row.outcome = { state: outcome, answer: clip(answer, 200), at: this.now() }
+      if (runId && !row.run_id) row.run_id = runId
+      changed.push({ ...row })
+    }
+    if (changed.length) this.#save()
+    return changed
+  }
+
+  /** Is the thread's newest run (its public run id) a reply that needs nothing from the owner? Every reply row on that
+   *  run (a steer adds one) must have asked for no answer, and the run must have ended done or fyi. A run a reply did
+   *  not start (a steer into the first turn's run) is never quiet. */
+  quietFor(thread, runId, agent = 'hermes') {
+    if (!runId || !THREAD_ID.test(String(thread))) return false
+    const rows = this.data.rows.filter(r => r.agent === agent && r.source === 'reply' && r.thread_id === thread && r.run_id === runId)
+    return rows.some(r => !r.steer) && rows.every(r => r.wants_reply === false && QUIET_OUTCOMES.has(r.outcome?.state))
   }
 
   /** The nightly check: rows sent more than SENT_FINAL_MS ago (within the last week) whose live state (`stateOf(row)`)

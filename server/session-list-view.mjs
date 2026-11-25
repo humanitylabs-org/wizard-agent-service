@@ -120,6 +120,8 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
       background: ['helper', 'heavy'].includes(item.wizard_background) ? item.wizard_background : '',
       // What the finished thread asks of James (the agent's hidden status line): needs_you / check / done / fyi.
       attention: attentionOf(item.wizard_attention),
+      // wizard-ux issue 1808: the newest answer was to the owner's reply that asked for none, and it needs nothing.
+      ...(item.wizard_quiet_reply === true ? { quietReply: true } : {}),
       // A durable quiet one-shot checker bound to this thread. The prompt never reaches the list.
       followUp: followUpOf(item.wizard_follow_up),
       // Thread titles (Agent Service thread-titles.mjs): every rename with its time, so the thread shows
@@ -145,7 +147,7 @@ export function listRow(item, q = '', channels = null, opts = null) {
   const s = normalizeFull(item);
   if (!s) return null;
   const { request, renames, source, runtime, ...row } = s;
-  for (const key of ['safeError','reconnect','runError','critical','waitingOn','helperStatus','background','attention','followUp']) if (!row[key]) delete row[key];
+  for (const key of ['safeError','reconnect','runError','critical','waitingOn','helperStatus','background','attention','followUp','quietReply']) if (!row[key]) delete row[key];
   const needle = String(q || '').toLowerCase().trim().split(/\s+/)[0];
   const body = [s.preview, s.request, clean(item.wizard_search_text), s.title].find(t => needle && t.toLowerCase().includes(needle));
   const at = body ? Math.max(0, body.toLowerCase().indexOf(needle)-40) : 0;

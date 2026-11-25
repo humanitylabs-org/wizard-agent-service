@@ -1191,10 +1191,12 @@ export const serverChecks = {
       const typed = await settle(async () => (await rows()).find(x => x.thread_id === 'wizard_sent_typed' && x.would_route), 'the typed row is classified')
       assert.deepEqual([typed.source, typed.route, typed.would_route, typed.would_decided_by], ['typed', 'agent', 'dump', 'owner_words'])
       assert.equal((await rows()).filter(x => x.thread_id === 'wizard_sent_orb').length, 1, 'the orb take is one row, not a typed one too')
-      // A second turn in the same thread is no new row.
+      // A second turn in the same thread is a reply row (wizard-ux issue 1808): route thread, never a second typed row.
       assert.equal((await s.request('/v1/runs', post({ session_id: 'wizard_sent_typed', input: 'And a case' }))).status, 202)
-      await new Promise(r => setTimeout(r, 100))
-      assert.equal((await rows()).filter(x => x.thread_id === 'wizard_sent_typed').length, 1, 'later turns are not captures')
+      const replied = await settle(async () => (await rows()).find(x => x.thread_id === 'wizard_sent_typed' && x.source === 'reply'), 'a later turn is a reply row')
+      assert.deepEqual([replied.route, replied.decided_by, replied.wants_reply, replied.text], ['thread', 'owner_words', false, 'And a case'])
+      assert.equal((await rows()).filter(x => x.thread_id === 'wizard_sent_typed' && x.source === 'typed').length, 1, 'later turns are not captures')
+      assert.equal((await (await s.raw(`/wizard/v1/sent/${replied.id}/correct`, json({ should_reply: false }))).json()).changed, false, 'a reply stays in its thread')
       // Corrections: "Should have replied" on the note opens its hidden thread; "Didn't need a reply" sends the typed
       // thread to the background. Each is one route example, whose id is on the row.
       const opened = await (await s.raw(`/wizard/v1/sent/${note.sent_id}/correct`, json({ should_reply: true }))).json()

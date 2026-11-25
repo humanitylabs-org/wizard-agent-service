@@ -3998,6 +3998,7 @@ function buildWizardServer(options, lifetime) {
   const inboxQueue = agent => (agent || MAIN_AGENT_ID) === MAIN_AGENT_ID ? runQueue : routedQueues?.loaded().find(queue => queue.agentId === agent)
   const inboxNoteRun = (agent, sessionId, run, runId = '') => {
     if (typeof sessionId !== 'string' || !sessionId || !run || !(agentInboxOn() || captureOn())) return
+    sentNoteRun(agent, sessionId, run, runId)
     try {
       const id = agent || MAIN_AGENT_ID
       const linked = agentInbox.linked(id, sessionId)
@@ -4135,6 +4136,16 @@ function buildWizardServer(options, lifetime) {
     : options.agentInboxStatePath ? join(dirname(resolve(String(options.agentInboxStatePath))), 'sent-log.json') : '', { now: options.agentInboxNow ?? Date.now })
   const sentState = row => {
     if (!row?.route) return 'routing'
+    if (row.source === 'reply') {
+      // A reply's state is its own run's: the outcome kept when it ended, else that turn on the queue.
+      const end = row.outcome?.state
+      if (end) return end === 'failed' ? 'failed' : end === 'needs_you' || end === 'check' ? 'needs_you' : 'done'
+      let turn = null
+      try { turn = (inboxQueue(row.agent)?.queuedForSession('direct', row.thread_id) || []).find(t => (row.run_id && t.publicRunId === row.run_id) || (row.run_key && t.idempotencyKey === row.run_key)) || null } catch { turn = null }
+      if (!turn) return row.final_state || 'unknown'
+      if (turn.terminalAt == null) return 'running'
+      return turn.status === 'completed' ? 'done' : 'failed'
+    }
     if (row.record_id) {
       const record = agentInbox.get(row.record_id)
       if (!record) return row.final_state || 'unknown'
@@ -4160,6 +4171,10 @@ function buildWizardServer(options, lifetime) {
     }
     if (row.confidence != null) out.confidence = row.confidence
     if (row.source === 'typed') Object.assign(out, { would_route: row.would_route ?? null, would_decided_by: row.would_decided_by ?? null, would_rules: row.would_rules || [] })
+    // A reply (issue 1808): whether his words asked for an answer, the agent's one-line answer, and quiet (the answer
+    // needed nothing from him, so it stayed out of Inbox).
+    if (row.source === 'reply') Object.assign(out, { wants_reply: row.wants_reply !== false, answer: row.outcome?.answer || '', outcome: row.outcome?.state || null,
+      quiet: row.wants_reply === false && ['done', 'fyi'].includes(row.outcome?.state) })
     if (row.corrected) out.corrected = row.corrected
     if (row.flag) out.flag = row.flag
     if (row.error) out.error = row.error
@@ -4207,12 +4222,47 @@ function buildWizardServer(options, lifetime) {
       if (row.source === 'typed') void lifetime.track(classifyTyped(row).catch(error => console.warn(`[sent-log] typed message not classified: ${error?.message || error}`)))
     } catch (error) { console.warn(`[sent-log] sent row not written: ${error?.message || error}`) }
   }
+  // wizard-ux issue 1808: a message the owner sends inside an existing main-agent thread is a Sent row too (source
+  // reply, route thread), written before the turn is admitted. His words decide whether the answer is for him: the
+  // same reply rules as a capture (a wants-reply phrase, a greeting or a short question), and any question mark. A
+  // voice note with no words yet is unclear, so it wants a reply. Never blocks or changes the send.
+  const sentReply = (sessionId, bodyText, runKey, voice, runId = '', steer = false) => {
+    if (!agentInboxOn()) return null
+    try {
+      let input
+      try { input = JSON.parse(bodyText)?.input } catch { return null }
+      const said = visibleInputText(input).trim()
+      if (said && typeof input === 'string' && MACHINE_INPUT.test(said)) return null
+      if (!said && !voice) return null
+      const words = said ? replyRules(said) : { intent: '', rules: ['voice'], tags: [], urgent: false }
+      const wants = !said || words.intent === 'agent' || said.includes('?')
+      const row = sentLog.reply({ agent: MAIN_AGENT_ID, thread: sessionId, text: said || 'Voice message', run_key: runKey, wants_reply: wants,
+        rules: words.rules.length ? words.rules : [wants ? 'question' : 'statement'], tags: words.tags, urgent: words.urgent, steer, run_id: runId })
+      return row
+    } catch (error) { console.warn(`[sent-log] reply row not written: ${error?.message || error}`); return null }
+  }
+  // A main-agent run ended: a reply row on it keeps the agent's final status and its one-line answer (kept once).
+  const sentNoteRun = (agent, sessionId, run, runId) => {
+    if ((agent || MAIN_AGENT_ID) !== MAIN_AGENT_ID || !agentInboxOn() || !run || !TERMINAL_RUN_STATUSES.has(String(run.status ?? ''))) return
+    try {
+      const record = (runQueue?.queuedForSession('direct', sessionId) || []).find(r => r.publicRunId === runId || r.upstreamRunId === runId)
+      const publicId = record?.publicRunId || runId, key = record?.idempotencyKey || ''
+      if (!publicId && !key) return
+      const output = typeof run.output === 'string' ? run.output : ''
+      const status = run.status === 'completed' ? parseStatus(output) : null
+      const state = run.status !== 'completed' ? 'failed' : status?.state || 'none'
+      const answer = status?.ask || output.replace(/\[WIZARD_STATUS_V1\][\s\S]*?\[\/WIZARD_STATUS_V1\]/gu, ' ').split('\n').map(line => line.trim()).find(Boolean) || ''
+      sentLog.noteRun({ agent: MAIN_AGENT_ID, thread: sessionId, run_id: publicId, run_key: key, state, answer })
+    } catch (error) { console.warn(`[sent-log] reply outcome not kept: ${error?.message || error}`) }
+  }
   // The owner's "Should have replied" / "Didn't need a reply" on a Sent row: the existing Open / Send to inbox move
   // (one route example, its id on the row). A typed row that already has its visible thread only teaches the router.
   const correctSent = async (id, shouldReply) => {
     const row = sentLog.get(id)
     if (!row) throw inboxError(404, 'not_found')
     if (!row.route) throw inboxError(409, 'still_routing')
+    // A reply in a thread the owner already has stays in that thread: nothing to move.
+    if (row.route === 'thread') return { row: sentView(row), changed: false }
     const background = row.route === 'dump' || row.route === 'reminder'
     let moved = null
     if (shouldReply && background) {
@@ -5712,8 +5762,18 @@ function buildWizardServer(options, lifetime) {
         ...session,
         ...(attention ? { wizard_attention: attention } : {}),
         ...(renames.length ? { wizard_title_renames: renames } : {}),
+        ...(sentQuietReply(session, attention || session.wizard_attention) ? { wizard_quiet_reply: true } : {}),
       }
     })
+  }
+  // Issue 1808: the thread's newest run was the owner's reply that asked for no answer and the agent ended it done or
+  // fyi: the answer needs nothing from him, so Chats keeps it out of Inbox (no unread dot). An ask the list still shows
+  // (needs you, check) or a run still going never counts.
+  const sentQuietReply = (session, attention) => {
+    if (!agentInboxOn() || typeof session?.wizard_last_run_id !== 'string' || !session.wizard_last_run_id) return false
+    if (attention && (attention.state === 'needs_you' || attention.state === 'check')) return false
+    if (ACTIVE_RUN_STATUSES.has(session.status) || session.status === 'waiting_for_approval') return false
+    try { return sentLog.quietFor(session.id, session.wizard_last_run_id) } catch { return false }
   }
   const enrichSessionListMessages = async (result, operator, sessionTruth = null, previewOffset = 0) => {
     try {
@@ -8864,6 +8924,11 @@ function buildWizardServer(options, lifetime) {
           const guidance = trackerOn() ? expandReplyToInput(parseJsonBody(prepared.body).input, id => threadItems.titleOf('hermes', queuedProxyRecord.sessionId, id)) : parseJsonBody(prepared.body).input
           const updated = await runQueue.appendGuidance(
             queuedProxyRecord.publicRunId, guidance, prepared.trustedPaths)
+          // Issue 1808: guidance for a turn still queued is a reply row on that turn too.
+          if (queuedProxyRecord.runtime === 'direct' && principal.kind === 'owner' && agentInboxOn()) {
+            sentReply(queuedProxyRecord.sessionId, prepared.body.toString('utf8'), typeof request.headers['idempotency-key'] === 'string' ? request.headers['idempotency-key'] : '',
+              (prepared.audioPaths ?? []).length > 0, queuedProxyRecord.publicRunId, true)
+          }
           sendJson(response, 202, { accepted: true, run_id: updated.publicRunId, status: 'queued', queue_position: runQueue.publicPayload(updated).queue_position })
           return
         }
@@ -8951,7 +9016,11 @@ function buildWizardServer(options, lifetime) {
           // A "signal sweep" turn: the card is posted first (the queue may dispatch at once), then its run note says so.
           const sweepAsked = queuedAdmission.runtime === 'direct' ? noteSweepRequest(queuedAdmission.sessionId, body, principal, request) : null
           if (sweepAsked) await sweepForTurn(queuedAdmission.sessionId, sweepAsked)
+          // Issue 1808: any later owner turn in the thread is a reply row, written before the turn is admitted.
+          const replyRow = queuedAdmission.runtime === 'direct' && principal.kind === 'owner' && !queuedAdmission.continuation && !firstOwnerTurn && agentInboxOn()
+            ? sentReply(queuedAdmission.sessionId, body.toString('utf8'), queuedAdmission.idempotencyKey, audioPaths.length > 0) : null
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
+          if (replyRow && admitted.record?.publicRunId) { try { if (!sentLog.get(replyRow.id)?.run_id) sentLog.update(replyRow.id, { run_id: admitted.record.publicRunId }) } catch { /* the run key still links it */ } }
           if (sweepAsked && admitted.replayed) sweepNotes.delete(queuedAdmission.sessionId)
           if (queuedAdmission.runtime === 'direct' && principal.kind === 'owner' && !queuedAdmission.continuation) inboxOwnerTurn(MAIN_AGENT_ID, queuedAdmission.sessionId)
           if (firstOwnerTurn && !admitted.replayed) sentTurn(queuedAdmission.sessionId, body.toString('utf8'), queuedAdmission.idempotencyKey, audioPaths.length > 0)
@@ -9128,6 +9197,13 @@ function buildWizardServer(options, lifetime) {
         }
         if (upstream.ok && steerPathId && !operator && request.method === 'POST' && runQueue && body) {
           try { runQueue.noteAcceptedSteer(steerPathId, inputText(parseJsonBody(body).input)) } catch { /* the reply still reached Hermes */ }
+        }
+        // Issue 1808: the owner typing while a turn runs (steer) is a reply row on that run, once Hermes took it.
+        if (upstream.ok && steerPathId && request.method === 'POST' && body && queuedProxyRecord?.runtime === 'direct' && principal.kind === 'owner' && agentInboxOn()) {
+          let accepted = true
+          try { accepted = JSON.parse(result.toString('utf8'))?.accepted !== false } catch { /* a 2xx without a body: taken */ }
+          const steerKey = typeof request.headers['idempotency-key'] === 'string' ? request.headers['idempotency-key'] : ''
+          if (accepted) sentReply(queuedProxyRecord.sessionId, body.toString('utf8'), steerKey, audioPaths.length > 0, queuedProxyRecord.publicRunId, true)
         }
         if (upstream.ok && steerPathId && request.method === 'POST' && trustedPaths.length) {
           const existing = runTrustedPaths.get(steerPathId) ?? []
