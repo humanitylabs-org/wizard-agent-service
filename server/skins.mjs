@@ -11,7 +11,7 @@ export class SkinsError extends Error {
 const fail = (code, status = 400) => { throw new SkinsError(status, code) }
 const HEX = /^[a-f0-9]{64}$/
 const BASE = /^[a-z0-9-]{1,32}$/
-const TWEAK = /^[a-z0-9-]+\/[a-z0-9-]+$/
+const TWEAK = /^[a-z0-9-]{1,40}\/[a-z0-9-]{1,40}$/ // bounded so skin.json stays under readJson's 32 KiB
 const TRASH = /^[a-f0-9]{32}$/
 const TRASH_DAYS = 7
 // A skin's recipe (base palette + boolean tweaks) as the shell's Settings > Look saves it in skin.json.
@@ -211,13 +211,20 @@ export function createSkins({ root = '', stateDir = '', relays = DEFAULT_SKINS_R
   // Settings > Look: a new colour or tweak for the worn skin. Tweak keys merge, so two devices editing
   // different tweaks keep both; the folder name, CSS and scripts stay as they are.
   function patch(id, input) {
+    if (busy.has(id)) fail('skin_busy', 409) // pack/publish rewrite skin.json from what they read first
     const path = folder(id), meta = metadata(id), values = recipe(input)
     if (input.name !== undefined) { if (!shortText(input.name, 64, true)) fail('invalid_skin_name'); values.name = input.name }
     if (values.tweaks) values.tweaks = recipe({ tweaks: { ...(meta.tweaks && typeof meta.tweaks === 'object' && !Array.isArray(meta.tweaks) ? meta.tweaks : {}), ...values.tweaks } }).tweaks
     atomicWrite(join(path, 'skin.json'), JSON.stringify({ ...meta, ...values }) + '\n', 0o664)
     return list()
   }
+  // The trash must be a real folder inside Skins, never a link (Skins is group-writable).
+  function trashReal() {
+    if (!lstatSafe(trashRoot)?.isDirectory()) return false
+    try { return dirname(realpathSync(trashRoot)) === realpathSync(skinsRoot) } catch { return false }
+  }
   function pruneTrash() {
+    if (!trashReal()) return
     let entries
     try { entries = readdirSync(trashRoot, { withFileTypes: true }) } catch { return }
     for (const entry of entries) {
@@ -232,7 +239,7 @@ export function createSkins({ root = '', stateDir = '', relays = DEFAULT_SKINS_R
     const path = folder(id), selected = active()
     pruneTrash()
     if (!lstatSafe(trashRoot)) mkdirSync(trashRoot, { mode: 0o700 })
-    if (!lstatSafe(trashRoot)?.isDirectory()) fail('skins_unavailable', 503)
+    if (!trashReal()) fail('skins_unavailable', 503)
     const trash = randomBytes(16).toString('hex'), target = join(trashRoot, trash)
     mkdirSync(target, { mode: 0o700 })
     atomicWrite(join(target, 'trash.json'), JSON.stringify({ id, removed_at: nowSeconds() }))
@@ -244,6 +251,7 @@ export function createSkins({ root = '', stateDir = '', relays = DEFAULT_SKINS_R
   function restore({ trash } = {}) {
     if (typeof trash !== 'string' || !TRASH.test(trash)) fail('invalid_trash')
     folders(); pruneTrash()
+    if (!trashReal()) fail('trash_not_found', 404)
     const target = join(trashRoot, trash), info = readJson(join(target, 'trash.json'))
     if (!lstatSafe(target)?.isDirectory() || !validSkinId(info.id) || info.id === 'active' || !lstatSafe(join(target, 'skin'))?.isDirectory()) fail('trash_not_found', 404)
     if (lstatSafe(join(skinsRoot, info.id))) fail('skin_exists', 409)
