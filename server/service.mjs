@@ -4112,7 +4112,7 @@ function buildWizardServer(options, lifetime) {
     const record = agentInbox.linked(MAIN_AGENT_ID, sessionId)
     // A capture batch (issue 696): the owner dropped these items in his Files Inbox.
     if (record?.capture && record.state === 'running' && captureOn()) {
-      const fromApp = record.capture.source && record.capture.source !== 'files' ? record.capture.source : ''
+      const fromApp = record.capture.source && record.capture.source !== 'files' ? captureAppName(record.capture.source) : ''
       return (fromApp ? `Background capture: the items in this message arrived in the owner's ${fromApp} app and he is not watching this thread; your reply is read later, if at all. `
         + `Handle every item now with the logged tools this message names (${fromApp}'s capture tools and wizard_capture), by his capture rules, and finish with wizard_capture action done and a short reply. `
         : 'Background capture: the owner dropped the items in this message into his Files Inbox and is not watching this thread; your reply is read later, if at all. '
@@ -4302,7 +4302,12 @@ function buildWizardServer(options, lifetime) {
     return captureBox
   }
   const captureClip = (value, max) => { const text = String(value ?? '').replace(/\s+/gu, ' ').trim(); return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text }
-  const captureAppName = app => { try { return String(bridge?.apps().find(entry => entry.id === app)?.name || '') } catch { return '' } }
+  const captureAppName = app => {
+    if (!app) return ''
+    let name = ''
+    try { name = String(bridge?.apps().find(entry => entry.id === app)?.name || '') } catch { name = '' }
+    return name || `${app.charAt(0).toUpperCase()}${app.slice(1)}`
+  }
   // The batch's one-line outcome is what the sweep shows (title) and the record's last update.
   const captureOutcome = batchId => {
     const batch = captureInbox()?.batch(batchId)
@@ -4311,8 +4316,8 @@ function buildWizardServer(options, lifetime) {
     if (batch.undone_at) {
       const done = batch.undo_result || { back: batch.items.length, of: batch.items.length, problems: 0 }
       // Only a whole batch put back reads as undone; a partial undo says what is still out and waits on the owner.
-      const where = batch.app ? `left in ${captureAppName(batch.app) || batch.app} as they were` : 'back in Inbox'
-      if (batch.state === 'undone') return agentInbox.update(record.id, { last_update: captureClip(`Undone: ${done.back} item${done.back === 1 ? '' : 's'} ${where}.`, 140), title: captureClip(`Undone: ${batch.outcome || `${done.back} from ${batch.app ? captureAppName(batch.app) || batch.app : 'Inbox'}`}`, 100) })
+      const where = batch.app ? `left in ${captureAppName(batch.app)} as they were` : 'back in Inbox'
+      if (batch.state === 'undone') return agentInbox.update(record.id, { last_update: captureClip(`Undone: ${done.back} item${done.back === 1 ? '' : 's'} ${where}.`, 140), title: captureClip(`Undone: ${batch.outcome || `${done.back} from ${batch.app ? captureAppName(batch.app) : 'Inbox'}`}`, 100) })
       return agentInbox.update(record.id, { state: 'new', kind: 'needs_you', title: captureClip(`Undo not finished: ${batch.outcome || `${done.of} from Inbox`}`, 100),
         last_update: captureClip(`Undo not finished: ${done.back} of ${done.of} back in Inbox; ${done.problems} step${done.problems === 1 ? '' : 's'} could not be put back. Open it to see which.`, 140),
         ask: captureClip(`${done.problems} step${done.problems === 1 ? '' : 's'} of this batch could not be put back`, 140) })
@@ -4324,7 +4329,7 @@ function buildWizardServer(options, lifetime) {
   const startCaptureBatch = batch => {
     const box = captureInbox()
     const count = batch.app ? batch.count : batch.items.length
-    const where = batch.app ? (captureAppName(batch.app) || batch.app) : 'Inbox'
+    const where = batch.app ? captureAppName(batch.app) : 'Inbox'
     const { record, created } = agentInbox.capture({
       agent: MAIN_AGENT_ID, thread_id: mintDailyThreadId(), source: batch.app ? `capture:${batch.source}` : CAPTURE_SOURCE, kind: 'note',
       title: `${count} new in ${where}`, ask: `File ${count} new item${count === 1 ? '' : 's'} from ${where} by your capture rules`,

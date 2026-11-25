@@ -495,7 +495,8 @@ export function createCaptureInbox({ root, agentRoot = '', statePath = '', now =
       const of = Math.max(batch.count || 0, batch.items.length)
       batch.undo_result = { restored: restored.length, problems: problems.length, back: problems.length ? 0 : of, of }
       save()
-      return { batch: batch.id, restored: restored.length, problems, app: batch.app, app_batch: batch.app_batch, items_left_in_app: of, of, app_reverts: `${batch.app} takes away its own tags, albums and processed marks for this batch within a minute` }
+      const label = `${batch.app.charAt(0).toUpperCase()}${batch.app.slice(1)}`
+      return { batch: batch.id, restored: restored.length, problems, app: batch.app, app_batch: batch.app_batch, items_left_in_app: of, of, app_reverts: `${label} takes away its own tags, albums and processed marks for this batch within a minute` }
     }
     const back = batch.items.filter(i => placeOf(batch, i) === i.path && existsSync(join(base, i.path))).length
     batch.undo_result = { restored: restored.length, problems: problems.length, back, of: batch.items.length }
