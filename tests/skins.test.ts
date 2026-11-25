@@ -339,6 +339,19 @@ describe('Remove, undo and recipes (wizard-files issue 15)', () => {
     for (const bad of [{ base: 'Bad Base' }, { tweaks: { nope: true } }, { tweaks: { 'wizard/a': 'yes' } }, { tweaks: [] }]) expect(() => skins.patch(id, bad)).toThrow()
     expect(() => skins.create({ name: 'X', activate: 'yes' as any })).toThrow('invalid_activate')
   })
+  it('a worn skin deleted in Files stays deleted when the Service starts again', () => {
+    const { skins, root } = local()
+    const { id } = skins.create({ name: 'Gone', css: 'a{}', activate: true })
+    rmSync(join(root, 'Skins', id), { recursive: true })
+    expect(createMySkin({ root })!.ensure()).toBe(true)
+    expect(existsSync(join(root, 'Skins', id))).toBe(false)
+    expect(skins.list()).toMatchObject({ active: null })
+    expect(skins.list().skins.map((s: any) => s.id)).toEqual([])
+    // A fresh box still gets its commented My skin to edit.
+    const fresh = local()
+    expect(createMySkin({ root: fresh.root })!.ensure()).toBe(true)
+    expect(existsSync(join(fresh.root, 'Skins', 'My skin', 'skin.css'))).toBe(true)
+  })
   it('skin folders are group-writable (0775) so the Files app can delete them, and older 0755 folders are opened at start', () => {
     const { skins, root, options } = local()
     const { id } = skins.create({ name: 'Shared' })
