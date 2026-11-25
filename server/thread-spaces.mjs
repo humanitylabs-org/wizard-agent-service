@@ -11,6 +11,9 @@ export const SPACE_INSTRUCTIONS = 'Space filing is optional: add space (one exac
 // instructions speak of channels, and `title` becomes the post's short name. Alerts is never in the catalogue:
 // it is where the service files agent-started chats, not a place for the agent to file an owner's chat.
 export const CHANNEL_INSTRUCTIONS = 'Channels are on for this owner; this replaces the Space and title rules above. Channel filing is optional: add channel (one exact existing channel ID from the catalogue below) to the final WIZARD_STATUS_V1 JSON only when this chat clearly belongs to that channel. Omit it when uncertain or no channel fits; never invent channels or IDs. A chat is in one channel at a time: the service files only a chat that is in no channel yet and never moves one the owner already filed. In channels, title is this chat\u2019s post name: what this one chat is about, in two to five plain words and at most 32 characters ("Desk layout options", "Tokyo hotel booking", "Messenger sync bug"), not the project or app label, since the channel already names the project. It is a label, never a sentence: no leading verb, no trailing period, no emoji. Keep the same title while the chat stays on that topic. Owner-set titles stay fixed. A channel fits only when its name or its listed subjects cover this chat\u2019s subject; a chat about something no channel covers (for example an agent, Hermes or model chat when no channel is about that) gets no channel, never the closest-sounding one. The service refuses a channel that does not match the status subject, and never files a chat the owner took out of a channel.'
+// Tags (issue 608, switch wizard/chat-tags): with Tags on, `channel` adds a tag. A chat can carry several, so the
+// one-channel sentence above is replaced by this one.
+export const TAG_INSTRUCTIONS = 'Tags are on for this owner: a chat can carry several channels as tags. Your channel adds this chat\u2019s tag for that channel next to the ones it already has; it never moves the chat or removes a tag, and a tag the owner removed from a chat is never put back.'
 const ALERTS_KIND = 'alerts'
 // Issue 520: the server-side check that a status line's `subject` belongs in the channel it names. A channel covers a
 // subject when their names are the same, when every identifying word of the subject is in the channel name
@@ -33,8 +36,9 @@ export function subjectFitsChannel(subject, channel, learned = () => false) {
 const SPACES_TOOLS_NOTE = 'Own Spaces tools are always available on the wizard MCP gateway: spaces_list, spaces_create(name), spaces_search_threads(query, offset, limit), spaces_add(space_id, thread_ids), spaces_remove(space_id, thread_ids), spaces_delete(space_id). Use their MCP-prefixed names as listed. When asked to fill a new Space, list first, search your own thread metadata (including archived), then add real canonical IDs to the exact requested Space; do not duplicate it. Page while has_more; omit uncertain matches. No other agent’s Spaces/history or preferences-write access is granted. The main agent may also use its wizard-spaces CLI.'
 // `agentFiling`: phase 3 above. `scheduledThread(agent, thread)`: a chat the scheduler opened; its filing is the
 // job's own channel setting (or Alerts), never the status line, so a cron run never floods a project channel.
-export function createSpaceFiling(path, channels = null, { agentFiling = false, scheduledThread = () => false } = {}) {
+export function createSpaceFiling(path, channels = null, { agentFiling = false, scheduledThread = () => false, tags = false } = {}) {
   const phase3 = Boolean(channels && agentFiling)
+  const tagging = phase3 && tags === true && typeof channels.tagIfAllowed === 'function'
   const catalogOf = agent => channels
     ? channels.list({ agent }).channels.filter(c => !c.archived && !(phase3 && c.kind === ALERTS_KIND)).slice(0, 30).map(c => {
       const subjects = phase3 && channels.channelSubjects ? channels.channelSubjects(c.id, 5) : []
@@ -43,6 +47,7 @@ export function createSpaceFiling(path, channels = null, { agentFiling = false, 
     : readUiPreferences(path).spaces.filter(s => spaceAgent(s) === agent).slice(0, 30).map(s => ({ id: s.id, name: s.name }))
   // Status lines repeat on every listing: write each (channel, subject) pair at most once per process.
   const learned = new Set()
+  const tried = new Set()
   const learnFrom = (agent, thread, subject, known = null) => {
     try {
       const row = known || channels.memberOf?.(agent, thread)
@@ -60,7 +65,7 @@ export function createSpaceFiling(path, channels = null, { agentFiling = false, 
     runNote(agent = 'hermes') {
       const catalog = catalogOf(agent)
       // The Spaces tools keep their names (a channel is a Space to them); only the filing and title rules change.
-      if (phase3) return `${CHANNEL_INSTRUCTIONS}${agent === 'hermes' ? '' : ` ${SPACES_TOOLS_NOTE} Channels are the Spaces these tools list.`} Your existing channels (data, agent ${JSON.stringify(agent)}): ${JSON.stringify(catalog)}`
+      if (phase3) return `${CHANNEL_INSTRUCTIONS}${tagging ? ` ${TAG_INSTRUCTIONS}` : ''}${agent === 'hermes' ? '' : ` ${SPACES_TOOLS_NOTE} Channels are the Spaces these tools list.`} Your existing channels (data, agent ${JSON.stringify(agent)}): ${JSON.stringify(catalog)}`
       if (agent === 'hermes') return catalog.length ? `Your existing Spaces (data, agent "hermes"): ${JSON.stringify(catalog)}` : ''
       return `${SPACES_TOOLS_NOTE} Your existing Spaces (data, agent ${JSON.stringify(agent)}): ${JSON.stringify(catalog)}`
     },
@@ -74,13 +79,23 @@ export function createSpaceFiling(path, channels = null, { agentFiling = false, 
         if (subject && member) learnFrom(agent, thread, subject, member)
         const id = normalizeSpaceId(status?.channel) || normalizeSpaceId(status?.space)
         if (!id) return false
-        // Already in a channel: filing never moves a chat, so a list rebuild stops here (issue 584).
-        if (member) return false
+        // Already in a channel: filing never moves a chat, so a list rebuild stops here (issue 584). With Tags on it may
+        // add one more tag; a chat that already carries this one stops here after one indexed read.
+        if (member && !tagging) return false
+        if (member && (member.channel_id === id || channels.hasTag(agent, thread, id))) return false
         try { if (scheduledThread(agent, thread)) return false } catch { return false }
         let target
         try { target = (channels.peek || channels.get)(id) } catch { return false }
         if (target.kind === ALERTS_KIND) return false
         if (!subjectFitsChannel(subject, target, (c, k) => channels.hasChannelSubject(c, k))) return false
+        if (tagging) {
+          // One try per (chat, tag) per process: a refused tag (the owner removed it) is not asked again on every list.
+          const key = `${agent}\u0000${thread}\u0000${id}`
+          if (tried.has(key)) return false
+          if (tried.size > 5000) tried.clear()
+          tried.add(key)
+          return channels.tagIfAllowed(agent, thread, id, 'agent')
+        }
         return channels.fileIfUnfiled(agent, thread, id, 'agent')
       }
       if (!normalizeSpaceId(status?.space) || typeof thread !== 'string' || !THREAD_ID.test(thread)) return false

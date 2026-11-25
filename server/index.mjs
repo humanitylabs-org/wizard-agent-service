@@ -246,6 +246,9 @@ server = createWizardServer({
   // Channel read watermarks (issue 471): /wizard/v1/channels/read keeps each channel's read point for the owner, so
   // reading a channel to the bottom on one device clears it on the others. Needs the channel store.
   channelReadSync: envChoice(process.env.WIZARD_CHANNEL_READ_SYNC),
+  // Tags (issue 608): a chat carries several channels as tags. Unlike the parts above it is off by default: unset follows
+  // the owner's wizard/chat-tags switch, '1' forces it on, '0' off.
+  channelTags: envChoice(process.env.WIZARD_CHANNEL_TAGS),
   // Chats Channels posts (issue 446): view=list rows carry firstRequest (the first owner message, cleaned, at most
   // 400 code units) and firstAttachments (its photos as file refs). Off by default.
   channelFirstPosts: envChoice(process.env.WIZARD_CHANNEL_FIRST_POSTS),

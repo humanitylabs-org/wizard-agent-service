@@ -55,7 +55,7 @@ import { createChannelStore, channelRequest, fixedChannelKind, fixedChannelThrea
 import { dayOf, mintDailyThreadId, dailyTitle, openerOf, dailyRunNote, validDay, DAYS_PAGE, DAYS_PAGE_MAX } from './daily-channel.mjs'
 import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigration } from './channel-spaces.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
-import { createChannelsSwitch, channelOn, channelPart } from './channels-switch.mjs'
+import { createChannelsSwitch, channelOn, channelPart, CHAT_TAGS_SWITCH } from './channels-switch.mjs'
 import { createCapabilities, CAPABILITY_SWITCH } from './capabilities.mjs'
 // wizard-ux issue 1437: the shell app whose skill is the generated interface manual, and the switch that lets it in.
 const INTERFACE_MANUAL_SWITCH = 'wizard/interface-manual'
@@ -3461,6 +3461,18 @@ function buildWizardServer(options, lifetime) {
   // Channel read watermarks (issue 471, needs the channel store): the shell's per-channel read point, shared by the
   // owner's devices, forward only.
   const channelReadSyncOn = () => channelOn(options.channelReadSync) && !!channelStoreNow()
+  // Tags (issue 608, owner switch `wizard/chat-tags`, off by default; env WIZARD_CHANNEL_TAGS '1' forces on, '0' off):
+  // a chat carries several of its agent's channels as tags. The first time it is on, every chat's channel becomes its
+  // first tag; `membership` keeps receiving the primary tag either way, so turning it off loses nothing.
+  const chatTagsSwitchOn = createChannelsSwitch({ id: CHAT_TAGS_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.channelTagsTtlMs ?? 3000 })
+  let tagsMigrated = false
+  const channelTagsOn = () => {
+    if (!channelPart(options.channelTags, chatTagsSwitchOn)) return false
+    const store = channelStoreNow()
+    if (!store) return false
+    if (!tagsMigrated) { try { store.migrateTags() } catch (error) { console.error(`[channels] tags not copied yet: ${String(error?.message || error).slice(0, 160)}`); return false } tagsMigrated = true }
+    return true
+  }
   // Daily channel (issue 527, needs the channel store): one pinned channel per agent holding one real thread per day
   // (the day starts at 05:00 in the owner's time zone). Seeded once for the main agent the first time it is on.
   let dailySeeded = false
@@ -3505,8 +3517,8 @@ function buildWizardServer(options, lifetime) {
   // Filing follows the Channels switch at runtime: one filer per (store, agent filing) state, picked per call.
   const spaceFilings = new Map()
   const spaceFilingNow = () => {
-    const store = channelStoreNow(), agentFiling = !!store && channelAgentFilingOn(), key = `${store ? 1 : 0}${agentFiling ? 1 : 0}`
-    if (!spaceFilings.has(key)) spaceFilings.set(key, createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), store, { agentFiling, scheduledThread }))
+    const store = channelStoreNow(), agentFiling = !!store && channelAgentFilingOn(), tags = agentFiling && channelTagsOn(), key = `${store ? 1 : 0}${agentFiling ? 1 : 0}${tags ? 1 : 0}`
+    if (!spaceFilings.has(key)) spaceFilings.set(key, createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), store, { agentFiling, scheduledThread, tags }))
     return spaceFilings.get(key)
   }
   const spaceFiling = { runNote: (...args) => spaceFilingNow().runNote(...args), apply: (...args) => spaceFilingNow().apply(...args) }
@@ -3710,6 +3722,7 @@ function buildWizardServer(options, lifetime) {
   if (agentCtx) Object.defineProperties(agentCtx, {
     channelStore: { get: () => channelStoreNow(), enumerable: true, configurable: true },
     channelAgentFiling: { get: () => channelAgentFilingOn(), enumerable: true, configurable: true },
+    channelTags: { get: () => channelTagsOn(), enumerable: true, configurable: true },
     channelFirstPosts: { get: () => channelFirstPostsOn(), enumerable: true, configurable: true },
   })
   // Deletes clean the store even while Channels are off, so turning them on again never brings a deleted thread back.
@@ -4212,6 +4225,22 @@ function buildWizardServer(options, lifetime) {
     }
     sentLog.update(row.id, fields)
   }
+  // Tags (issue 608, switch wizard/chat-tags): tags the owner said in a capture ("#philosopher", "hashtag philosopher",
+  // kept on its Sent row) go on the thread it ran in once that thread is known. Only tags that already exist: a tag is
+  // a channel of that agent with the same letters and digits ("🧠 Philosopher" is #philosopher); a misheard word
+  // never makes a new one. Never blocks or changes the send.
+  const tagWord = w => (String(w ?? '').toLocaleLowerCase().match(/[\p{L}\p{N}]+/gu) || []).join('')
+  const sentTagsApply = row => {
+    if (!row?.tags?.length || !row.thread_id || !channelTagsOn()) return
+    try {
+      const store = channelStoreNow(), agent = row.agent || MAIN_AGENT_ID
+      const mine = store.list({ agent }).channels.filter(c => !c.archived)
+      for (const tag of row.tags) {
+        const c = mine.find(x => tagWord(x.name) === tagWord(tag))
+        if (c && !store.hasTag(agent, row.thread_id, c.id)) store.addTag({ sessionId: row.thread_id, channelId: c.id, agent, by: 'owner' })
+      }
+    } catch (error) { console.warn(`[channels] said tags not applied: ${String(error?.message || error).slice(0, 160)}`) }
+  }
   // A new thread's first owner turn on the main agent: the orb row it came from (same words, minutes ago) gets its
   // thread, else it is a typed (or untouched voice) row of its own. Never blocks or changes the send.
   const sentTurn = (sessionId, bodyText, runKey, voice) => {
@@ -4221,11 +4250,12 @@ function buildWizardServer(options, lifetime) {
       try { input = JSON.parse(bodyText)?.input } catch { return }
       const text = visibleInputText(input).trim()
       if (!text || (typeof input === 'string' && MACHINE_INPUT.test(text))) return
-      if (sentLog.linkTurn({ agent: MAIN_AGENT_ID, thread: sessionId, text, run_key: runKey })) return
+      const linked = sentLog.linkTurn({ agent: MAIN_AGENT_ID, thread: sessionId, text, run_key: runKey })
+      if (linked) { sentTagsApply(linked); return }
       const row = sentLog.typed({ agent: MAIN_AGENT_ID, thread: sessionId, text, run_key: runKey, source: voice ? 'new_chat' : 'typed' })
       if (!row) return
       const words = replyRules(text)
-      if (words.tags.length || words.urgent) sentLog.update(row.id, { tags: words.tags, urgent: words.urgent })
+      if (words.tags.length || words.urgent) sentTagsApply(sentLog.update(row.id, { tags: words.tags, urgent: words.urgent }))
       if (row.source === 'typed') void lifetime.track(classifyTyped(row).catch(error => console.warn(`[sent-log] typed message not classified: ${error?.message || error}`)))
     } catch (error) { console.warn(`[sent-log] sent row not written: ${error?.message || error}`) }
   }
@@ -4245,6 +4275,7 @@ function buildWizardServer(options, lifetime) {
       const wants = !said || words.intent === 'agent' || said.includes('?')
       const row = sentLog.reply({ agent: MAIN_AGENT_ID, thread: sessionId, text: said || 'Voice message', run_key: runKey, wants_reply: wants,
         rules: words.rules.length ? words.rules : [wants ? 'question' : 'statement'], tags: words.tags, urgent: words.urgent, steer, run_id: runId })
+      sentTagsApply(row)
       return row
     } catch (error) { console.warn(`[sent-log] reply row not written: ${error?.message || error}`); return null }
   }
@@ -5469,7 +5500,7 @@ function buildWizardServer(options, lifetime) {
         const hits=await searchHermesSessionTextAsync(hermesStatePath,cached.map(s=>s.id),q,request.headers['x-wizard-search-scope'] || scope)
         return {object:'list',window_projected:true,data:[...hits].map(([id,snippet])=>({id,agent:'hermes',snippet})),search_total:hits.size,mode:hits.mode,partial:hits.partial,timings:{list_ms,...hits.timings}}
       }
-      const feed = searchParams.has('channel') ? channelStore.memberSet(searchParams.get('channel')) : null
+      const feed = searchParams.has('channel') ? channelStore.memberSet(searchParams.get('channel'), { tags: channelTagsOn() }) : null
       return listWindowPage({ params: searchParams, scope, dispositions: threadDispositionStore.get(scope), members: feed?.agent === MAIN_AGENT_ID ? feed.ids : null, load: async () => {
         if (!searchParams.get('q') && listCache.mode() === 'on') {
           // The window selector normalizes into separate objects and never mutates
@@ -7687,11 +7718,12 @@ function buildWizardServer(options, lifetime) {
       }
       // Chats channels (issue 440): same owner surface, access and cross-site rules as ui-preferences.
       // Read watermarks (issue 471, WIZARD_CHANNEL_READ_SYNC=1 with the store): /wizard/v1/channels/read.
-      if (url.pathname === '/wizard/v1/channels' || url.pathname === '/wizard/v1/channels/membership' || url.pathname === '/wizard/v1/channels/read') {
-        const reads = url.pathname.endsWith('/read')
+      // Tags (issue 608, switch wizard/chat-tags): /wizard/v1/channels/tags, 404 while Tags are off.
+      if (url.pathname === '/wizard/v1/channels' || url.pathname === '/wizard/v1/channels/membership' || url.pathname === '/wizard/v1/channels/read' || url.pathname === '/wizard/v1/channels/tags') {
+        const reads = url.pathname.endsWith('/read'), tagRoute = url.pathname.endsWith('/tags')
         const channelStore = channelStoreNow()
-        if (!channelStore || (reads && !channelReadSyncOn())) { sendJson(response, 404, { error: 'not_found' }); return }
-        const membership = reads ? 'read' : url.pathname.endsWith('/membership')
+        if (!channelStore || (reads && !channelReadSyncOn()) || (tagRoute && !channelTagsOn())) { sendJson(response, 404, { error: 'not_found' }); return }
+        const membership = reads ? 'read' : tagRoute ? 'tags' : url.pathname.endsWith('/membership')
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
         const methods = membership ? ['GET', 'PUT'] : ['GET', 'POST', 'PATCH']
@@ -7704,7 +7736,7 @@ function buildWizardServer(options, lifetime) {
           if (!body || typeof body !== 'object' || Array.isArray(body)) { sendJson(response, 400, { error: 'invalid_request' }); return }
         }
         try {
-          sendJson(response, request.method === 'POST' ? 201 : 200, channelRequest(channelStore, request.method, membership, url.searchParams, body, { daily: channelDailyOn() }), { 'Cache-Control': 'no-store' })
+          sendJson(response, request.method === 'POST' ? 201 : 200, channelRequest(channelStore, request.method, membership, url.searchParams, body, { daily: channelDailyOn(), tags: channelTagsOn() }), { 'Cache-Control': 'no-store' })
         } catch (error) { sendJson(response, [400, 404, 409].includes(error?.status) ? error.status : 503, { error: [400, 404, 409].includes(error?.status) ? error.code || 'invalid_request' : 'channels_unavailable' }) }
         return
       }
@@ -8241,7 +8273,7 @@ function buildWizardServer(options, lifetime) {
               thread_id: typeof input.thread_id === 'string' ? input.thread_id : '' }).row
           } catch (error) { console.warn(`[sent-log] sent row not written: ${error?.message || error}`) }
         }
-        const sentFinish = fields => { if (sent) { try { sentLog.finish(sent.id, fields) } catch (error) { console.warn(`[sent-log] sent row not updated: ${error?.message || error}`) } } }
+        const sentFinish = fields => { if (sent) { try { sentTagsApply(sentLog.finish(sent.id, fields)) } catch (error) { console.warn(`[sent-log] sent row not updated: ${error?.message || error}`) } } }
         const sentId = sent ? { sent_id: sent.id } : {}
         // Router missing, failing or slow: the take opens a visible thread (the shell's fallback), and its row says so.
         const fallback = (reason, words = said ? replyRules(said) : null) => sentFinish({ route: 'agent', decided_by: 'fallback', rules: [...(words?.rules || []), reason], tags: words?.tags, urgent: words?.urgent, model: fast?.model || '', error: reason })
@@ -9409,7 +9441,7 @@ function buildWizardServer(options, lifetime) {
         const forbidden = [hermesKey, inboxToken, ...privatePaths].filter(Boolean).map((value) => Buffer.from(value))
         if (forbidden.some((value) => result.includes(value))) { sendJson(response, 502, { error: 'unsafe_upstream_response' }); return }
         if (upstream.ok && request.method === 'GET' && upstreamPath === '/api/sessions' && url.searchParams.get('view') === 'list') {
-          result = Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), url.searchParams.get('q'), channelStore && !operator ? channelStore : null, { firstPosts: channelFirstPosts && !operator })))
+          result = Buffer.from(JSON.stringify(listPayload(JSON.parse(result.toString('utf8')), url.searchParams.get('q'), channelStore && !operator ? channelStore : null, { firstPosts: channelFirstPosts && !operator, tags: !operator && !!channelStore && channelTagsOn() })))
         }
         // A deleted thread leaves its channel (issue 440).
         // Also while Channels are off: a store opened earlier keeps no membership for a deleted thread.

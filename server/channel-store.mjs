@@ -56,7 +56,11 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     CREATE TABLE IF NOT EXISTS owner_unfiled(agent TEXT NOT NULL, session_id TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(agent, session_id));
     CREATE TABLE IF NOT EXISTS channel_subjects(channel_id TEXT NOT NULL, subject TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(channel_id, subject));
     CREATE TABLE IF NOT EXISTS daily_days(channel_id TEXT NOT NULL, day TEXT NOT NULL, agent TEXT NOT NULL, session_id TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(channel_id, day));
-    CREATE INDEX IF NOT EXISTS daily_days_session ON daily_days(agent, session_id);`)
+    CREATE INDEX IF NOT EXISTS daily_days_session ON daily_days(agent, session_id);
+    CREATE TABLE IF NOT EXISTS tags(agent TEXT NOT NULL, session_id TEXT NOT NULL, channel_id TEXT NOT NULL, tagged_at TEXT NOT NULL,
+      tagged_by TEXT NOT NULL CHECK(tagged_by IN ('owner','agent','migration')), PRIMARY KEY(agent, session_id, channel_id));
+    CREATE INDEX IF NOT EXISTS tags_channel ON tags(channel_id, tagged_at);
+    CREATE TABLE IF NOT EXISTS tag_removed(agent TEXT NOT NULL, session_id TEXT NOT NULL, channel_id TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(agent, session_id, channel_id));`)
   const q = sql => db.prepare(sql)
   // Issue 520 follow-up: the first build also learned subjects from migration-filed chats. Drop what it learned once;
   // owner-filed chats teach their subjects again on their next status line.
@@ -108,8 +112,46 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     dayOfSession: q('SELECT * FROM daily_days WHERE agent=? AND session_id=? ORDER BY day DESC LIMIT 1'),
     removeDays: q('DELETE FROM daily_days WHERE channel_id=?'),
     forgetDay: q('DELETE FROM daily_days WHERE agent=? AND session_id=?'),
+    // Tags (issue 608): a chat can carry several of its agent's channels. `membership` keeps the primary tag (the first
+    // one, then the oldest left), so everything that knows one channel per chat (Daily, filing, older shells) still works.
+    tagsOf: q('SELECT channel_id, tagged_at, tagged_by FROM tags WHERE agent=? AND session_id=? ORDER BY tagged_at, channel_id'),
+    tag: q('SELECT 1 AS y FROM tags WHERE agent=? AND session_id=? AND channel_id=?'),
+    addTag: q('INSERT OR IGNORE INTO tags(agent,session_id,channel_id,tagged_at,tagged_by) VALUES(?,?,?,?,?)'),
+    dropTag: q('DELETE FROM tags WHERE agent=? AND session_id=? AND channel_id=?'),
+    dropTags: q('DELETE FROM tags WHERE agent=? AND session_id=?'),
+    tagMembers: q(`SELECT session_id FROM tags WHERE channel_id=? UNION SELECT session_id FROM membership WHERE channel_id=?`),
+    channelTags: q('SELECT agent, session_id FROM tags WHERE channel_id=?'),
+    removeChannelTags: q('DELETE FROM tags WHERE channel_id=?'),
+    tagCount: q('SELECT COUNT(*) AS n FROM (SELECT session_id FROM tags WHERE channel_id=? UNION SELECT session_id FROM membership WHERE channel_id=?)'),
+    markRemoved: q('INSERT INTO tag_removed(agent,session_id,channel_id,at) VALUES(?,?,?,?) ON CONFLICT(agent,session_id,channel_id) DO UPDATE SET at=excluded.at'),
+    unmarkRemoved: q('DELETE FROM tag_removed WHERE agent=? AND session_id=? AND channel_id=?'),
+    removed: q('SELECT 1 AS y FROM tag_removed WHERE agent=? AND session_id=? AND channel_id=?'),
+    forgetRemoved: q('DELETE FROM tag_removed WHERE agent=? AND session_id=?'),
+    removeChannelRemoved: q('DELETE FROM tag_removed WHERE channel_id=?'),
+    copyTags: q("INSERT OR IGNORE INTO tags(agent,session_id,channel_id,tagged_at,tagged_by) SELECT agent, session_id, channel_id, filed_at, filed_by FROM membership"),
   }
   const tx = fn => { db.exec('BEGIN IMMEDIATE'); try { const v = fn(); db.exec('COMMIT'); return v } catch (e) { try { db.exec('ROLLBACK') } catch {} throw e } }
+  // Tags (issue 608): every one-channel write keeps the tag table in step (called inside a transaction), so the two never
+  // disagree whichever way the switch stood: filing adds the tag, a move replaces the primary tag, unfiling drops all.
+  // Until Tags were first on (tags_migrated) the table is empty and nothing writes it: the migration copies membership
+  // then, so a box that never turns Tags on pays nothing.
+  let tagsLive = Boolean(st.meta.get('tags_migrated'))
+  const tagFiled = (agent, sessionId, channelId, at, by) => { if (tagsLive) st.addTag.run(agent, sessionId, channelId, at, by) }
+  const tagMoved = (agent, sessionId, from, to, at, by) => { if (!tagsLive) return; if (from && from !== to) st.dropTag.run(agent, sessionId, from); tagFiled(agent, sessionId, to, at, by) }
+  const tagsGone = (agent, sessionId) => { if (tagsLive) { st.dropTags.run(agent, sessionId); st.forgetRemoved.run(agent, sessionId) } }
+  // The chat's tags: the primary (membership) first, then the others oldest first.
+  const tagIds = (agent, sessionId) => {
+    const primary = st.member.get(agent, sessionId)?.channel_id || ''
+    const rest = st.tagsOf.all(agent, sessionId).map(r => r.channel_id).filter(id => id !== primary)
+    return primary ? [primary, ...rest] : rest
+  }
+  // After a tag left: the primary is the oldest tag still on the chat, or none (General).
+  const promote = (agent, sessionId) => {
+    const next = st.tagsOf.all(agent, sessionId).find(r => st.channel.get(r.channel_id))
+    if (next) st.file.run(agent, sessionId, next.channel_id, next.tagged_at, next.tagged_by)
+    else st.unfile.run(agent, sessionId)
+    return next?.channel_id || ''
+  }
   const view = r => ({ id: r.id, agent: r.agent, name: r.name, order: r.ord, createdAt: r.created_at, archived: !!r.archived,
     ...(r.archived ? { archivedAt: r.archived } : {}), pinned: r.pinned !== null && r.pinned !== undefined, ...(r.pinned !== null && r.pinned !== undefined ? { pinOrder: r.pinned } : {}),
     ...(r.kind ? { kind: r.kind } : {}), ...(r.kind === 'daily' ? { dayStartsAt: DAILY_DAY_STARTS_AT } : {}), ...(r.count !== undefined ? { count: Number(r.count) } : {}) })
@@ -125,9 +167,9 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
   const store = {
     path,
     sort,
-    list({ agent } = {}) {
-      const rows = st.all.all().filter(r => !agent || r.agent === agent).map(view)
-      return { schema: CHANNELS_SCHEMA, sort: sort(), migratedAt: meta('spaces_migrated'), channels: rows }
+    list({ agent, tags = false } = {}) {
+      const rows = st.all.all().filter(r => !agent || r.agent === agent).map(r => view(tags ? { ...r, count: st.tagCount.get(r.id, r.id).n } : r))
+      return { schema: CHANNELS_SCHEMA, sort: sort(), migratedAt: meta('spaces_migrated'), channels: rows, ...(tags ? { tags: true } : {}) }
     },
     get: id => view({ ...mustChannel(id), count: st.members.all(id).length }),
     // The channel without its member count: per-row checks on a list build must not read every member (issue 584).
@@ -187,7 +229,16 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     },
     setSort(value) { if (value !== 'az' && value !== 'za') fail(400, 'invalid_sort'); st.setMeta.run('sort', value); return sort() },
     // Owner action only (an old shell's "remove Space", spaces_delete). Never deletes threads.
-    remove(id) { return tx(() => { mustChannel(id); st.removeMembers.run(id); st.removeSubjects.run(id); st.removeDays.run(id); st.remove.run(id); return { deleted: id } }) },
+    remove(id) {
+      return tx(() => {
+        mustChannel(id)
+        // A chat whose primary tag this was keeps its other tags: the oldest becomes its primary (issue 608).
+        const tagged = st.channelTags.all(id)
+        st.removeMembers.run(id); st.removeChannelTags.run(id); st.removeChannelRemoved.run(id)
+        for (const r of tagged) if (!st.member.get(r.agent, r.session_id)) promote(r.agent, r.session_id)
+        st.removeSubjects.run(id); st.removeDays.run(id); st.remove.run(id); return { deleted: id }
+      })
+    },
     // The membership row ({channel_id, filed_by}) or null.
     memberOf(agent, sessionId) { return validThreadId(sessionId) ? st.member.get(agentOf(agent), sessionId) || null : null },
     ownerUnfiled(agent, sessionId) { return validThreadId(sessionId) ? Boolean(st.tombstoned.get(agentOf(agent), sessionId)) : false },
@@ -206,7 +257,12 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     },
     channelOf(agent, sessionId) { return validThreadId(sessionId) ? st.member.get(agentOf(agent), sessionId)?.channel_id || '' : '' },
     members(id) { mustChannel(id); return st.members.all(id).map(r => ({ sessionId: r.session_id, filedAt: r.filed_at, filedBy: r.filed_by })) },
-    memberSet(id) { const r = typeof id === 'string' && CHANNEL_ID.test(id) ? st.channel.get(id) : null; return r ? { agent: r.agent, ids: new Set(st.members.all(id).map(m => m.session_id)) } : null },
+    // `tags` (issue 608): every chat carrying this channel as one of its tags, not only those filed in it.
+    memberSet(id, { tags = false } = {}) {
+      const r = typeof id === 'string' && CHANNEL_ID.test(id) ? st.channel.get(id) : null
+      if (!r) return null
+      return { agent: r.agent, ids: new Set((tags ? st.tagMembers.all(id, id) : st.members.all(id)).map(m => m.session_id)) }
+    },
     // The atomic move: into channelId (dropping any other channel of the same agent), or out of every channel (null).
     move({ sessionId, channelId, agent, filedBy = 'owner' }) {
       if (!validThreadId(sessionId)) fail(400, 'invalid_session')
@@ -214,15 +270,17 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
       return tx(() => {
         if (channelId === null) {
           const owner = agentOf(agent)
-          // Only a chat that was in a channel leaves a tombstone: the owner took it out.
+          // Only a chat that was in a channel leaves a tombstone: the owner took it out. Out of every channel is out of
+          // every tag too (issue 608).
           if (st.unfile.run(owner, sessionId).changes) st.tombstone.run(owner, sessionId, now())
+          if (tagsLive) st.dropTags.run(owner, sessionId)
           return { sessionId, agent: owner, channel: null }
         }
         const r = mustChannel(channelId)
         if (agent !== undefined && agent !== null && agent !== '' && agentOf(agent) !== r.agent) fail(409, 'agent_mismatch')
         st.untombstone.run(r.agent, sessionId)
         const had = st.member.get(r.agent, sessionId)
-        if (had?.channel_id !== r.id) st.file.run(r.agent, sessionId, r.id, now(), filedBy)
+        if (had?.channel_id !== r.id) { const at = now(); st.file.run(r.agent, sessionId, r.id, at, filedBy); tagMoved(r.agent, sessionId, had?.channel_id, r.id, at, filedBy) }
         return { sessionId, agent: r.agent, channel: r.id }
       })
     },
@@ -233,15 +291,92 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
         const r = st.channel.get(channelId)
         if (!r || r.agent !== agentOf(agent) || r.archived) return false
         if (st.tombstoned.get(r.agent, sessionId)) return false
-        return st.fileNew.run(r.agent, sessionId, r.id, now(), filedBy).changes === 1
+        const at = now()
+        if (st.fileNew.run(r.agent, sessionId, r.id, at, filedBy).changes !== 1) return false
+        tagFiled(r.agent, sessionId, r.id, at, filedBy)
+        return true
+      })
+    },
+    // Tags (issue 608). The chat's tag ids, primary first.
+    tagsOf(agent, sessionId) { return validThreadId(sessionId) ? tagIds(agentOf(agent), sessionId) : [] },
+    hasTag(agent, sessionId, channelId) {
+      if (!validThreadId(sessionId) || typeof channelId !== 'string' || !CHANNEL_ID.test(channelId)) return false
+      const who = agentOf(agent)
+      return Boolean(st.tag.get(who, sessionId, channelId)) || st.member.get(who, sessionId)?.channel_id === channelId
+    },
+    // Once, the first time Tags are on: every chat's channel becomes its first tag.
+    migrateTags() {
+      if (meta('tags_migrated')) return { migrated: false, tags: 0 }
+      return tx(() => {
+        if (meta('tags_migrated')) return { migrated: false, tags: 0 }
+        const n = st.copyTags.run().changes
+        st.setMeta.run('tags_migrated', now())
+        tagsLive = true
+        return { migrated: true, tags: Number(n) }
+      })
+    },
+    // Add one tag (the agent's own channel). A chat with no channel gets it as its primary. The owner's add clears his
+    // own earlier removal of that tag. -> {sessionId, agent, channel (primary), tags}
+    addTag({ sessionId, channelId, agent, by = 'owner' }) {
+      if (!validThreadId(sessionId)) fail(400, 'invalid_session')
+      if (!FILED_BY.has(by)) fail(400, 'invalid_filed_by')
+      if (!tagsLive) store.migrateTags()
+      return tx(() => {
+        const r = mustChannel(channelId)
+        if (agent !== undefined && agent !== null && agent !== '' && agentOf(agent) !== r.agent) fail(409, 'agent_mismatch')
+        const at = now()
+        if (by === 'owner') { st.unmarkRemoved.run(r.agent, sessionId, r.id); st.untombstone.run(r.agent, sessionId) }
+        tagFiled(r.agent, sessionId, r.id, at, by)
+        if (!st.member.get(r.agent, sessionId)) st.file.run(r.agent, sessionId, r.id, at, by)
+        return { sessionId, agent: r.agent, channel: st.member.get(r.agent, sessionId)?.channel_id || null, tags: tagIds(r.agent, sessionId) }
+      })
+    },
+    // Remove one tag. The owner's removal is remembered, so the agent never puts that tag back. Removing the primary
+    // makes the oldest other tag primary; the last one leaves the chat in General (the owner took it out, as unfiling).
+    removeTag({ sessionId, channelId, agent, by = 'owner' }) {
+      if (!validThreadId(sessionId)) fail(400, 'invalid_session')
+      if (!tagsLive) store.migrateTags()
+      return tx(() => {
+        const r = mustChannel(channelId)
+        if (agent !== undefined && agent !== null && agent !== '' && agentOf(agent) !== r.agent) fail(409, 'agent_mismatch')
+        st.dropTag.run(r.agent, sessionId, r.id)
+        if (by === 'owner') st.markRemoved.run(r.agent, sessionId, r.id, now())
+        if (st.member.get(r.agent, sessionId)?.channel_id === r.id && !promote(r.agent, sessionId) && by === 'owner') st.tombstone.run(r.agent, sessionId, now())
+        return { sessionId, agent: r.agent, channel: st.member.get(r.agent, sessionId)?.channel_id || null, tags: tagIds(r.agent, sessionId) }
+      })
+    },
+    // The agent's status-line `channel` with Tags on: one more tag, never one the owner removed from this chat, never on
+    // a chat the owner took out of every channel, never an archived channel. -> true when added.
+    tagIfAllowed(agent, sessionId, channelId, by = 'agent') {
+      if (!validThreadId(sessionId) || typeof channelId !== 'string' || !CHANNEL_ID.test(channelId)) return false
+      // Read first: a list rebuild asks for every row, and a refusal must not take the write lock each time.
+      const who = agentOf(agent), refused = () => {
+        const r = st.channel.get(channelId)
+        if (!r || r.agent !== who || r.archived || st.removed.get(who, sessionId, r.id)) return true
+        const member = st.member.get(who, sessionId)
+        return (!member && Boolean(st.tombstoned.get(who, sessionId))) || member?.channel_id === r.id || Boolean(st.tag.get(who, sessionId, r.id))
+      }
+      if (refused()) return false
+      if (!tagsLive) store.migrateTags()
+      return tx(() => {
+        const r = st.channel.get(channelId)
+        if (!r || r.agent !== who || r.archived) return false
+        if (st.removed.get(who, sessionId, r.id)) return false
+        const member = st.member.get(who, sessionId)
+        if (!member && st.tombstoned.get(who, sessionId)) return false
+        if (member?.channel_id === r.id || st.tag.get(who, sessionId, r.id)) return false
+        const at = now()
+        tagFiled(who, sessionId, r.id, at, by)
+        if (!member) st.file.run(who, sessionId, r.id, at, by)
+        return true
       })
     },
     // A deleted thread leaves its channel.
-    forget(agent, sessionId) { if (validThreadId(sessionId)) { st.unfile.run(agentOf(agent), sessionId); st.untombstone.run(agentOf(agent), sessionId); st.forgetDay.run(agentOf(agent), sessionId) } },
+    forget(agent, sessionId) { if (validThreadId(sessionId)) { st.unfile.run(agentOf(agent), sessionId); st.untombstone.run(agentOf(agent), sessionId); st.forgetDay.run(agentOf(agent), sessionId); tagsGone(agentOf(agent), sessionId) } },
     // exists(id) -> true | false | null (unknown: kept). Returns how many memberships were dropped.
     prune(agent, exists) {
       const owner = agentOf(agent), gone = st.agentMembers.all(owner).map(r => r.session_id).filter(id => exists(id) === false)
-      if (gone.length) tx(() => { for (const id of gone) { st.unfile.run(owner, id); st.untombstone.run(owner, id) } })
+      if (gone.length) tx(() => { for (const id of gone) { st.unfile.run(owner, id); st.untombstone.run(owner, id); tagsGone(owner, id) } })
       const goneMarks = st.agentTombstones.all(owner).map(r => r.session_id).filter(id => exists(id) === false)
       if (goneMarks.length) tx(() => { for (const id of goneMarks) st.untombstone.run(owner, id) })
       return gone.length
@@ -260,7 +395,7 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
           const target = st.channel.get(s.id)
           if (target.agent !== agent) return
           for (const thread of s.threads) {
-            if (st.fileNew.run(agent, thread, s.id, at, 'migration').changes === 1) memberships++
+            if (st.fileNew.run(agent, thread, s.id, at, 'migration').changes === 1) { memberships++; tagFiled(agent, thread, s.id, at, 'migration') }
             else if (st.member.get(agent, thread)?.channel_id !== s.id) duplicates++
           }
         })
@@ -315,7 +450,7 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
         const sessionId = mint()
         if (!validThreadId(sessionId)) fail(500, 'invalid_session')
         st.addDay.run(channelId, day, r.agent, sessionId, now())
-        if (!st.tombstoned.get(r.agent, sessionId)) st.fileNew.run(r.agent, sessionId, channelId, now(), 'agent')
+        if (!st.tombstoned.get(r.agent, sessionId) && st.fileNew.run(r.agent, sessionId, channelId, now(), 'agent').changes === 1) tagFiled(r.agent, sessionId, channelId, now(), 'agent')
         return { sessionId, day, created: true }
       })
     },
@@ -407,6 +542,22 @@ export function channelRequest(store, method, membership, params, body, options 
     only('at')
     return store.markRead(body.at)
   }
+  // /wizard/v1/channels/tags (issue 608, Tags on): GET ?sessionId=&agent= -> {sessionId, agent, channel, tags} or
+  // ?channel= -> {channel, members}; PUT {sessionId, agent?, add: id} | {sessionId, agent?, remove: id}.
+  if (membership === 'tags') {
+    if (method === 'GET') {
+      if (params.has('channel')) { const set = store.memberSet(params.get('channel'), { tags: true }); if (!set) fail(404, 'channel_not_found'); return { channel: params.get('channel'), members: [...set.ids] } }
+      const sessionId = params.get('sessionId')
+      if (!validThreadId(sessionId)) fail(400, 'invalid_session')
+      const agent = agentOf(params.get('agent'))
+      return { sessionId, agent, channel: store.channelOf(agent, sessionId) || null, tags: store.tagsOf(agent, sessionId) }
+    }
+    only('sessionId', 'agent', 'add', 'remove')
+    const add = Object.hasOwn(body, 'add'), remove = Object.hasOwn(body, 'remove')
+    if (add === remove || typeof body[add ? 'add' : 'remove'] !== 'string') fail(400, 'invalid_request')
+    return add ? store.addTag({ sessionId: body.sessionId, channelId: body.add, agent: body.agent, by: 'owner' })
+      : store.removeTag({ sessionId: body.sessionId, channelId: body.remove, agent: body.agent, by: 'owner' })
+  }
   if (membership) {
     if (method === 'GET') {
       if (params.has('channel')) return { channel: params.get('channel'), members: store.members(params.get('channel')) }
@@ -422,7 +573,7 @@ export function channelRequest(store, method, membership, params, body, options 
   if (method === 'GET') {
     const agent = params.get('agent')
     if (agent !== null && !CHANNEL_AGENT.test(agent)) fail(400, 'invalid_agent')
-    return store.list(agent ? { agent } : {})
+    return store.list({ ...(agent ? { agent } : {}), tags: options.tags === true })
   }
   if (method === 'POST') { only('name', 'agent'); return store.create({ name: body.name, agent: body.agent }) }
   const keys = Object.keys(body)

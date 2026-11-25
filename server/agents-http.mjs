@@ -749,7 +749,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   if (isPrivateAgent(registry,agent.id) && method === 'GET' && upstreamPath === '/api/sessions' && searchParams.has('q') && principalOf(request).kind !== 'owner') { sendJson(response,403,{error:'owner_required'}); return }
   const deleting = method === 'DELETE' && /^\/api\/sessions\/[A-Za-z0-9._:-]{1,200}$/u.test(upstreamPath) && searchParams.size === 0
   // Chats channels (issue 440): a channel feed needs the channel store, and the channel must be this agent's.
-  if (method === 'GET' && upstreamPath === '/api/sessions' && searchParams.has('channel') && ctx.channelStore?.memberSet(searchParams.get('channel'))?.agent !== agent.id) { sendJson(response, 404, { error: 'channel_not_found' }); return }
+  if (method === 'GET' && upstreamPath === '/api/sessions' && searchParams.has('channel') && ctx.channelStore?.memberSet(searchParams.get('channel'), { tags: ctx.channelTags === true })?.agent !== agent.id) { sendJson(response, 404, { error: 'channel_not_found' }); return }
   if (deleting && principalOf(request).kind !== 'owner') { sendJson(response,403,{error:'owner_required'}); return }
   if (!deleting && !ctx.isAllowedProxyRequest(method, upstreamPath, searchParams)) { sendJson(response, 404, { error: 'not_found' }); return }
   const hasBody = method === 'PATCH' || (method === 'POST' && !upstreamPath.endsWith('/stop'))
@@ -949,7 +949,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
         }
         const payload=searchParams.get('mode')==='body'
           ? {object:'list',data:[...hits||[]].map(([id,snippet])=>({id,agent:agent.id,snippet})),search_total:hits?.size||0,mode:hits?.mode||'titles',partial:hits?.partial||false,timings:{list_ms,...hits?.timings}}
-          : await listWindows.get(ctx)({params:searchParams,scope:agent.id,members:channelFeed?(f=>f?.agent===agent.id?f.ids:null)(ctx.channelStore.memberSet(searchParams.get('channel'))):null,load:async()=>rows.map(row=>hits?.has(row.id)?{...row,agent:agent.id,wizard_search_text:hits.get(row.id),wizard_search_match:true}:{...row,agent:agent.id})})
+          : await listWindows.get(ctx)({params:searchParams,scope:agent.id,members:channelFeed?(f=>f?.agent===agent.id?f.ids:null)(ctx.channelStore.memberSet(searchParams.get('channel'),{tags:ctx.channelTags===true})):null,load:async()=>rows.map(row=>hits?.has(row.id)?{...row,agent:agent.id,wizard_search_text:hits.get(row.id),wizard_search_match:true}:{...row,agent:agent.id})})
         result=Buffer.from(JSON.stringify(payload))
       }
       if (ctx.projectFollowUps) result = ctx.projectFollowUps(result, agent.id)
@@ -965,7 +965,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
         const listed=JSON.parse(result.toString('utf8'))
         if (ctx.channelFirstPosts) await routedFirstPosts(ctx, agent, listed, secrets, headers)
         else if (ctx.channelStore) await archivedFirstRequests(ctx, agent, listed, secrets)
-        result=Buffer.from(JSON.stringify(listPayload(listed, searchParams.get('q'), ctx.channelStore || null, { firstPosts: ctx.channelFirstPosts === true })))
+        result=Buffer.from(JSON.stringify(listPayload(listed, searchParams.get('q'), ctx.channelStore || null, { firstPosts: ctx.channelFirstPosts === true, tags: !!ctx.channelStore && ctx.channelTags === true })))
       }
     } else if (/^\/api\/sessions(?:\/[^/]+)?$/u.test(upstreamPath)) result = decorateThreadAgent(result, info)
     if (method === 'POST' && upstreamPath === '/v1/runs') result = Buffer.from(JSON.stringify({ ...JSON.parse(result.toString('utf8')), agent_id: agent.id }))

@@ -155,3 +155,28 @@ compressed). No Hermes change.
 
 Store: table `daily_days(channel_id, day, agent, session_id, created_at)` in `channels.sqlite`; deleting a day thread
 through the Service drops its row, deleting the channel drops all of them.
+
+## Tags (issue 608)
+
+Channels become tags: a chat can carry several of its agent's channels. Off by default, behind the owner's switch
+`wizard/chat-tags` (read from the synced Look file; `WIZARD_CHANNEL_TAGS=1` forces it on, `0` off, option
+`channelTags`). With it off nothing changes: no tag rows are written and `/wizard/v1/channels/tags` is a 404.
+
+- **Store.** Table `tags(agent, session_id, channel_id, tagged_at, tagged_by)` plus `tag_removed(agent, session_id,
+  channel_id, at)` in `channels.sqlite`. The first time Tags are on, every membership is copied in once (meta
+  `tags_migrated`): each chat's channel becomes its first tag. `membership` keeps the **primary tag** (the first one,
+  then the oldest left), so Daily day threads, agent filing and older shells keep working and switching Tags off shows
+  each chat in its primary tag's channel, nothing lost. Once migrated, every one-channel write (move, agent filing, a
+  Daily claim, a Spaces migration, unfile, delete) mirrors into `tags`.
+- **API.** `GET /wizard/v1/channels/tags?sessionId=&agent=` → `{sessionId, agent, channel, tags}` (primary first);
+  `?channel=<id>` → `{channel, members}`. `PUT {sessionId, agent?, add: <channel id>}` or `{…, remove: <channel id>}`
+  (exactly one; only the chat's own agent's channels, else 409). Removing the primary promotes the oldest other tag;
+  removing the last leaves the chat in General. An owner's removal is remembered. `GET /wizard/v1/channels` says
+  `tags: true` and counts tagged chats.
+- **Chats list and feeds.** `view=list` rows carry `tags` (primary = `channel` first) on every agent kind; a tag's
+  feed (`view=list&channel=<id>`) lists every chat carrying it.
+- **Agent filing.** The status line's `channel` adds a tag (the run note says so), never one the owner removed from
+  that chat, never on a chat the owner took out of every channel, never an archived channel.
+- **Said tags.** Tags in a capture (`#philosopher`, "hashtag philosopher", on its Sent row) go on the thread the take
+  ran in, for tags that already exist (same letters and digits as the channel name, so "🧠 Philosopher" is
+  `#philosopher`). A word that names no tag makes none.
