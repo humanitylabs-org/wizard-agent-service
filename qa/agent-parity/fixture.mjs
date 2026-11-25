@@ -121,6 +121,9 @@ export async function scene(kind, serverOptions = {}) {
       syncMessages();return streamRun(run)
     }
     if (path === '/api/sessions' && req.method === 'POST') {
+      // Stock Hermes refuses a new session whose title another session holds (400 invalid_title), like a rename.
+      if (serverOptions.fixtureUniqueTitles && typeof body.title === 'string' && body.title
+        && [...sessions.values()].some(other => other.id !== (body.id || body.session_id) && other.title === body.title)) return json(400, { error: 'invalid_title' })
       const row = { ...body, id: body.id || body.session_id, created_at: Date.now() / 1000, messages: [] }
       sessions.set(row.id, row); titleDb.prepare('INSERT OR REPLACE INTO sessions (id,title,title_source,started_at) VALUES (?, ?, ?, ?)').run(row.id, row.title || '', row.title_source || 'llm', row.created_at); return json(201, { session: row })
     }
