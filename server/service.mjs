@@ -60,7 +60,7 @@ import { createCapabilities, CAPABILITY_SWITCH } from './capabilities.mjs'
 // wizard-ux issue 1437: the shell app whose skill is the generated interface manual, and the switch that lets it in.
 const INTERFACE_MANUAL_SWITCH = 'wizard/interface-manual'
 const INTERFACE_MANUAL_APPS = new Set(['wizard-ux'])
-import { LOCAL_APP_ROUTES_SWITCH, createRouteTable, launcherPath as localLauncherPath, loopbackRequest, serveLocalAppRoute, upgradeLocalAppRoute } from './local-app-routes.mjs'
+import { createRouteTable, launcherPath as localLauncherPath, loopbackRequest, serveLocalAppRoute, upgradeLocalAppRoute } from './local-app-routes.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
 import { APP_WAKE_SWITCH, APP_WAKE_CONTRACT, APP_WAKE_RUN_PREFIX, createWakeLedger, parseWakeEvent, wakeTurnText } from './app-wake.mjs'
 import { APP_BATCH, APP_BATCH_MAX, CAPTURE_SOURCE, CAPTURE_SWITCH, SCAN_MS as CAPTURE_SCAN_MS, batchTurnText, captureTool, createCaptureInbox } from './capture-inbox.mjs'
@@ -3278,10 +3278,9 @@ function buildWizardServer(options, lifetime) {
   const privateFirstSwitchOn = createChannelsSwitch({ id: PRIVATE_FIRST_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.privateFirstTtlMs ?? 3000 })
   // Standard first (wizard-ux issue 1800): the owner's Set up private AI in the Welcome turns it on for this box too.
   const privateFirstOn = () => channelPart(options.privateFirst, () => privateFirstSwitchOn() || privateFirst?.optedIn?.() === true)
-  // Local app routes (wizard-app-manager issue 629, local-app-routes.mjs): the owner's `wizard/local-app-routes` switch
-  // in the Look file; option localAppRoutes (env WIZARD_LOCAL_APP_ROUTES, '1' on / '0' off) wins.
-  const localAppRoutesSwitchOn = createChannelsSwitch({ id: LOCAL_APP_ROUTES_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.localAppRoutesTtlMs ?? 3000 })
-  const localAppRoutesOn = () => channelPart(options.localAppRoutes, localAppRoutesSwitchOn)
+  // Local app routes (wizard-app-manager issue 629, local-app-routes.mjs): on for everyone (switch removed); only a
+  // box's option localAppRoutes false (env WIZARD_LOCAL_APP_ROUTES=0) turns them off.
+  const localAppRoutesOn = () => channelOn(options.localAppRoutes)
   const localAppRoutes = createRouteTable({ appsJsonPath, address: options.appsMcpAddress === 'internal' ? 'internal' : 'local' })
   let privateFirst = null
   // The main Hermes plugins' loopback credential (issues 575 and 577: private first, schedules, agent reads,
@@ -8204,7 +8203,7 @@ function buildWizardServer(options, lifetime) {
       }
       if (url.pathname === '/wizard/v1/apps' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        // Switch wizard/local-app-routes, on the box's own loopback address: an app page with no openable view gets its
+        // Local app routes, on the box's own loopback address: an app page with no openable view gets its
         // local Wizard path (served above), so it opens inside Wizard instead of listing as backend-only.
         const localPath = localAppRoutesOn() && loopbackRequest(request, { tailnetIngress }) ? (app) => localLauncherPath(localAppRoutes(), app) : null
         sendJson(response, 200, readApps({ appsJsonPath, launcherPath, localPath }), { 'Cache-Control': 'no-store' })

@@ -1,4 +1,4 @@
-// Local app routes (wizard-app-manager issue 629, switch wizard/local-app-routes): on a box that is not on Tailscale,
+// Local app routes (wizard-app-manager issue 629, on for everyone): on a box that is not on Tailscale,
 // an installed app's page opens at its Wizard path on the box's own loopback address, through this service.
 import { afterEach, describe, expect, it } from 'vitest'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createHash, randomBytes } from 'node:crypto'
 import { createWizardServer, listen } from '../server/service.mjs'
-import { routeOf, loopbackRequest, LOCAL_APP_ROUTES_SWITCH } from '../server/local-app-routes.mjs'
+import { routeOf, loopbackRequest } from '../server/local-app-routes.mjs'
 
 const servers: any[] = [], dirs: string[] = []
 afterEach(async () => {
@@ -15,9 +15,10 @@ afterEach(async () => {
   dirs.splice(0).forEach(d => rmSync(d, { recursive: true, force: true }))
 })
 const home = () => { const d = mkdtempSync(join(tmpdir(), 'local-app-routes-')); dirs.push(d); return d }
+// The retired switch id: a Look file that still says off must not turn the routes off any more.
 const setLook = (d: string, on: boolean) => {
   mkdirSync(join(d, 'Pages', 'wizard-look'), { recursive: true })
-  writeFileSync(join(d, 'Pages', 'wizard-look', 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { [LOCAL_APP_ROUTES_SWITCH]: { on, at: 1 } } }))
+  writeFileSync(join(d, 'Pages', 'wizard-look', 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/local-app-routes': { on, at: 1 } } }))
 }
 
 // A stand-in app on its own loopback port: echoes what it got, and answers a WebSocket handshake with one frame.
@@ -43,7 +44,7 @@ async function start(d: string, appPort: number, extra: Record<string, unknown> 
   const s = createWizardServer({
     wizardOsHome: d, requireAccess: false, hermesKey: 'test', agentBridge: false, followThrough: false,
     runQueueStatePath: join(d, 'q.db'), runQueuePollIntervalMs: 0, appsJsonPath: join(d, 'apps.json'),
-    pagesRoot: join(d, 'Pages'), pagesGitDir: join(d, 'pages-history.git'), pagesWatch: false, localAppRoutesTtlMs: 0,
+    pagesRoot: join(d, 'Pages'), pagesGitDir: join(d, 'pages-history.git'), pagesWatch: false,
     ...extra,
   })
   servers.push(s); const a: any = await listen(s); return a.port as number
@@ -103,14 +104,14 @@ describe('local app routes: which apps get one', () => {
 })
 
 describe('local app routes over HTTP', () => {
-  it('switch off: nothing changes (backend-only, the path is not served)', async () => {
-    const d = home(); setLook(d, false); const app = await fakeApp(); const port = await start(d, app.port)
+  it('a box turned off with WIZARD_LOCAL_APP_ROUTES=0: backend-only, the path is not served', async () => {
+    const d = home(); const app = await fakeApp(); const port = await start(d, app.port, { localAppRoutes: false })
     expect(await appsList(port)).toEqual([['wizard-search', ''], ['files', ''], ['notes', '']])
     expect((await get(port, '/wizard-search/')).status).toBe(404)
     expect(app.seen).toEqual([])
   })
-  it('switch on: the launcher gets the Wizard path and the page is served from the app, as a box-local caller', async () => {
-    const d = home(); setLook(d, true); const app = await fakeApp(); const port = await start(d, app.port)
+  it('on for everyone: the launcher gets the Wizard path and the page is served from the app, as a box-local caller', async () => {
+    const d = home(); setLook(d, false); const app = await fakeApp(); const port = await start(d, app.port)
     expect(await appsList(port)).toEqual([['wizard-search', '/wizard-search/'], ['files', '/files/'], ['notes', '']])
     const page = await get(port, '/wizard-search/q/x?term=wizards', { 'x-forwarded-for': '172.18.0.1', 'x-forwarded-host': '127.0.0.1', forwarded: 'for=x', 'x-wizard-owner-proof': 'secret', cookie: 'a=1' })
     expect([page.status, page.body, page.headers['x-app']]).toEqual([200, 'app:/q/x?term=wizards', 'yes'])
@@ -123,8 +124,8 @@ describe('local app routes over HTTP', () => {
     // An owner-proof app keeps needing its owner edge.
     expect((await get(port, '/notes/')).status).toBe(404)
   })
-  it('switch on: overlapping paths go to the most specific app', async () => {
-    const d = home(); setLook(d, true); const a = await fakeApp(), b = await fakeApp()
+  it('overlapping paths go to the most specific app', async () => {
+    const d = home(); const a = await fakeApp(), b = await fakeApp()
     await start(d, a.port)
     writeFileSync(join(d, 'apps.json'), JSON.stringify({ schema: 1, apps: [
       { id: 'foo', status: 'running', provides: [], view: { url: `http://127.0.0.1:${a.port}/foo/` } },
@@ -134,8 +135,8 @@ describe('local app routes over HTTP', () => {
     expect((await get(port, '/foo/x')).body).toBe('app:/foo/x')
     expect([a.seen.map((r: any) => r.url), b.seen.map((r: any) => r.url)]).toEqual([['/foo/x'], ['/foo/bar/x']])
   })
-  it('switch on: refused through Tailscale Serve, from any other Host, and cross-site', async () => {
-    const d = home(); setLook(d, true); const app = await fakeApp(); const port = await start(d, app.port)
+  it('refused through Tailscale Serve, from any other Host, and cross-site', async () => {
+    const d = home(); const app = await fakeApp(); const port = await start(d, app.port)
     expect((await get(port, '/wizard-search/', { host: 'box.example.ts.net:8444', 'tailscale-user-login': 'owner@example.com' })).status).toBe(403)
     expect((await get(port, '/wizard-search/', { host: 'attacker.example' })).status).toBe(403)
     expect((await get(port, '/wizard-search/', { 'sec-fetch-site': 'cross-site' })).status).toBe(403)
@@ -145,15 +146,15 @@ describe('local app routes over HTTP', () => {
     expect(await appsList(port, { host: 'box.example.ts.net:8444', 'tailscale-user-login': 'owner@example.com' })).toEqual([['wizard-search', ''], ['files', ''], ['notes', '']])
     expect(app.seen.length).toBe(1)
   })
-  it('switch on: an app\'s WebSocket goes through too; off it is closed', async () => {
-    const d = home(); setLook(d, true); const app = await fakeApp(); const port = await start(d, app.port)
+  it('an app\'s WebSocket goes through too; turned off on the box it is closed', async () => {
+    const d = home(); const app = await fakeApp(); const port = await start(d, app.port)
+    const off = await start(d, app.port, { localAppRoutes: false })
     const ws = (p: number) => new Promise<string>((resolve) => {
       const q = request({ hostname: '127.0.0.1', port: p, path: '/wizard-search/socket', headers: { connection: 'Upgrade', upgrade: 'websocket', 'sec-websocket-version': '13', 'sec-websocket-key': randomBytes(16).toString('base64') } })
       q.on('upgrade', (res, socket, head) => { let b: Buffer = Buffer.from(head); socket.on('data', (c: Buffer) => { b = Buffer.concat([b, c]) }); socket.on('end', () => resolve(`${res.statusCode}:${b.subarray(2).toString()}`)) })
       q.on('response', r => resolve(`http ${r.statusCode}`)); q.on('error', () => resolve('closed')); q.end()
     })
     expect(await ws(port)).toBe('101:hi')
-    setLook(d, false)
-    expect(await ws(port)).toBe('closed')
+    expect(await ws(off)).toBe('closed')
   })
 })
