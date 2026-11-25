@@ -7525,7 +7525,9 @@ function buildWizardServer(options, lifetime) {
           const route = url.pathname.slice('/wizard/v1/skins'.length)
           const action = /^\/([^/]+)\/(pack|publish)$/.exec(route)
           const blob = /^\/store\/blob\/([a-f0-9]{64})$/.exec(route)
-          const allowed = route === '' ? ['GET', 'POST'] : route === '/active' ? ['PUT'] : route === '/store' || blob ? ['GET'] : route === '/store/add' || route === '/store/report' || action ? ['POST'] : []
+          // /<id>: one of the owner's skins (Settings > Look edits and removes it). Reserved names keep their own routes.
+          const item = /^\/[^/]+$/.test(route) && route !== '/active' && (['PATCH', 'DELETE'].includes(request.method) || !['/store', '/restore'].includes(route)) ? route.slice(1) : null
+          const allowed = item ? ['PATCH', 'DELETE'] : route === '' ? ['GET', 'POST'] : route === '/active' ? ['PUT'] : route === '/store' || blob ? ['GET'] : route === '/store/add' || route === '/store/report' || route === '/restore' || action ? ['POST'] : []
           if (!allowed.length) { sendJson(response, 404, { error: 'not_found' }); return }
           if (!allowed.includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: allowed.join(', ') }); return }
           let input = {}
@@ -7535,7 +7537,13 @@ function buildWizardServer(options, lifetime) {
             if (!input || typeof input !== 'object' || Array.isArray(input)) throw new SkinsError(400, 'invalid_request')
           }
           let output
-          if (!route) output = request.method === 'GET' ? skins.list() : skins.create({ name: input.name, css: input.css })
+          if (item) {
+            let id
+            try { id = decodeURIComponent(item) } catch { throw new SkinsError(400, 'invalid_skin_id') }
+            output = request.method === 'PATCH' ? skins.patch(id, input) : skins.remove(id)
+          }
+          else if (!route) output = request.method === 'GET' ? skins.list() : skins.create({ name: input.name, css: input.css, base: input.base, tweaks: input.tweaks, activate: input.activate === undefined ? false : input.activate })
+          else if (route === '/restore') output = skins.restore(input)
           else if (route === '/active') output = skins.setActive(input.id)
           else if (route === '/store') output = await skins.store({ refresh: url.searchParams.get('refresh') === '1', authors: url.searchParams.get('authors') || '' })
           else if (blob) {

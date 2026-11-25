@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { createServer } from 'node:http'
 import { WebSocketServer } from 'ws'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createSkins, validateListing, addressOf } from '../server/skins.mjs'
@@ -300,6 +300,56 @@ async function api(net: any, extra: any = {}) {
   const call = (path: string, method = 'GET', body?: any, headers = {}) => fetch(origin + '/wizard/v1/skins' + path, { method, headers: { ...(body === undefined ? {} : { 'Content-Type': 'application/json' }), ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
   return { ...localBox, origin, call }
 }
+describe('Remove, undo and recipes (wizard-files issue 15)', () => {
+  it('removes a worn skin to hidden trash, keeps it out of the list, and Undo brings every file back', () => {
+    const { skins, root } = local(), dir = join(root, 'Skins')
+    const { id } = skins.create({ name: 'Test Skin', css: 'a{}', base: 'grove', tweaks: { 'wizard/x': true }, activate: true })
+    writeFileSync(join(dir, id, 'skin.js'), 'export default function setup() {}')
+    expect(skins.list()).toMatchObject({ active: 'Test Skin', skins: [{ id: 'Test Skin', base: 'grove', tweaks: { 'wizard/x': true }, has_recipe: true }] })
+    const gone = skins.remove(id)
+    expect(gone.trash).toMatch(/^[a-f0-9]{32}$/)
+    expect(gone.list).toEqual({ active: null, skins: [] })
+    expect(existsSync(join(dir, id))).toBe(false)
+    expect(readFileSync(join(dir, 'active'), 'utf8')).toBe('')
+    // A fresh service (next reload) still sees it gone: the trash is a dot folder, never a skin.
+    expect(createSkins({ root, stateDir: join(root, 'state2') })!.list()).toEqual({ active: null, skins: [] })
+    const back = skins.restore({ trash: gone.trash })
+    expect(back.id).toBe('Test Skin')
+    expect(readFileSync(join(dir, id, 'skin.css'), 'utf8')).toBe('a{}')
+    expect(readFileSync(join(dir, id, 'skin.js'), 'utf8')).toContain('setup')
+    expect(() => skins.restore({ trash: gone.trash })).toThrow('trash_not_found')
+    expect(() => skins.restore({ trash: '../x' })).toThrow('invalid_trash')
+    expect(() => skins.remove('Nope')).toThrow('skin_not_found')
+  })
+  it('refuses to restore over a skin of the same name and drops trash after seven days', () => {
+    const { skins, root } = local()
+    const first = skins.remove(skins.create({ name: 'Twin' }).id)
+    skins.create({ name: 'Twin' })
+    expect(() => skins.restore({ trash: first.trash })).toThrow('skin_exists')
+    const trash = join(root, 'Skins', '.trash', first.trash)
+    writeFileSync(join(trash, 'trash.json'), JSON.stringify({ id: 'Twin', removed_at: Math.floor(Date.now() / 1000) - 8 * 86400 }))
+    skins.list()
+    expect(existsSync(trash)).toBe(false)
+  })
+  it('PATCH saves colour and merges tweaks without touching CSS; bad recipes are refused', () => {
+    const { skins, root } = local()
+    const { id } = skins.create({ name: 'Mine', css: 'b{}', tweaks: { 'wizard/a': true } })
+    expect(skins.patch(id, { base: 'tide', tweaks: { 'wizard/b': false } }).skins[0]).toMatchObject({ base: 'tide', tweaks: { 'wizard/a': true, 'wizard/b': false } })
+    expect(readFileSync(join(root, 'Skins', id, 'skin.css'), 'utf8')).toBe('b{}')
+    for (const bad of [{ base: 'Bad Base' }, { tweaks: { nope: true } }, { tweaks: { 'wizard/a': 'yes' } }, { tweaks: [] }]) expect(() => skins.patch(id, bad)).toThrow()
+    expect(() => skins.create({ name: 'X', activate: 'yes' as any })).toThrow('invalid_activate')
+  })
+  it('skin folders are group-writable (0775) so the Files app can delete them, and older 0755 folders are opened at start', () => {
+    const { skins, root, options } = local()
+    const { id } = skins.create({ name: 'Shared' })
+    expect(statSync(join(root, 'Skins')).mode & 0o777).toBe(0o775)
+    expect(statSync(join(root, 'Skins', id)).mode & 0o777).toBe(0o775)
+    mkdirSync(join(root, 'Skins', 'Old'), { mode: 0o755 }); chmodSync(join(root, 'Skins', 'Old'), 0o755)
+    createSkins(options)!.migrate()
+    expect(statSync(join(root, 'Skins', 'Old')).mode & 0o777).toBe(0o775)
+  })
+})
+
 describe('HTTP routes', () => {
   it('exercises every API route, script activation and verified blob response', async () => {
     const net = await network(), { call, origin, root } = await api(net), event = listing(net.blossom)
@@ -321,6 +371,29 @@ describe('HTTP routes', () => {
     expect(await (await call('/active', 'PUT', { id: null })).json()).toMatchObject({ active: null })
     expect(await (await fetch(origin + '/wizard/v1/my-skin')).text()).toBe('')
     expect((await fetch(origin + '/wizard/v1/my-skin/script')).status).toBe(404)
+  })
+  it('Settings > Look remove, undo and edit reach the box (DELETE /<id>, POST /restore, PATCH /<id>)', async () => {
+    const net = await network(), { call, root } = await api(net), headers = { 'X-Requested-With': 'wizard' }
+    const made = await (await call('', 'POST', { name: 'Test Skin', base: 'grove', tweaks: {}, activate: true }, headers)).json()
+    const mine = (list: any) => list.skins.find((s: any) => s.id === 'Test Skin')
+    const first = await (await call('')).json()
+    expect(first.active).toBe('Test Skin'); expect(mine(first)).toMatchObject({ base: 'grove', has_recipe: true })
+    const patched = await call('/' + encodeURIComponent(made.id), 'PATCH', { base: 'ember', tweaks: { 'wizard/y': true } }, headers)
+    expect(patched.status).toBe(200); expect(mine(await patched.json())).toMatchObject({ base: 'ember', tweaks: { 'wizard/y': true } })
+    const removed = await call('/' + encodeURIComponent(made.id), 'DELETE', {}, headers)
+    expect(removed.status).toBe(200)
+    const body = await removed.json()
+    expect(body.list.active).toBe(null); expect(mine(body.list)).toBeUndefined()
+    const after = await (await call('')).json()
+    expect(after.active).toBe(null); expect(mine(after)).toBeUndefined()
+    expect(existsSync(join(root, 'Skins', 'Test Skin'))).toBe(false)
+    expect((await call('/' + encodeURIComponent(made.id), 'DELETE', {}, headers)).status).toBe(404)
+    const restored = await (await call('/restore', 'POST', { trash: body.trash }, headers)).json()
+    expect(restored.id).toBe('Test Skin'); expect(mine(restored.list)).toMatchObject({ base: 'ember' })
+    // A skin may be named like a route: its own edits still reach it.
+    await call('', 'POST', { name: 'store' }, headers)
+    expect((await call('/store', 'DELETE', {}, headers)).status).toBe(200)
+    expect((await call('/active', 'DELETE', {}, headers)).status).toBe(405)
   })
   it('owner-only, same-origin, JSON/body/method checks are enforced before side effects', async () => {
     const net = await network(), proof = 'synthetic-owner-proof-for-skins-tests', { call } = await api(net, { ownerProof: proof })
