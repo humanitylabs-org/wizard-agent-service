@@ -3877,10 +3877,11 @@ function buildWizardServer(options, lifetime) {
   const pendingFirstSendReader = options.pendingFirstSendReader ?? ((ids) => (hermesStatePath ? hermesStateHealth.read('pending-first-send', () => readPendingFirstSendSessions(hermesStatePath, ids)) : []))
   const archivedSessionReader = options.archivedSessionReader ?? (() => (hermesStatePath ? hermesStateHealth.read('archive', () => readArchivedSessions(hermesStatePath)) : []))
   const sessionArchivedReader = options.sessionArchivedReader ?? null
+  const canonicalSessionParents = new Map()
   const canonicalSessionReader = options.canonicalSessionReader
     ?? (!options.canonicalSessionListing ? null
       : hermesStatePath && helmDbPath && existsSync(helmDbPath) ? () => hermesStateHealth.read('list', () => readCanonicalSessions(hermesStatePath, helmDbPath))
-        : () => readCanonicalSessionsHttp((path) => hermesJson(path), { archived: archivedSessionReader }))
+        : () => readCanonicalSessionsHttp((path) => hermesJson(path), { archived: archivedSessionReader, parents: canonicalSessionParents }))
   const canonicalSessionSnapshots = new Map()
   let canonicalSessionCache = { sessions: null, expiresAt: 0, assistantRevision: '' }
   let mainCatalogCensus = null, mainCatalogCensusAt = 0

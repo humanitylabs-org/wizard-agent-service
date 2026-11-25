@@ -98,6 +98,20 @@ def latest_visible_users(
     return latest
 
 
+# The chat after a /new (or /reset) or a /branch is its own conversation; Hermes keeps parent_session_id
+# only for lineage. Its marker names its immediate parent, or the parent ended at a boundary. A
+# compression continuation (parent ended 'compression', inherited markers name an older ancestor)
+# and a sub-agent run (_delegate_from, excluded below) stay out, as in Hermes' own listing.
+BOUNDARY_END_REASONS = ("session_reset", "session_switch", "idle", "daily", "suspended", "resume_pending_expired", "branched")
+_MODEL_CONFIG = "CASE WHEN json_valid(sessions.model_config) THEN sessions.model_config END"
+OWN_CONVERSATION_SQL = (
+    f"(json_extract({_MODEL_CONFIG}, '$._reset_from') = sessions.parent_session_id"
+    f" OR json_extract({_MODEL_CONFIG}, '$._branched_from') = sessions.parent_session_id"
+    " OR EXISTS (SELECT 1 FROM sessions parent WHERE parent.id = sessions.parent_session_id"
+    f" AND parent.end_reason IN ({', '.join(repr(r) for r in BOUNDARY_END_REASONS)})))"
+)
+
+
 def read_sessions(state_path: str, helm_path: str, limit: int = 2_000) -> list[dict[str, Any]]:
     cutoff = time.time() - HUMAN_SESSION_MAX_AGE_SECONDS
     with read_only(state_path) as state:
@@ -108,7 +122,7 @@ def read_sessions(state_path: str, helm_path: str, limit: int = 2_000) -> list[d
                    pinned, archived, hidden, chat_id, thread_id
               FROM sessions
              WHERE hidden = 0
-               AND parent_session_id IS NULL
+               AND (parent_session_id IS NULL OR {OWN_CONVERSATION_SQL})
                AND message_count > 0
                AND CASE
                      WHEN json_valid(COALESCE(model_config, '{{}}'))

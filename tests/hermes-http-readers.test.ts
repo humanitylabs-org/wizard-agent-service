@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { readCanonicalSessionsHttp } from '../server/hermes-http-readers.mjs'
+import { readArchivedSessions } from '../server/archived-sessions.mjs'
 
 // GET /api/sessions on stock Hermes: newest first, compression chains listed under their root id
 // with the live tip's fields (_lineage_root_id), delegate children flagged is_internal_child.
@@ -38,5 +43,59 @@ describe('canonical session listing over Hermes HTTP', () => {
     expect((await readCanonicalSessionsHttp(request, { now })).length).toBe(450)
     expect((await readCanonicalSessionsHttp(request, { now, limit: 250 })).length).toBe(250)
   })
-})
 
+  // Issue 612: after a /new in Telegram, stock Hermes v2026.9.24 starts a new session whose
+  // parent_session_id is the old one (end_reason session_reset). It is its own conversation.
+  it('lists the conversation after a /new or a /branch, never a sub-agent child', async () => {
+    const now = Date.UTC(2026, 10, 24)
+    const t = now / 1000
+    const page = [
+      { id: 'tg_new', source: 'telegram', parent_session_id: 'tg_old', title: 'Boat trip', last_active: t - 5, message_count: 3 },
+      { id: 'slack_branch', source: 'slack', parent_session_id: 'slack_far', title: 'Branch', last_active: t - 6, message_count: 2 },
+      { id: 'tg_helper', source: 'telegram', parent_session_id: 'tg_live', title: 'Helper', last_active: t - 7, message_count: 2 },
+      { id: 'tg_old', source: 'telegram', end_reason: 'session_reset', title: 'Garden', last_active: t - 10, message_count: 4 },
+      { id: 'tg_live', source: 'telegram', title: 'Live', last_active: t - 12, message_count: 4 },
+    ]
+    const seen: string[] = []
+    const request = async (path: string) => {
+      seen.push(path)
+      if (path === '/api/sessions/slack_far') return { object: 'hermes.session', session: { id: 'slack_far', end_reason: 'branched' } }
+      return { object: 'list', data: path.includes('offset=0') ? page : [] }
+    }
+    const parents = new Map()
+    const sessions = await readCanonicalSessionsHttp(request, { now, parents })
+    expect(sessions.map((s) => s.id)).toEqual(['tg_new', 'slack_branch', 'tg_old', 'tg_live'])
+    expect(sessions[0]).toMatchObject({ id: 'tg_new', title: 'Boat trip', parent_session_id: 'tg_old', archived: false, hidden: false })
+    // Only the parent that was not on the page is read, once; later lists use the cache.
+    expect(seen.filter((p) => !p.startsWith('/api/sessions?'))).toEqual(['/api/sessions/slack_far'])
+    await readCanonicalSessionsHttp(request, { now: now + 1000, parents })
+    expect(seen.filter((p) => p === '/api/sessions/slack_far')).toHaveLength(1)
+  })
+
+  it('keeps an archived conversation after a /new in the archive, without sub-agent or compression children', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'archived-612-'))
+    try {
+      const path = join(dir, 'state.db')
+      const db = new DatabaseSync(path)
+      db.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT, model TEXT, title TEXT, started_at REAL, ended_at REAL,
+        end_reason TEXT, message_count INTEGER, parent_session_id TEXT, last_activity_at REAL, pinned INTEGER DEFAULT 0,
+        archived INTEGER DEFAULT 0, hidden INTEGER DEFAULT 0, model_config TEXT)`)
+      const add = db.prepare('INSERT INTO sessions (id, source, end_reason, message_count, parent_session_id, last_activity_at, archived, model_config) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      add.run('old', 'telegram', 'session_reset', 4, null, 10, 1, null)
+      add.run('after_new', 'telegram', null, 3, 'old', 20, 1, JSON.stringify({ _reset_from: 'old' }))
+      add.run('legacy_reset', 'telegram', null, 2, 'old', 15, 1, null)
+      add.run('compressed', 'telegram', 'compression', 5, null, 30, 1, null)
+      add.run('continuation', 'telegram', null, 5, 'compressed', 31, 1, null)
+      add.run('helper', 'telegram', null, 2, 'compressed', 32, 1, JSON.stringify({ _delegate_from: 'compressed' }))
+      add.run('helper_of_reset', 'telegram', null, 2, 'old', 33, 1, JSON.stringify({ _delegate_from: 'old' }))
+      // A compression descendant of the after-/new chat inherits its marker (naming an older ancestor).
+      db.prepare("UPDATE sessions SET end_reason = 'compression' WHERE id = 'after_new'").run()
+      add.run('after_new_tip', 'telegram', null, 3, 'after_new', 25, 1, JSON.stringify({ _reset_from: 'old' }))
+      db.close()
+      expect(readArchivedSessions(path).map((s) => s.id)).toEqual(['compressed', 'after_new', 'legacy_reset', 'old'])
+      expect(readArchivedSessions(path).map((s) => s.id)).not.toContain('after_new_tip')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

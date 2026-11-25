@@ -70,6 +70,16 @@
       "policy_exemptions": []
     },
     {
+      "id": "chat-after-reset-list",
+      "description": "Issue 612: after a /new (or /reset) in Telegram, stock Hermes starts a new session whose parent_session_id is the old one (ended session_reset). That new conversation is its own chat: it lists in Chats next to the old one and opens with its own messages; a child of a session that did not end at a conversation boundary (a sub-agent run) stays out.",
+      "layer": "server",
+      "fixture": "chat-after-reset-list",
+      "how_to_test": "For main, host-profile, container and restricted: end the parity thread with end_reason session_reset, add a Telegram session whose parent_session_id is it and a child of a live session, then read /api/sessions?limit=100 and ?view=list: the after-/new chat and the old one list, the sub-agent child does not on main (routed lists are their stock Hermes listing, which leaves sub-agent runs out), and the after-/new chat's history holds only its own messages. tests/hermes-http-readers.test.ts covers the HTTP reader (parent off the page read once with GET /api/sessions/<id>, /branch children) and the state.db archive reader.",
+      "source_refs": ["server/hermes-http-readers.mjs", "server/archived-sessions.mjs"],
+      "reference_tests": ["tests/hermes-http-readers.test.ts", "qa/agent-parity/server-checks.mjs"],
+      "policy_exemptions": []
+    },
+    {
       "id": "tools-list-cache-hints",
       "description": "The wizard MCP gateway's tools/list carries SEP-2549 cache hints (ttlMs, cacheScope private) so a caching client such as Hermes lazy: true can register app tools at chat start; only a complete discovery is cacheable (one day), and any visible app that is stopped, failing, malformed, filtered, paginated or replaced during the request makes the reply ttlMs 0. Issue 623: a session served without a running app's tools (failing, slow or empty) is rechecked in the background and sent tools/list_changed once they come back, and wizard_apps says per app whether its tools are temporarily unavailable or not yet in the caller's tool list.",
       "layer": "server",

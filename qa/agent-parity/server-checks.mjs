@@ -121,6 +121,35 @@ export const serverChecks = {
       assert.equal(item.source, 'telegram', `the list row keeps its source (${query})`)
     }
   },
+  // Issue 612: after a /new in Telegram, stock Hermes starts a new session whose parent_session_id is the
+  // old one (ended session_reset). It is its own conversation and lists; a sub-agent child never does.
+  'chat-after-reset-list': async s => {
+    const row = s.sessions.get('wizard_parity')
+    const at = Date.now() / 1000
+    Object.assign(row, { hidden: false, source: 'telegram', end_reason: 'session_reset', ended_at: at - 5 })
+    row.messages.push({ role: 'user', content: 'Synthetic first Telegram conversation', timestamp: at - 10 })
+    const child = (id, parent, content) => s.sessions.set(id, { id, source: 'telegram', title: content, created_at: at - 4, parent_session_id: parent,
+      messages: [{ role: 'user', content, timestamp: at - 3 }, { role: 'assistant', content: 'Synthetic reply', timestamp: at - 2 }] })
+    child('wizard_parity_live', null, 'Synthetic live conversation')
+    child('wizard_parity_after_new', 'wizard_parity', 'Synthetic conversation after new')
+    child('wizard_parity_helper', 'wizard_parity_live', 'Synthetic helper run')
+    for (const query of ['?limit=100', '?view=list&limit=100']) {
+      let ids = []
+      for (let n = 0; n < 40 && !ids.includes('wizard_parity_after_new'); n++) {
+        const r = await s.request('/api/sessions' + query); assert.equal(r.status, 200)
+        ids = (await r.json()).data.map(x => x.id)
+        if (!ids.includes('wizard_parity_after_new')) await new Promise(done => setTimeout(done, 50))
+      }
+      assert.ok(ids.includes('wizard_parity_after_new'), `${s.kind}: the conversation after /new lists (${query})`)
+      assert.ok(ids.includes('wizard_parity'), `${s.kind}: the conversation before /new still lists (${query})`)
+      // Main applies its own rule; a routed agent's list is its stock Hermes listing, which already leaves
+      // sub-agent runs out (the fixture lists every session, so only main can show it here).
+      if (s.kind === 'main') assert.ok(!ids.includes('wizard_parity_helper'), `${s.kind}: a sub-agent child stays out (${query})`)
+    }
+    const history = await s.request('/api/sessions/wizard_parity_after_new/messages?view=wizard'); assert.equal(history.status, 200)
+    const text = JSON.stringify(await history.json())
+    assert.ok(text.includes('Synthetic conversation after new') && !text.includes('Synthetic first Telegram conversation'), `${s.kind}: it opens with its own messages`)
+  },
   // Issue 527 (Daily channel, with the channel store): one pinned channel per agent holding one real thread per day,
   // through each runtime's real Service routes and scheduler.
   // Issue 564: a scheduled run the agent's queue reports finished stops counting toward the scheduler's in-flight
