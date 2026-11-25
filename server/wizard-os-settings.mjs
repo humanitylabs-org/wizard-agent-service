@@ -255,6 +255,7 @@ function readJsonFile(path, limit = 2 * 1024 * 1024) {
 
 const SAFE_URL = /^(?:\/[^\s]*|https:\/\/[^\s]+)$/u
 const APP_TYPES = new Set(['view', 'service', 'agent', 'external'])
+const APP_REPO = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/
 const APP_CATEGORIES = new Set(['agent', 'interface', 'app', 'system'])
 
 // wizard.md `home_screen` (spec/WIZARD_MD.md "Home-screen pins"): offline (true), position_keys, route_state.
@@ -335,6 +336,9 @@ export function readApps({ appsJsonPath, launcherPath, localPath = null }) {
       // Only known values leave the box; anything else is omitted so the shell falls back to its own heuristics.
       ...(APP_TYPES.has(app.type) ? { type: app.type } : {}),
       ...(APP_CATEGORIES.has(app.category) ? { category: app.category } : {}),
+      // Where the App Manager installed it from (`owner/repo`). The shell keeps one first-party app's window unsealed
+      // under the browser boundary only when it came from its own listing (telegram#68). Only a plain owner/repo passes.
+      ...(typeof app.repo === 'string' && APP_REPO.test(app.repo) ? { repo: app.repo } : {}),
       ...(chatsView(app) ? { chats_view: chatsView(app), url: `/wizard/v1/chats-views/${id}/` } : {}),
     })
   }
