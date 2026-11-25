@@ -131,6 +131,7 @@ server = createWizardServer({
   threadItemsStatePath: process.env.WIZARD_THREAD_ITEMS_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'thread-items.json'),
   // Agent inbox (issue 549): next to the Thread tracker ledger, in the agent's private data and the normal backup.
   agentInboxStatePath: process.env.WIZARD_AGENT_INBOX_STATE_PATH || resolve(hermesHome, 'state', 'wizard-mobile', 'agent-inbox.json'),
+  // The agent inbox and Sent log are on for everyone (wizard-ux issue 1778); WIZARD_AGENT_INBOX=0 turns them off.
   agentInbox: envChoice(process.env.WIZARD_AGENT_INBOX),
   // App wake events (wizard-os issue 634): unset follows the owner's wizard/app-wake switch; 1 on, 0 off.
   appWake: envChoice(process.env.WIZARD_APP_WAKE),

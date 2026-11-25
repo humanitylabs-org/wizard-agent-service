@@ -174,8 +174,8 @@ describe('issue 1808: replies typed in a thread', { timeout: 30_000 }, () => {
     expect(rows[0]).toMatchObject({ source: 'reply', route: 'thread', text: 'and tell me when?', wants_reply: true, state: 'running' })
   })
 
-  it('switch off: no reply row, no quiet flag (unchanged from today)', async () => {
-    const { base, d } = await box(answers)
+  it('WIZARD_AGENT_INBOX=0: no reply row, no quiet flag (unchanged from today)', async () => {
+    const { base, d } = await box(answers, { agentInbox: false })
     await send(base, 'wizard_off_1', 'Why did the clips edit fail?', 'o-1')
     await send(base, 'wizard_off_1', 'Sent to Miguel, done', 'o-2')
     await new Promise(r => setTimeout(r, 400))

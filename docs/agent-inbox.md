@@ -1,8 +1,8 @@
 # Agent inbox
 
-Step 1 of the agent inbox series (issue 549). Owner switch `wizard/agent-inbox` in the synced Look file, off by
-default; `WIZARD_AGENT_INBOX=1` / `0` forces it on or off. With the switch off nothing is written and every route
-below answers 404.
+Step 1 of the agent inbox series (issue 549). On for everyone since wizard-ux issue 1778 (James's yes at
+show-and-tell; the owner switch `wizard/agent-inbox` is gone and an old value for it in the Look file is ignored).
+Only a box's `WIZARD_AGENT_INBOX=0` turns it off; then nothing is written and every route below answers 404.
 
 One short record per background task, in `$HERMES_HOME/state/wizard-mobile/agent-inbox.json` (next to the Thread
 tracker ledger, so it is in the agent's private data and the normal backup; `WIZARD_AGENT_INBOX_STATE_PATH`
@@ -112,7 +112,7 @@ builder, never a second list. An app proves itself with its own app token, the f
 `Authorization: Bearer <token>`. That credential is never the owner, and it opens only these routes for that app:
 
 - `GET /wizard/v1/agent-inbox/doors`: the door probe, `{ on: true, sweep_caps: { waiting, done }, door, pings }`. With
-  the switch off it answers 404, which tells the app to keep its own behaviour (every route below is 404 then too).
+  WIZARD_AGENT_INBOX=0 it answers 404, which tells the app to keep its own behaviour (every route below is 404 then too).
 - `POST /wizard/v1/agent-inbox` with `{ source: { app, item_id }, text, title? }`: a note. One record (`source`
   `app:<app>/<item_id>`, state running) and a hidden main-agent worker, started exactly like the orb dump. A resend of
   the same item id returns the same record; a note whose worker could not start waits as needs_you and starts again.
@@ -165,7 +165,7 @@ A new main-agent thread's first owner turn links to the orb row with the same wo
 `typed` row (route `agent`, always a visible thread) that is classified in the background into `would_route`. The
 model is asked only when the fast router is private (the owner's typed words never reach any other model).
 
-Routes (owner only; switch off -> 404):
+Routes (owner only; WIZARD_AGENT_INBOX=0 -> 404):
 
 - `GET /wizard/v1/sent?limit=50&before=<row id>` -> `{ rows, next, check }`, newest first. A row: `id`,
   `idempotency_key`, `at`, `source` (orb | side | new_chat | typed), `text`, `route` (dump | agent | command |

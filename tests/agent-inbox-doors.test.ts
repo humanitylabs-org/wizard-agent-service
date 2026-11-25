@@ -184,8 +184,8 @@ describe('app doors over HTTP', () => {
   const get = (token = ''): RequestInit => (token ? { headers: { authorization: `Bearer ${token}` } } : {})
   const settle = () => new Promise(r => setTimeout(r, 150))
 
-  it('switch off: every door route answers 404 and nothing is written', async () => {
-    const d = home(), { u, calls } = await start(d)
+  it('WIZARD_AGENT_INBOX=0: every door route answers 404 and nothing is written', async () => {
+    const d = home(), { u, calls } = await start(d, { agentInbox: false })
     expect((await fetch(`${u}/doors`, get(MESSENGER))).status).toBe(404)
     expect((await fetch(`${u}/pings`, get(MESSENGER))).status).toBe(404)
     expect((await fetch(u, json('POST', { source: { app: 'messenger', item_id: 'note_1' }, text: 'Book the dentist' }, MESSENGER))).status).toBe(404)

@@ -112,8 +112,8 @@ describe('Open and Send to inbox over HTTP', () => {
   }
   const json = (method: string, value: any, headers = {}) => ({ method, headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(value) })
 
-  it('switch off: both routes are 404 and nothing is written', async () => {
-    const d = home(), { u, patches } = await start(d)
+  it('WIZARD_AGENT_INBOX=0: both routes are 404 and nothing is written', async () => {
+    const d = home(), { u, patches } = await start(d, { agentInbox: false })
     expect((await fetch(`${u}/send`, json('POST', { thread_id: 'wizard_visible_1' }))).status).toBe(404)
     expect((await fetch(`${u}/open`, json('POST', { thread_id: 'wizard_visible_1' }))).status).toBe(404)
     expect(patches).toEqual([])
