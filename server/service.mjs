@@ -4282,9 +4282,10 @@ function buildWizardServer(options, lifetime) {
   const captureOn = () => channelPart(options.captureInbox, captureSwitchOn)
   const captureRoot = String(options.userFilesRoot || options.mediaRoot || '')
   // Where the agent sees the same folder: WIZARD_FILES_ROOT (the agent's view of owner Files) when the box names it;
-  // otherwise the attachments' agent root when the Files root is the media root (a WizardOS box), else the root itself.
-  const captureAgentRoot = String(options.filesRoot
-    || (options.mediaRoot && (!options.userFilesRoot || resolve(String(options.userFilesRoot)) === resolve(String(options.mediaRoot))) ? (options.mediaAgentRoot || options.mediaRoot) : captureRoot))
+  // otherwise the attachments' agent root, unless the attachments live in a different folder than the Files root
+  // (then the agent's view of attachments is not this folder, and the Files root itself is used).
+  const captureSeparate = Boolean(options.mediaRoot && options.userFilesRoot && resolve(String(options.userFilesRoot)) !== resolve(String(options.mediaRoot)))
+  const captureAgentRoot = String(options.filesRoot || (captureSeparate ? captureRoot : (options.mediaAgentRoot || captureRoot)))
   const captureStatePath = options.captureInboxStatePath ? resolve(String(options.captureInboxStatePath))
     : options.agentInboxStatePath ? join(dirname(resolve(String(options.agentInboxStatePath))), 'capture-inbox.json') : ''
   let captureBox = null
