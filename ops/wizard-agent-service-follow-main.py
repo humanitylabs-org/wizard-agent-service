@@ -16,6 +16,10 @@ One pass, run by ops/wizard-agent-service-follow-main.timer every few minutes:
    reads it for /wizard/health and tells the owner inside Wizard once the box has been behind for 30 min.
 
 A failed prepare or deploy of the same commit is retried after WIZARD_FOLLOW_MAIN_RETRY_S (default 1800) s.
+
+Every status names its `cause` (issue 638), so the Service tells the owner only what is his to act on:
+red-main (a required check failed on main: CI's "Red main" workflow reruns it once and files a bug for the
+builder), checks-pending, github (GitHub unreachable), prepare and deploy (`failures` counts tries in a row).
 """
 from __future__ import annotations
 
@@ -223,41 +227,48 @@ def follow_once(cfg: dict | None = None) -> dict:
     except Exception as exc:  # noqa: BLE001
         return write_status(cfg, {**{k: prior.get(k) for k in ("main", "behind_by", "behind_since") if prior.get(k)},
                                   "state": "behind" if prior.get("behind_since") else "unknown", "live": live,
-                                  "reason": f"couldn't read main from GitHub: {plain(str(exc))}"})
+                                  "cause": "github", "reason": f"couldn't read main from GitHub: {plain(str(exc))}"})
     if live == main:
         return write_status(cfg, {"state": "current", "live": live, "main": main})
     since = prior.get("behind_since") if prior.get("state") != "current" and prior.get("behind_since") else now_iso()
     base = {"live": live, "main": main, "behind_by": behind_by(cfg, live, main), "behind_since": since}
     if prior.get("failed_sha") == main and time.time() - float(prior.get("failed_at_s") or 0) < cfg["retry_s"]:
         return write_status(cfg, {**base, "state": "behind", "reason": prior.get("reason") or "the last try failed",
+                                  "cause": prior.get("cause") or "deploy", "failures": max(int(prior.get("failures") or 0), 1),
                                   "failed_sha": main, "failed_at_s": prior.get("failed_at_s")})
+
+    def failed(cause: str) -> dict:
+        """Tries of this stage failed in a row: a prepare failure followed by a first deploy failure is 1, not 2."""
+        count = int(prior.get("failures") or 0) if prior.get("cause") == cause else 0
+        return {"cause": cause, "failed_sha": main, "failures": count + 1, "failed_at_s": time.time()}
     try:
         verdict, detail = checks(cfg, main)
     except Exception as exc:  # noqa: BLE001
-        return write_status(cfg, {**base, "state": "behind", "reason": f"couldn't read main's checks from GitHub: {plain(str(exc))}"})
+        return write_status(cfg, {**base, "state": "behind", "cause": "github",
+                                  "reason": f"couldn't read main's checks from GitHub: {plain(str(exc))}"})
     if verdict == "failed":
-        return write_status(cfg, {**base, "state": "behind",
+        return write_status(cfg, {**base, "state": "behind", "cause": "red-main",
                                   "reason": f"the newest change on main failed its checks ({detail}), so it is not installed"})
     if verdict == "waiting":
         waited = time.time() - datetime.fromisoformat(since).timestamp()
         state = "behind" if waited > CHECKS_WAIT_S else "waiting"
-        return write_status(cfg, {**base, "state": state, "reason": f"waiting for main's checks ({detail})"})
+        return write_status(cfg, {**base, "state": state, "cause": "checks-pending", "reason": f"waiting for main's checks ({detail})"})
     write_status(cfg, {**base, "state": "preparing", "reason": "preparing the release"})
     try:
         release = prepare(cfg, main)
     except Exception as exc:  # noqa: BLE001
         return write_status(cfg, {**base, "state": "behind", "reason": f"couldn't prepare the release: {plain(str(exc))}",
-                                  "failed_sha": main, "failed_at_s": time.time()})
+                                  **failed("prepare")})
     write_status(cfg, {**base, "state": "deploying", "reason": "installing the release"})
     try:
         deploy(cfg, main, release)
     except Exception as exc:  # noqa: BLE001
         return write_status(cfg, {**base, "live": live_sha(cfg), "state": "behind",
-                                  "reason": f"the deploy stopped: {plain(str(exc))}", "failed_sha": main, "failed_at_s": time.time()})
+                                  "reason": f"the deploy stopped: {plain(str(exc))}", **failed("deploy")})
     now_live = live_sha(cfg)
     if now_live != main:
         return write_status(cfg, {**base, "live": now_live, "state": "behind", "reason": "the deploy finished but the box is not on main",
-                                  "failed_sha": main, "failed_at_s": time.time()})
+                                  **failed("deploy")})
     return write_status(cfg, {"state": "current", "live": now_live, "main": main, "deployed_at": now_iso()})
 
 

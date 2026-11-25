@@ -148,6 +148,7 @@ class FollowMainTest(unittest.TestCase):
         self.assertEqual(out["state"], "waiting")
         self.assertIn("test", out["reason"])
         self.assertIn("validate", out["reason"])
+        self.assertEqual(out["cause"], "checks-pending")
         self.assertEqual(out["behind_by"], 1)
         self.assertFalse(self.deploy_log.exists())
         since = out["behind_since"]
@@ -166,6 +167,7 @@ class FollowMainTest(unittest.TestCase):
         out = fm.follow_once()
         self.assertEqual(out["state"], "behind")
         self.assertIn("failed its checks (test)", out["reason"])
+        self.assertEqual(out["cause"], "red-main")  # issue 638: CI's to fix, the Service tells the owner nothing
         self.assertFalse(self.deploy_log.exists())
         self.assertFalse((self.root / "releases" / f"was-{sha}").exists())
 
@@ -190,11 +192,19 @@ class FollowMainTest(unittest.TestCase):
         self.assertEqual(out["state"], "behind")
         self.assertEqual(out["live"], self.v1)
         self.assertEqual(out["reason"], "the deploy stopped: refusing to deploy: it does not contain the live release")
-        self.assertEqual(fm.follow_once()["reason"], out["reason"])
+        self.assertEqual((out["cause"], out["failures"]), ("deploy", 1))
+        again = fm.follow_once()
+        self.assertEqual((again["reason"], again["cause"], again["failures"]), (out["reason"], "deploy", 1))
         self.assertEqual(len(self.deploy_log.read_text().split()), 1)  # no retry storm
+        # Issue 638: the retry failing too counts a second failure in a row (the Service tells the owner then).
+        with mock.patch.dict(os.environ, {"WIZARD_FOLLOW_MAIN_RETRY_S": "0"}):
+            self.assertEqual(fm.follow_once()["failures"], 2)
         (self.tmp / "refuse").unlink()
         with mock.patch.dict(os.environ, {"WIZARD_FOLLOW_MAIN_RETRY_S": "0"}):
-            self.assertEqual(fm.follow_once()["live"], sha)
+            done = fm.follow_once()
+        self.assertEqual(done["live"], sha)
+        self.assertNotIn("cause", done)
+        self.assertNotIn("failures", done)
 
     def test_a_failed_prepare_leaves_no_half_release(self):
         sha = self.merge()
@@ -203,8 +213,14 @@ class FollowMainTest(unittest.TestCase):
             out = fm.follow_once()
         self.assertEqual(out["state"], "behind")
         self.assertIn("couldn't prepare the release", out["reason"])
+        self.assertEqual((out["cause"], out["failures"]), ("prepare", 1))
         self.assertEqual([p.name for p in (self.root / "releases").iterdir()], [f"was-{self.v1}"])
         self.assertFalse(self.deploy_log.exists())
+        # The retry prepares fine and its first deploy fails: a first failure of a new stage, not "failed again".
+        (self.tmp / "refuse").write_text("")
+        with mock.patch.dict(os.environ, {"WIZARD_FOLLOW_MAIN_RETRY_S": "0"}):
+            out = fm.follow_once()
+        self.assertEqual((out["cause"], out["failures"]), ("deploy", 1))
 
     def test_unreachable_github_is_behind_not_a_crash(self):
         sha = self.merge()
@@ -213,6 +229,7 @@ class FollowMainTest(unittest.TestCase):
         self.assertEqual(out["state"], "behind")
         self.assertEqual(out["main"], sha)
         self.assertIn("couldn't read main's checks", out["reason"])
+        self.assertEqual(out["cause"], "github")
 
 
 class FollowMainUnitTest(unittest.TestCase):
