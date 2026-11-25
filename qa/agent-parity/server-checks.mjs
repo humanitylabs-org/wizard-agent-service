@@ -2222,7 +2222,7 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.equal(await md.text(), '# PARITY_MARKDOWN\n\n- one\n')
   },
   'messaging-chat-replies': async s => {
-    // Issue 427: with the switch on, an owner reply into a chat a messaging app owns (Telegram here) never reaches
+    // Issue 427 (on for everyone): an owner reply into a chat a messaging app owns (Telegram here) never reaches
     // Hermes /v1/runs (a second writer there; newer Hermes refuses it). It waits in the outbox until the wizard-os plugin
     // in the gateway takes it with the main gateway key, injects it through the chat's own connection and reports
     // back; the run then reads the answer from state.db. An older chat (its app moved on) carries on through the

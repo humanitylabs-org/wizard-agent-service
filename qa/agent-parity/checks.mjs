@@ -11,7 +11,7 @@ const featureScenes = {
   'thread-tracker': kind => scene(kind, { threadTracker: true }),
   'routed-owner-turns': kind => scene(kind, { routedOwnerTurns: true }),
   'main-provider-attach': kind => scene(kind, { mainProviderAttach: true }),
-  'messaging-chat-replies': kind => scene(kind, { messagingReplies: true, agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' }),
+  'messaging-chat-replies': kind => scene(kind, { agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' }),
   'private-first-setup': kind => scene(kind, { privateFirst: true }),
   'needs-you-reason-dismiss': kind => scene(kind, { needsYouReason: true, backgroundResultsRefreshMs: 100 }),
   'plain-chat-titles': kind => scene(kind, ({ root }) => ({ pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, plainClashTitlesTtlMs: 0, fixtureUniqueTitles: true })),

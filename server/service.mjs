@@ -82,7 +82,7 @@ import { serveOldReport } from './reports-redirect.mjs'
 import { ThreadAppSnapshots, appsDelta, createAgentBridge, GATEWAY_MAIN_AGENT, gatewayToken, renderDelta, renderKernel, SHARED_AGENT_TOOLS } from './agent-bridge.mjs'
 import { LockedRunBridge } from './locked-run-bridge.mjs'
 import { RunEventLog } from './run-event-log.mjs'
-import { MessagingReplies, MESSAGING_REPLIES_SWITCH, FILES_ERROR, isMessagingRunId, readMessagingSession } from './messaging-replies.mjs'
+import { MessagingReplies, FILES_ERROR, isMessagingRunId, readMessagingSession } from './messaging-replies.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { heavyJobsForSession, pendingHeavyJobs } from './heavy-wait.mjs'
 import { createDetachedJobReader, createLedger, detachedRowsFor } from './detached-job-wait.mjs'
@@ -5103,10 +5103,9 @@ function buildWizardServer(options, lifetime) {
       if (!result.ok) throw Object.assign(new Error('watcher archive preservation failed'), { status: result.status })
       canonicalSessionCache.expiresAt = 0
     }
-    // Replies into chats a messaging app owns (issue 427, owner switch wizard/messaging-chat-replies, off by default):
+    // Replies into chats a messaging app owns (issue 427, on for everyone; WIZARD_MESSAGING_REPLIES=0 turns it off):
     // they go to the wizard-os plugin in the Hermes gateway (messaging-replies.mjs), never to /v1/runs.
-    const messagingSwitchOn = createChannelsSwitch({ id: MESSAGING_REPLIES_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.messagingRepliesSwitchTtlMs ?? 3000 })
-    messagingRepliesOn = () => Boolean(hermesStatePath) && channelPart(options.messagingReplies, messagingSwitchOn)
+    messagingRepliesOn = () => Boolean(hermesStatePath) && channelOn(options.messagingReplies)
     messagingReplies = new MessagingReplies(options.messagingRepliesStatePath ? resolve(String(options.messagingRepliesStatePath))
       : resolve(dirname(runQueueStatePath), 'messaging-replies.json'), { now: options.messagingRepliesNow ?? Date.now })
     const SERVICE_SEND = /^(?:wizard-heavy-|wizard-follow-through-|wizard-helper-receipt-|wizard-inbox-|wizard-not-started-requeue-|schedule:)/u
@@ -8019,7 +8018,8 @@ function buildWizardServer(options, lifetime) {
       if (url.pathname.startsWith('/wizard/internal/messaging-replies/')) {
         // Replies into messaging-app chats (issue 427): the wizard-os plugin inside the main Hermes gateway takes them
         // and reports back, with the main Hermes's own gateway key (or the heavy-lane token), like the schedule tools.
-        // Switch off: `on: false` and no items, so the plugin injects nothing and drops its Hermes permission.
+        // Off (WIZARD_MESSAGING_REPLIES=0, or no Hermes state.db): `on: false` and no items, so the plugin injects nothing
+        // and drops its Hermes permission.
         if (!messagingReplies || (!options.heavyToken && !bridge)) { sendJson(response, 404, { error: 'not_found' }); return }
         if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
         if (isAgentIngress(request) || principalOf(request).kind === 'agent' || request.headers.origin || request.headers['sec-fetch-site']
