@@ -47,6 +47,8 @@ export async function scene(kind, serverOptions = {}) {
   const stt = { text: 'Synthetic voice words.' }
   const signin = { ready: false }
   const titleDb = new DatabaseSync(join(root, 'hermes-state.db'))
+  // Hermes keeps its state.db in WAL mode, so the Service's list worker reads it while this writer commits (issue 584).
+  titleDb.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=2000')
   titleDb.exec(`CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, title_source TEXT, started_at REAL,
     source TEXT, model TEXT, ended_at REAL, end_reason TEXT, message_count INTEGER DEFAULT 0,
     parent_session_id TEXT, last_activity_at REAL, pinned INTEGER DEFAULT 0, archived INTEGER DEFAULT 0, hidden INTEGER DEFAULT 0);
@@ -54,6 +56,7 @@ export async function scene(kind, serverOptions = {}) {
     CREATE TABLE session_turn_leases (conversation_id TEXT, expires_at REAL);`)
   if (serverOptions.fixtureSelectorLock) titleDb.exec('ALTER TABLE sessions ADD COLUMN model_config TEXT')
   const searchDb = serverOptions.fixtureSearchIndex && kind!=='main' ? new DatabaseSync(join(agentHome,'state.db')) : null
+  if(searchDb) searchDb.exec('PRAGMA journal_mode=WAL; PRAGMA busy_timeout=2000')
   if(searchDb) searchDb.exec('CREATE TABLE messages(id INTEGER PRIMARY KEY,session_id TEXT,role TEXT,finish_reason TEXT,content TEXT,display_kind TEXT,timestamp REAL); CREATE TABLE sessions(id TEXT PRIMARY KEY,source TEXT,model TEXT,title TEXT,started_at REAL,ended_at REAL,end_reason TEXT,message_count INTEGER,parent_session_id TEXT,last_activity_at REAL,pinned INTEGER,archived INTEGER,hidden INTEGER)')
   const searchStore=searchDb||titleDb
   if(serverOptions.fixtureSearchIndex) searchStore.exec("CREATE VIRTUAL TABLE messages_fts_trigram USING fts5(content,content='messages',content_rowid='id',tokenize='trigram')")

@@ -86,8 +86,10 @@ export async function instrumentProjection(source, archive, fixture, { legacy = 
       .replace('{ nonHoldingFor, activeSessionIds:', '{ activeSessionIds:')
       .replace('backgroundResults.project(result, options.backgroundResultsBusyReader ? undefined : sessionTruth)', 'backgroundResults.project(result)')
   }
-  assert(service.includes('    const gate = () => {'))
-  service = service.replace('    const gate = () => {', '    backgroundResults = options.chatsBackground ?? backgroundResults\n    options.chatsTruthProbe?.({ projectBatch, fullCore, projectSessionListCore, check: () => checkCore(), snapshot: () => listCache.served(), resetMetrics: () => { if (typeof projectionSlices !== "undefined") Object.assign(projectionSlices, { slices: 0, total_ms: 0, max_ms: 0 }) }, rebuild: () => { snapshot.clear(); projector.clear(); return listCache.served() } })\n    const gate = () => {')
+  // The list cache's gate became async when its state.db read moved to the list worker (issue 584).
+  const gateLine = ['    const gate = async () => {', '    const gate = () => {'].find(line => service.includes(line))
+  assert(gateLine)
+  service = service.replace(gateLine, '    backgroundResults = options.chatsBackground ?? backgroundResults\n    options.chatsTruthProbe?.({ projectBatch, fullCore, projectSessionListCore, check: () => checkCore(), snapshot: () => listCache.served(), resetMetrics: () => { if (typeof projectionSlices !== "undefined") Object.assign(projectionSlices, { slices: 0, total_ms: 0, max_ms: 0 }) }, rebuild: () => { snapshot.clear(); projector.clear(); return listCache.served() } })\n' + gateLine)
   writeFileSync(servicePath, service)
   const { createWizardServer, listen } = await import(pathToFileURL(servicePath))
   const truth = await import(pathToFileURL(truthPath))

@@ -15,7 +15,7 @@ import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { readArchivedSessions } from './archived-sessions.mjs'
 import { listPayload } from './session-list-view.mjs'
-import { firstPostOfHistory, readHermesFirstPosts } from './first-post.mjs'
+import { firstPostOfHistory, readHermesFirstPosts, readHermesFirstPostsAsync } from './first-post.mjs'
 import { fullRetryInput, ownerRetryRows, searchMessageText } from './session-detail.mjs'
 import { createListWindows, selectWindow } from './session-list-window.mjs'
 import { classifyRunError } from './run-error.mjs'
@@ -45,8 +45,10 @@ export async function loadAgentSessionRows(ctx, agent, { headers = {}, secrets =
   }
   const known = new Set(all.map(row => row?.id))
   let archived = []
-  const readArchive = () => readArchivedSessions(ctx.archivePath ?? ctx.agentStatePath?.(agent) ?? join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), { limit: archiveLimit })
-  try { archived = ctx.archiveRead ? ctx.archiveRead('archive', readArchive) : readArchive() }
+  const archivePath = ctx.archivePath ?? ctx.agentStatePath?.(agent) ?? join(ctx.registry.agentsDir, agent.id, 'home', 'state.db')
+  const readArchive = () => readArchivedSessions(archivePath, { limit: archiveLimit })
+  // The Service's agent list reads it in its list worker (issue 584); other callers read it here.
+  try { archived = ctx.readArchivedRows ? await ctx.readArchivedRows(archivePath, archiveLimit) : ctx.archiveRead ? ctx.archiveRead('archive', readArchive) : readArchive() }
   catch (error) { if (requireComplete) throw error }
   if (requireComplete && archived.length >= archiveLimit) throw new AgentError(502, 'incomplete_listing', 'agent.archive')
   for (const row of archived) if (!known.has(row.id) && (!ctx.isThreadVisible || ctx.isThreadVisible(row))) all.push(row)
@@ -66,12 +68,13 @@ const runErrorField = (run, agent) => {
 // Chats channels (issue 440): Hermes' list `preview` is a thread's first-message head, but archived rows read
 // from the agent's own state.db carry none. Read their first owner request there (when the Service can read
 // it; a restricted agent's cannot, and those rows keep no firstRequest). Text naming a secret is dropped.
-function archivedFirstRequests(ctx, agent, listed, secrets) {
+async function archivedFirstRequests(ctx, agent, listed, secrets) {
   const rows = ['data', 'sessions', 'items'].flatMap(key => Array.isArray(listed?.[key]) ? listed[key] : [])
     .filter(row => row && typeof row.id === 'string' && !row.preview && !Object.hasOwn(row, 'wizard_first_request'))
   if (!rows.length || listed.mode === 'body' || listed.fields === 'slim') return
   let firsts
-  try { firsts = readHermesFirstRequests(ctx.agentStatePath?.(agent) ?? join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), rows.map(row => row.id)) } catch { return }
+  const path = ctx.agentStatePath?.(agent) ?? join(ctx.registry.agentsDir, agent.id, 'home', 'state.db')
+  try { firsts = ctx.readFirstRequests ? await ctx.readFirstRequests(path, rows.map(row => row.id)) : readHermesFirstRequests(path, rows.map(row => row.id)) } catch { return }
   for (const row of rows) {
     const first = firsts.get(row.id)
     if (typeof first === 'string' && !secrets.some(secret => first.includes(secret))) row.wizard_first_request = first
@@ -115,7 +118,10 @@ async function routedFirstPosts(ctx, agent, listed, secrets, headers) {
   try { restore = await ctx.ownerTurnRestore?.(agent) ?? null } catch { /* no restore: as in this agent's history */ }
   const state = firstPostState(ctx), now = Date.now()
   if (!state.memos.has(agent.id)) state.memos.set(agent.id, new Map())
-  try { posts = readHermesFirstPosts(ctx.agentStatePath?.(agent) || join(ctx.registry.agentsDir, agent.id, 'home', 'state.db'), rows.map(row => row.id), { restore, memo: state.memos.get(agent.id), agentFirst: ctx.channelAgentFiling === true }) } catch { /* unreadable: read through the runtime */ }
+  const path = ctx.agentStatePath?.(agent) || join(ctx.registry.agentsDir, agent.id, 'home', 'state.db')
+  const postOptions = { restore, memo: state.memos.get(agent.id), agentFirst: ctx.channelAgentFiling === true }
+  // The state.db part in the Service's list worker when it has one (issue 584).
+  try { posts = ctx.readFirstPostPages ? await readHermesFirstPostsAsync(input => ctx.readFirstPostPages(path, input), rows.map(row => row.id), postOptions) : readHermesFirstPosts(path, rows.map(row => row.id), postOptions) } catch { /* unreadable: read through the runtime */ }
   for (const row of rows) {
     const key = `${agent.id} ${row.id}`
     if (posts.has(row.id)) { const post = posts.get(row.id); row.wizard_first_post = postNames(post, secrets) ? null : post; continue }
@@ -132,7 +138,7 @@ export async function projectProfileSessions(ctx, agent, rows, headers, secrets)
   // ledger snapshot) instead of opening the agent's databases three times per row.
   let openAsk = null
   if (ctx.projectOpenAsk && ctx.prepareOpenAsk) {
-    try { openAsk = ctx.prepareOpenAsk(agent, rows.map(row => row?.id)) } catch { openAsk = null }
+    try { openAsk = await ctx.prepareOpenAsk(agent, rows.map(row => row?.id)) } catch { openAsk = null }
   }
   let next = 0
   await Promise.all(Array.from({ length: Math.min(4, rows.length) }, async () => {
@@ -958,7 +964,7 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
       if(searchParams.get('view') === 'list') {
         const listed=JSON.parse(result.toString('utf8'))
         if (ctx.channelFirstPosts) await routedFirstPosts(ctx, agent, listed, secrets, headers)
-        else if (ctx.channelStore) archivedFirstRequests(ctx, agent, listed, secrets)
+        else if (ctx.channelStore) await archivedFirstRequests(ctx, agent, listed, secrets)
         result=Buffer.from(JSON.stringify(listPayload(listed, searchParams.get('q'), ctx.channelStore || null, { firstPosts: ctx.channelFirstPosts === true })))
       }
     } else if (/^\/api\/sessions(?:\/[^/]+)?$/u.test(upstreamPath)) result = decorateThreadAgent(result, info)
