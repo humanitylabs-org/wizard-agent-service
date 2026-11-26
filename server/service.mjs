@@ -8,6 +8,7 @@ import { recallSentFile, rememberSentFile, sourceGone } from './sent-files.mjs'
 import { basename, dirname, extname, join, resolve, sep } from 'node:path'
 import { cpus, homedir, loadavg } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
+import { EXTERNAL_WIZARD_SESSION_PREFIX, OPERATOR_USER_SESSION_PREFIX, isDirectHumanSessionIdentity, readActiveHumanSessionIds } from './active-sessions.mjs'
 import { Readable, Transform } from 'node:stream'
 import { guardOwnerThreadWrite, isTurnWritePath, OwnerThreadWriteError, withoutAgentToAgentTurns } from './owner-thread-write.mjs'
 import { pipeline } from 'node:stream/promises'
@@ -195,7 +196,6 @@ const PROXY_PREFIX = '/wizard/hermes'
 const OPERATOR_PROXY_PREFIX = '/wizard/operator'
 const OPERATOR_UPSTREAM_PREFIX = ''
 const OPERATOR_SESSION_PREFIX = 'wizardop_'
-const OPERATOR_USER_SESSION_PREFIX = 'wizardop_user_'
 const OPERATOR_WORKER_SESSION_PREFIX = 'wizardopw_'
 const OPERATOR_MODEL = 'glm-5-3-flash'
 const OPERATOR_PRESET = 'private-operator-v1'
@@ -239,6 +239,7 @@ ${FINISH_REPORT_INSTRUCTIONS}
 ${STATUS_INSTRUCTIONS}`
 
 // Own reply style: WizardOS facts and protocol only.
+export { readActiveHumanSessionIds }
 export const OWN_STYLE_RUN_INSTRUCTIONS = `${WIZARD_CLIENT_INTRO} ${WIZARD_CLIENT_FACTS}
 
 ${OWN_STYLE_SOURCE}
@@ -437,62 +438,12 @@ export function supportsJoinedDelegation(payload) {
     && capability.modes.includes('join')
 }
 
-const HUMAN_SESSION_SOURCES = new Set(['webui', 'telegram', 'discord', 'slack', 'whatsapp', 'signal', 'wizard-mobile'])
 const ACTIVE_RUN_STATUSES = new Set(['queued', 'accepted', 'running', 'waiting_for_approval', 'stopping', 'unknown'])
 const TERMINAL_RUN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted'])
 const PROJECTED_RUN_STATUSES = new Set([...ACTIVE_RUN_STATUSES, ...TERMINAL_RUN_STATUSES])
 const FAILED_RUN_STATUSES = new Set(['failed', 'interrupted'])
-const EXTERNAL_WIZARD_SESSION_PREFIX = 'wizard-assistant-'
 const CANONICAL_SESSION_READER = fileURLToPath(new URL('./read-human-sessions.py', import.meta.url))
 const HELM_THREAD_ID_READER = fileURLToPath(new URL('./helm-thread-id.py', import.meta.url))
-
-function isDirectHumanSessionIdentity(id, source) {
-  return HUMAN_SESSION_SOURCES.has(String(source ?? '').toLowerCase())
-    || id.startsWith('wizard_')
-    || id.startsWith(EXTERNAL_WIZARD_SESSION_PREFIX)
-}
-
-// Turns running on other surfaces (Telegram, TUI, cron). Stock Hermes serves no list of live turns
-// over HTTP, so this read needs WIZARD_HERMES_STATE_PATH (spec/AGENT_BRIDGE.md, "Agent adapter").
-export function readActiveHumanSessionIds(sessionDbPath, currentTime = Date.now()) {
-  if (!sessionDbPath || !existsSync(sessionDbPath)) throw new Error('Hermes session state is unavailable')
-  const database = new DatabaseSync(sessionDbPath, { readOnly: true })
-  try {
-    const now = currentTime / 1000
-    // Two index-driven branches instead of one scan of every root session (that join took ~12 ms warm and
-    // far longer on a busy disk, on every queue tick): live turn leases first, then recently active rows
-    // through the COALESCE(last_activity_at, started_at) index. The exact old predicate still decides.
-    const rows = database.prepare(`
-      SELECT sessions.id, sessions.source
-        FROM session_turn_leases
-        CROSS JOIN sessions ON sessions.id = session_turn_leases.conversation_id
-       WHERE session_turn_leases.expires_at > ?
-         AND sessions.hidden = 0
-         AND sessions.parent_session_id IS NULL
-         AND sessions.message_count > 0
-      UNION
-      SELECT sessions.id, sessions.source
-        FROM sessions
-       WHERE COALESCE(sessions.last_activity_at, sessions.started_at) >= ?
-         AND sessions.hidden = 0
-         AND +sessions.parent_session_id IS NULL
-         AND sessions.message_count > 0
-         AND COALESCE(sessions.last_activity_description, '') <> ''
-         -- A background helper heartbeats its parent's activity while the parent's own
-         -- turn is over. That parent is waiting, not working: it must not hold a slot.
-         AND COALESCE(sessions.last_activity_description, '') NOT LIKE 'delegate_task:%'
-         AND COALESCE(sessions.last_activity_at, 0) >= ?
-    `).all(now, now - 150, now - 150)
-    return rows
-      .filter((row) => {
-        const id = String(row.id ?? '')
-        return isDirectHumanSessionIdentity(id, row.source) || id.startsWith(OPERATOR_USER_SESSION_PREFIX)
-      })
-      .map((row) => String(row.id))
-  } finally {
-    database.close()
-  }
-}
 
 // True once Hermes has ingested the run's message into the thread (or any compression descendant of it):
 // its user row carries display_metadata.submission_id = the run id. Throws when state is unreadable.
@@ -5113,6 +5064,21 @@ function buildWizardServer(options, lifetime) {
   const heavyJobRows = () => ledgerRows() ?? []
   let backgroundResults = null
   let runQueueReady = Promise.resolve()
+  // Running turns and turn leases from Hermes' state.db, read in their own worker (issue 584). They are asked on
+  // every queue tick, health call and Chats list rebuild; on the HTTP thread a cold read waited behind the list
+  // worker's disk reads and froze the Service for seconds. A separate worker never queues behind a long list read.
+  // One running-turns read at a time: every caller that asks while it runs shares its answer.
+  const hermesStateLane = createListEvidenceLane({ hermesStatePath, enabled: options.listEvidenceWorker !== false, label: 'state' })
+  lifetime.own(() => hermesStateLane.close(), () => hermesStateLane.close())
+  const hermesStateRead = async (kind, input = {}) => {
+    if (!hermesStatePath) throw new Error('Hermes session state is unavailable')
+    const got = await hermesStateLane.read({ kind, ...input })
+    if (got?.failed) throw Object.assign(new Error(got.failed.message), { code: got.failed.code ?? undefined })
+    return got?.value
+  }
+  let activeSessionsRead = null
+  const readActiveSessionsOffThread = () => (activeSessionsRead ??= hermesStateRead('active', { now: Date.now() })
+    .finally(() => { activeSessionsRead = null }))
   if (runQueueStatePath) {
     // Every owner-authored turn (typed or voice reply, share, follow-through) brings an archived
     // thread back: it shows in Working and its result lands in Ready. Quiet scheduler watchers are the exception;
@@ -5318,7 +5284,7 @@ function buildWizardServer(options, lifetime) {
     const maxActive = Number(options.runQueueMaxActive ?? 8)
     // Turns started on other surfaces (Telegram, TUI) are visible only in state.db; without it the
     // queue counts its own runs, which Hermes serialises per session anyway.
-    const activeSessionReader = options.activeSessionReader ?? (() => (hermesStatePath ? readActiveHumanSessionIds(hermesStatePath) : []))
+    const activeSessionReader = options.activeSessionReader ?? (() => (hermesStatePath ? readActiveSessionsOffThread() : []))
     const dispatchHealthReader = options.dispatchHealthReader ?? (() => wizardInteractiveHealthy())
     const turnHeldCache = new Map()
     const runTurnHeld = async (runId) => {
@@ -5359,9 +5325,7 @@ function buildWizardServer(options, lifetime) {
       // True while any turn holds this thread (the reply is only waiting its turn); false when none does; throws when unreadable.
       leaseHeld: options.sessionLeaseReader ?? (async (record) => {
         if (!hermesStatePath) throw new Error('turn leases unavailable')
-        const database = new DatabaseSync(hermesStatePath, { readOnly: true })
-        try { return Boolean(database.prepare('SELECT 1 FROM session_turn_leases WHERE conversation_id = ? AND expires_at > ? LIMIT 1').get(record.sessionId, Date.now() / 1000)) }
-        finally { database.close() }
+        return hermesStateRead('lease', { ids: [record.sessionId], now: Date.now() })
       }),
       // Cancel a never-started Hermes run; true only once Hermes confirms the run is gone, so the resend cannot double up.
       cancelUpstream: options.cancelNotStartedRun ?? (async (record) => {
@@ -6150,7 +6114,7 @@ function buildWizardServer(options, lifetime) {
       // are rebuilt on every build. Before, ~300 recent threads were rebuilt on every message anywhere.
       const warm = new Set(recent)
       const hot = new Set(delta.roots ?? [])
-      try { for (const id of readActiveHumanSessionIds(hermesStatePath)) hot.add(id) } catch { for (const id of recent) hot.add(id) }
+      try { for (const id of await readActiveSessionsOffThread()) hot.add(id) } catch { for (const id of recent) hot.add(id) }
       for (const id of runQueue?.recentUnfinishedSessionIds(nowSeconds - hotWindowSeconds, 1000) ?? []) hot.add(id)
       for (const run of directRuns.values()) if (run?.sessionId) hot.add(run.sessionId)
       for (const activity of await readHelmActivities()) if (activity?.sessionId) hot.add(activity.sessionId)
@@ -7231,7 +7195,7 @@ function buildWizardServer(options, lifetime) {
       }
       if (url.pathname === '/wizard/list-cache' && request.method === 'GET') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        sendJson(response, 200, { ...listCache.stats(), speed: speedMeter.stats() })
+        sendJson(response, 200, { ...listCache.stats(), state_reads: hermesStateLane.stats(), speed: speedMeter.stats() })
         return
       }
       if (url.pathname === '/wizard/background-results' && request.method === 'GET') {
