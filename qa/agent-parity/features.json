@@ -2601,6 +2601,22 @@
       "policy_exemptions": []
     },
     {
+      "id": "channel-model-emoji",
+      "description": "With the shell switch wizard/channel-model-emoji on, a channel made with New channel in Chats whose name has no emoji (and matches no keyword) asks POST /wizard/v1/channel-emoji for one emoji in the background and is renamed once if its name is unchanged, identically for main, host-profile, container and restricted agents; a private (Tinfoil) or recovery agent's channel name never reaches a cloud model (403 on the server, never asked by the shell).",
+      "layer": "ux",
+      "fixture": null,
+      "how_to_test": "Server: tests/channel-emoji-ask.node.mjs (one-emoji check, contract, own system prompt, name only, 400/415/503, wrong model, deadline + cancel, no persistence) and tests/lookup-privacy.test.ts (a private agent refused with zero broker calls; the main agent answered). UX (wizard-ux issue 1605): tests/channel-model-emoji.test.mjs runs the real create step for main, host-profile, container and restricted agents plus a private agent and the switch off; tests/qa-chat-channel-model-emoji.cjs covers New channel in real Chromium on a synthetic box. Synthetic fixture evidence, not a real broker or routed-agent live run.",
+      "source_refs": [
+        "server/channel-emoji-ask.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/channel-emoji-ask.node.mjs",
+        "tests/lookup-privacy.test.ts"
+      ],
+      "policy_exemptions": []
+    },
+    {
       "id": "detached-job-wait",
       "description": "A turn that handed off to a detached background job (a deploy started through wizard_restart_report.py) keeps its chat in Working, never Ready or Stuck, until the job reports; returned helpers read as waiting on a background job with no Resume.",
       "layer": "server",

@@ -151,3 +151,30 @@ describe('AI Look up privacy follows the session, not the caller', () => {
     expect(ok.status).toBe(200); expect(await ok.text()).toContain('claude-haiku-4-5'); expect(broker.calls.length).toBe(1)
   })
 })
+
+// Channel emoji from a model (wizard-ux issue 1605): a private (Tinfoil) agent's channel name never reaches the broker.
+async function emojiBroker() {
+  const calls: any[] = []
+  const server = createServer(async (req, res) => { calls.push({ path: req.url, body: await readBody(req) }); res.writeHead(200, { 'Content-Type': 'application/x-ndjson' }); res.end(JSON.stringify({ type: 'done', text: '🎯', model: 'claude-haiku-4-5' }) + '\n') })
+  servers.push(server)
+  const address = await listen(server) as import('node:net').AddressInfo
+  return { url: `http://127.0.0.1:${address.port}`, calls }
+}
+describe('Channel emoji from a model refuses a private agent before any cloud call', () => {
+  it('a private agent gets 403 private_agent and zero broker calls; the main agent gets one emoji', async () => {
+    const dir = box()
+    const main = await fakeHermes('main', ['wizard_main_1'])
+    const broker = await emojiBroker()
+    const { base } = await start(dir, main, { lookupEnv: { WIZARD_LOOKUP_URL: broker.url, WIZARD_LOOKUP_TOKEN: TOKEN } })
+    const { agent } = await withPrivate(dir, base)
+    const url = `${base}/wizard/v1/channel-emoji`
+    const r = await fetch(url, json({ name: 'Quarterly OKRs', agent: agent.id }))
+    expect(r.status).toBe(403); expect((await r.json()).error).toBe('private_agent')
+    expect(broker.calls.length).toBe(0)
+    const ok = await fetch(url, json({ name: 'Quarterly OKRs', agent: 'hermes' }))
+    expect(ok.status).toBe(200); expect(await ok.json()).toEqual({ emoji: '🎯' })
+    expect(broker.calls.length).toBe(1)
+    expect(broker.calls[0].body.quote).toBe('Quarterly OKRs')   // only the name, nothing else of the box
+    expect(JSON.stringify(broker.calls[0].body)).not.toContain('wizard_main_1')
+  })
+})
