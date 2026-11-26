@@ -8,7 +8,7 @@ const notification = { title: 'Synthetic alert', message: 'Synthetic disk is alm
 
 // Keep the real Scheduler, scheduleNotifier, app bridge, auth and agent proxies.
 // Only Hermes and the notifications MCP provider are synthetic boundaries.
-export async function notificationScene(kind, bound) {
+export async function notificationScene(kind, bound, extra = {}) {
   let clock = Date.parse('2026-10-21T00:00:00Z')
   let setAllowed
   const internalReads = [], internalPatches = [], appCalls = [], sends = []
@@ -36,7 +36,7 @@ export async function notificationScene(kind, bound) {
     return {
       agentBridge: true, bridgeWriteSkills: false, bridgeWatchMs: 0, bridgeLog: () => {},
       schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerNow: () => clock,
-      schedulerTimezone: 'UTC', schedulerEnabled: false,
+      schedulerTimezone: 'UTC', schedulerEnabled: false, ...extra,
       fetchImpl: async (url, init = {}) => {
         const parsed = new URL(url), headers = new Headers(init.headers)
         if (parsed.hostname === 'notifications.fixture') {
@@ -185,4 +185,27 @@ export async function checkFallbackNotification(s, jobId, priorThread) {
   assert.ok(JSON.stringify(await history.json()).includes('Synthetic visible fallback alert.'))
   assert.equal(s.appCalls.length, priorCalls, 'unbound agent must not call notifications')
   assert.equal(s.sends.length, priorSends, 'unbound agent must not send as itself or main')
+}
+
+// Chat replies on the phone (wizard-ux issue 1619, switch wizard/phone-chat-replies): the phone hands an accepted send
+// to the Service, which follows the run through its own internal read and posts the reply once to the bound
+// Notifications app under Chats, as the thread's own agent.
+export const PHONE_REPLY_SHELL = 'https://box.example.ts.net:8796/wizard-os-home/'
+export const phoneReplyScene = kind => notificationScene(kind, true, { phoneChatReplies: true, phoneReplyShellUrl: PHONE_REPLY_SHELL, phoneReplyTickMs: 25 })
+export async function checkPhoneReplyNote(s) {
+  const thread = 'wizard_parity_phone_reply'
+  assert.ok((await s.request('/api/sessions', post({ id: thread, title: 'Parity reply' }))).status < 300)
+  const admitted = await s.request('/v1/runs', post({ session_id: thread, input: 'Synthetic question' }))
+  assert.equal(admitted.status, 202)
+  const run = (await admitted.json()).run_id
+  const handed = await fetch(`${s.origin()}/wizard/v1/phone/reply-notes`, post({ session: thread, run, title: 'Parity reply', ...(s.kind === 'main' ? {} : { agent: s.id }) }))
+  assert.equal(handed.status, 202)
+  const notes = () => s.appCalls.filter(c => /(^|__)notify$/.test(c.name)).map(c => c.arguments)
+  await new Promise(r => setTimeout(r, 100))
+  assert.deepEqual(notes(), [], 'nothing is posted while the run works')
+  Object.assign([...s.runs.values()].filter(r => r.session_id === thread).at(-1), { status: 'completed', output: 'Synthetic **answer**.' })
+  const end = Date.now() + 5000
+  while (!notes().length && Date.now() < end) await new Promise(r => setTimeout(r, 20))
+  await new Promise(r => setTimeout(r, 100))
+  assert.deepEqual(notes(), [{ message: 'Synthetic answer.', title: 'Parity reply', link: `${PHONE_REPLY_SHELL}?session=${thread}`, app: 'chats', tags: 'chat-reply' }])
 }

@@ -132,6 +132,7 @@ import { readArchivedSessions } from './archived-sessions.mjs'
 import { createHermesStateHealth } from './hermes-state-health.mjs'
 import { createMainProviderAttach } from './main-provider-attach.mjs'
 import { createPrivateFirst, PRIVATE_FIRST_SWITCH } from './private-first.mjs'
+import { createPhoneReplyNotes, PHONE_CHAT_REPLIES_SWITCH, CHATS_APP, CHAT_REPLY_TAG } from './phone-reply-notes.mjs'
 export { readArchivedSessions }
 
 export const BODY_LIMIT = 12 * 1024 * 1024
@@ -2692,11 +2693,13 @@ export function scheduleNotifier({ bridge, appsJsonPath }) {
   return {
     // 'main' is the portable spelling (scheduler jobs, host system jobs); the bridge knows the main agent as hermes.
     available: (agent = GATEWAY_MAIN_AGENT) => pick(agent === 'main' ? GATEWAY_MAIN_AGENT : agent)?.status === 'running',
-    send: async ({ title, message, agent = GATEWAY_MAIN_AGENT }) => {
+    // link / about / tags are optional (the phone's chat-reply notes, wizard-ux issue 1619): `about` is the app the
+    // item is filed under (the notify tool's `app`), so a scheduled job's call stays exactly as it was.
+    send: async ({ title, message, agent = GATEWAY_MAIN_AGENT, link = '', about = '', tags = '' }) => {
       agent = agent === 'main' ? GATEWAY_MAIN_AGENT : agent
       const app = pick(agent)
       if (!app || app.status !== 'running') throw new Error('notifications slot unavailable')
-      const result = await bridge.callTool(`${app.prefix}__notify`, { message, ...(title ? { title } : {}) }, agent)
+      const result = await bridge.callTool(`${app.prefix}__notify`, { message, ...(title ? { title } : {}), ...(link ? { link } : {}), ...(about ? { app: about } : {}), ...(tags ? { tags } : {}) }, agent)
       if (!result || result.isError) throw new Error('notify failed')
       return { app: app.id }
     },
@@ -6530,6 +6533,30 @@ function buildWizardServer(options, lifetime) {
     deliver: deliverBackgroundOccurrence,
   }) : null
   if (scheduler) lifetime.own(() => scheduler.close(), () => scheduler.quiesce())
+  // Chat replies on the phone through the per-app notification path (wizard-ux issue 1619, switch
+  // wizard/phone-chat-replies, off): the phone hands an accepted send here, the box follows the run and posts the
+  // reply to the Notifications app under Chats, so the phone's per-app reader delivers it (no run polling there).
+  const phoneChatRepliesSwitchOn = createChannelsSwitch({ id: PHONE_CHAT_REPLIES_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.phoneChatRepliesTtlMs ?? 3000 })
+  const phoneChatRepliesOn = () => channelPart(options.phoneChatReplies, phoneChatRepliesSwitchOn)
+  const phoneNotifier = bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null
+  const phoneReplyNotes = phoneNotifier && bridgeOsHome ? createPhoneReplyNotes({
+    statePath: join(bridgeOsHome, 'phone-reply-notes.json'),
+    available: agent => phoneNotifier.available(agent || 'main'),
+    shellUrl: () => options.phoneReplyShellUrl ?? shellUrlFromApps(appsJsonPath),
+    tickMs: options.phoneReplyTickMs ?? 2_000,
+    log: line => console.log(`[phone-reply-notes] ${line}`),
+    readRun: async (run, agent) => {
+      if (!selfOrigin) return null
+      const query = agents ? `?agent=${encodeURIComponent(agent || MAIN_AGENT_ID)}` : ''
+      const result = await fetchImpl(`${selfOrigin}${PROXY_PREFIX}/v1/runs/${encodeURIComponent(run)}${query}`, {
+        headers: { 'X-Wizard-Internal-Token': internalToken }, redirect: 'manual', signal: AbortSignal.timeout(5_000),
+      })
+      if (!result.ok) { await result.body?.cancel(); return { status: result.status } }
+      return { status: 200, payload: await result.json() }
+    },
+    notify: (note, agent) => phoneNotifier.send({ ...note, agent: agent || 'main', about: CHATS_APP, tags: CHAT_REPLY_TAG }),
+  }) : null
+  if (phoneReplyNotes) lifetime.own(() => phoneReplyNotes.stop(), () => phoneReplyNotes.stop())
   const hostJobsActive = options.systemJobsEnabled === true
   if (hostJobsActive && (!options.systemJobsStatePath || !options.systemJobsUnitDir || !options.systemJobsSocketPath)) throw new Error('Host jobs require explicit state, unit and socket paths')
   // Host execution needs the one owner credential no local caller can imitate (principals.mjs: proxy_proof).
@@ -7969,6 +7996,21 @@ function buildWizardServer(options, lifetime) {
         tickQueues()
         return
       }
+      if (url.pathname === '/wizard/v1/phone/reply-notes') {
+        // The phone's handover of one accepted chat send (wizard-ux issue 1619). 404 while the switch is off.
+        if (!phoneReplyNotes || !phoneChatRepliesOn()) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        const refused = setupWriteRefusal(request, tailnetIngress)
+        if (refused) { sendJson(response, refused, { error: refused === 415 ? 'json_required' : 'cross_origin_request' }); return }
+        let value
+        try { value = JSON.parse((await readBoundedBody(request, 4 * 1024)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid_json' }); return }
+        try { sendJson(response, 202, phoneReplyNotes.watch(value), { 'Cache-Control': 'no-store' }) } catch (error) {
+          sendJson(response, Number.isInteger(error?.status) ? error.status : 500, { ok: false, error: error?.code || 'reply_notes_failed' })
+        }
+        return
+      }
       if (url.pathname === '/wizard/v1/private-first') {
         // Private first (issue 545): GET is read-only, for the owner's Welcome and Agents views. POST {offer} is the
         // Welcome's answer to its private AI offer (wizard-ux issue 1800, standard first): setup / later / declined.
@@ -9358,6 +9400,7 @@ function buildWizardServer(options, lifetime) {
     if (!address || typeof address !== 'object') return
     const host = ['0.0.0.0', '::', ''].includes(address.address) ? '127.0.0.1' : address.family === 'IPv6' ? `[${address.address}]` : address.address
     selfOrigin = `http://${host}:${address.port}`
+    phoneReplyNotes?.start() // replies still in flight when the Service last stopped
     if (options.schedulerEnabled === true && process.env.WIZARD_SCHEDULER === '1') scheduler?.start()
     supervisor?.start()
   })
