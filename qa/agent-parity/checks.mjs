@@ -5,7 +5,7 @@ import { serverChecks, dailyClock, dailyScheduleToken, sentClock } from './serve
 import { queueChecks } from './queue-checks.mjs'
 import { trackerChecks } from './tracker-checks.mjs'
 import { STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
-import { notificationScene, checkBoundNotification } from './scheduler-notify.mjs'
+import { notificationScene, checkBoundNotification, phoneReplyScene, checkPhoneReplyNote } from './scheduler-notify.mjs'
 
 const featureScenes = {
   'thread-tracker': kind => scene(kind, { threadTracker: true }),
@@ -39,7 +39,7 @@ const featureScenes = {
   'owner-turn-ledger': kind => scene(kind, { routedOwnerTurns: true, ownerTurnLedger: true }),
   'owner-turn-service-sends': kind => scene(kind, { routedOwnerTurns: true }),
   'slow-admission': kind => scene(kind, { runQueueLaunchWaitMs: 100 }),
-  'locked-selector-boundary': kind => scene(kind, { fixtureSelectorLock: true, fixtureHoldEvents: true }), 'scheduler-notifications': kind => notificationScene(kind, true),
+  'locked-selector-boundary': kind => scene(kind, { fixtureSelectorLock: true, fixtureHoldEvents: true }), 'scheduler-notifications': kind => notificationScene(kind, true), 'phone-chat-reply-notes': phoneReplyScene,
   'head-row-owner-write-parity': kind => scene(kind, { canonicalSessionListing: true, listCacheMode: 'on', listCacheStaleMs: 0, canonicalSessionCacheMs: 0 }),
   // Main's cached Hermes listing with the stock running status; main admits direct here (the
   // check runs main's durable-queue path in a second scene) and without state.db, whose live
@@ -58,6 +58,7 @@ export const checks = {
     assert.ok(!s.seen.some(r => r.path.includes('/incognito')), 'private-only refusal must happen before any upstream request')
   },
   'scheduler-notifications': checkBoundNotification,
+  'phone-chat-reply-notes': checkPhoneReplyNote,
   'session-create': async s => {
     const r = await s.request('/api/sessions', post({ id: 'wizard_parity', source: 'wizard-mobile', hidden: true }))
     assert.equal(r.status, 201); assert.equal((await r.json()).session.id, 'wizard_parity')

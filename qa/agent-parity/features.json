@@ -2650,6 +2650,22 @@
       ],
       "fixture": null,
       "policy_exemptions": []
+    },
+    {
+      "id": "phone-chat-reply-notes",
+      "description": "With switch wizard/phone-chat-replies on, the phone hands an accepted chat send to POST /wizard/v1/phone/reply-notes and the Service itself follows the run and posts its reply (or an approval wait) once to the Notifications app under Chats, linked to the thread, as the thread's own agent (wizard-ux issue 1619)",
+      "layer": "server",
+      "how_to_test": "On each agent kind, start a run in a synthetic thread through the real Service, hand it over with {session, run, title, agent}; with the switch off the route is 404 and nothing is sent. With it on: nothing is sent while running; after the run completes upstream the bound notifications MCP app gets exactly one notify {message: reply excerpt, title, link: <shell>/wizard-os-home/?session=<thread>, app: chats, tags: chat-reply} and the watch file is empty; waiting_for_approval is told once; when that agent cannot reach Notifications the handover is refused 409 so the phone keeps its own watcher. Only the owner may hand a run over. Synthetic fixture evidence.",
+      "source_refs": [
+        "server/phone-reply-notes.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/phone-reply-notes.test.ts",
+        "qa/agent-parity/scheduler-notify.mjs"
+      ],
+      "fixture": "phone-chat-reply-notes",
+      "policy_exemptions": []
     }
   ]
 }
