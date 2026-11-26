@@ -40,15 +40,22 @@ export const OUTSIDE_TOOLS = [
 ]
 const OUTSIDE_IDS = new Set(OUTSIDE_TOOLS.map((tool) => tool.id))
 // Command approvals for container agents (issue 597, switch `wizard/agent-approvals`). The container is the agent's
-// sandbox, so on the Hermes API server (an "unattended" surface to stock Hermes) flagged work runs by default
-// (`approve`); the owner can set an agent back to `deny`. A prompt the owner sees in Wizard waits this long, like a
-// person's own approvals, instead of stock Hermes's 300 s.
-export const UNATTENDED_APPROVALS = ['approve', 'deny']
+// sandbox, so on the Hermes API server (an "unattended" surface to stock Hermes) flagged work runs by default:
+//   approve  execute_code and flagged commands run; the smart guardian still refuses clearly destructive ones, and
+//            anything it would escalate is refused at once (no prompt nobody may see);
+//   ask      flagged commands prompt the owner in Wizard, open for APPROVAL_WINDOW_S instead of stock Hermes's 300 s;
+//            work Hermes cannot ask about here (execute_code) is refused at once;
+//   deny     execute_code and every flagged command are refused at once, with the reason shown to the agent.
+export const UNATTENDED_APPROVALS = ['approve', 'ask', 'deny']
 export const APPROVAL_WINDOW_S = 3600
+// Stock Hermes fails closed, at once and without any prompt, when the selected approval transport is not registered
+// (tools/approval_prompt.py `_present_with_selected_transport`): this name is never registered.
+export const NO_PROMPT_TRANSPORT = 'wizard-no-prompt'
 const APPROVAL_POLICY = 'This agent runs inside its own container, which is its sandbox. Inline interpreter one-liners and heredocs (python3 -c, python3 - <<EOF, node -e) are normal work here: APPROVE them unless the code itself deletes, overwrites or sends away data.'
-/** The agent's unattended approval mode: its own setting, else approve (container agents only). */
+/** The agent's approvals mode: its own setting, else approve (container agents only). */
 export function unattendedApprovals(agent) {
-  return agent?.permissions?.unattended_approvals === 'deny' ? 'deny' : 'approve'
+  const mode = agent?.permissions?.unattended_approvals
+  return mode === 'deny' || mode === 'ask' ? mode : 'approve'
 }
 /** Seconds an owner approval prompt stays open for this agent, or 0 when the Service does not set it. */
 export function approvalWindowSeconds(agent, on) {
@@ -429,8 +436,13 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   }
   // Stock Hermes redacts sk-ant-oat... tool results before session/trajectory
   // persistence. Pin its supported secure setting for the restricted grant.
-  if (agent.runtime?.isolation === 'restricted' && agent.privacy === 'standard' && agent.model.provider === 'anthropic') {
-    lines.push('security:', '  redact_secrets: true')
+  const redactSecrets = agent.runtime?.isolation === 'restricted' && agent.privacy === 'standard' && agent.model.provider === 'anthropic'
+  // Issue 597: in approve and deny nobody is prompted; a would-be prompt is refused at once.
+  const noPrompt = approvalWindowSeconds(agent, approvals) > 0 && unattendedApprovals(agent) !== 'ask'
+  if (redactSecrets || noPrompt) {
+    lines.push('security:')
+    if (redactSecrets) lines.push('  redact_secrets: true')
+    if (noPrompt) lines.push('  approval:', `    transport: ${yamlString(NO_PROMPT_TRANSPORT)}`)
   }
   if (visionHelper) {
     lines.push('auxiliary:', '  vision:', '    provider: custom', `    model: ${yamlString(visionHelper)}`,
@@ -441,7 +453,8 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
     // Issue 597: stock Hermes treats the API server as unattended (execute_code and flagged commands with nobody to
     // answer resolve from unattended_mode, instantly). A prompt Wizard shows the owner waits the owner-sized window.
     const mode = unattendedApprovals(agent)
-    lines.push('approvals:', `  timeout: ${APPROVAL_WINDOW_S}`, `  unattended_mode: ${yamlString(mode)}`)
+    lines.push('approvals:', `  mode: ${yamlString(mode === 'deny' ? 'manual' : 'smart')}`, `  timeout: ${APPROVAL_WINDOW_S}`,
+      `  unattended_mode: ${yamlString(mode === 'approve' ? 'approve' : 'deny')}`)
     if (mode === 'approve') lines.push(`  smart_policy: ${yamlString(APPROVAL_POLICY)}`)
   }
   // Per-model capability patches for the agent's own (custom) Tinfoil route, only for models it may use.

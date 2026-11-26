@@ -20,13 +20,27 @@ it('hermesConfigYaml: a container agent gets the approvals block only with the s
   const off = hermesConfigYaml(container())
   expect(off).not.toContain('approvals:')
   expect(hermesConfigYaml(container(), { approvals: false })).toBe(off)
+  // approve (default): execute_code runs, the guardian checks flagged commands, nothing ever waits on a prompt.
   const on = hermesConfigYaml(container(), { approvals: true })
-  expect(on).toContain(`approvals:\n  timeout: ${APPROVAL_WINDOW_S}\n  unattended_mode: "approve"\n  smart_policy: `)
+  expect(on).toContain(`approvals:\n  mode: "smart"\n  timeout: ${APPROVAL_WINDOW_S}\n  unattended_mode: "approve"\n  smart_policy: `)
+  expect(on).toContain('security:\n  approval:\n    transport: "wizard-no-prompt"\n')
+  // deny: no guardian, nothing runs that is flagged, nothing waits.
   const deny = hermesConfigYaml(container({ unattended_approvals: 'deny' }), { approvals: true })
-  expect(deny).toContain('approvals:\n  timeout: 3600\n  unattended_mode: "deny"\n')
+  expect(deny).toContain('approvals:\n  mode: "manual"\n  timeout: 3600\n  unattended_mode: "deny"\n')
+  expect(deny).toContain('transport: "wizard-no-prompt"')
   expect(deny).not.toContain('smart_policy')
+  // ask: prompts go to the owner (stock transport), open for an hour.
+  const ask = hermesConfigYaml(container({ unattended_approvals: 'ask' }), { approvals: true })
+  expect(ask).toContain('approvals:\n  mode: "smart"\n  timeout: 3600\n  unattended_mode: "deny"\n')
+  expect(ask).not.toContain('security:')
+  expect(ask).not.toContain('smart_policy')
   // Only these lines differ from the switch-off file.
-  expect(on.split('\n').filter(line => !off.split('\n').includes(line)).every(line => /^(approvals:|  timeout: 3600|  unattended_mode: "approve"|  smart_policy: ".+")$/u.test(line))).toBe(true)
+  expect(on.split('\n').filter(line => !off.split('\n').includes(line)).every(line => /^(approvals:|  mode: "smart"|  timeout: 3600|  unattended_mode: "approve"|  smart_policy: ".+"|security:|  approval:|    transport: "wizard-no-prompt")$/u.test(line))).toBe(true)
+  // A restricted standard agent on Claude keeps its redact_secrets line inside the one security block.
+  const claude = { ...container({}, { isolation: 'restricted' }), privacy: 'standard', model: { provider: 'anthropic', model: 'claude', allowed_models: ['claude'], fallback: false } }
+  expect(hermesConfigYaml(claude)).toContain('security:\n  redact_secrets: true\n')
+  expect(hermesConfigYaml(claude, { approvals: true })).toContain('security:\n  redact_secrets: true\n  approval:\n    transport: "wizard-no-prompt"\n')
+  expect(hermesConfigYaml(claude, { approvals: true }).match(/^security:/gmu)).toHaveLength(1)
   // Restricted containers too; profile, external and imported agents keep Hermes's own window.
   expect(hermesConfigYaml(container({}, { isolation: 'restricted' }), { approvals: true })).toContain('unattended_mode: "approve"')
   expect(approvalWindowSeconds(container(), true)).toBe(3600)
@@ -61,9 +75,9 @@ it('switch off: nothing is shown, stored or written', async () => {
 it('switch on: approve by default, the owner can set deny, and a flip back restores the old file', async () => {
   const on = { value: true }, s = scene(on)
   const { agent } = await s.registry.create(privateBody())
-  expect(s.config(agent.id)).toContain('approvals:\n  timeout: 3600\n  unattended_mode: "approve"')
+  expect(s.config(agent.id)).toContain('  timeout: 3600\n  unattended_mode: "approve"')
   expect((await s.registry.publicAgent(agent)).permissions.unattended_approvals).toBe('approve')
-  expect((await s.registry.agentOptions()).approvals).toEqual({ unattended: ['approve', 'deny'], default: 'approve', window_s: 3600 })
+  expect((await s.registry.agentOptions()).approvals).toEqual({ unattended: ['approve', 'ask', 'deny'], default: 'approve', window_s: 3600 })
   expect(s.registry.approvalWindow(agent.id)).toBe(3600)
   await expect(s.registry.update(agent.id, { permissions: { unattended_approvals: 'maybe' } })).rejects.toMatchObject({ status: 400 })
   const applied = s.calls.length
@@ -72,6 +86,9 @@ it('switch on: approve by default, the owner can set deny, and a flip back resto
   expect(s.stored(agent.id).permissions.unattended_approvals).toBe('deny')
   expect(s.config(agent.id)).toContain('unattended_mode: "deny"')
   expect((await s.registry.publicAgent(updated)).permissions.unattended_approvals).toBe('deny')
+  await s.registry.update(agent.id, { permissions: { unattended_approvals: 'ask' } })
+  expect(s.config(agent.id)).toContain('  mode: "smart"\n  timeout: 3600\n  unattended_mode: "deny"')
+  expect(s.config(agent.id)).not.toContain('wizard-no-prompt')
   // The main agent is configured in Hermes itself.
   await expect(s.registry.update('hermes', { permissions: { unattended_approvals: 'approve' } })).rejects.toMatchObject({ status: 409 })
   // Switch off again: the managed upgrade writes the switch-off file and re-applies the agent.
