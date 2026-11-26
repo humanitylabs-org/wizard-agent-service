@@ -3,8 +3,7 @@
 A box that runs the Agent Service from hand-deployed releases
 (`~/.local/share/wizard-mobile-server/releases/was-<sha>`, switched by `ops/wizard-agent-service-deploy.py`)
 used to stay on its last release until someone prepared the next one and deployed it by hand. Follow main does
-that by itself. It is off by default behind the owner switch `wizard/follow-main`. `WIZARD_FOLLOW_MAIN=1` in the
-env file forces it on and `=0` forces it off.
+that by itself on every box where its timer is installed (below); there is no switch.
 
 Every 5 minutes, `ops/wizard-agent-service-follow-main.py` runs these steps:
 
@@ -22,9 +21,9 @@ Every 5 minutes, `ops/wizard-agent-service-follow-main.py` runs these steps:
 
 If a prepare or deploy of the same commit fails, it is retried after 30 min (`WIZARD_FOLLOW_MAIN_RETRY_S`).
 
-The Agent Service reads that file (`WIZARD_FOLLOW_MAIN_STATUS` overrides the path). While the switch is on:
+The Agent Service reads that file (`WIZARD_FOLLOW_MAIN_STATUS` overrides the path). Once the timer has written it:
 
-- `/wizard/health` carries `follow_main`. The timer reads `follow_main.on` from it.
+- `/wizard/health` carries `follow_main`.
 - The owner is told ("Wizard is behind") only when there is a step he can take, and the notice names it
   (issue 638):
   - the timer stopped running: the `systemctl --user enable --now ...` command that restarts it;
@@ -42,7 +41,7 @@ The Agent Service reads that file (`WIZARD_FOLLOW_MAIN_STATUS` overrides the pat
     that filed this as a `deploy` failure ("heavy queue not idle") is read as `heavy-busy` too.
 - At most one notice per cause until the box is current again, never one per merge.
 
-With the switch off, health has no `follow_main` field, the timer pass changes nothing and no notice is sent.
+On a box whose timer never ran, health has no `follow_main` field and no notice is sent.
 
 ## Install on a box (owner)
 
@@ -51,9 +50,6 @@ cp ops/wizard-agent-service-follow-main.service ops/wizard-agent-service-follow-
 systemctl --user daemon-reload
 systemctl --user enable --now wizard-agent-service-follow-main.timer
 ```
-
-Then turn on `wizard/follow-main` in Settings › Look. On a box with no Look file, put `WIZARD_FOLLOW_MAIN=1` into
-`~/.config/wizard-agent-service/follow-main.env`.
 
 The unit runs the copy in the live release, so each deploy brings its own newer follow-main step.
 

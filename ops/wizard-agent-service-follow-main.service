@@ -1,6 +1,5 @@
 # Follow main (issue 514): one pass that prepares the newest green main as an immutable release and deploys it
-# with the box's own deploy helper (ops/wizard-agent-service-follow-main.py). Does nothing unless the owner's
-# wizard/follow-main switch is on (or WIZARD_FOLLOW_MAIN=1 in the env file below; =0 forces it off).
+# with the box's own deploy helper (ops/wizard-agent-service-follow-main.py). Installing this timer is all it takes.
 # Runs the copy in the live release, so each deploy brings its own newer follow-main step; before the first
 # deploy that carries it, the source checkout's copy runs.
 # Install: cp this file and wizard-agent-service-follow-main.timer to ~/.config/systemd/user/,
