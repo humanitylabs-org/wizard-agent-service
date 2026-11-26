@@ -804,7 +804,9 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     const screenContext = ctx.clientViewContext?.(value.instructions) || ''
     const note = await ctx.routedPresentation?.runNote(agent, sessionId, { Authorization: `Bearer ${registry.apiKey(agent.id)}` }) || ''
     const followUp = ctx.followUpNote?.(sessionId) || ''
-    value = { ...value, instructions: withAskMax(ctx.runInstructions || agentRunInstructions(ctx.responseStyle?.()), ctx.askMax?.() ?? 140) + (note ? `\n\n${note}` : '') + (followUp ? `\n${followUp}` : '') + (screenContext ? `\n\n${screenContext}` : '') }
+    // Issue 631: the private default agent's own turn notes (a signal sweep posted into its Daily).
+    const own = await ctx.routedTurnNote?.(agent, sessionId, value, request) || ''
+    value = { ...value, instructions: withAskMax(ctx.runInstructions || agentRunInstructions(ctx.responseStyle?.()), ctx.askMax?.() ?? 140) + (note ? `\n\n${note}` : '') + (followUp ? `\n${followUp}` : '') + (own ? `\n${own}` : '') + (screenContext ? `\n\n${screenContext}` : '') }
     delete value.delegation_delivery
     delete value.response_rendering
   }

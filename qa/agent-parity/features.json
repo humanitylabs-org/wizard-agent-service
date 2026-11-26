@@ -760,6 +760,25 @@
       "policy_exemptions": []
     },
     {
+      "id": "private-routing-edges",
+      "description": "Private mode edges (issue 631, the same switch wizard/private-routing in the Look file, off by default; WIZARD_PRIVATE_ROUTING 1 forces it on, 0 off). Pushes: a note handed to the notifications slot for a private agent (agent alerts incl. the collapsed one, scheduled deliver: notification runs, phone chat-reply notes) is sent with the title 'Wizard: 1 new item', the fixed body 'Open Wizard to read it.' and the shell's own link (alerts: ?inbox=alerts); an app door's ping for a private agent's alert has that title, an empty ask and content_free true. A standard agent's notes and pings are unchanged. Daily: with a private default agent a Daily channel is seeded once for it (seedDailyFor, meta daily_seeded:<agent>), POST /wizard/v1/agent-inbox/sweep posts the card into its today thread (card.agent = that agent), 'signal sweep' typed in its threads posts a card and the turn gets the sweep run note, and a scheduled 'signal sweep' job made for main runs on the private agent in its Daily for that occurrence. Open / Send to inbox: the private default agent's threads move through its own Hermes (no agent named: its pin decides), its Daily days stay, GET /wizard/v1/agent-inbox adds private_default, and the owner's next turn shows a sent thread again. History: the private agent's standard_chats MCP lists standard_history_search (the standard agent's memory_store.db facts, imported first, and Markdown under Files/Imported, credential-redacted, read-only). Switch off or no private default: every route, push and tool list is exactly today's.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP routes with privateRouting on, Channels Daily on, an alertNotifier that records each note and an app door token. On container and restricted the scene agent is made private and the default: a payment_failed event for it is pushed as 'Wizard: 1 new item' with no codeword while the same event for hermes keeps its words, the door ping of the private alert has no ask, the sweep card is the private agent's and the last row of its own Daily thread, typed Signal sweep in its thread posts a new card with the run note, a scheduled sweep made for main is admitted on the private agent in its Daily and posts a card, Send to inbox with no agent named hides its thread in its own Hermes, its Daily thread is refused with 409, GET agent-inbox names private_default and lists the Daily as stay, Open shows it again and the owner's next turn after another Send lists it again. On main and host-profile no private default exists: the alert and ping keep their words, the card is main's, and a standard routed thread still answers 409 main_only. tests/private-edges.test.ts covers the content-free note, the wrapper and the switch, the ping, the per-agent Daily seed, the imported History search (imported first, Files/Imported, no credential) and the tool list with the Look switch on and off through a private agent's own gateway key. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/private-edges.mjs",
+        "server/service.mjs",
+        "server/agents-http.mjs",
+        "server/scheduler.mjs",
+        "server/channel-store.mjs",
+        "server/standard-chats.mjs"
+      ],
+      "reference_tests": [
+        "tests/private-edges.test.ts"
+      ],
+      "fixture": "private-routing-edges",
+      "policy_exemptions": []
+    },
+    {
       "id": "orb-dump",
       "description": "Orb dump route (issue 551, on for everyone since wizard-ux issue 1778, WIZARD_AGENT_INBOX=0 turns it off; only when the shell sends accept_dump): POST /wizard/v1/route sorts a new task request into route dump in the same fast-router call, writes its agent inbox record (state running, title, ask, deadline from words like today or by Friday, privacy private) before answering, then creates a hidden worker thread on the main agent and admits its turn on the durable queue with key wizard-inbox-<record id> and a background-task run note. Reply, tell me, a conversation or a short direct question stay route agent; commands and view answers are unchanged; without accept_dump the routing is exactly as before. A worker that cannot start leaves the record waiting on the owner; the same words again start it again. Issue 1569: only a worker thread the Service started for a capture may be hidden, a hidden thread opens by id, and a thread the owner typed in is shown again and never hidden after that.",
       "layer": "server",

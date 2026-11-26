@@ -218,3 +218,31 @@ The chat list row of a thread whose newest run is a quiet reply carries `wizard_
 `view=list`), never while a turn runs or while the row shows needs_you / check. The shell keeps such a thread out of
 Inbox / Ready (wizard/chats-inbox). A question, needs_you, check or a failed run goes to Inbox as before. Switch off:
 no reply rows and no flag.
+
+### Private mode edges (issue 631, switch `wizard/private-routing`)
+
+With the owner's `wizard/private-routing` switch on (the switch of issue 629; env `WIZARD_PRIVATE_ROUTING=1` forces it
+on, `0` off), nothing from a private agent's work leaks through the box's edges (`server/private-edges.mjs`):
+
+- **Pushes.** Every note the Service hands the notifications slot for a private agent (agent alerts, the day's
+  collapsed alert, scheduled `deliver: notification` runs, phone chat-reply notes) goes out as
+  `title: "Wizard: 1 new item"`, the fixed body `Open Wizard to read it.` (the Notifications `notify` tool refuses an
+  empty message) and the shell's own https link (alerts: its `?inbox=alerts` view; a thread deep link is kept). An app
+  door's ping for a private agent's alert has the same title, `ask: ""` and `content_free: true`. The words stay in the
+  inbox record and show only inside Wizard. Standard agents' notes are unchanged. Nothing in the phone app changes: the
+  words never leave the Service.
+- **Daily follows the default agent.** With a private default agent a Daily channel is seeded once for it (an archive
+  or delete sticks); the sweep card goes into that Daily's today thread; "signal sweep" typed in its threads posts the
+  card and gives the turn the same run note as on main; a scheduled sweep job (prompt `signal sweep`) runs on the
+  private agent in its Daily for each occurrence (the job keeps its own agent, so switching off puts it back). Its Daily
+  archived means no card (409 `daily_unavailable`), never the standard agent's Daily instead.
+- **Open / Send to inbox** move the private default agent's threads too, through its own Hermes (a request that names
+  no agent uses the thread's pin). `GET /wizard/v1/agent-inbox` adds `private_default: <agent id>` and lists its Daily
+  days in `stay`. The owner's next turn in a thread he sent to the inbox lists it again.
+- **Imported History.** With the read grant (`read_standard_chats`, DECISIONS 81) the private agent's `standard_chats`
+  MCP server also lists `standard_history_search`: the standard agent's fact store (`memory_store.db` beside its
+  state.db; imported History facts first) and Markdown under `Files/Imported` (the Importer's History chats, memories
+  and skills), read-only, credential-redacted, rate-limited like the other three tools. No private store is opened.
+
+Switch off, or no private default agent (for the Daily and Open / Send parts): every route, push and tool list is
+exactly as before.

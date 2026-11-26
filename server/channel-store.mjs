@@ -433,6 +433,25 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
         return id
       })
     },
+    // Issue 631 (switch wizard/private-routing): the private default agent's own Daily, seeded once per agent the way the
+    // main agent's is (an owner's archive or delete of it sticks). An agent that already has a daily channel keeps it.
+    seedDailyFor(agent) {
+      const who = agentOf(agent)
+      if (who === 'hermes') return this.seedDaily()
+      const key = `daily_seeded:${who}`
+      if (meta(key)) return null
+      return tx(() => {
+        if (meta(key)) return null
+        const existing = st.dailyOf.all(who)[0]
+        if (existing) { st.setMeta.run(key, existing.id); return null }
+        const id = freeId(`${DAILY_ID}-${who}`.slice(0, 38))
+        const minOrd = st.all.all().filter(r => r.agent === who).reduce((m, r) => Math.min(m, r.ord), 0)
+        for (const r of st.all.all().filter(r => r.agent === who && r.pinned !== null)) st.pin.run(r.pinned + 1, r.id)
+        insertChannel({ id, agent: who, name: 'Daily', ord: minOrd - 1, createdAt: now(), pinned: 0, kind: 'daily' })
+        st.setMeta.run(key, id)
+        return id
+      })
+    },
     // The agent's open daily channel (the raw row), or null.
     dailyChannel(agent) { try { return st.dailyOf.all(agentOf(agent)).find(r => !r.archived) || null } catch { return null } },
     // A daily channel by id (archived ones included, so their days stay readable), or null.

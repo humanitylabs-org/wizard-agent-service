@@ -136,6 +136,7 @@ import { createPrivateMode, PRIVATE_MODE_SWITCH, isPersonalDataApp } from './pri
 import { RESULT_READER_SWITCH, createResultReader, readerFacts } from './result-reader.mjs'
 import { PRIVATE_ROUTING_SWITCH, routingNames, nameRule, chooseAgent, privateLabelBlock } from './private-routing.mjs'
 import { createPhoneReplyNotes, PHONE_CHAT_REPLIES_SWITCH, CHATS_APP, CHAT_REPLY_TAG } from './phone-reply-notes.mjs'
+import { privatePushes, contentFreePing } from './private-edges.mjs'
 export { readArchivedSessions }
 
 export const BODY_LIMIT = 12 * 1024 * 1024
@@ -3366,6 +3367,20 @@ function buildWizardServer(options, lifetime) {
   // privateRouting (env WIZARD_PRIVATE_ROUTING, '1' on / '0' off) wins. Off: the orb route answers exactly as before.
   const privateRoutingSwitchOn = createChannelsSwitch({ id: PRIVATE_ROUTING_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.privateRoutingTtlMs ?? 3000 })
   const privateRoutingOn = () => channelPart(options.privateRouting, privateRoutingSwitchOn)
+  // Issue 631 (private-edges.mjs, same switch): a private agent's pushes are content-free, and with a private default
+  // agent the Daily, the sweep and Open / Send to inbox are that agent's. Off: '' / false everywhere, today's paths.
+  const agentIsPrivate = agent => {
+    if (!agents || !agent) return false
+    try { return agents.read(agent === 'main' ? MAIN_AGENT_ID : agent)?.privacy === 'private' } catch { return false }
+  }
+  const privateDefaultId = () => {
+    if (!agents || !privateRoutingOn()) return ''
+    let id = ''
+    try { id = agents.defaultAgentId() } catch { return '' }
+    return id && id !== MAIN_AGENT_ID && agentIsPrivate(id) && agents.read(id)?.role !== 'recovery' ? id : ''
+  }
+  const privatePushOn = () => Boolean(agents) && privateRoutingOn()
+  const quietPushes = (notifier, view = '') => privatePushes(notifier, { on: privatePushOn, isPrivate: agentIsPrivate, shellUrl: () => shellUrlFromApps(appsJsonPath), view })
   const privateMode = agents ? createPrivateMode({
     on: () => channelPart(options.privateMode, privateModeSwitchOn), registry: agents, agentsDir, appsJsonPath,
     bindings: () => appBindings,
@@ -3492,8 +3507,15 @@ function buildWizardServer(options, lifetime) {
     const store = channelStoreNow()
     if (!store) return false
     if (!dailySeeded) { try { store.seedDaily() } catch (error) { console.error(`[channels] Daily not seeded: ${String(error?.message || error).slice(0, 160)}`) } dailySeeded = true }
+    // Issue 631 (switch wizard/private-routing): a private default agent gets its own Daily, once.
+    const privateId = privateDefaultId()
+    if (privateId && !privateDailySeeded.has(privateId)) {
+      try { store.seedDailyFor(privateId) } catch (error) { console.error(`[channels] private Daily not seeded: ${String(error?.message || error).slice(0, 160)}`) }
+      privateDailySeeded.add(privateId)
+    }
     return true
   }
+  const privateDailySeeded = new Set()
   const dailyClock = options.dailyNow ?? Date.now
   const dailyTimeZone = () => { try { return options.dailyTimezone || options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok' } catch { return 'Asia/Bangkok' } }
   // Today's thread of an open daily channel, created once (racing first posts share it). -> {sessionId, day, created, title}
@@ -3625,6 +3647,18 @@ function buildWizardServer(options, lifetime) {
   }
   const agentCtx = agents ? {
     projectSweepCard: (result, agent, sessionId, searchParams) => projectSweepCard(result, agent, sessionId, searchParams),
+    // Issue 631 (switch wizard/private-routing): a turn to the private default agent. The owner's turn brings a thread
+    // his Send to inbox hid back into Chats; "signal sweep" (typed, or a scheduled sweep) posts the card into that
+    // agent's Daily first and the turn's run note says so, exactly as on the main agent. -> the run note, or ''.
+    routedTurnNote: async (agent, sessionId, value, request) => {
+      if (!agentInboxOn() || !sessionId || agent?.id !== privateDefaultId()) return ''
+      const principal = principalOf(request)
+      if (principal?.kind === 'owner') inboxOwnerTurn(agent.id, sessionId)
+      const asked = noteSweepRequest(sessionId, Buffer.from(JSON.stringify(value ?? {})), principal, request)
+      if (!asked) return ''
+      await sweepForTurn(sessionId, asked)
+      return sweepRunNote(sessionId)
+    },
     agentInboxNoteRun: (agent, thread, run, runId) => inboxNoteRun(agent, thread, run, runId),
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
@@ -4020,10 +4054,11 @@ function buildWizardServer(options, lifetime) {
     inbox: agentInbox, rules: alertRules, now: options.agentInboxNow ?? Date.now, timezone: () => dailyTimeZone(),
     router: () => { try { return resolveFastRouter(readSettings(settingsPath).settings, router) } catch { return null } },
     fetchImpl: options.alertFetch ?? fetch,
-    notify: options.alertNotifier ?? {
+    // Issue 631: a private agent's alert is sent content-free while the private-routing switch is on.
+    notify: quietPushes(options.alertNotifier ?? {
       available: agent => { alertNotifier ??= bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null; return Boolean(alertNotifier?.available(agent)) },
       send: note => alertNotifier.send(note),
-    },
+    }, 'alerts'),
   })
   const inboxQueue = agent => (agent || MAIN_AGENT_ID) === MAIN_AGENT_ID ? runQueue : routedQueues?.loaded().find(queue => queue.agentId === agent)
   // Result reader (issue 630, result-reader.mjs): the owner's `wizard/result-reader` switch in the Look file; option
@@ -4138,27 +4173,53 @@ function buildWizardServer(options, lifetime) {
   // unhide is tried again at his next turn (the record is only marked once Hermes took it).
   const inboxOwnerTurn = (agent, sessionId) => {
     if (!sessionId || !agentInboxOn() || !agentInbox.ownerTurnPending(agent, sessionId)) return
-    const hidden = agent === MAIN_AGENT_ID && agentInbox.mayHide(agent, sessionId)
+    // Issue 631: a thread the private default agent's Send to inbox hid comes back through that agent's own Hermes.
+    const routed = agent !== MAIN_AGENT_ID && agent === privateDefaultId()
+    const hidden = (agent === MAIN_AGENT_ID || routed) && agentInbox.mayHide(agent, sessionId)
     void (async () => {
       try {
-        if (hidden) await hermesJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'PATCH', body: JSON.stringify({ hidden: false }) })
+        if (hidden && routed) {
+          const shown = await deliveryCall(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(sessionId)}?agent=${encodeURIComponent(agent)}`, { hidden: false }, '', 'PATCH')
+          if (!shown.ok) throw new Error(`unhide ${shown.status}`)
+        } else if (hidden) await hermesJson(`/api/sessions/${encodeURIComponent(sessionId)}`, { method: 'PATCH', body: JSON.stringify({ hidden: false }) })
         agentInbox.ownerTurn(agent, sessionId)
       } catch (error) { console.warn(`[agent-inbox] owner thread not shown again: ${error?.message || error}`) }
     })()
   }
+
   // Open / Send to inbox (wizard-ux issue 1570, same switch). Main agent only, like the orb's dump: only main threads
   // are hidden (Hermes `hidden`), so a routed agent's thread is refused instead of half moved. Send refuses a thread
   // the owner pinned (a collaborative thread stays in Chats). The Hermes PATCH comes first, so a refused or failed
   // hide or unhide changes no record and logs no example.
   const INBOX_THREAD = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/u
+  const inboxPrivateView = () => { const id = privateDefaultId(); return id ? { private_default: id } : {} }
   const moveInboxThread = async (move, input = {}) => {
-    const agent = typeof input.agent === 'string' && input.agent ? input.agent : MAIN_AGENT_ID
+    // Issue 631: a shell that names no agent moves the private default agent's thread when that agent holds it.
+    let pinned = ''
+    if (!(typeof input.agent === 'string' && input.agent) && privateDefaultId() && INBOX_THREAD.test(String(input.thread_id || ''))) { try { pinned = agents.pinnedAgent(input.thread_id) || '' } catch { pinned = '' } }
+    const agent = typeof input.agent === 'string' && input.agent ? input.agent : pinned && pinned === privateDefaultId() ? pinned : MAIN_AGENT_ID
     const thread = typeof input.thread_id === 'string' ? input.thread_id : ''
     if (!INBOX_THREAD.test(thread)) throw inboxError(400, 'invalid_thread')
-    if (agent !== MAIN_AGENT_ID) throw inboxError(409, 'main_only')
+    // Issue 631 (switch wizard/private-routing): the private default agent's threads move too, through its own Hermes.
+    const routed = agent !== MAIN_AGENT_ID && agent === privateDefaultId()
+    if (agent !== MAIN_AGENT_ID && !routed) throw inboxError(409, 'main_only')
     const path = `/api/sessions/${encodeURIComponent(thread)}`
+    const routedPath = `${PROXY_PREFIX}${path}?agent=${encodeURIComponent(agent)}`
+    const setHidden = async hidden => {
+      if (!routed) return hermesJson(path, { method: 'PATCH', body: JSON.stringify({ hidden }) })
+      const done = await deliveryCall(routedPath, { hidden }, '', 'PATCH')
+      if (!done.ok) throw inboxError(done.status === 404 ? 404 : 503, done.status === 404 ? 'not_found' : 'agent_unavailable')
+      return done.payload
+    }
     let session
-    try { session = await hermesJson(path, {}, true) } catch (error) { throw error?.status === 404 ? inboxError(404, 'not_found') : error }
+    if (routed) {
+      const read = await deliverySession(routedPath).catch(() => null)
+      if (read?.status === 404) throw inboxError(404, 'not_found')
+      if (!read?.ok) throw inboxError(503, 'agent_unavailable')
+      session = read.payload
+    } else {
+      try { session = await hermesJson(path, {}, true) } catch (error) { throw error?.status === 404 ? inboxError(404, 'not_found') : error }
+    }
     const row = session?.session ?? session
     const said = typeof input.utterance === 'string' ? input.utterance : ''
     if (move === 'send') {
@@ -4170,13 +4231,13 @@ function buildWizardServer(options, lifetime) {
       const fixed = fixedChannelKind(resolve(bridgeOsHome || wizardOsHome(), 'channels.sqlite'), agent, thread)
       if (fixed === 'unreadable') throw inboxError(503, 'channels_unavailable')
       if (fixed) throw inboxError(409, `${fixed}_thread`)
-      const running = Boolean(runQueue?.queuedForSession('direct', thread).some(record => record.terminalAt == null))
-      await hermesJson(path, { method: 'PATCH', body: JSON.stringify({ hidden: true }) })
+      const running = Boolean(inboxQueue(agent)?.queuedForSession('direct', thread).some(record => record.terminalAt == null))
+      await setHidden(true)
       const record = agentInbox.sendToInbox(agent, thread, { title: typeof input.title === 'string' ? input.title : String(row?.title || ''), ask: said, running })
       const example = agentInbox.addRouteExample({ utterance: said || record.ask || record.title, chosen: 'agent', wanted: 'dump' })
       return { record, hidden: true, example }
     }
-    await hermesJson(path, { method: 'PATCH', body: JSON.stringify({ hidden: false }) })
+    await setHidden(false)
     const record = agentInbox.openFromInbox(agent, thread)
     const example = agentInbox.addRouteExample({ utterance: said || record?.ask || '', chosen: 'dump', wanted: 'agent' })
     return { record, hidden: false, example }
@@ -4417,7 +4478,9 @@ function buildWizardServer(options, lifetime) {
   }
   const runSweep = async () => {
     if (!agentInboxOn()) throw inboxError(404, 'not_found')
-    const channel = channelDailyOn() ? channelStoreNow()?.dailyChannel(MAIN_AGENT_ID) : null
+    // Issue 631: with a private default agent (switch wizard/private-routing) the card is that agent's, in its Daily;
+    // its Daily archived means no card, never the standard agent's Daily instead.
+    const channel = channelDailyOn() ? channelStoreNow()?.dailyChannel(privateDefaultId() || MAIN_AGENT_ID) : null
     if (!channel || channel.archived) throw inboxError(409, 'daily_unavailable')
     const claim = claimDailyThread(channel)
     // Today's thread must really exist before any record changes: a claim whose first create failed, or whose session
@@ -6627,8 +6690,10 @@ function buildWizardServer(options, lifetime) {
     intervalMs: options.schedulerIntervalMs ?? 15_000,
     ...(options.schedulerTrickleMs !== undefined ? { trickleMs: options.schedulerTrickleMs } : {}),
     ...(options.schedulerMaxInflight !== undefined ? { maxInflight: options.schedulerMaxInflight } : {}),
-    notifier: bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null,
+    notifier: bridge ? quietPushes(scheduleNotifier({ bridge, appsJsonPath })) : null,
     agentId: agent => (agent === 'main' ? MAIN_AGENT_ID : agent),
+    // Issue 631: with a private default agent, a scheduled "signal sweep" runs on it (in its Daily), never on main.
+    sweepAgent: () => privateDefaultId() || null,
     channels: () => channelAgentFilingOn(),
     nightly: now => { if (agentInboxOn()) { agentInbox.nightly(now, inboxWorkerRuns(now)); sentLog.nightly(now, sentState) } },
     daily: { on: () => channelDailyOn(), thread: dailyScheduleThread, isDaily: (agent, channel) => !!channel && channelDailyOn() && channelStoreNow().dailyChannel(agent === 'main' ? MAIN_AGENT_ID : agent)?.id === channel },
@@ -6658,7 +6723,7 @@ function buildWizardServer(options, lifetime) {
   // reply to the Notifications app under Chats, so the phone's per-app reader delivers it (no run polling there).
   const phoneChatRepliesSwitchOn = createChannelsSwitch({ id: PHONE_CHAT_REPLIES_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.phoneChatRepliesTtlMs ?? 3000 })
   const phoneChatRepliesOn = () => channelPart(options.phoneChatReplies, phoneChatRepliesSwitchOn)
-  const phoneNotifier = bridge ? scheduleNotifier({ bridge, appsJsonPath }) : null
+  const phoneNotifier = bridge ? quietPushes(scheduleNotifier({ bridge, appsJsonPath })) : null
   const phoneReplyNotes = phoneNotifier && bridgeOsHome ? createPhoneReplyNotes({
     statePath: join(bridgeOsHome, 'phone-reply-notes.json'),
     available: agent => phoneNotifier.available(agent || 'main'),
@@ -7112,7 +7177,9 @@ function buildWizardServer(options, lifetime) {
         standardRetrievalRate.set(agent.id,rate)
         const rpc = parseJsonBody(await readBoundedBody(request,16384))
         const secrets = [hermesKey,options.inboxToken || '',...(agents.credentialValues?.() || [])].filter(Boolean)
-        let result = standardChatRpc(agent,principal,rpc,hermesStatePath,secrets)
+        // Issue 631 (switch wizard/private-routing): the read grant also reaches the standard agent's imported History.
+        const historyRoot = options.userFilesRoot || options.mediaRoot || ''
+        let result = standardChatRpc(agent,principal,rpc,hermesStatePath,secrets,privateRoutingOn() ? { history: { filesRoot: historyRoot ? String(historyRoot) : '' } } : {})
         const serialized = JSON.stringify(result)
         if (result && secrets.some(secret => serialized.includes(secret) || serialized.includes(JSON.stringify(secret).slice(1,-1)))) {
           result = {jsonrpc:'2.0',id:rpc?.id ?? null,result:{content:[{type:'text',text:'unsafe_content'}],isError:true}}
@@ -7497,7 +7564,12 @@ function buildWizardServer(options, lifetime) {
             }
             // ?keep=1: read without consuming, the door acks after its store (issue 325). A plain GET still hands each
             // ping out once as it did before, so a door built on that contract keeps working.
-            else sendJson(response, 200, { pings: url.searchParams.get('keep') === '1' ? agentInbox.pendingPings(target) : agentInbox.takePings(target) }, { 'Cache-Control': 'no-store' })
+            else {
+              const pings = url.searchParams.get('keep') === '1' ? agentInbox.pendingPings(target) : agentInbox.takePings(target)
+              // Issue 631: a ping for a private agent's alert carries no words while the private-routing switch is on.
+              const quiet = privatePushOn() ? pings.map(ping => agentIsPrivate(agentInbox.get(ping.id)?.agent) ? contentFreePing(ping, shellUrlFromApps(appsJsonPath)) : ping) : pings
+              sendJson(response, 200, { pings: quiet }, { 'Cache-Control': 'no-store' })
+            }
           } else if (door && sweepRoute && request.method === 'GET') {
             const card = agentInbox.doorCards(door)[0]
             sendJson(response, 200, { card: card && card.id === agentInbox.latestSweep()?.id ? agentInbox.sweepView(card) : null }, { 'Cache-Control': 'no-store' })
@@ -7548,7 +7620,11 @@ function buildWizardServer(options, lifetime) {
               // Issue 630: the result reader's counts (runs filed, fallbacks, disagreements), only while it is on.
               ...(resultReaderOn() ? { reader: { on: true, private_router: Boolean(resultReader.usable()), counts: agentInbox.readerStats() } } : {}),
               // Main-agent Daily and Alerts threads: Send to inbox refuses them, so the shell does not offer it (issue 1569).
-              stay: fixedChannelThreads(resolve(bridgeOsHome || wizardOsHome(), 'channels.sqlite'), MAIN_AGENT_ID) }, { 'Cache-Control': 'no-store' })
+              // Issue 631: with a private default agent (switch wizard/private-routing) its threads move too, and its own
+              // Daily days stay as well.
+              ...inboxPrivateView(),
+              stay: [...fixedChannelThreads(resolve(bridgeOsHome || wizardOsHome(), 'channels.sqlite'), MAIN_AGENT_ID),
+                ...(privateDefaultId() ? fixedChannelThreads(resolve(bridgeOsHome || wizardOsHome(), 'channels.sqlite'), privateDefaultId()) : [])] }, { 'Cache-Control': 'no-store' })
           } else if (!one) {
             const { record, created } = agentInbox.capture({ ...input, agent: typeof input.agent === 'string' && input.agent ? input.agent : MAIN_AGENT_ID })
             sendJson(response, created ? 201 : 200, { record: view(record), created }, { 'Cache-Control': 'no-store' })
