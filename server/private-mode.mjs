@@ -385,7 +385,8 @@ export function createPrivateMode({ on, registry, agentsDir, appsJsonPath = '', 
     }),
     /** Apps back where they were, the standard agent the default again; the private agent and its history are kept. */
     turnOff: () => run(async () => {
-      const privateId = privateAgentId()
+      // A private agent the owner deleted meanwhile still has its moves undone: the apps go back where they were.
+      const privateId = privateAgentId() ?? (typeof record().private_agent === 'string' ? record().private_agent : null)
       const results = []
       if (privateId) {
         for (const appId of Object.keys(record().apps ?? {})) results.push(await restoreApp(appId, privateId))
