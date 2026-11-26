@@ -23,6 +23,7 @@ const featureScenes = {
   'chats-tags': kind => scene(kind, ({ root }) => ({ pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, channelTagsTtlMs: 0, channelDaily: false, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true, agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'agent-inbox': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'orb-dump': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json') })),
+  'result-reader': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, resultReaderTtlMs: 0 })),
   'agent-inbox-move': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'private-routing': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), privateRouting: true })),
   'sent-log': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), agentInboxNow: () => sentClock.at ?? Date.now() })),

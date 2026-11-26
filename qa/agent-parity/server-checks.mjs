@@ -933,6 +933,106 @@ export const serverChecks = {
     await s.restart()
     assert.equal((await record(made.id)).state, 'archived', 'durable across a restart')
   },
+  // Issue 630: the result reader (switch wizard/result-reader in the Look file). Through this kind's Service routes:
+  // off, a finished worker run is filed from its status line exactly as before and the private model is never asked;
+  // on, a fake PRIVATE router on 127.0.0.1 reads each finished run once (polls share the read) and its decision files
+  // the record (classified_by reader, both readings kept, a disagreement counted, the ask capped at 140, the owner's
+  // corrections in the prompt); an unreadable reply falls back to the status line; a router that is not private (the
+  // same fake on 127.0.0.2) is never called and records file as today.
+  'result-reader': async s => {
+    const { createServer } = await import('node:http')
+    const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/result-reader': { on, at: Date.now() } } })) }
+    let calls = 0, bad = false, last = null
+    const fake = createServer((req, res) => {
+      let body = ''
+      req.on('data', c => { body += c })
+      req.on('end', () => {
+        const parsed = JSON.parse(body)
+        let facts = null
+        try { facts = JSON.parse(parsed.messages?.[1]?.content) } catch { facts = null }
+        res.setHeader('Content-Type', 'application/json')
+        // Other fast-router callers (a typed message's route) get a plain route answer.
+        if (typeof facts?.final_reply_end !== 'string') { res.end(JSON.stringify({ choices: [{ message: { content: '{"route":"agent","summary":"x"}' } }] })); return }
+        calls++; last = parsed
+        const t = facts.final_reply_end
+        const out = bad ? 'not json at all'
+          : /Reply A or B/u.test(t) ? JSON.stringify({ kind: 'needs_you', urgent: false, ask: 'Two synthetic venues found. Reply A for the first or B for the second', options: { a: 'Book the first venue', b: 'Book the second venue' } })
+          : /failed/iu.test(t) ? JSON.stringify({ kind: 'result', urgent: false, failed: true, ask: 'The synthetic upload failed: the server refused it' })
+          : JSON.stringify({ kind: 'result', urgent: false, ask: 'A synthetic report finished with notes on every supplier we looked at '.repeat(5) })
+        res.end(JSON.stringify({ choices: [{ message: { content: out } }] }))
+      })
+    })
+    await new Promise(r => fake.listen(0, '0.0.0.0', r))
+    try {
+      const settingsPath = join(s.root, 'os', 'settings.json')
+      const current = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {}
+      mkdirSync(dirname(settingsPath), { recursive: true })
+      const routerAt = hostname => writeFileSync(settingsPath, JSON.stringify({ ...current, fast_router: { endpoint: `http://${hostname}:${fake.address().port}/v1/chat/completions`, model: 'fixture-private' } }))
+      routerAt('127.0.0.1')
+      const line = value => `\n[WIZARD_STATUS_V1]${JSON.stringify(value)}[/WIZARD_STATUS_V1]`
+      let n = 0
+      const file = async output => {
+        n++
+        const made = await s.raw('/wizard/v1/agent-inbox', json('POST', { agent: s.id, thread_id: 'wizard_parity', title: `Synthetic task ${n}`, ask: `Synthetic ask ${n}` }))
+        assert.equal(made.status, 201)
+        const { record } = await made.json()
+        const run = await admit(s, { input: `Synthetic worker turn ${n}` })
+        Object.assign([...s.runs.values()].at(-1), { status: 'completed', updated_at: Date.now() / 1000, output })
+        assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
+        assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
+        let got
+        for (let i = 0; i < 80; i++) { got = (await (await s.raw(`/wizard/v1/agent-inbox/${record.id}`)).json()).record; if (got.state !== 'running') break; await new Promise(r => setTimeout(r, 25)) }
+        assert.equal((await s.raw(`/wizard/v1/agent-inbox/${record.id}`, json('PATCH', { action: 'archive' }))).status, 200)
+        return got
+      }
+      const choose = 'Two synthetic venues for Saturday. The first holds 40, the second 60. Which one should I book? Reply A or B.'
+      // Switch off: exactly today's filing, no reader call, no reader fields.
+      look(false)
+      const off = await file(choose)
+      assert.deepEqual([off.kind, off.last_update, off.classified_by, off.reader, calls], ['result', 'Finished without a summary. Open it to read.', undefined, undefined, 0], 'switch off: filed as before')
+      assert.equal((await (await s.raw('/wizard/v1/agent-inbox')).json()).reader, undefined, 'switch off: no reader counts')
+      look(true)
+      const asks = await file(choose)
+      assert.deepEqual([asks.kind, asks.state, asks.classified_by, asks.status_line, asks.options.a], ['needs_you', 'new', 'reader', null, 'Book the first venue'], 'a reply asking the owner to choose lands as needs_you')
+      assert.ok(asks.ask.length <= 140 && asks.ask.startsWith('Two synthetic venues'), 'its ask is the reader\'s, within the cap')
+      assert.equal(calls, 1, 'one read for a finished run seen twice')
+      assert.equal(last.temperature, 0)
+      const failed = await file(`Every synthetic upload failed with a refusal from the server.${line({ state: 'done', ask: 'Synthetic upload done' })}`)
+      assert.deepEqual([failed.kind, failed.failed, failed.classified_by, failed.status_line?.state, failed.reader_disagreed, failed.last_update], ['result', true, 'reader', 'done', true, 'The synthetic upload failed: the server refused it'], 'a done line on a failed run files per the reply')
+      const long = await file('A synthetic long rambling reply. '.repeat(400))
+      assert.ok(long.last_update.length <= 140, 'a long rambling reply still gives an ask within the cap')
+      const counts = (await (await s.raw('/wizard/v1/agent-inbox')).json()).reader
+      assert.deepEqual([counts.on, counts.private_router, counts.counts.disagreements, counts.counts.reader], [true, true, 1, 3], 'the disagreement is counted once')
+      // The owner's correction reaches the next prompt.
+      const paid = await (await s.raw('/wizard/v1/agent-inbox/events', json('POST', { agent: s.id, type: 'payment_failed', source: { app: 'wizard-money', item: 'p630' }, title: 'Synthetic payment failed' }))).json()
+      assert.equal((await s.raw(`/wizard/v1/agent-inbox/${paid.record.id}`, json('PATCH', { action: 'not_urgent' }))).status, 200)
+      await file(choose)
+      assert.match(last.messages[0].content, /"Synthetic payment failed" was filed as an alert; the owner said it was not urgent/u, 'corrections go into the reader prompt')
+      if (s.kind === 'main') {
+        // An orb take's Sent row shows how its result was filed (the orb's worker runs on the main agent only).
+        const said = await (await s.raw('/wizard/v1/route', json('POST', { text: 'Research synthetic flights to Lisbon by Friday', timezone: 'UTC', accept_dump: true }))).json()
+        assert.equal(said.cmd.route, 'dump')
+        let run
+        for (let i = 0; i < 80 && !run; i++) { run = [...s.runs.values()].find(x => x.session_id === said.cmd.thread_id); if (!run) await new Promise(r => setTimeout(r, 25)) }
+        assert.ok(run, 'the orb worker turn was admitted')
+        Object.assign(run, { status: 'completed', updated_at: Date.now() / 1000, output: choose })
+        assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
+        let row
+        for (let i = 0; i < 80; i++) { row = (await (await s.raw('/wizard/v1/sent')).json()).rows.find(r => r.record_id === said.cmd.record_id); if (row?.filed_by) break; await new Promise(r => setTimeout(r, 25)) }
+        assert.deepEqual([row?.filed_by, row?.state], ['reader', 'needs_you'], 'the Sent row shows the result was filed by the reader')
+      }
+      bad = true
+      const fallback = await file(`Synthetic finish.${line({ state: 'done', ask: 'Synthetic finish done' })}`)
+      assert.deepEqual([fallback.kind, fallback.last_update, fallback.classified_by], ['result', 'Synthetic finish done', 'status_line'], 'an unreadable reader reply files from the status line')
+      bad = false
+      // A router that is not private is never asked; the record files as today.
+      const before = calls
+      routerAt('127.0.0.2')
+      const cloud = await file(choose)
+      assert.deepEqual([cloud.kind, cloud.last_update, cloud.classified_by, calls], ['result', 'Finished without a summary. Open it to read.', undefined, before], 'a non-private router: zero reader calls')
+    } finally { await new Promise(r => fake.close(r)) }
+  },
   // Issue 552: alert rules. Through this kind's Service routes: owner rules, rule hits reach Alerts, non-urgent events
   // wait for the sweep, a borderline event goes to a private fake model on a local port (decision logged), the two
   // feedback taps each add one example, and the 4th alert of the day collapses and flags the rules on the next card.
