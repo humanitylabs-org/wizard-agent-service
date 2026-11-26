@@ -136,6 +136,7 @@ import { createPrivateFirst, PRIVATE_FIRST_SWITCH } from './private-first.mjs'
 import { createPrivateMode, PRIVATE_MODE_SWITCH, isPersonalDataApp } from './private-mode.mjs'
 import { RESULT_READER_SWITCH, createResultReader, readerFacts } from './result-reader.mjs'
 import { PRIVATE_ROUTING_SWITCH, routingNames, nameRule, chooseAgent, privateLabelBlock } from './private-routing.mjs'
+import { FIRST_CHAT_SWITCH, FIRST_CHAT_NOTE } from './first-chat.mjs'
 import { createPhoneReplyNotes, PHONE_CHAT_REPLIES_SWITCH, CHATS_APP, CHAT_REPLY_TAG } from './phone-reply-notes.mjs'
 import { privatePushes, contentFreePing } from './private-edges.mjs'
 export { readArchivedSessions }
@@ -3137,6 +3138,12 @@ function buildWizardServer(options, lifetime) {
   lifetime.own(() => { try { devices.flush() } catch { /* optional metadata must not block shutdown */ } })
   // wizard_remind / wizard_tips on the gateway (server/onboarding.mjs); bound once the scheduler exists below.
   let onboarding = null
+  // Five-choice first chat (issue 650, first-chat.mjs): the owner's `wizard/first-chat-goals` switch in the Look file;
+  // option firstChatGoals (env WIZARD_FIRST_CHAT_GOALS, '1' on / '0' off) wins. On: one run-note line for every agent and
+  // tips built from the owner's pick. Off: no note, the fixed tips, exactly as before.
+  const firstChatSwitchOn = createChannelsSwitch({ id: FIRST_CHAT_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.firstChatGoalsTtlMs ?? 3000 })
+  const firstChatOn = () => channelPart(options.firstChatGoals, firstChatSwitchOn)
+  const firstChatNote = () => (firstChatOn() ? FIRST_CHAT_NOTE : '')
   let followUps = null
   // wizard_start_thread / wizard_schedule for routed agents (server/agent-reach-out.mjs); bound with the scheduler.
   let reachOut = null
@@ -3538,7 +3545,7 @@ function buildWizardServer(options, lifetime) {
   const heavyNotices = (agentId, sessionId) => heavyWork?.queue.noticeContext(agentId, sessionId) || ''
   const acknowledgeHeavyNotices = (agentId, sessionId, body) => heavyWork?.queue.acknowledgeNotices(agentId, sessionId, body)
   const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling,
-    heavyStatus, heavyNotices, trackerNote: (agentId, id) => [trackerNote(agentId, id), dailyNote(agentId, id), capabilities.runNote(agentId)].filter(Boolean).join('\n') }) : null
+    heavyStatus, heavyNotices, trackerNote: (agentId, id) => [trackerNote(agentId, id), dailyNote(agentId, id), capabilities.runNote(agentId), firstChatNote()].filter(Boolean).join('\n') }) : null
   const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   const providerFailureDismissed = record => dismissedFailureStore.isDismissedAfter(record.sessionId, record.createdAt * 1000, record.agent_id)
     || dismissedFailureStore.isDismissed(record.sessionId, record.publicRunId, record.agent_id)
@@ -5634,8 +5641,8 @@ function buildWizardServer(options, lifetime) {
   // Appended to every direct run: the thread's current title and the owner's subject list.
   const runTitleNote = (sessionId) => {
     const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes')].filter(Boolean).join('\n')
-    if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote, trackerNote('hermes', '')].filter(Boolean).join('\n')
-    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId), dailyNote('hermes', sessionId), sweepRunNote(sessionId), dumpRunNote(sessionId)].filter(Boolean).join('\n')
+    if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote, trackerNote('hermes', ''), firstChatNote()].filter(Boolean).join('\n')
+    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId), dailyNote('hermes', sessionId), sweepRunNote(sessionId), dumpRunNote(sessionId), firstChatNote()].filter(Boolean).join('\n')
   }
   const patchHermesTitle = async (sessionId, title, { exact = false, datedAt = null } = {}) => {
     // A title another thread holds is dated, never numbered (James, 8 Nov: no #N). An exact patch never is.
@@ -6769,7 +6776,7 @@ function buildWizardServer(options, lifetime) {
 
   onboarding = scheduler ? onboardingTools({ scheduler, running: () => Boolean(scheduler.timer) && !scheduler.stopped,
     timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
-    now: options.schedulerNow ?? Date.now, mainAgent: GATEWAY_MAIN_AGENT }) : null
+    now: options.schedulerNow ?? Date.now, mainAgent: GATEWAY_MAIN_AGENT, firstChat: firstChatOn }) : null
   followUps = scheduler ? followUpTool({ scheduler, running: () => scheduler.running(), mainAgent: GATEWAY_MAIN_AGENT,
     // A routed agent watches only a thread it has accepted (its pin). Main keeps its own unpinned history.
     ownsThread: (agentId, sessionId) => agentId === GATEWAY_MAIN_AGENT || Boolean(agents?.pinnedAgents(sessionId)?.includes(agentId)) }) : null
