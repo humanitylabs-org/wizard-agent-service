@@ -133,6 +133,7 @@ import { createHermesStateHealth } from './hermes-state-health.mjs'
 import { createMainProviderAttach } from './main-provider-attach.mjs'
 import { createPrivateFirst, PRIVATE_FIRST_SWITCH } from './private-first.mjs'
 import { createPrivateMode, PRIVATE_MODE_SWITCH, isPersonalDataApp } from './private-mode.mjs'
+import { RESULT_READER_SWITCH, createResultReader, readerFacts } from './result-reader.mjs'
 import { PRIVATE_ROUTING_SWITCH, routingNames, nameRule, chooseAgent, privateLabelBlock } from './private-routing.mjs'
 import { createPhoneReplyNotes, PHONE_CHAT_REPLIES_SWITCH, CHATS_APP, CHAT_REPLY_TAG } from './phone-reply-notes.mjs'
 export { readArchivedSessions }
@@ -4025,16 +4026,64 @@ function buildWizardServer(options, lifetime) {
     },
   })
   const inboxQueue = agent => (agent || MAIN_AGENT_ID) === MAIN_AGENT_ID ? runQueue : routedQueues?.loaded().find(queue => queue.agentId === agent)
+  // Result reader (issue 630, result-reader.mjs): the owner's `wizard/result-reader` switch in the Look file; option
+  // resultReader (env WIZARD_RESULT_READER, '1' on / '0' off) wins. Needs the agent inbox. On, and with a PRIVATE fast
+  // router set, a fixed private model reads each finished worker run and decides how it is filed; the status line is a
+  // hint. Off, or no private router: every run is filed exactly as before.
+  const resultReaderSwitchOn = createChannelsSwitch({ id: RESULT_READER_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.resultReaderTtlMs ?? 3000 })
+  const resultReaderOn = () => agentInboxOn() && channelPart(options.resultReader, resultReaderSwitchOn)
+  // The owner's corrections, newest first: Not urgent / Should have alerted (issue 552) and Open / Send to inbox (1570).
+  const readerExamples = () => {
+    const out = []
+    try {
+      const rules = alertRules.read()
+      for (const e of rules.examples.not_urgent) out.push({ at: e.at || 0, text: `"${e.title || e.sender}" was filed as an alert; the owner said it was not urgent.` })
+      for (const e of rules.examples.should_alert) out.push({ at: e.at || 0, text: `"${e.title || e.sender}" waited for the sweep; the owner said it should have alerted.` })
+    } catch { /* no rules file: no alert examples */ }
+    for (const e of agentInbox.routeExamples(8)) {
+      out.push({ at: e.at || 0, text: e.wanted === 'agent' ? `"${e.utterance}" went to the background; the owner opened it, he wanted to see it now.` : `"${e.utterance}" was shown in Chats; the owner sent it to the inbox, it could wait.` })
+    }
+    return out.sort((a, b) => b.at - a.at).slice(0, 8)
+  }
+  const resultReader = createResultReader({
+    router: () => { try { return resolveFastRouter(readSettings(settingsPath).settings, router) } catch { return null } },
+    examples: readerExamples, fetchImpl: options.resultReaderFetch ?? fetch, timeoutMs: options.resultReaderTimeoutMs,
+  })
+  const inboxContinues = (id, sessionId, runId) => heavyStatus(id, sessionId, { state: 'done', ask: 'probe' })?.state !== 'done'
+    || Boolean(inboxQueue(id)?.queuedForSession('direct', sessionId).some(record => record.terminalAt == null && record.publicRunId !== runId && record.upstreamRunId !== runId))
+  // A finished run on a linked record goes to the reader once (polls of the same run share its read); filed when it
+  // answers, failed reads included. false: no private router, so the caller files it as before.
+  const readerNoteRun = (id, sessionId, run, runId) => {
+    const finished = { id: runId, status: run.status, output: run.output }
+    const pending = agentInbox.pendingRun(id, sessionId, finished)
+    if (!pending) return true
+    if (!resultReader.usable()) return false
+    const key = `${id}\n${sessionId}\n${pending.sig}`
+    if (resultReader.busy(key)) return true
+    let turn = null
+    try { turn = (inboxQueue(id)?.queuedForSession('direct', sessionId) || []).find(r => r.publicRunId === runId || r.upstreamRunId === runId) || null } catch { turn = null }
+    const durationMs = turn && Number.isFinite(turn.createdAt) && Number.isFinite(turn.terminalAt) ? (turn.terminalAt - turn.createdAt) * 1000 : null
+    let agentKind = id === MAIN_AGENT_ID ? 'main' : 'standard'
+    try { if (agents?.read(id)?.privacy === 'private') agentKind = 'private' } catch { /* unknown agent: standard */ }
+    const facts = readerFacts({ agent: id, agentKind, run: { ...run, output: pending.output }, durationMs, owedWork: heavyStatus(id, sessionId, { state: 'done', ask: 'probe' })?.state !== 'done', title: pending.record.title })
+    const job = resultReader.read(key, facts)
+    if (!job) return false
+    void lifetime.track(job.then(reader => {
+      const noted = agentInbox.noteRun(id, sessionId, finished, { continues: inboxContinues(id, sessionId, runId), guard: status => heavyStatus(id, sessionId, status), reader })
+      if (noted) void alertGate.considerRecord(noted).catch(error => console.warn(`[agent-alerts] record not checked: ${error?.message || error}`))
+    }).catch(error => console.warn(`[result-reader] run not filed: ${error?.message || error}`)))
+    return true
+  }
   const inboxNoteRun = (agent, sessionId, run, runId = '') => {
     if (typeof sessionId !== 'string' || !sessionId || !run || !agentInboxOn()) return
     sentNoteRun(agent, sessionId, run, runId)
     try {
       const id = agent || MAIN_AGENT_ID
       if (!agentInbox.linked(id, sessionId)) return
+      if (resultReaderOn() && readerNoteRun(id, sessionId, run, runId)) return
       // More work still on its way for this thread (another queued or running turn): a fyi is progress, not the end.
       // Owed heavy work is probed through the same guard: it would hold a done back as fyi.
-      const continues = heavyStatus(id, sessionId, { state: 'done', ask: 'probe' })?.state !== 'done'
-        || Boolean(inboxQueue(id)?.queuedForSession('direct', sessionId).some(record => record.terminalAt == null && record.publicRunId !== runId && record.upstreamRunId !== runId))
+      const continues = inboxContinues(id, sessionId, runId)
       const noted = agentInbox.noteRun(id, sessionId, { id: runId, status: run.status, output: run.output }, { continues, guard: status => heavyStatus(id, sessionId, status) })
       // A finished task with a high or urgent severity is an alert candidate (issue 552), checked once.
       if (noted) void alertGate.considerRecord(noted).catch(error => console.warn(`[agent-alerts] record not checked: ${error?.message || error}`))
@@ -4226,6 +4275,8 @@ function buildWizardServer(options, lifetime) {
       quiet: row.wants_reply === false && ['done', 'fyi'].includes(row.outcome?.state) })
     // Issue 629: where private routing sent it, and which rule chose that agent.
     if (row.agent_id) Object.assign(out, { agent_id: row.agent_id, agent_model: row.agent_model || '', chosen_by: row.chosen_by || null })
+    // Issue 630: how the result was filed (reader, status_line or fallback), once the result reader filed its record.
+    if (row.record_id) { const filed = agentInbox.get(row.record_id)?.classified_by; if (filed) out.filed_by = filed }
     if (row.corrected) out.corrected = row.corrected
     if (row.flag) out.flag = row.flag
     if (row.error) out.error = row.error
@@ -7494,6 +7545,8 @@ function buildWizardServer(options, lifetime) {
           } else if (!one && request.method === 'GET') {
             const q = url.searchParams
             sendJson(response, 200, { records: agentInbox.list({ state: q.get('state') || '', kind: q.get('kind') || '', agent: q.get('agent') || '', limit: q.get('limit') || 200 }).map(view), check: agentInbox.lastCheck(),
+              // Issue 630: the result reader's counts (runs filed, fallbacks, disagreements), only while it is on.
+              ...(resultReaderOn() ? { reader: { on: true, private_router: Boolean(resultReader.usable()), counts: agentInbox.readerStats() } } : {}),
               // Main-agent Daily and Alerts threads: Send to inbox refuses them, so the shell does not offer it (issue 1569).
               stay: fixedChannelThreads(resolve(bridgeOsHome || wizardOsHome(), 'channels.sqlite'), MAIN_AGENT_ID) }, { 'Cache-Control': 'no-store' })
           } else if (!one) {

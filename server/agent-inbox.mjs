@@ -60,6 +60,8 @@ const RECORD_ID = /^inbox_[a-f0-9]{24}$/u
 const TOKEN = /^[a-z][a-z0-9-]{0,19}$/u
 const SEVERITIES = new Set(['low', 'normal', 'high', 'urgent'])
 // Only a run in one of these states has finished; any other status (queued, started, running, a new alias) changes nothing.
+// The result reader's kinds (issue 630, result-reader.mjs).
+const READER_RESULT_KINDS = new Set(['needs_you', 'result', 'fyi'])
 const TERMINAL = new Set(['completed', 'failed', 'cancelled', 'canceled', 'interrupted', 'expired', 'error', 'stopped', 'timed_out'])
 
 const clip = (value, max) => {
@@ -131,6 +133,8 @@ export class AgentInboxStore {
         if (Array.isArray(parsed.agent_examples)) this.data.agent_examples = parsed.agent_examples
         // App doors (issue 569): which app doors asked for alert pings, and the alerts each one was given.
         if (parsed.doors && typeof parsed.doors === 'object' && !Array.isArray(parsed.doors)) this.data.doors = parsed.doors
+        // Result reader (issue 630): how many finished runs it filed, fell back on, and disagreed with a status line.
+        if (parsed.reader && typeof parsed.reader === 'object' && !Array.isArray(parsed.reader)) this.data.reader = parsed.reader
       }
     } catch { /* an unreadable store starts empty; the original bytes stay on disk until the next write */ }
   }
@@ -324,20 +328,16 @@ export class AgentInboxStore {
    *  no-summary result). The same run output read again (list polls, history reads) is applied once.
    *  `continues`: more work is still on its way for this thread (another queued run, owed background work), so a
    *  fyi only updates `last_update`. `guard(status)`: the Service's heavy-work guard (done -> fyi while owed). */
-  noteRun(agent, thread, run = {}, { continues = false, guard = s => s } = {}) {
-    const record = typeof thread === 'string' && thread ? this.linked(agent, thread) : null
-    if (!record) return null
-    const status = String(run.status ?? '')
-    if (!TERMINAL.has(status)) return null
-    // Answered from the sweep card (issue 550): only the turn that carried the answer moves the record on. An earlier
-    // turn that was still running when the owner answered finishes without touching it.
-    if (record.state === 'answered' && record.answer_run && String(run.id ?? '') !== record.answer_run) return null
-    const output = typeof run.output === 'string' ? run.output : ''
-    const sig = hash(`${run.id ?? ''}\n${status}\n${output}`).slice(0, 24)
-    if (record.run_sigs?.includes(sig)) return null
+  noteRun(agent, thread, run = {}, { continues = false, guard = s => s, reader = undefined } = {}) {
+    const pending = this.pendingRun(agent, thread, run)
+    if (!pending) return null
+    const { record, sig, output } = pending
     record.run_sigs = [...(record.run_sigs || []), sig].slice(-MAX_RUN_SIGS)
     const raw = parseStatusObject(output)
     let parsed = raw ? normalizeStatus(raw) : null
+    // Result reader (issue 630): only when its switch is on and a private router was there to ask (`reader` given).
+    // Without it this method files the run exactly as before, byte for byte.
+    if (reader !== undefined) return this.#readerFile(record, run, raw, parsed, reader, { continues, guard })
     if (parsed) {
       const guarded = guard(parsed) || parsed
       this.#apply(record, guarded, raw, { final: true, continues: continues || guarded.state !== parsed.state })
@@ -352,6 +352,79 @@ export class AgentInboxStore {
     this.#save()
     return { ...record }
   }
+
+  /** The record a finished run would update, or null when noteRun would do nothing with it (no linked record, not a
+   *  finished run, a turn from before the owner's answer, or this exact run output was applied already). */
+  pendingRun(agent, thread, run = {}) {
+    const record = typeof thread === 'string' && thread ? this.linked(agent, thread) : null
+    if (!record) return null
+    const status = String(run.status ?? '')
+    if (!TERMINAL.has(status)) return null
+    // Answered from the sweep card (issue 550): only the turn that carried the answer moves the record on. An earlier
+    // turn that was still running when the owner answered finishes without touching it.
+    if (record.state === 'answered' && record.answer_run && String(run.id ?? '') !== record.answer_run) return null
+    const output = typeof run.output === 'string' ? run.output : ''
+    const sig = hash(`${run.id ?? ''}\n${status}\n${output}`).slice(0, 24)
+    if (record.run_sigs?.includes(sig)) return null
+    return { record, sig, output }
+  }
+
+  /** Issue 630: file one finished run with the result reader's decision (`reader.result`), or, when the read failed,
+   *  exactly as the status line would (classified_by status_line), or as the no-summary result (fallback). The reader's
+   *  kind and ask go through the same mapping as a status line, so an answered record, a confirm line and owed
+   *  background work behave as before. Both readings stay on the record, and a disagreement is counted. */
+  #readerFile(record, run, raw, parsed, reader, { continues, guard }) {
+    const read = reader?.result && READER_RESULT_KINDS.has(reader.result.kind) ? reader.result : null
+    const hint = parsed ? { state: parsed.state, ask: parsed.ask } : null
+    const stats = this.data.reader = { calls: 0, reader: 0, status_line: 0, fallback: 0, disagreements: 0, ...(this.data.reader || {}) }
+    stats.calls++
+    record.status_line = hint
+    delete record.reader_disagreed
+    if (read) {
+      const state = read.kind === 'needs_you' ? 'needs_you' : read.kind === 'result' ? 'done' : 'fyi'
+      const status = { ...(parsed || {}), state, ask: clip(read.ask, 140) }
+      // The status line's deadline and confirm stay (confirm only ever holds a task back for the owner); its
+      // recommendation and answer tokens are the agent's, so only the reader's options (from the reply) apply.
+      const extras = { ...(raw?.deadline != null ? { deadline: raw.deadline } : {}), ...(raw?.confirm === true ? { confirm: true } : {}), ...(read.options ? { options: read.options } : {}) }
+      const guarded = guard(status) || status
+      this.#apply(record, guarded, extras, { final: true, continues: continues || guarded.state !== status.state })
+      if (read.failed === true && record.kind === 'result') record.failed = true
+      // urgent goes to the alert stage (issue 552): a high severity makes the record a candidate; its rules decide.
+      if (read.urgent === true && !['high', 'urgent'].includes(record.severity)) record.severity = 'high'
+      record.reader = { kind: read.kind, urgent: read.urgent === true, failed: read.failed === true, ask: clip(read.ask, 140), ...(reader.model ? { model: reader.model } : {}), at: this.now() }
+      record.classified_by = 'reader'
+      stats.reader++
+      const lineKind = hint ? (hint.state === 'needs_you' || hint.state === 'check' ? 'needs_you' : hint.state === 'done' ? 'result' : 'fyi') : ''
+      // A disagreement: another kind, or a line that says done about a run the reader found failed.
+      const failedDone = hint?.state === 'done' && read.failed === true
+      if (lineKind && (lineKind !== read.kind || failedDone)) {
+        stats.disagreements++
+        record.reader_disagreed = true
+        this.log(`[result-reader] reader and status line disagree (${hint.state} -> ${read.kind}${read.failed ? ', failed' : ''}); the reader wins`)
+      }
+    } else {
+      record.reader = { error: clip(reader?.error || 'unavailable', 80), at: this.now() }
+      if (parsed) {
+        const guarded = guard(parsed) || parsed
+        this.#apply(record, guarded, raw, { final: true, continues: continues || guarded.state !== parsed.state })
+        record.classified_by = 'status_line'
+        stats.status_line++
+      } else {
+        record.state = record.state === 'answered' ? 'archived' : 'new'
+        record.kind = 'result'
+        delete record.failed
+        record.last_update = NO_SUMMARY
+        record.updated_at = this.now()
+        record.classified_by = 'fallback'
+        stats.fallback++
+      }
+    }
+    this.#save()
+    return { ...record }
+  }
+
+  /** The result reader's counts (issue 630), or null when it never filed a run. */
+  readerStats() { return this.data.reader ? { ...this.data.reader } : null }
 
   /** One status line on a linked thread that is not the end of a run (e.g. a progress line). */
   noteStatus(agent, thread, text, { continues = true } = {}) {

@@ -725,6 +725,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "result-reader",
+      "description": "Result reader (issue 630, switch wizard/result-reader in the Look file, off by default; WIZARD_RESULT_READER 1 forces it on, 0 off; needs the agent inbox): when a worker run on a linked inbox record finishes, a fixed stateless reader (server/result-reader.mjs, no memory, no tools) calls ONLY the private fast router (privateRouter endpoint host) at temperature 0 with bounded facts (agent, agent kind, duration, ok/failed/killed, error text, owed background work, the status line as a hint, the last 4,000 characters of the final reply) and the owner's latest 8 corrections (Not urgent / Should have alerted, Open / Send to inbox). Its strict JSON (kind needs_you | result | fyi, urgent, failed, ask capped at 140, options only on needs_you) files the record through the inbox's own mapping (owed work, confirm lines and answered records behave as before); urgent raises the severity to high so the alert gate (rules, examples, 3-a-day cap) decides. The reader wins over the status line; the record keeps classified_by (reader | status_line | fallback), status_line and reader, a disagreement (another kind, or done on a failed run) is counted, GET /wizard/v1/agent-inbox carries reader counts, and a Sent row whose record it filed shows filed_by. One read per finished run however often it is polled. Invalid JSON, an HTTP error or a timeout: filed exactly as today (classified_by status_line, or fallback with no status line), logged. No private router: never called, logged once, records exactly as today. Switch off: records byte-identical to today.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP routes with a fake fast router on 127.0.0.1 written into settings.json and the switch flipped in <root>/Pages/wizard-look/look.json: off, a reply asking the owner to choose with no status line is filed as today (Finished without a summary, no classified_by, zero model calls); on, the same reply polled twice is one call at temperature 0 and lands as needs_you with the reader's ask and options; a done line on a failed run lands as result with failed true, classified_by reader and one counted disagreement; a long rambling reply gives an ask within 140; a Not urgent correction appears in the next prompt; an unreadable reply files from the status line; the same fake on 127.0.0.2 (not private) is never called and the record files as today. tests/result-reader.test.ts covers the private-router gate, bounded facts, strict JSON, the shared in-flight read, the timeout, the Look switch, every filing path, the alert hand-off and byte-identical filing without the reader. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/result-reader.mjs",
+        "server/agent-inbox.mjs",
+        "server/service.mjs",
+        "server/index.mjs"
+      ],
+      "reference_tests": [
+        "tests/result-reader.test.ts"
+      ],
+      "fixture": "result-reader",
+      "policy_exemptions": []
+    },
+    {
       "id": "private-routing",
       "description": "Private routing (issue 629, switch wizard/private-routing in the Look file, off by default; WIZARD_PRIVATE_ROUTING 1 forces it on, 0 off): only with a private default agent, POST /wizard/v1/route answers route agent with agent_id, chosen_by (name, private_label, thread, default, rules_only with rule), model and provider when a model was named, thread_id for the thread in front, and summary = the owner's exact words. Order: a spoken agent name or a model name the box runs (from the registry and the model list, at the start or as ask/tell/use X; the main agent is reached only by a model name) settles it without any model; else the private router (privateRouter endpoint host only) adds a personal label in its one call, which can only pick the private agent; else the thread in front (thread_id plus thread_agent or its pin) keeps a reply; else the default private agent. A non-private or missing router is never called and rules decide with chosen_by rules_only. A dump becomes the chosen agent's visible thread. The Sent row keeps agent_id, agent_model and chosen_by, and POST /wizard/v1/sent/<id>/correct {agent} stores one agent example; the private router gets the latest 8 as few-shot lines. Switch off or no private default: the route answer is exactly today's.",
       "layer": "server",
