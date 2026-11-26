@@ -584,6 +584,19 @@ def _load_private_search_tests():
 PrivateSearchTests = _load_private_search_tests()
 
 
+def _load_main_delivery_tests():
+    # CI runs only this file: pull in the main-agent delivery tests (issue 666).
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("test_main_delivery", Path(__file__).resolve().parent / "test_main_delivery.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.MainDeliveryTest
+
+
+MainDeliveryTest = _load_main_delivery_tests()
+
+
 class TinfoilKeyFromVolumeTest(unittest.TestCase):
     """Issue 582: a standard install's helper reads the key the owner saved in the Tinfoil app, from its volume."""
 

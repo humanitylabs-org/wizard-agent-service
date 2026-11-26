@@ -9,8 +9,10 @@ Agent Service never gets the Docker socket.
     POST /agents/<id>/start    start the agent's container
     POST /agents/<id>/stop     stop it
     POST /agents/<id>/deliver  assistant-only message into the agent's own session store (app deliveries such as
-                               recording recaps). `hermes` (the main agent) works when --main-container names the
-                               main Hermes container.
+                               recording recaps). `hermes` (the main agent) is found on its own (issue 666): the
+                               container --main-container names, else the host Hermes of an alongside box
+                               (alongside.json next to the agents folder, or --main-hermes-home), else the one
+                               running `hermes-agent` engine container of a fresh box.
     GET  /healthz
 
 Drivers:
@@ -36,6 +38,7 @@ import os
 import re
 import secrets
 import shlex
+import shutil
 import signal
 import stat
 import subprocess
@@ -1167,9 +1170,11 @@ def lifecycle_action(driver, agent: dict, action: str) -> dict:
 
 DELIVER_SCRIPT = r'''
 import hashlib, json, re, sqlite3, sys
-sys.path.insert(0, "/opt/hermes")
-from hermes_state import SessionDB
 p = json.load(sys.stdin)
+sys.path.insert(0, "/opt/hermes")
+if p.get("hermes_src"):   # a host Hermes (issue 666): its checkout, when its venv does not carry it
+    sys.path.insert(0, p["hermes_src"])
+from hermes_state import SessionDB
 sid, key, body, title, meta = p["session_id"], p["delivery_key"], p["body"], p["title"], p.get("display_metadata") or {}
 def recap(text):
     m = re.search(r"\n\n\[WIZARD_STATUS_V1\][^\n]*?\[/WIZARD_STATUS_V1\]\s*$", text)
@@ -1207,29 +1212,189 @@ finally:
 '''
 
 
-def deliver(driver, agent: dict, payload: dict, *, container: str = "") -> dict:
+def delivery_payload(agent: dict, payload: dict) -> dict:
     need = {"session_id": str, "delivery_key": str, "body": str, "title": str}
+    if not isinstance(payload, dict):
+        raise RuntimeFailure("invalid_payload", 400)
     for name, kind in need.items():
         if not isinstance(payload.get(name), kind) or not payload[name]:
             raise RuntimeFailure(f"invalid_{name}", 400)
     if not re.fullmatch(r"[A-Za-z0-9._:-]{1,120}", payload["session_id"]) or len(payload["body"]) > 400_000:
         raise RuntimeFailure("invalid_payload", 400)
     meta = payload.get("display_metadata") if isinstance(payload.get("display_metadata"), dict) else {}
-    clean = {"session_id": payload["session_id"], "delivery_key": payload["delivery_key"][:200], "body": payload["body"],
-             "title": payload["title"][:60], "display_metadata": meta, "model": (agent.get("model") or {}).get("model")}
-    service = RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]
-    cid = container or (('agent-' + agent['id']) if isinstance(driver, ImportDriver) else container_for(driver.project(agent['id']), service))
-    user = f'{os.getuid()}:{os.getgid()}' if isinstance(driver, ImportDriver) else f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes"
+    return {"session_id": payload["session_id"], "delivery_key": payload["delivery_key"][:200], "body": payload["body"],
+            "title": payload["title"][:60], "display_metadata": meta, "model": (agent.get("model") or {}).get("model")}
+
+
+def delivery_receipt(run: subprocess.CompletedProcess) -> dict:
+    if run.returncode:
+        code = (run.stderr.strip().splitlines() or ["delivery_failed"])[-1]
+        raise RuntimeFailure(code if re.fullmatch(r"[a-z_]{3,40}", code) else "delivery_failed")
+    return json.loads(run.stdout.strip().splitlines()[-1])
+
+
+def deliver(driver, agent: dict, payload: dict, *, container: str = "", user: str = "") -> dict:
+    clean = delivery_payload(agent, payload)
+    # A named container (the main agent's) needs no agent folder: before issue 666 it raised KeyError here.
+    cid = container or (('agent-' + agent['id']) if isinstance(driver, ImportDriver) else container_for(
+        driver.project(agent['id']), RESTRICTED_SERVICE if restricted(agent) else service_names(agent)[0]))
+    user = user or (f'{os.getuid()}:{os.getgid()}' if isinstance(driver, ImportDriver) else f"{AGENT_UID}:{AGENT_UID}" if restricted(agent) else "hermes")
     if isinstance(driver, ImportDriver):
         label = docker(['inspect', '--format', '{{index .Config.Labels "wizard.import.id"}}', cid], timeout=10).stdout.strip()
         if label != agent['id']:
             raise RuntimeFailure('import_container_not_owned', 409)
     run = docker(["exec", "-i", "-u", user, cid, "/opt/hermes/.venv/bin/python", "-c", DELIVER_SCRIPT],
                  input_text=json.dumps(clean), timeout=120, check=False)
-    if run.returncode:
-        code = (run.stderr.strip().splitlines() or ["delivery_failed"])[-1]
-        raise RuntimeFailure(code if re.fullmatch(r"[a-z_]{3,40}", code) else "delivery_failed")
-    return json.loads(run.stdout.strip().splitlines()[-1])
+    return delivery_receipt(run)
+
+
+# ---------------------------------------------------------------- the main agent (issue 666)
+
+MAIN_ENGINE_SERVICES = ("hermes-agent-engine", "hermes-agent")   # a fresh box's hermes-agent app (Runtipi)
+HERMES_LAUNCHERS = (".local/bin/hermes", ".local/share/pipx/venvs/hermes-agent/bin/hermes",
+                    ".local/pipx/venvs/hermes-agent/bin/hermes", ".local/share/uv/tools/hermes-agent/bin/hermes")
+
+
+class MainAgent:
+    """Where deliveries to `hermes` (the box's main agent) go. Nothing on a box names it (WAM's unit never passed
+    --main-container and an alongside box's main Hermes is not a container at all), so it is found per delivery:
+      1. --main-container, when given (as before);
+      2. the host Hermes of an alongside box: --main-hermes-home, else alongside.json (mode alongside) in the
+         WizardOS home next to the agents folder. The delivery script runs on the host with that Hermes's own
+         Python and HERMES_HOME, as this (the owner's) user: same write, same read-back receipt as in a container;
+      3. the one running hermes-agent engine container of a fresh box.
+    Otherwise main_delivery_unavailable, as before."""
+
+    def __init__(self, agents_root: Path | None, container: str = "", hermes_home: Path | None = None,
+                 python: str = ""):
+        self.root = Path(agents_root) if isinstance(agents_root, (str, Path)) and agents_root else None
+        self.container = container
+        self.hermes_home = Path(hermes_home).expanduser() if hermes_home else None
+        self.python = python
+        self._found: dict = {}
+
+    def host_home(self) -> Path | None:
+        if self.hermes_home:
+            return self.hermes_home
+        if not self.root:
+            return None
+        try:
+            state = json.loads((self.root.parent / "alongside.json").read_text())
+        except (OSError, ValueError):
+            return None
+        agent = state.get("agent") if isinstance(state, dict) and state.get("mode") == "alongside" else None
+        home = agent.get("hermes_home") if isinstance(agent, dict) else None
+        return Path(home) if isinstance(home, str) and Path(home).is_absolute() else None
+
+    @staticmethod
+    def _launcher_python(path: Path, depth: int = 0) -> list[str]:
+        """The interpreter a `hermes` launcher runs: a console script's shebang, or the target of a one-line
+        `exec <path>` shell wrapper (followed once)."""
+        try:
+            real = path.resolve()
+            sibling = real.parent / "python"
+            out = [str(sibling)] if sibling.is_file() else []
+            with open(real, "rb") as f:
+                head = f.read(4096).decode("utf-8", "replace").splitlines()
+        except OSError:
+            return []
+        first = head[0] if head else ""
+        if first.startswith("#!") and "python" in first.rsplit("/", 1)[-1]:
+            exe = first[2:].strip().split()[0]
+            if exe.startswith("/") and not exe.endswith("/env"):
+                out.append(exe)
+        elif first.startswith("#!") and depth == 0:
+            for line in head[1:8]:
+                m = re.match(r"\s*exec\s+(\S+)\s", line + " ")
+                if m and m.group(1).startswith("/"):
+                    out += MainAgent._launcher_python(Path(m.group(1).strip("'\"")), 1)
+                    break
+        return out
+
+    def python_candidates(self, home: Path) -> list[str]:
+        if self.python:
+            return [self.python]
+        repo = home / "hermes-agent"
+        found = [str(repo / "venv/bin/python"), str(repo / ".venv/bin/python")]
+        launchers = [os.environ.get("WIZARD_HERMES_BIN", ""), shutil.which("hermes") or "",
+                     *(str(Path.home() / rel) for rel in HERMES_LAUNCHERS)]
+        for launcher in filter(None, launchers):
+            if Path(launcher).is_file():
+                found += self._launcher_python(Path(launcher))
+        return list(dict.fromkeys(p for p in found if Path(p).is_file() and os.access(p, os.X_OK)))
+
+    def host_python(self, home: Path) -> str:
+        """The first candidate that can open this Hermes's session store; remembered once found."""
+        key = str(home)
+        if self._found.get(key):
+            return self._found[key]
+        env = {**os.environ, "HERMES_HOME": key}
+        probe = "import sys; sys.path.insert(0, sys.argv[1]); import hermes_state; hermes_state.SessionDB"
+        for python in self.python_candidates(home):
+            try:
+                run = subprocess.run([python, "-c", probe, str(home / "hermes-agent")], capture_output=True, text=True,
+                                     timeout=60, env=env, cwd=key)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if run.returncode == 0:
+                self._found[key] = python
+                return python
+        raise RuntimeFailure("main_hermes_python_not_found", 503)
+
+    def deliver_host(self, home: Path, payload: dict) -> dict:
+        clean = delivery_payload({"id": "hermes", "model": {}}, payload)
+        if not (home / "config.yaml").is_file() and not (home / "state.db").is_file():
+            raise RuntimeFailure("main_hermes_home_missing", 503)
+        db = home / "state.db"
+        # The delivery writes as this user: never into another user's Hermes (its files would end up unreadable).
+        if (db if db.exists() else home).stat().st_uid != os.getuid():
+            raise RuntimeFailure("main_hermes_other_user", 409)
+        python = self.host_python(home)
+        clean["hermes_src"] = str(home / "hermes-agent")
+        try:
+            run = subprocess.run([python, "-c", DELIVER_SCRIPT], input=json.dumps(clean), capture_output=True,
+                                 text=True, timeout=120, env={**os.environ, "HERMES_HOME": str(home)}, cwd=str(home))
+        except subprocess.TimeoutExpired:
+            raise RuntimeFailure("delivery_timeout", 504)
+        except OSError:
+            raise RuntimeFailure("main_hermes_python_not_found", 503)
+        return delivery_receipt(run)
+
+    def engine_container(self) -> str:
+        try:
+            run = docker(["ps", "--format", '{{.ID}} {{.Label "com.docker.compose.service"}}'], timeout=30, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        if run.returncode:
+            return ""
+        rows = [line.split(None, 1) for line in run.stdout.splitlines() if len(line.split(None, 1)) == 2]
+        for service in MAIN_ENGINE_SERVICES:
+            hits = [cid for cid, name in rows if name.strip() == service]
+            if len(hits) == 1:
+                return hits[0]
+            if hits:
+                raise RuntimeFailure("main_container_ambiguous", 409)
+        return ""
+
+    def deliver(self, driver, payload: dict) -> dict:
+        main = {"id": "hermes", "model": {}}
+        if self.container:
+            return deliver(driver, main, payload, container=self.container)
+        home = self.host_home()
+        if home:
+            return self.deliver_host(home, payload)
+        delivery_payload(main, payload)   # refuse a bad body before looking for a container
+        cid = self.engine_container()
+        if not cid:
+            raise RuntimeFailure("main_delivery_unavailable", 503)
+        return deliver(driver, main, payload, container=cid, user=self.store_owner(cid))
+
+    @staticmethod
+    def store_owner(cid: str) -> str:
+        """Write as whoever owns the engine's session store (a fresh box runs its Hermes as the owner's uid)."""
+        run = docker(["exec", cid, "stat", "-c", "%u:%g", "/opt/data/state.db"], timeout=30, check=False)
+        owner = run.stdout.strip() if not run.returncode else ""
+        return owner if re.fullmatch(r"[0-9]{1,10}:[0-9]{1,10}", owner) else "hermes"
 
 
 # ---------------------------------------------------------------- file placement (only the agent's inbox, as its uid)
@@ -1598,7 +1763,8 @@ def driver_for(agent: dict, driver, restricted_driver):
     return driver
 
 
-def make_handler(token: str, agents: Agents, driver, main_container: str = "", restricted_driver=None, incognito_manager=None):
+def make_handler(token: str, agents: Agents, driver, main_container: str = "", restricted_driver=None, incognito_manager=None,
+                 main_agent: MainAgent | None = None):
     # Production constructs/reaps the manager before serving. Non-Incognito helper clients and
     # lightweight handler fixtures must not gain a Docker dependency or background reaper.
     manager_lock = threading.Lock()
@@ -1681,10 +1847,9 @@ def make_handler(token: str, agents: Agents, driver, main_container: str = "", r
             agent_id, action = m.groups()
             try:
                 if agent_id == "hermes" and action == "deliver":
-                    # The main agent is not an agent folder; it is delivered to only when the box names its container.
-                    if not main_container:
-                        raise RuntimeFailure("main_delivery_unavailable", 503)
-                    self._json(200, deliver(driver, {"id": "hermes", "model": {}}, payload, container=main_container))
+                    # The main agent is not an agent folder: its container or host Hermes is found per delivery.
+                    main = main_agent or MainAgent(getattr(agents, "root", None), main_container)
+                    self._json(200, main.deliver(driver, payload))
                     return
                 if action.startswith("incognito/"):
                     if not isinstance(payload, dict):
@@ -1807,7 +1972,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="read the Tinfoil key the owner saved in the Tinfoil app from this Docker volume (issue 582)")
     ap.add_argument("--image", default=DEFAULT_IMAGE)
     ap.add_argument("--proxy-image", default=DEFAULT_PROXY_IMAGE)
-    ap.add_argument("--main-container", default="", help="main Hermes container name (enables deliveries to the main agent)")
+    ap.add_argument("--main-container", default="", help="main Hermes container name (default: found on its own)")
+    ap.add_argument("--main-hermes-home", type=Path, help="the host main Hermes's home (default: alongside.json next to "
+                    "the agents folder); deliveries to the main agent are written there")
+    ap.add_argument("--main-hermes-python", default="", help="the host main Hermes's Python (default: found from its "
+                    "install)")
     ap.add_argument("--restricted-runtime-dir", type=Path, default=RESTRICTED_DIR,
                     help="restricted runtime (compose.yml + SOURCE.txt); agents with runtime.isolation=restricted run here")
     args = ap.parse_args(argv)
@@ -1830,7 +1999,8 @@ def main(argv: list[str] | None = None) -> int:
         restricted_driver = RestrictedDriver(agents, args.restricted_runtime_dir, os.environ.get("WIZARD_RESTRICTED_AGENT_IMAGE", ""))
     incognito = IncognitoManager(driver, docker=docker, failure=RuntimeFailure, image=DEFAULT_IMAGE,
         proxy_image=DEFAULT_PROXY_IMAGE, container_for=container_for, owner=args.incognito_owner)
-    handler = make_handler(token, agents, driver, args.main_container, restricted_driver, incognito)
+    main_agent = MainAgent(agents.root, args.main_container, args.main_hermes_home, args.main_hermes_python)
+    handler = make_handler(token, agents, driver, args.main_container, restricted_driver, incognito, main_agent)
     server = None
     def terminate(signum, frame):
         raise SystemExit(0)
