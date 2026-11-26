@@ -24,6 +24,7 @@ const featureScenes = {
   'agent-inbox': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'orb-dump': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'result-reader': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, resultReaderTtlMs: 0 })),
+  'first-chat-goals': kind => scene(kind, ({ root }) => ({ pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, firstChatGoalsTtlMs: 0, schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: true, schedulerIntervalMs: 3_600_000, agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' })),
   'agent-inbox-move': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'private-routing': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), privateRouting: true })),
   'private-routing-edges': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), privateRouting: true, channelStore: true, channelDaily: true, dailyTimezone: 'UTC',

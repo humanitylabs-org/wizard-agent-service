@@ -78,6 +78,22 @@ test('action-card marker never reaches the list preview, main and routed (host-p
     }
   }
 });
+// Issue 650: a first-chat reply carries tap-to-pick reply buttons ([WIZARD_CHOICES_V1]{"choices":[…]}[/WIZARD_CHOICES_V1],
+// wizard-ux core/chat-kit.js choiceList). The buttons are drawn under the reply and never show as text in the list.
+test('reply-buttons marker never reaches the list preview, main and routed (host-profile, container, restricted)', () => {
+  const mark = '[WIZARD_CHOICES_V1]{"choices":["Get on top of my inbox","Find a job","Something else"]}[/WIZARD_CHOICES_V1]';
+  for (const kind of ['main', 'host-profile', 'container', 'restricted']) {
+    const agent = kind === 'main' ? '' : `qa-${kind}`;
+    const base = { id: `choices-${kind}`, title: 'Synthetic', status: 'completed', ...(agent ? { agent } : {}), wizard_last_user_at: 1700000000 };
+    for (const content of [`Hi, I'm your Wizard. What should we start with?\n\n${mark}`, `Hi, I'm your Wizard. What should we start with?\n\n${mark.slice(0, 40)}`]) {
+      const row = listRow({ ...base, latest_message: { role: 'assistant', content, timestamp: 1700000100 } });
+      assert.equal(row.agent, agent, kind);
+      assert.doesNotMatch(row.preview, /WIZARD|CHOICES|inbox|Find a job/, `${kind}: ${row.preview}`);
+      assert.equal(row.preview, "Hi, I'm your Wizard. What should we start with?", kind);
+      assert.equal(normalizeFull({ ...base, latest_message: { role: 'assistant', content } }).preview, row.preview, `${kind} full = slim`);
+    }
+  }
+});
 // wizard-ux issue 1766: the compact list keeps the app a chat started in, so the shell can say a Telegram chat lives in
 // Telegram (no Retry Hermes always refuses). A row with no source carries no key.
 test('list rows keep the chat source (telegram, slack); a row without one has none', () => {

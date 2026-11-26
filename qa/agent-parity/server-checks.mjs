@@ -3106,6 +3106,49 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     setApps(['parity-qa', 'parity-video'])
     assert.doesNotMatch((await call()).content[0].text, /not allowed/u, 'on again: no restart needed')
   },
+  'first-chat-goals': async s => {
+    // Issue 650 (switch wizard/first-chat-goals in the Look file, off by default). Through this kind's own Service
+    // routes: off, a first message's run carries no first-chat note and wizard_tips starts the five fixed tips even when
+    // given a pick; on, the run carries the one note line and the same call builds four tips from the pick.
+    const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/first-chat-goals': { on, at: Date.now() } } })) }
+    const NOTE = 'Five-choice first chat is on'
+    const firstRun = async id => {
+      await s.request('/api/sessions', post({ id }))
+      const before = s.seen.length
+      await admit(s, { session_id: id, input: 'Synthetic: Hi! What can you help me with?' })
+      for (let n = 0; n < 80; n++) {
+        const run = s.seen.slice(before).filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === id).at(-1)
+        if (run) return run.body
+        await new Promise(r => setTimeout(r, 25))
+      }
+      assert.fail(`the first message of ${id} never reached the agent`)
+    }
+    const tips = async args => {
+      const r = await s.agentMcp('tools/call', { name: 'wizard_tips', arguments: args })
+      assert.equal(r.status, 200, 'own gateway credential and transport')
+      const result = (await r.json()).result
+      assert.ok(!result.isError, result.content?.[0]?.text)
+      return JSON.parse(result.content[0].text)
+    }
+    // The tips need the scheduler's timer (WIZARD_SCHEDULER=1 on a box): start this kind's Service again with it.
+    const prior = process.env.WIZARD_SCHEDULER
+    process.env.WIZARD_SCHEDULER = '1'
+    try { await s.restart() } finally { if (prior === undefined) delete process.env.WIZARD_SCHEDULER; else process.env.WIZARD_SCHEDULER = prior }
+    look(false)
+    const off = await firstRun('wizard_parity_first_off')
+    assert.ok(!String(off.instructions || '').includes(NOTE), 'switch off: no first-chat note')
+    const fixed = await tips({ action: 'start', pick: 'Find a job', about: 'synthetic design roles' })
+    assert.equal(fixed.started, true); assert.equal(fixed.pick, undefined, 'switch off: the pick is ignored')
+    assert.equal(fixed.tips.length, 5, 'switch off: the five fixed tips')
+    assert.equal((await tips({ action: 'stop' })).stopped, 5)
+    look(true)
+    const on = await firstRun('wizard_parity_first_on')
+    assert.ok(String(on.instructions || '').includes(NOTE) && on.instructions.includes('First chat: five choices'), 'switch on: the note names the wizard-guide section')
+    const personal = await tips({ action: 'start', pick: 'find a JOB', about: 'synthetic design roles' })
+    assert.equal(personal.pick, 'Find a job'); assert.equal(personal.tips.length, 4, 'switch on: four tips for days 2-5')
+    assert.ok(personal.tips.every(t => t.text.includes('picked "Find a job"')), 'every tip is built from the pick')
+    assert.equal((await tips({ action: 'stop' })).stopped, 4)
+  },
   'capability-registry': async s => {
     // Issue 463: agents find what the box already does (built-ins, host voice service, app jobs) before installing
     // their own. On for everyone (the wizard/capability-registry switch was removed), whatever the Look file holds.

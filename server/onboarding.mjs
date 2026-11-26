@@ -8,6 +8,7 @@
 // occurrence, so it arrives through the ordinary run queue in one "Wizard · Tips" thread.
 import { randomUUID } from 'node:crypto'
 import { resolveWindow } from './scheduler.mjs'
+import { normalizePick, personalTips } from './first-chat.mjs'
 
 export const TIPS_GROUP = 'wizard-tips'
 export const TIPS_THREAD_TITLE = 'Wizard · Tips'
@@ -24,11 +25,12 @@ export const TIPS = [
 
 const tipPrompt = (index) => `Wizard tip ${index + 1} of ${TIPS.length} (${TIPS[index].topic}). Share this with the owner in two or three friendly sentences and suggest one thing to try now:\n${TIPS[index].text}\nEnd with: "Say stop tips to turn these off."`
 
-/** When each tip lands: day 1 a minute after opting in, then each following morning (08:30 owner time). */
-export function tipInstants(now, timezone) {
-  const out = [now + 60_000]
+/** When each tip lands: day 1 a minute after opting in, then each following morning (08:30 owner time). A personal
+ * series (issue 650) has no day-1 tip, the first chat was day 1: its `count` tips land on the next mornings. */
+export function tipInstants(now, timezone, { mornings = false, count = TIPS.length } = {}) {
+  const out = mornings ? [] : [now + 60_000]
   let after = now + 12 * 3600_000
-  for (let i = 1; i < TIPS.length; i += 1) {
+  for (let i = out.length; i < count; i += 1) {
     const at = resolveWindow('morning', timezone, after, () => 0)
     out.push(at)
     after = at + 3600_000
@@ -43,16 +45,20 @@ const brief = (scheduler, job) => {
   return { id: job.id, name: job.name, kind: job.kind, when: p.nextRun, text: job.kind === 'remind' ? job.prompt.slice(0, 200) : '' }
 }
 
-/** Start the drip once per agent. Re-asking while tips are pending returns the same series (no duplicates). */
-export function startTips(scheduler, { agent = 'main', timezone = 'UTC', now = Date.now() } = {}) {
+/** Start the drip once per agent. Re-asking while tips are pending returns the same series (no duplicates).
+ * `pick` (issue 650, only passed while the five-choice first chat switch is on): the day 2-5 tips are built from the
+ * owner's first-chat pick and `about` words instead of the five fixed topics. */
+export function startTips(scheduler, { agent = 'main', timezone = 'UTC', now = Date.now(), pick = '', about = '' } = {}) {
   const existing = scheduler.list().filter((job) => job.group === TIPS_GROUP && job.agent === agent)
   if (existing.some((job) => pending(scheduler, job))) return { started: false, already: true, thread: existing[0].thread, tips: existing.map((job) => brief(scheduler, job)) }
   for (const job of existing) scheduler.delete(job.id)
   const thread = `wizard_tips_${randomUUID()}`
-  const jobs = tipInstants(now, timezone).map((at, index) => scheduler.create({
-    name: `Wizard tip ${index + 1} of ${TIPS.length}`, kind: 'remind', agent, when: { once: new Date(at).toISOString() }, prompt: tipPrompt(index),
+  const personal = normalizePick(pick) ? personalTips({ pick, about }) : null
+  const count = personal ? personal.length : TIPS.length
+  const jobs = tipInstants(now, timezone, { mornings: Boolean(personal), count }).map((at, index) => scheduler.create({
+    name: `Wizard tip ${index + 1} of ${count}`, kind: 'remind', agent, when: { once: new Date(at).toISOString() }, prompt: personal ? personal[index].prompt : tipPrompt(index),
   }, { thread, threadTitle: TIPS_THREAD_TITLE, group: TIPS_GROUP }))
-  return { started: true, thread, tips: jobs.map((job) => brief(scheduler, job)) }
+  return { started: true, thread, ...(personal ? { pick: normalizePick(pick) } : {}), tips: jobs.map((job) => brief(scheduler, job)) }
 }
 
 export function stopTips(scheduler, { agent = 'main' } = {}) {
@@ -79,7 +85,15 @@ const TOOLS = [
   {
     name: 'wizard_tips',
     description: '[WizardOS] Opt the owner in to one Wizard feature tip a day for five days (build an app by voice, My skin, reminders, Store and connectors, change requests), or stop them. Only start when the owner says yes.',
-    inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['start', 'stop', 'status'], description: 'start, stop or status' } }, required: ['action'] },
+    inputSchema: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['start', 'stop', 'status'], description: 'start, stop or status' },
+        pick: { type: 'string', description: 'start, optional: what the owner picked in their first chat (wizard-guide "First chat: five choices")' },
+        about: { type: 'string', description: 'start, optional: anything they added about it, in their own words' },
+      },
+      required: ['action'],
+    },
   },
 ]
 
@@ -90,7 +104,7 @@ const bad = (text) => ({ content: [{ type: 'text', text }], isError: true })
  * Built-in gateway tools for createAgentBridge({ builtins }). `scheduler` may be null (no state path); `running()`
  * says whether the timer is on (WIZARD_SCHEDULER=1). Off means the tools say so rather than promise a delivery.
  */
-export function onboardingTools({ scheduler, running = () => false, timezone = () => 'UTC', now = Date.now, mainAgent = 'hermes' }) {
+export function onboardingTools({ scheduler, running = () => false, timezone = () => 'UTC', now = Date.now, mainAgent = 'hermes', firstChat = () => false }) {
   return {
     list: () => (scheduler ? TOOLS : []),
     async call(name, args = {}, agentId) {
@@ -102,7 +116,10 @@ export function onboardingTools({ scheduler, running = () => false, timezone = (
       try {
         if (name === 'wizard_tips') {
           const action = String(args.action || '')
-          if (action === 'start') return ok(startTips(scheduler, { agent, timezone: tz, now: now() }))
+          // Issue 650: the pick shapes the tips only while the five-choice first chat switch is on; off, it is ignored.
+          let personal = false
+          try { personal = firstChat() === true } catch { personal = false }
+          if (action === 'start') return ok(startTips(scheduler, { agent, timezone: tz, now: now(), ...(personal ? { pick: args.pick, about: args.about } : {}) }))
           if (action === 'stop') return ok(stopTips(scheduler, { agent }))
           if (action === 'status') return ok({ tips: scheduler.list().filter((job) => job.group === TIPS_GROUP && job.agent === agent && pending(scheduler, job)).map((job) => brief(scheduler, job)) })
           return bad('action must be start, stop or status')
