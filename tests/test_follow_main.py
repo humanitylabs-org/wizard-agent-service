@@ -90,7 +90,7 @@ class FollowMainTest(unittest.TestCase):
         self.api = ThreadingHTTPServer(("127.0.0.1", 0), Checks)
         threading.Thread(target=self.api.serve_forever, daemon=True).start()
         self.env = mock.patch.dict(os.environ, {
-            "WAS_SOURCE": str(self.src), "WIZARD_SERVER_RELEASE_ROOT": str(self.root), "WIZARD_FOLLOW_MAIN": "1",
+            "WAS_SOURCE": str(self.src), "WIZARD_SERVER_RELEASE_ROOT": str(self.root),
             "WIZARD_FOLLOW_MAIN_API": f"http://127.0.0.1:{self.api.server_port}", "WAS_DEPLOY": str(deploy),
             "WIZARD_FOLLOW_MAIN_NPM": str(npm), "HOME": str(self.tmp / "home")})
         self.env.start()
@@ -110,18 +110,14 @@ class FollowMainTest(unittest.TestCase):
     def status(self):
         return json.loads((self.root / "follow-main.json").read_text())
 
-    def test_off_changes_nothing(self):
+    def test_no_switch_left_a_stale_off_setting_and_no_service_still_follow_main(self):
         sha = self.merge()
         Checks.runs[sha] = green()
-        with mock.patch.dict(os.environ, {"WIZARD_FOLLOW_MAIN": "0"}):
-            self.assertEqual(fm.follow_once(), {"state": "off"})
-        self.assertFalse((self.root / "follow-main.json").exists())
-        self.assertFalse((self.root / "releases" / f"was-{sha}").exists())
-        self.assertFalse(self.deploy_log.exists())
-
-    def test_switch_unset_asks_the_service_and_an_unreachable_one_reads_off(self):
-        with mock.patch.dict(os.environ, {"WIZARD_FOLLOW_MAIN": "", "WAS_PORT": "9"}):
-            self.assertEqual(fm.follow_once(), {"state": "off"})
+        with mock.patch.dict(os.environ, {"WIZARD_FOLLOW_MAIN": "0", "WAS_PORT": "9"}):
+            out = fm.follow_once()
+        self.assertNotEqual(out["state"], "off")
+        self.assertTrue((self.root / "follow-main.json").exists())
+        self.assertTrue((self.root / "releases" / f"was-{sha}").exists())
 
     def test_current_when_live_is_main(self):
         out = fm.follow_once()

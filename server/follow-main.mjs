@@ -1,17 +1,15 @@
-// Follow main (issue 514, owner switch wizard/follow-main, off by default). The host step
+// Follow main (issue 514, on for everyone on a box whose follow-main timer runs). The host step
 // ops/wizard-agent-service-follow-main.py prepares the newest green main and deploys it, writing follow-main.json
-// beside the releases. This side only reads that file: /wizard/health gains `follow_main` (the host step reads
-// `on` from it), and once the box has been behind main for 30 min the owner gets one notification, but only when
+// beside the releases. This side only reads that file: /wizard/health gains `follow_main`, and once the box has been behind main for 30 min the owner gets one notification, but only when
 // there is a step he can take, named in it (issue 638): the timer stopped, or a prepare/deploy still fails after its
 // retry. A red check on main, checks still running or GitHub unreachable is CI's and the builder's (the "Red main"
 // workflow reruns it once, then files a bug), so it shows in health and tells nobody. One notice per cause until
-// the box catches up, never one per merge. With the switch off, health carries no field and nothing is sent.
+// the box catches up, never one per merge. A box whose timer never ran (no status file) carries no field.
 // A deploy that only waits for the heavy queue (issue 644) is `heavy-busy`: shown in health, sent to nobody. Only a
 // wait longer than any heavy job may run is `heavy-stuck`, and that notice names the job holding the queue.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-export const FOLLOW_MAIN_SWITCH = 'wizard/follow-main'
 export const FOLLOW_MAIN_SCHEMA = 'wizard.follow-main/1'
 export const FOLLOW_MAIN_NOTICE_MS = 30 * 60_000
 // The timer runs every 5 min; a status this old means the host step is not running. A pass that is preparing or
@@ -85,8 +83,8 @@ export function behindMessage(status) {
     `It failed again after a retry. Ask your agent to run wizard-agent-service-deploy ${status.main ?? 'with the newest main'} on this Wizard and fix what it reports.`
 }
 
-export function createFollowMain({ statusPath, on, notifier = null, now = Date.now, noticeMs = FOLLOW_MAIN_NOTICE_MS, staleMs = FOLLOW_MAIN_STALE_MS, busyStaleMs = FOLLOW_MAIN_BUSY_STALE_MS, log = console.error } = {}) {
-  const enabled = () => { try { return Boolean(statusPath) && on?.() === true } catch { return false } }
+export function createFollowMain({ statusPath, notifier = null, now = Date.now, noticeMs = FOLLOW_MAIN_NOTICE_MS, staleMs = FOLLOW_MAIN_STALE_MS, busyStaleMs = FOLLOW_MAIN_BUSY_STALE_MS, log = console.error } = {}) {
+  const enabled = () => Boolean(statusPath)
   const sentPath = statusPath ? join(dirname(statusPath), 'follow-main-notified.json') : ''
   // The causes the owner already heard about in this behind episode (cleared once the box is current again).
   let sent = null
@@ -107,10 +105,10 @@ export function createFollowMain({ statusPath, on, notifier = null, now = Date.n
       renameSync(tmp, sentPath)
     } catch { /* kept in memory; at worst one repeat after a restart */ }
   }
-  /** The status as health shows it: a missing file reads not_installed, an old one stale. */
+  /** The status as health shows it, null when the timer never ran here; an old one reads stale. */
   function status() {
     const found = readFollowMainStatus(statusPath)
-    if (!found) return { state: 'not_installed', reason: 'the follow-main timer has not run on this box' }
+    if (!found) return null
     const checked = Date.parse(found.checked_at ?? '')
     const limit = ['preparing', 'deploying'].includes(found.state) ? Math.max(staleMs, busyStaleMs) : staleMs
     if (!Number.isFinite(checked) || now() - checked > limit) {
@@ -119,15 +117,15 @@ export function createFollowMain({ statusPath, on, notifier = null, now = Date.n
     return found
   }
   return {
-    /** null while off (health unchanged); otherwise { on: true, state, live, main, behind_by, behind_since, reason }. */
+    /** null on a box that does not follow main; otherwise { state, live, main, behind_by, behind_since, reason }. */
     health() {
-      if (!enabled()) return null
-      return { on: true, ...status() }
+      return enabled() ? status() : null
     },
     /** Tell the owner once per cause, after the box has been behind for noticeMs, and only when it is his to act on. */
     async tick() {
       if (!enabled()) return null
       const s = status()
+      if (!s) return null
       if (s.state === 'current') {
         if (sentKeys().size) remember(new Set()) // caught up: the next episode of the same cause is news again
         return null

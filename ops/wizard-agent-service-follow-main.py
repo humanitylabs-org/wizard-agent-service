@@ -1,18 +1,16 @@
 #!/usr/bin/env python3
-"""Follow main on a hand-deployed Agent Service line (issue 514; owner switch wizard/follow-main, off by default).
+"""Follow main on a hand-deployed Agent Service line (issue 514; on wherever its timer is installed).
 
 One pass, run by ops/wizard-agent-service-follow-main.timer every few minutes:
 
-1. Off unless the switch is on: WIZARD_FOLLOW_MAIN=1 forces it on, =0 forces it off; unset asks the running
-   Service (GET /wizard/health -> follow_main.on, which follows the owner's Look-file switch). Off = no change.
-2. Read origin/main. When the live release (current/RELEASE_SHA) is main, write state `current` and stop.
-3. Wait for GitHub's required checks on that exact commit (test, gitleaks, validate). CI is the remote worker
+1. Read origin/main. When the live release (current/RELEASE_SHA) is main, write state `current` and stop.
+2. Wait for GitHub's required checks on that exact commit (test, gitleaks, validate). CI is the remote worker
    that already ran the full suite on this sha, so nothing heavy runs on the box.
-4. Prepare the immutable release ~/.local/share/wizard-mobile-server/releases/was-<sha>: git archive of the
+3. Prepare the immutable release ~/.local/share/wizard-mobile-server/releases/was-<sha>: git archive of the
    commit + `npm ci --omit=dev` (pure-JS dependencies), RELEASE_SHA and SERVER_TREE, renamed into place.
-5. Run the box's deploy helper with that sha (the installed ~/.local/bin/wizard-agent-service-deploy, else the
+4. Run the box's deploy helper with that sha (the installed ~/.local/bin/wizard-agent-service-deploy, else the
    release's own copy). It refuses rewinds, skips the drain while the run keeper is up, and rolls back on failure.
-6. Write follow-main.json beside the releases (state, live, main, behind_by, behind_since, reason). The Service
+5. Write follow-main.json beside the releases (state, live, main, behind_by, behind_since, reason). The Service
    reads it for /wizard/health and tells the owner inside Wizard once the box has been behind for 30 min.
 
 A failed prepare or deploy of the same commit is retried after WIZARD_FOLLOW_MAIN_RETRY_S (default 1800) s.
@@ -66,7 +64,6 @@ def settings() -> dict:
         "src": env_path("WAS_SOURCE", home / "apps/wizard-agent-service"),
         "root": root,
         "status": env_path("WIZARD_FOLLOW_MAIN_STATUS", root / "follow-main.json"),
-        "port": int(os.environ.get("WAS_PORT", "8923")),
         "api": os.environ.get("WIZARD_FOLLOW_MAIN_API", "https://api.github.com").rstrip("/"),
         "retry_s": float(os.environ.get("WIZARD_FOLLOW_MAIN_RETRY_S", "1800")),
         "deploy": os.environ.get("WAS_DEPLOY", ""),
@@ -90,17 +87,6 @@ def run(cfg: dict, *args: str, cwd: Path | None = None, timeout: float = 900) ->
 def last_line(text: str) -> str:
     lines = [line.strip() for line in (text or "").splitlines() if line.strip()]
     return lines[-1][-300:] if lines else ""
-
-
-def switch_on(cfg: dict) -> bool:
-    forced = os.environ.get("WIZARD_FOLLOW_MAIN")
-    if forced in {"1", "0"}:
-        return forced == "1"
-    try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{cfg['port']}/wizard/health", timeout=5) as r:
-            return json.loads(r.read() or b"{}").get("follow_main", {}).get("on") is True
-    except Exception:  # noqa: BLE001 - an unreachable or older Service reads as off
-        return False
 
 
 def read_status(cfg: dict) -> dict:
@@ -281,8 +267,6 @@ def plain(text: str) -> str:
 
 def follow_once(cfg: dict | None = None) -> dict:
     cfg = cfg or settings()
-    if not switch_on(cfg):
-        return {"state": "off"}
     prior = read_status(cfg)
     live = live_sha(cfg)
     try:
