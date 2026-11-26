@@ -183,6 +183,34 @@ describe('private mode on an existing box (issue 626)', () => {
     expect(onCheck.agents.find((a: any) => a.id === 'private')).toMatchObject({ company: 'Tinfoil', private_inference: true, is_default: true })
   })
 
+  it('wizard-os#929: an app declares personal data with personal_data (a label only); undeclared apps are not personal', async () => {
+    const b = await box()
+    const apps = [
+      ...APPS.filter((a) => a.id !== 'messenger'),
+      { id: 'messenger', name: 'Messenger', status: 'running', view: { url: '/messenger/' }, mcp: { url: 'http://messenger/mcp' }, personal_data: 'reads your messages' },
+      { id: 'photos', name: 'Photos', status: 'running', view: { url: '/photos/' }, personal_data: true },
+      { id: 'game', name: 'Game', status: 'running', view: { url: '/game/' }, personal_data: '' },
+      { id: 'wizard-notes2', name: 'Diary', status: 'running', view: { url: '/diary/' }, privacy: 'private', personal_data: '  reads your\n notes.  ' },
+    ]
+    writeFileSync(join(b.dir, 'apps.json'), JSON.stringify({ schema: 1, apps }))
+    const check = (await b.call('GET', '/wizard/v1/privacy-check')).json
+    const row = (id: string) => check.apps.find((a: any) => a.app_id === id)
+    expect(row('messenger')).toMatchObject({ personal_data: true, personal_data_reads: 'reads your messages' })
+    expect(row('photos').personal_data).toBe(true)
+    expect(row('photos')).not.toHaveProperty('personal_data_reads')
+    expect(row('wizard-notes2')).toMatchObject({ personal_data: true, personal_data_reads: 'reads your notes' })
+    expect(row('game').personal_data).toBe(false)
+    expect(row('meditate').personal_data).toBe(false)
+    // The install sheet's read: the label is reported, and nothing about who can use the app changes.
+    const sheet = (await b.call('GET', '/wizard/v1/apps/messenger/agents')).json
+    expect(sheet).toMatchObject({ privacy: 'standard', personal_data: true, personal_data_reads: 'reads your messages' })
+    expect(sheet).not.toHaveProperty('needs_private_agent')
+    expect(sheet.agents.find((a: any) => a.id === 'hermes').enabled).toBe(true)
+    const game = (await b.call('GET', '/wizard/v1/apps/game/agents')).json
+    expect(game).not.toHaveProperty('personal_data')
+    expect(game).not.toHaveProperty('personal_data_reads')
+  })
+
   it('helpers: provider company and which schedules run on an app', () => {
     expect(providerCompany('openai-codex')).toBe('OpenAI')
     expect(providerCompany('claude-subscription-directsdk-experimental')).toBe('Anthropic')

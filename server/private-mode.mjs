@@ -18,7 +18,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
-import { MAIN_AGENT_ID, PRIVATE_DATA_SLOTS, isConfidentialProvider, isPrivateApp, isStandardOnlyApp } from './agents.mjs'
+import { MAIN_AGENT_ID, isConfidentialProvider, isPersonalDataApp, isStandardOnlyApp, personalDataReads } from './agents.mjs'
 
 export const PRIVATE_MODE_SWITCH = 'wizard/private-mode'
 export const PRIVATE_MODE_SCHEMA = 'wizard.private-mode/1'
@@ -52,8 +52,9 @@ export function providerCompany(provider) {
   return provider
 }
 
-/** The app's own personal-data declaration: the `privacy: private` tag or a private-data slot it provides. */
-export const isPersonalDataApp = (app) => isPrivateApp(app) || (Array.isArray(app?.provides) && app.provides.some((slot) => PRIVATE_DATA_SLOTS.includes(slot)))
+/** The app's own personal-data declaration: `personal_data: <what it reads>`, the `privacy: private` tag or a
+ * private-data slot it provides (agents.mjs, wizard-os#929). */
+export { isPersonalDataApp }
 
 /** A Service schedule that runs on an app: it names the app's skill, or its prompt or name names the app. */
 export function jobRunsOnApp(job, app) {
@@ -422,7 +423,8 @@ export function createPrivateMode({ on, registry, agentsDir, appsJsonPath = '', 
         const sendsTo = boundTo.has(app.id) ? byId.get(boundTo.get(app.id)) ?? null : null
         apps.push({
           app_id: app.id, label: typeof app.name === 'string' && app.name.trim() ? app.name.trim() : app.id,
-          personal_data: isPersonalDataApp(app), standard_only: isStandardOnlyApp(app),
+          personal_data: isPersonalDataApp(app), ...(isPersonalDataApp(app) && personalDataReads(app) ? { personal_data_reads: personalDataReads(app) } : {}),
+          standard_only: isStandardOnlyApp(app),
           agents: using.map((agent) => ({ id: agent.id, label: agent.label, privacy: agent.privacy, company: agent.company })),
           lines: using.map((agent) => `${app.name || app.id} → ${agent.label} → ${agent.company ?? 'unknown'}`),
           ...(sendsTo ? { sends_work_to: { id: sendsTo.id, label: sendsTo.label, privacy: sendsTo.privacy, company: sendsTo.company } } : {}),
