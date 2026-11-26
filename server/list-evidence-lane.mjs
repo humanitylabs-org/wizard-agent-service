@@ -4,7 +4,7 @@ import { createListEvidenceReader } from './list-evidence.mjs'
 // One worker per service, bounded request batches supplied by projectListSlices, plus the Chats list's other reads of
 // Hermes' state.db (issue 584: revision, first posts, archive, and a routed agent's own state.db). No controllers, write
 // handles or credentials cross here; a routed agent's path is only the state.db file the Service already reads.
-export function createListEvidenceLane({ hermesStatePath, enabled = true, log = console.log,
+export function createListEvidenceLane({ hermesStatePath, enabled = true, log = console.log, label = 'evidence',
   workerUrl = new URL('./list-evidence-worker.mjs', import.meta.url), timeoutMs = 120_000 } = {}) {
   let worker, failed = false, closed = false, sequence = 0, fallback
   const pending = new Map()
@@ -14,7 +14,7 @@ export function createListEvidenceLane({ hermesStatePath, enabled = true, log = 
   const fail = () => {
     if (failed || closed) return
     failed = true
-    log('[list-cache] evidence worker unavailable; using the in-thread reader')
+    log(`[list-cache] ${label} worker unavailable; using the in-thread reader`)
     const old = worker; worker = null; void old?.terminate().catch(() => undefined)
     for (const entry of pending.values()) { clearTimeout(entry.timer); entry.reject(new Error('list evidence worker unavailable')) }
     pending.clear()
