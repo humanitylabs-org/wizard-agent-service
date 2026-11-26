@@ -216,6 +216,9 @@ server = createWizardServer({
   // Private first (issue 545): a fresh install's default agent is a private Tinfoil agent; Claude/ChatGPT switch on
   // the standard agent. Follows the owner's `wizard/private-first-setup` switch; '1' forces it on, '0' off.
   privateFirst: envChoice(process.env.WIZARD_PRIVATE_FIRST),
+  // Command approvals for container agents (issue 597): follows the owner's `wizard/agent-approvals` switch; '1'
+  // forces it on, '0' off.
+  agentApprovals: envChoice(process.env.WIZARD_AGENT_APPROVALS),
   // Local app routes (wizard-app-manager issue 629): on for everyone; '0' turns them off on this box.
   localAppRoutes: envChoice(process.env.WIZARD_LOCAL_APP_ROUTES),
   // Graceful restart (issue 480): /wizard/v1/restart lets a restarter hold new sends (saved, launched by the next

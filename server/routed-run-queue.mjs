@@ -7,6 +7,18 @@ import { DurableRunQueue, queuedInputTextOf } from './run-queue.mjs'
 import { readSteerResentHttp } from './hermes-http-readers.mjs'
 import { normalizeProviderPreflightFailure, projectProviderSignInHistory, projectProviderSignInEvent } from './run-provider-failure.mjs'
 const terminal = new Set(['completed','failed','cancelled','interrupted'])
+/**
+ * Issue 597: stock Hermes keeps a run's last `approval` on its status after the prompt's window closed (the status
+ * stays waiting_for_approval until the next status change), so a card looks answerable after the agent already gave
+ * up. With an owner-sized window set for the agent (windowS, from its config.yaml), the prompt says when it closes.
+ */
+export function withApprovalWindow(payload, windowS, nowS = Date.now() / 1000) {
+  if (!(windowS > 0) || !payload || typeof payload !== 'object') return payload
+  const approval = payload.approval
+  if (!approval || typeof approval !== 'object' || !Number.isFinite(approval.timestamp)) return payload
+  const expiresAt = approval.timestamp + windowS
+  return { ...payload, approval: { ...approval, window_s: windowS, expires_at: expiresAt, ...(nowS >= expiresAt ? { expired: true } : {}) } }
+}
 const json = (status, payload) => new Response(JSON.stringify(payload),{status,headers:{'Content-Type':'application/json'}})
 export function createRoutedQueues({ registry, queuedHistory, restoreOwnerTurns = null, keepOwnerTurns = false, own, pollIntervalMs = 1500, maxActive = 8, onStatus, onRun, onDispatch, decorateDispatch, providerAccessRecovery = false, providerAccessWindowSeconds, providerFailureDismissed, providerSignInReady = null, launchWaitMs, launchHold = null }) {
   const entries = new Map()
@@ -129,7 +141,11 @@ export function createRoutedQueues({ registry, queuedHistory, restoreOwnerTurns 
       await queue.tick(true)
       let record=queue.get(match[1]);if(!record)return json(404,{error:'not_found'})
       const action=match[2]
-      if(method==='GET'&&!action)return json(200,queue.publicPayload(record))
+      const windowS = registry.approvalWindow?.(agent) || 0
+      if(method==='GET'&&!action)return json(200,withApprovalWindow(queue.publicPayload(record),windowS))
+      // An answer after the window closed would be accepted by nobody (the agent already moved on): refuse it here.
+      if(method==='POST'&&action==='approval'&&withApprovalWindow(record.payload,windowS)?.approval?.expired===true)
+        return json(409,{error:'approval_expired',message:`This approval closed after ${Math.round(windowS/60)} minutes without an answer, and the agent moved on. Ask it to try again.`})
       if(method==='POST'&&action==='stop') {
         queue.markOwnerStop(record.publicRunId)
         if(!record.upstreamRunId){record=await queue.cancel(record.publicRunId);return json(200,queue.publicPayload(record))}
