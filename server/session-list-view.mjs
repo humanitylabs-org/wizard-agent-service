@@ -36,12 +36,16 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
     while (cleanMemoChars > CLEAN_MEMO_CHARS) { const [oldest] = CLEAN_MEMO.keys(); cleanMemoChars -= oldest.length; CLEAN_MEMO.delete(oldest); }
     return out;
   };
+  // A reply-buttons group as plain text: its labels in brackets, the way shells that can't draw buttons show it.
+  const buttonLabels = j => { try { const b = JSON.parse(j)?.buttons; return Array.isArray(b) ? ' ' + b.map(x => `[${String(x?.label ?? '').trim()}]`).join(' ') + ' ' : ' ' } catch { return ' ' } };
   const cleanText = s => s
     .replace(/\[WIZARD_FILES_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_FILES_V1\]/g, (_, j) => chipLabel(j))
     .replace(/\[WIZARD_FILE_CHIPS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_FILE_CHIPS_V1\]/g, (_, j) => chipLabel(j))
     .replace(/\[WIZARD_IMAGE_INTENT_V1\][\s\S]*?\[\/WIZARD_IMAGE_INTENT_V1\]/g, ' ')
     .replace(/\[WIZARD_TWEAK_V1\](?:[\s\S]*?\[\/WIZARD_TWEAK_V1\]|[\s\S]*$)/g, ' ') // a reply's tweak card (wizard-ux core/chat-kit.js tweakIds); unterminated: to the end
     .replace(/\[WIZARD_ACTION_V1\](?:[\s\S]*?\[\/WIZARD_ACTION_V1\]|[\s\S]*$)/g, ' ') // an app's action card (wizard-ux core/chat-kit.js actionIds, issue 1463)
+    .replace(/\[WIZARD_BUTTONS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_BUTTONS_V1\]/g, (_, j) => buttonLabels(j)) // reply buttons: their labels as text (wizard-ux issue 1889)
+    .replace(/\[WIZARD_(?:BUTTONS|TAPS)_V1\](?:[\s\S]*?\[\/WIZARD_(?:BUTTONS|TAPS)_V1\]|[\s\S]*$)/g, ' ') // the owner's taps (the Tapped lines stay); unterminated: to the end
     .replace(/^Please use the attached files?\.\s*/, '')
     .replace(/<memory-context>[\s\S]*?<\/memory-context>/g, ' ')
     .replace(/\[(?:Browser dogfooding|System note)[^\]]*\][\s\S]*$/m, ' ')
