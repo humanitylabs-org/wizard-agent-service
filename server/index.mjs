@@ -218,6 +218,8 @@ server = createWizardServer({
   privateFirst: envChoice(process.env.WIZARD_PRIVATE_FIRST),
   // Private mode on an existing box (issue 626): follows the owner's `wizard/private-mode` switch; '1' forces it on, '0' off.
   privateMode: envChoice(process.env.WIZARD_PRIVATE_MODE),
+  // Private routing (issue 629): follows the owner's `wizard/private-routing` switch; '1' forces it on, '0' off.
+  privateRouting: envChoice(process.env.WIZARD_PRIVATE_ROUTING),
   // Command approvals for container agents (issue 597): follows the owner's `wizard/agent-approvals` switch; '1'
   // forces it on, '0' off.
   agentApprovals: envChoice(process.env.WIZARD_AGENT_APPROVALS),

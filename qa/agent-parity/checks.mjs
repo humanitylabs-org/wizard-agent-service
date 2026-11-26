@@ -24,6 +24,7 @@ const featureScenes = {
   'agent-inbox': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'orb-dump': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'agent-inbox-move': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json') })),
+  'private-routing': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), privateRouting: true })),
   'sent-log': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), agentInboxNow: () => sentClock.at ?? Date.now() })),
   'agent-alerts': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), channelStore: true, channelDaily: true, dailyTimezone: 'UTC', schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),
   'agent-sweep': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), channelStore: true, channelDaily: true, dailyTimezone: 'UTC', schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),

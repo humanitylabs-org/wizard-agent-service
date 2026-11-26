@@ -1089,6 +1089,75 @@ export const serverChecks = {
   // failed. On main a new thread's first typed message is a typed row with would_route, an orb row links to the
   // visible thread it opened, and /correct is Open / Send to inbox. On every other kind the orb's main agent is not in
   // the scene: dumps cannot start (the row shows failed) and that kind's own turns never make main Sent rows.
+  // Issue 629 (switch wizard/private-routing, on in this scene): with a private default agent the orb route names the
+  // agent each take is for, with the owner's exact words. Main and host-profile cannot hold a private default here,
+  // so there the answer must stay exactly today's.
+  'private-routing': async s => {
+    const { createServer } = await import('node:http')
+    const prompts = []
+    const answer = (req, res) => { let b = ''; req.on('data', c => { b += c }); req.on('end', () => {
+      const body = JSON.parse(b)
+      prompts.push(body.messages[0].content)
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ route: 'agent', summary: 'router rewrite', personal: /Messenger/u.test(body.messages[1].content) }) } }] }))
+    }) }
+    const fake = createServer(answer)
+    await new Promise(r => fake.listen(0, '127.0.0.1', r))
+    // The same fake on 127.0.0.2: it answers, but its host is not one privateRouter() trusts (Linux; elsewhere an
+    // unresolvable host stands in).
+    const other = createServer(answer)
+    const otherHost = await new Promise(r => { other.once('error', () => r('')); other.listen(0, '127.0.0.2', () => r(`127.0.0.2:${other.address().port}`)) })
+    try {
+      const settingsPath = join(s.root, 'os', 'settings.json')
+      const current = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {}
+      mkdirSync(dirname(settingsPath), { recursive: true })
+      const loopback = { endpoint: `http://127.0.0.1:${fake.address().port}/v1/chat/completions`, model: 'fixture-router' }
+      const write = extra => writeFileSync(settingsPath, JSON.stringify({ ...current, fast_router: loopback, ...extra }))
+      const say = async (text, extra = {}) => (await s.raw('/wizard/v1/route', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, apps: [], ...extra }) })).json()
+      if (s.kind !== 'main') s.setSupervisorSeal('private', false)
+      write(s.kind === 'main' ? {} : { agents: { default_agent_id: s.id } })
+      const agents = (await (await s.raw('/wizard/v1/agents')).json()).agents
+      const privateDefault = agents.find(a => a.is_default && a.privacy === 'private')
+      if (!privateDefault) {
+        assert.ok(['main', 'host-profile'].includes(s.kind), `${s.kind}: the private agent can be the default`)
+        const r = await say('What did Sam say in Messenger yesterday')
+        assert.deepEqual(r.cmd, { route: 'agent', summary: 'router rewrite', personal: true }, `${s.kind}: no private default, today's answer`)
+        assert.ok(!prompts.some(p => p.includes('PRIVATE LABEL')), `${s.kind}: no label asked without a private default`)
+        return
+      }
+      assert.equal(privateDefault.id, s.id)
+      const exact = text => ({ route: 'agent', summary: text })
+      let text = 'Parity synthetic agent, what is new today'
+      assert.deepEqual((await say(text)).cmd, { ...exact(text), agent_id: s.id, chosen_by: 'name' }, `${s.kind}: a spoken agent name`)
+      assert.equal(prompts.length, 0, `${s.kind}: a name settles it without any model`)
+      text = 'Use fixture to review this plan'
+      assert.deepEqual((await say(text)).cmd, { ...exact(text), agent_id: 'hermes', model: 'fixture-model', provider: 'anthropic', chosen_by: 'name' }, `${s.kind}: a spoken model name`)
+      text = 'What did Sam say in Messenger yesterday'
+      assert.deepEqual((await say(text)).cmd, { ...exact(text), agent_id: s.id, chosen_by: 'private_label' }, `${s.kind}: personal data`)
+      assert.ok(prompts.at(-1).includes('PRIVATE LABEL'), `${s.kind}: the private router is asked for the label`)
+      text = 'Fix the Chats scroll bug'
+      const fix = await say(text)
+      assert.deepEqual(fix.cmd, { ...exact(text), agent_id: s.id, chosen_by: 'default' }, `${s.kind}: no name goes to the private default`)
+      const thread = 'wizard_1764000000000_aaaaaaaaaaaa'
+      text = 'and what about Plato'
+      assert.deepEqual((await say(text, { thread_id: thread, thread_agent: 'hermes' })).cmd, { ...exact(text), agent_id: 'hermes', thread_id: thread, chosen_by: 'thread' }, `${s.kind}: a reply stays in the thread in front`)
+      text = 'and in Messenger?'
+      assert.deepEqual((await say(text, { thread_id: thread, thread_agent: 'hermes' })).cmd, { ...exact(text), agent_id: s.id, chosen_by: 'private_label' }, `${s.kind}: personal data leaves a standard thread`)
+      const row = (await (await s.raw(`/wizard/v1/sent/${fix.sent_id}`)).json()).row
+      assert.deepEqual([row.agent_id, row.chosen_by], [s.id, 'default'], `${s.kind}: the Sent row keeps the choice`)
+      const fixed = await (await s.raw(`/wizard/v1/sent/${fix.sent_id}/correct`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ agent: 'hermes' }) })).json()
+      assert.equal(fixed.example?.wanted, 'hermes', `${s.kind}: one correction example`)
+      // A non-private router is never called: rules decide.
+      const asked = prompts.length
+      write({ agents: { default_agent_id: s.id }, fast_router: { endpoint: `http://${otherHost || 'router.parity.invalid'}/v1/chat/completions`, model: 'fixture-router' } })
+      text = 'What did Sam say in Messenger yesterday'
+      assert.deepEqual((await say(text)).cmd, { ...exact(text), agent_id: s.id, chosen_by: 'rules_only', rule: 'default' }, `${s.kind}: rules only`)
+      assert.equal(prompts.length, asked, `${s.kind}: zero calls to a non-private router`)
+      write({ agents: { default_agent_id: s.id } })
+      await say('Ask about the weather')
+      assert.ok(prompts.at(-1).includes('"Fix the Chats scroll bug" -> "personal": false'), `${s.kind}: the correction reaches the private router`)
+    } finally { await new Promise(r => fake.close(r)); if (otherHost) await new Promise(r => other.close(r)) }
+  },
   'sent-log': async s => {
     const { createServer } = await import('node:http')
     let reply = { route: 'agent', summary: 'x' }

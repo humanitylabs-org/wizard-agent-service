@@ -132,7 +132,8 @@ import { readArchivedSessions } from './archived-sessions.mjs'
 import { createHermesStateHealth } from './hermes-state-health.mjs'
 import { createMainProviderAttach } from './main-provider-attach.mjs'
 import { createPrivateFirst, PRIVATE_FIRST_SWITCH } from './private-first.mjs'
-import { createPrivateMode, PRIVATE_MODE_SWITCH } from './private-mode.mjs'
+import { createPrivateMode, PRIVATE_MODE_SWITCH, isPersonalDataApp } from './private-mode.mjs'
+import { PRIVATE_ROUTING_SWITCH, routingNames, nameRule, chooseAgent, privateLabelBlock } from './private-routing.mjs'
 import { createPhoneReplyNotes, PHONE_CHAT_REPLIES_SWITCH, CHATS_APP, CHAT_REPLY_TAG } from './phone-reply-notes.mjs'
 export { readArchivedSessions }
 
@@ -3360,6 +3361,10 @@ function buildWizardServer(options, lifetime) {
   // Private mode on an existing box (issue 626, private-mode.mjs): the owner's `wizard/private-mode` switch in the Look
   // file; option privateMode (env WIZARD_PRIVATE_MODE, '1' on / '0' off) wins. Off: nothing here runs.
   const privateModeSwitchOn = createChannelsSwitch({ id: PRIVATE_MODE_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.privateModeTtlMs ?? 3000 })
+  // Private routing (issue 629, private-routing.mjs): the owner's `wizard/private-routing` switch in the Look file; option
+  // privateRouting (env WIZARD_PRIVATE_ROUTING, '1' on / '0' off) wins. Off: the orb route answers exactly as before.
+  const privateRoutingSwitchOn = createChannelsSwitch({ id: PRIVATE_ROUTING_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.privateRoutingTtlMs ?? 3000 })
+  const privateRoutingOn = () => channelPart(options.privateRouting, privateRoutingSwitchOn)
   const privateMode = agents ? createPrivateMode({
     on: () => channelPart(options.privateMode, privateModeSwitchOn), registry: agents, agentsDir, appsJsonPath,
     bindings: () => appBindings,
@@ -4176,6 +4181,37 @@ function buildWizardServer(options, lifetime) {
     }
     return row.route === 'command' ? 'done' : row.final_state || 'unknown'
   }
+  // Issue 629: private routing applies only with the switch on and a private default agent. -> { privateId, names,
+  // privateApps } or null (then the route is exactly today's). Names are read from the registry and the box's model
+  // list on each take, so a new agent or a new sign-in is known at once.
+  const privateRoutingContext = async () => {
+    if (!agents || !privateRoutingOn()) return null
+    let privateId = ''
+    try { privateId = agents.defaultAgentId() } catch { return null }
+    const agent = privateId ? agents.read(privateId) : null
+    if (!agent || agent.privacy !== 'private' || agent.role === 'recovery') return null
+    const [providers, mainOptions] = await Promise.all([
+      agents.providers().catch(() => []),
+      hermesJson('/api/model/options').catch(() => null),
+    ])
+    let privateApps = []
+    try {
+      const apps = appsJsonPath ? JSON.parse(readFileSync(appsJsonPath, 'utf8'))?.apps : []
+      privateApps = (Array.isArray(apps) ? apps : []).filter(isPersonalDataApp).map(app => String(app.name || app.id || '')).filter(Boolean)
+    } catch { privateApps = [] }
+    return { privateId, privateApps, names: routingNames({ agents: agents.list(), providers, mainModel: typeof mainOptions?.model === 'string' ? mainOptions.model : '' }) }
+  }
+  // The thread in front of the owner: { id, agent, private } from the route body's thread_id (+ thread_agent, else the
+  // thread's pin), or null when it is not a thread an agent here owns.
+  const privateRoutingThread = input => {
+    const id = typeof input?.thread_id === 'string' && /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/u.test(input.thread_id) ? input.thread_id : ''
+    if (!id || !agents) return null
+    let agentId = typeof input.thread_agent === 'string' ? input.thread_agent : ''
+    if (!agentId) { try { agentId = agents.pinnedAgent(id) } catch { agentId = '' } }
+    const agent = agentId ? agents.read(agentId) : null
+    if (!agent || agent.role === 'recovery') return null
+    return { id, agent: agent.id, private: agent.privacy === 'private' }
+  }
   const sentView = row => {
     const out = {
       id: row.id, idempotency_key: row.idempotency_key ?? null, at: row.at, source: row.source, text: row.text, route: row.route,
@@ -4188,6 +4224,8 @@ function buildWizardServer(options, lifetime) {
     // needed nothing from him, so it stayed out of Inbox).
     if (row.source === 'reply') Object.assign(out, { wants_reply: row.wants_reply !== false, answer: row.outcome?.answer || '', outcome: row.outcome?.state || null,
       quiet: row.wants_reply === false && ['done', 'fyi'].includes(row.outcome?.state) })
+    // Issue 629: where private routing sent it, and which rule chose that agent.
+    if (row.agent_id) Object.assign(out, { agent_id: row.agent_id, agent_model: row.agent_model || '', chosen_by: row.chosen_by || null })
     if (row.corrected) out.corrected = row.corrected
     if (row.flag) out.flag = row.flag
     if (row.error) out.error = row.error
@@ -4310,6 +4348,21 @@ function buildWizardServer(options, lifetime) {
     const updated = sentLog.update(row.id, { correction_id: moved.example?.id || row.correction_id || null, corrected: { should_reply: shouldReply, at: Date.now() },
       ...(moved.record?.id && !row.record_id ? { record_id: moved.record.id } : {}) })
     return { row: sentView(updated), changed: true, ...(moved.record ? { record: moved.record } : {}) }
+  }
+  // Issue 629: the owner says a privately routed take should have gone to another agent. One agent example (the private
+  // router's label learns only whether that agent is private); the row keeps the correction. Moving the words is the
+  // shell's (it starts them on the chosen agent).
+  const correctSentAgent = (id, wanted) => {
+    const row = sentLog.get(id)
+    if (!row) throw inboxError(404, 'not_found')
+    if (!row.route) throw inboxError(409, 'still_routing')
+    if (!row.agent_id) throw inboxError(409, 'not_privately_routed')
+    const agent = agents?.read(wanted)
+    if (!agent || agent.role === 'recovery' || agent.hidden === true) throw inboxError(400, 'unknown_agent')
+    if (agent.id === row.agent_id) return { row: sentView(row), changed: false }
+    const example = agentInbox.addAgentExample({ utterance: row.text, chosen: row.agent_id, wanted: agent.id, personal: agent.privacy === 'private' })
+    const updated = sentLog.update(row.id, { correction_id: example?.id || row.correction_id || null, corrected: { agent: agent.id, at: Date.now() } })
+    return { row: sentView(updated), changed: true, ...(example ? { example } : {}) }
   }
   const runSweep = async () => {
     if (!agentInboxOn()) throw inboxError(404, 'not_found')
@@ -7297,6 +7350,11 @@ function buildWizardServer(options, lifetime) {
           if (correct) {
             let input
             try { input = JSON.parse((await readBoundedBody(request, 4096)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+            // Issue 629: {agent} = "that should have gone to <agent>" on a privately routed row (switch wizard/private-routing).
+            if (privateRoutingOn() && typeof input?.agent === 'string' && input.should_reply === undefined && sentLog.get(one)?.agent_id) {
+              sendJson(response, 200, correctSentAgent(one, input.agent), { 'Cache-Control': 'no-store' })
+              return
+            }
             if (typeof input?.should_reply !== 'boolean') { sendJson(response, 400, { error: 'invalid_request', detail: 'should_reply must be true or false' }); return }
             sendJson(response, 200, await correctSent(one, input.should_reply), { 'Cache-Control': 'no-store' })
           } else if (one) {
@@ -8159,13 +8217,16 @@ function buildWizardServer(options, lifetime) {
         // Sent log (issue 607): with the agent inbox switch on, every owner capture gets its row first, also when no
         // router is configured. Switch off: exactly today's route.
         const sentOn = agentInboxOn() && ownerLike(principalOf(request)) && !skinOriginRefused(request)
-        if (!fast && !sentOn) { sendJson(response, 404, { error: 'router_not_configured' }); return }
+        // Issue 629: with private routing (switch on, private default agent) the rules route a take even with no router.
+        const privateRoute = ownerLike(principalOf(request)) ? await privateRoutingContext() : null
+        if (!fast && !sentOn && !privateRoute) { sendJson(response, 404, { error: 'router_not_configured' }); return }
         let input
         try { input = JSON.parse((await readBoundedBody(request, 8192)).toString('utf8')) } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
         const { settings } = readSettings(settingsPath)
         // Issue 551: only a shell that handles the dump route asks for it, and only the owner's own same-origin JSON
         // request may start a background task. Anything else routes exactly as before.
-        const dump = input?.accept_dump === true && agentInboxOn() && ownerLike(principalOf(request)) && !skinOriginRefused(request)
+        // Private routing: no dump (its worker runs only on the main, standard agent); the chosen agent's thread instead.
+        const dump = !privateRoute && input?.accept_dump === true && agentInboxOn() && ownerLike(principalOf(request)) && !skinOriginRefused(request)
           && /^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))
         const said = typeof input?.text === 'string' ? input.text.replace(/\s+/gu, ' ').trim() : ''
         let sent = null
@@ -8180,6 +8241,32 @@ function buildWizardServer(options, lifetime) {
         const sentId = sent ? { sent_id: sent.id } : {}
         // Router missing, failing or slow: the take opens a visible thread (the shell's fallback), and its row says so.
         const fallback = (reason, words = said ? replyRules(said) : null) => sentFinish({ route: 'agent', decided_by: 'fallback', rules: [...(words?.rules || []), reason], tags: words?.tags, urgent: words?.urgent, model: fast?.model || '', error: reason })
+        if (privateRoute) {
+          // Issue 629: name rule (no model), then the private router's label (only a private router is ever called),
+          // then the thread in front, then the default (private) agent. The answer carries the owner's exact words.
+          if (!said) { sendJson(response, 400, { error: 'invalid_request', ...sentId }); return }
+          const named = nameRule(said, privateRoute.names)
+          const thread = privateRoutingThread(input)
+          const modelOk = Boolean(fast) && privateRouter(fast)
+          let routed = null, error = ''
+          if (!named && modelOk) {
+            try {
+              routed = await routeUtterance({ input, settings, router: fast, fetchImpl, dump: false,
+                privateLabel: privateLabelBlock({ apps: privateRoute.privateApps, examples: agentInbox.agentExamples(8) }) })
+            } catch (failure) { error = failure?.name === 'AbortError' ? 'router_timeout' : 'router_error' }
+          }
+          const choice = chooseAgent({ named, personal: routed ? routed.why?.personal === true : null, thread, privateId: privateRoute.privateId, rulesOnly: !routed && (!modelOk || Boolean(error)) })
+          let cmd = routed?.cmd
+          if (cmd?.route === 'view' && choice.thread_id) cmd = { route: 'view', summary: said, ...choice }
+          else if (cmd?.route !== 'command') cmd = { route: 'agent', summary: said, ...choice }
+          const words = replyRules(said)
+          sentFinish({ route: cmd.route === 'command' ? 'command' : 'agent', decided_by: named ? 'owner_words' : routed ? routed.why?.decided_by || 'model' : 'fallback',
+            rules: [...(routed?.why?.rules || words.rules), ...(named ? [`name:${named.said}`] : []), ...(!routed && (!modelOk || error) ? ['rules_only'] : [])],
+            model: routed?.model || '', confidence: routed?.why?.confidence, tags: words.tags, urgent: words.urgent, error,
+            ...(cmd.agent_id ? { agent_id: cmd.agent_id, agent_model: cmd.model || '', chosen_by: cmd.chosen_by, thread_id: cmd.thread_id } : {}) })
+          sendJson(response, 200, { cmd, ms: routed?.ms ?? 0, model: routed?.model || '', ...sentId })
+          return
+        }
         try {
           // The owner's own Open / Send to inbox taps (wizard-ux issue 1570) are few-shot examples, and they are his
           // private words: only a private router (checked by endpoint host) ever sees them.
