@@ -156,7 +156,7 @@ describe('private mode on an existing box (issue 626)', () => {
     expect(await b.bindings()).toEqual({ 'wizard-mail': 'hermes', messenger: 'hermes' })
   })
 
-  it('reuses an owner-made private agent and grants #81 standard-chat reads where the box has them', async () => {
+  it('reuses an owner-made private agent and grants DECISIONS 81 standard-chat reads where the box has them', async () => {
     const b = await box({ standardChats: true })
     const made = await b.call('POST', '/wizard/v1/agents', { label: 'Vault', permissions: { preset: 'private', read_standard_chats: false }, model: { provider: 'tinfoil', model: 'glm-5-3', allowed_models: ['glm-5-3'], fallback: false } })
     expect(made.status).toBe(201)

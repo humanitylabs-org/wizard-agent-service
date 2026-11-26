@@ -3,18 +3,18 @@
 // Off by default: with it off nothing here runs, the state answers `on: false` and every change is refused.
 //
 // Turning private mode on is four steps the Settings › Privacy sheet runs one by one (or `on` runs them together):
-//   agent    the private agent, made through the same registry path as #545/#115 (private preset, a confidential
+//   agent    the private agent, made through the same registry path as issue 545 (DECISIONS 115) (private preset, a confidential
 //            provider, no fallback, sealed). An existing private agent is reused, never doubled.
 //   apps     each chosen app leaves every standard agent's list and joins the private agent's (it then reaches only
-//            private agents), its "Sends its work to" binding (#60) points at the private agent and the Service
+//            private agents), its "Sends its work to" binding (DECISIONS 60) points at the private agent and the Service
 //            schedules that run on it move to the private agent. The app's own logins are never touched.
-//   context  Bring your context along (#81): the private agent reads the standard agent's chats and memory, one way.
+//   context  Bring your context along (DECISIONS 81): the private agent reads the standard agent's chats and memory, one way.
 //   default  Start new chats on private AI: the private agent becomes the default agent (voice follows the default).
 // Every change is written to `agents/.private-mode.json` with what it replaced BEFORE it is made, so a retry skips
 // what is done, leaving halfway keeps what's done, and turning private mode off puts back exactly what was there.
-// Turning off keeps the private agent and its history (sealed, #59, never merged); deleting it stays a separate act.
+// Turning off keeps the private agent and its history (sealed, DECISIONS 59, never merged); deleting it stays a separate act.
 // The Privacy check (`privacyCheck()`) lists installed apps x agents x the app's own personal-data declaration x the
-// provider company each agent's model runs at. No extra router: the private agent keeps its own Tinfoil relay (#66).
+// provider company each agent's model runs at. No extra router: the private agent keeps its own Tinfoil relay (DECISIONS 66).
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
@@ -72,7 +72,7 @@ export function jobRunsOnApp(job, app) {
  * on(): the switch. registry: the agent registry. agentsDir: where `.private-mode.json` lives. appsJsonPath: the
  * installed apps. bindings(): the app bindings (or null). scheduler(): the Service scheduler (or null).
  * defaultAgent()/setDefaultAgent(id): the owner's default agent. mainOptions(): the main Hermes's model options.
- * privateFirstAgent(): the private agent #545 set up, when there is one.
+ * privateFirstAgent(): the private agent issue 545 set up, when there is one.
  */
 export function createPrivateMode({ on, registry, agentsDir, appsJsonPath = '', bindings = () => null, scheduler = () => null, defaultAgent, setDefaultAgent, mainOptions = async () => null, privateFirstAgent = () => null, log = () => {} }) {
   const recordPath = join(agentsDir, '.private-mode.json')
@@ -102,7 +102,7 @@ export function createPrivateMode({ on, registry, agentsDir, appsJsonPath = '', 
     const agent = typeof id === 'string' ? registry.read(id) : null
     return agent?.privacy === 'private' && usable(agent) ? agent.id : null
   }
-  /** An earlier private agent to reuse: #545's, else the oldest one on a confidential provider. */
+  /** An earlier private agent to reuse: issue 545's, else the oldest one on a confidential provider. */
   function existingPrivateAgent() {
     let first = null
     try { first = privateFirstAgent?.() || null } catch { first = null }
@@ -285,12 +285,12 @@ export function createPrivateMode({ on, registry, agentsDir, appsJsonPath = '', 
     const agent = registry.read(privateId)
     const priorRead = kept.prior_read_standard ?? agent?.permissions?.read_standard_chats === true
     try {
-      // #81: the private agent's read-only standard_chats tools (history and memory), where the box has the transport.
+      // DECISIONS 81: the private agent's read-only standard_chats tools (history and memory), where the box has the transport.
       await registry.update(privateId, { permissions: { read_standard_chats: true } })
       save({ context: { granted: true, how: 'read_standard_chats', prior_read_standard: priorRead } })
     } catch (error) {
       if (error?.error !== 'standard_chats_unconfigured') throw error
-      // No standard-chats transport on this box: the same one-way read as an agent-data grant (#59 allows it from a
+      // No standard-chats transport on this box: the same one-way read as an agent-data grant (DECISIONS 59 allows it from a
       // standard source to any reader; a private agent is never a source).
       const existed = registry.grants().find((grant) => grant.reader === privateId && grant.source === MAIN_AGENT_ID) ?? null
       try {
