@@ -1,8 +1,9 @@
-// Auto channel emoji (wizard-ux issue 1580, with the Channels switch wizard/chat-channels on): a channel an agent
+// Auto channel emoji (wizard-ux issue 1580, owner switch wizard/channel-auto-emoji, off by default): a channel an agent
 // creates with no emoji in front of its name gets a fitting one from this keyword map ("Money" -> "💰 Money"), stored as
 // the start of the name, the way the shell stores a picked one (wizard-ux issue 1506). A name that already starts with
 // an emoji, or matches no word here, is kept exactly as given (the shell shows 💬). The same list runs in the shell's
-// New channel (wizard-ux web/core/chats.js `CHANNEL_AUTO_EMOJI`): change both together.
+// New channel (wizard-ux web/core/chats.js `CHANNEL_AUTO_EMOJI`) behind the same switch: change both together.
+export const CHANNEL_AUTO_EMOJI_SWITCH = 'wizard/channel-auto-emoji'
 export const CHANNEL_AUTO_EMOJI = [
   ['💰', 'money finance finances budget budgets bank banking invest investing investment investments tax taxes savings expense expenses crypto bitcoin stocks accounting invoice invoices salary pension'],
   ['🧾', 'receipts receipt bills bill'],
