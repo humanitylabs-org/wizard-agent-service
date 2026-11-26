@@ -1311,34 +1311,86 @@ class MainAgent:
                     break
         return out
 
-    def python_candidates(self, home: Path) -> list[str]:
+    def launchers(self, home: Path) -> list[Path]:
+        names = [os.environ.get("WIZARD_HERMES_BIN", ""), str(home / "hermes-agent/.hermes/bin/hermes"),
+                 shutil.which("hermes") or "", *(str(Path.home() / rel) for rel in HERMES_LAUNCHERS)]
+        return [Path(n) for n in dict.fromkeys(filter(None, names)) if Path(n).is_file() and os.access(n, os.X_OK)]
+
+    def runners(self, home: Path):
+        """Ways to run a Python script inside this Hermes's environment, best first (lazily). Each is an argv whose
+        last item is code that runs the script; see command(). A plain interpreter: [python, "-c", ""]."""
         if self.python:
-            return [self.python]
+            yield [self.python, "-c", ""]
+            return
         repo = home / "hermes-agent"
         found = [str(repo / "venv/bin/python"), str(repo / ".venv/bin/python")]
-        launchers = [os.environ.get("WIZARD_HERMES_BIN", ""), shutil.which("hermes") or "",
-                     *(str(Path.home() / rel) for rel in HERMES_LAUNCHERS)]
-        for launcher in filter(None, launchers):
-            if Path(launcher).is_file():
-                found += self._launcher_python(Path(launcher))
-        return list(dict.fromkeys(p for p in found if Path(p).is_file() and os.access(p, os.X_OK)))
+        launchers = self.launchers(home)
+        for launcher in launchers:
+            found += self._launcher_python(launcher)
+        for python in dict.fromkeys(found):
+            if Path(python).is_file() and os.access(python, os.X_OK):
+                yield [python, "-c", ""]
+        # The official installer's launcher has no plain venv: it prints the command it runs Hermes with
+        # (`--print-runtime-command`); its setup code, without the final hermes_cli start, runs our script instead.
+        # Only asked of a launcher that has that flag: any other `hermes` never gets an argument it doesn't know.
+        for launcher in launchers:
+            runtime = self._runtime_command(launcher, home)
+            if runtime:
+                yield runtime
 
-    def host_python(self, home: Path) -> str:
-        """The first candidate that can open this Hermes's session store; remembered once found."""
+    @staticmethod
+    def _knows_runtime_flag(launcher: Path) -> bool:
+        try:
+            text = launcher.resolve().read_bytes()[:262144]
+        except OSError:
+            return False
+        if b"--print-runtime-command" in text:
+            return True
+        m = re.search(rb"^\s*exec\s+'?\"?(/[^\s'\"]+)", text, re.M)   # a one-line sh wrapper (~/.local/bin/hermes)
+        try:
+            return bool(m) and b"--print-runtime-command" in Path(m.group(1).decode()).resolve().read_bytes()[:262144]
+        except (OSError, UnicodeDecodeError):
+            return False
+
+    @staticmethod
+    def _runtime_command(launcher: Path, home: Path) -> list[str] | None:
+        if not MainAgent._knows_runtime_flag(launcher):
+            return None
+        try:
+            run = subprocess.run([str(launcher), "--print-runtime-command"], capture_output=True, text=True, timeout=30,
+                                 env={**os.environ, "HERMES_HOME": str(home)}, stdin=subprocess.DEVNULL)
+            argv = json.loads(run.stdout.strip().splitlines()[-1]) if run.returncode == 0 and run.stdout.strip() else None
+        except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+            return None
+        if not (isinstance(argv, list) and len(argv) >= 3 and all(isinstance(a, str) for a in argv) and argv[-2] == "-c"):
+            return None
+        code = argv[-1]
+        at = code.rfind("runpy.run_module('hermes_cli.main'")
+        if at < 0 or not argv[0].startswith("/"):
+            return None
+        return [*argv[:-1], code[:at]]
+
+    @staticmethod
+    def command(runner: list[str], script: str) -> list[str]:
+        prefix = runner[-1]
+        return [*runner[:-1], prefix + f"exec(compile({script!r}, '<wizard-delivery>', 'exec'))" if prefix else script]
+
+    def host_runner(self, home: Path) -> list[str]:
+        """The first runner that can open this Hermes's session store; remembered once found."""
         key = str(home)
         if self._found.get(key):
             return self._found[key]
         env = {**os.environ, "HERMES_HOME": key}
-        probe = "import sys; sys.path.insert(0, sys.argv[1]); import hermes_state; hermes_state.SessionDB"
-        for python in self.python_candidates(home):
+        probe = f"import sys; sys.path.insert(0, {str(home / 'hermes-agent')!r}); import hermes_state; hermes_state.SessionDB"
+        for runner in self.runners(home):
             try:
-                run = subprocess.run([python, "-c", probe, str(home / "hermes-agent")], capture_output=True, text=True,
-                                     timeout=60, env=env, cwd=key)
+                run = subprocess.run(self.command(runner, probe), capture_output=True, text=True, timeout=60, env=env,
+                                     cwd=key, stdin=subprocess.DEVNULL)
             except (OSError, subprocess.SubprocessError):
                 continue
             if run.returncode == 0:
-                self._found[key] = python
-                return python
+                self._found[key] = runner
+                return runner
         raise RuntimeFailure("main_hermes_python_not_found", 503)
 
     def deliver_host(self, home: Path, payload: dict) -> dict:
@@ -1349,10 +1401,10 @@ class MainAgent:
         # The delivery writes as this user: never into another user's Hermes (its files would end up unreadable).
         if (db if db.exists() else home).stat().st_uid != os.getuid():
             raise RuntimeFailure("main_hermes_other_user", 409)
-        python = self.host_python(home)
+        runner = self.host_runner(home)
         clean["hermes_src"] = str(home / "hermes-agent")
         try:
-            run = subprocess.run([python, "-c", DELIVER_SCRIPT], input=json.dumps(clean), capture_output=True,
+            run = subprocess.run(self.command(runner, DELIVER_SCRIPT), input=json.dumps(clean), capture_output=True,
                                  text=True, timeout=120, env={**os.environ, "HERMES_HOME": str(home)}, cwd=str(home))
         except subprocess.TimeoutExpired:
             raise RuntimeFailure("delivery_timeout", 504)

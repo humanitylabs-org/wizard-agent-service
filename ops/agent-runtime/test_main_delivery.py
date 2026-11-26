@@ -129,6 +129,37 @@ class MainDeliveryTest(unittest.TestCase):
         with mock.patch.dict(os.environ, {"WIZARD_HERMES_BIN": str(wrapper)}), mock.patch.object(ar, "HERMES_LAUNCHERS", ()):
             self.assertTrue(ar.MainAgent(None, hermes_home=home).deliver(object(), PAYLOAD)["verified"])
 
+    def test_official_installer_launcher_runs_the_delivery_in_its_environment(self):
+        home = host_hermes(self.root, with_venv=False)
+        src = home / "hermes-agent"
+        setup = f"import sys; sys.path.insert(0, {str(src)!r}); import runpy; "
+        launcher = src / ".hermes/bin/hermes"
+        launcher.parent.mkdir(parents=True)
+        argv = [sys.executable, "-I", "-c", setup + "runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)"]
+        (launcher.parent / "runtime.json").write_text(json.dumps(argv))
+        launcher.write_text(f"#!/bin/sh\nif [ \"$1\" = --print-runtime-command ]; then cat {launcher.parent / 'runtime.json'}; exit 0; fi\n"
+                            "exec /nonexistent/hermes-python -I -c 'start hermes'\n")
+        launcher.chmod(0o755)
+        with mock.patch.object(ar.shutil, "which", lambda name: None), mock.patch.object(ar, "HERMES_LAUNCHERS", ()), \
+                mock.patch.dict(os.environ, {"WIZARD_HERMES_BIN": ""}):
+            main = ar.MainAgent(None, hermes_home=home)
+            self.assertTrue(main.deliver(object(), PAYLOAD)["verified"])
+            runner = main.host_runner(home)
+        self.assertEqual(runner[:3], [sys.executable, "-I", "-c"])
+        self.assertEqual(self.rows(home), [("app-goals-1", "assistant", "Weekly goals check-in")])
+
+    def test_a_launcher_without_the_runtime_flag_is_never_given_it(self):
+        home = host_hermes(self.root, with_venv=False)
+        marker = self.root / "ran"
+        launcher = self.root / "hermes"
+        launcher.write_text(f"#!/bin/sh\necho \"$@\" > {marker}\n")
+        launcher.chmod(0o755)
+        with mock.patch.object(ar.shutil, "which", lambda name: None), mock.patch.object(ar, "HERMES_LAUNCHERS", ()), \
+                mock.patch.dict(os.environ, {"WIZARD_HERMES_BIN": str(launcher)}):
+            with self.assertRaises(ar.RuntimeFailure):
+                ar.MainAgent(None, hermes_home=home).deliver(object(), PAYLOAD)
+        self.assertFalse(marker.exists())
+
     def test_no_python_that_opens_the_store_is_a_clear_refusal(self):
         home = host_hermes(self.root, with_venv=False)
         with mock.patch.object(ar.shutil, "which", lambda name: None), mock.patch.object(ar, "HERMES_LAUNCHERS", ()), \
