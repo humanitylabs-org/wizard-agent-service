@@ -70,7 +70,7 @@ import { AlertRulesFile, createAlertGate, privateRouter } from './agent-alerts.m
 import { createWorkspaceStore } from './workspaces.mjs'
 import { replyRules, routeUtterance } from './voice-router.mjs'
 import { createFollowMain, FOLLOW_MAIN_SWITCH } from './follow-main.mjs'
-import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER, NEEDS_YOU_REASON_SWITCH } from './background-results.mjs'
+import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX, resolveHelperAttempt, MAX_HELPER_ATTEMPTS } from './delegation-follow-through.mjs'
 import { projectOwnedOpenWork } from './owned-open-work.mjs'
 import { createOwnedOpenWorkReader, createOwnedWorkFollowThrough, ownedWorkStatePathOf, OWNED_WORK_KIND } from './owned-open-work-follow-through.mjs'
@@ -3253,7 +3253,6 @@ function buildWizardServer(options, lifetime) {
   let agentSockets
   // Private first (issue 545, private-first.mjs): the owner's `wizard/private-first-setup` switch in the Look file;
   // option privateFirst (env WIZARD_PRIVATE_FIRST, '1' on / '0' off) wins, because a fresh box has no Look file yet.
-  const needsYouReasonSwitchOn = createChannelsSwitch({ id: NEEDS_YOU_REASON_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.needsYouReasonTtlMs ?? 3000 })
   const privateFirstSwitchOn = createChannelsSwitch({ id: PRIVATE_FIRST_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.privateFirstTtlMs ?? 3000 })
   // Standard first (wizard-ux issue 1800): the owner's Set up private AI in the Welcome turns it on for this box too.
   const privateFirstOn = () => channelPart(options.privateFirst, () => privateFirstSwitchOn() || privateFirst?.optedIn?.() === true)
@@ -5224,8 +5223,6 @@ function buildWizardServer(options, lifetime) {
     now: options.backgroundResultsNow ?? Date.now,
     refreshMs: options.backgroundResultsRefreshMs ?? 15_000,
     busy: options.backgroundResultsBusyReader ?? (id => listTruthReader.busy(id)),
-    // Reason + Dismiss for this Needs you (issue 469): the owner's wizard/needs-you-reason switch; env 1/0 forces it.
-    reasonOn: () => channelPart(options.needsYouReason, needsYouReasonSwitchOn),
     dismissedPath: runQueueStatePath ? resolve(dirname(runQueueStatePath), 'background-dismissed.json') : '',
   })
   // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
@@ -7017,10 +7014,10 @@ function buildWizardServer(options, lifetime) {
         sendJson(response, 200, await backgroundResults.list())
         return
       }
-      // Dismiss a saved result (issue 469, switch wizard/needs-you-reason): {session_id, id?}; no id = the thread's all.
+      // Dismiss a saved result (issue 469, on for everyone): {session_id, id?}; no id = the thread's all.
       if (url.pathname === '/wizard/background-results/dismiss' && request.method === 'POST') {
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
-        if (!backgroundResults?.dismissOn) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (!backgroundResults) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
         if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }

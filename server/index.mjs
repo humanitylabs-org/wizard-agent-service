@@ -138,8 +138,6 @@ server = createWizardServer({
   // Replies into messaging-app chats (issue 427): on for everyone; WIZARD_MESSAGING_REPLIES=0 turns them off.
   messagingReplies: envChoice(process.env.WIZARD_MESSAGING_REPLIES),
   interfaceManual: envChoice(process.env.WIZARD_INTERFACE_MANUAL),
-  // Reason + Dismiss on the saved-result Needs you (issue 469): unset follows wizard/needs-you-reason; 1 on, 0 off.
-  needsYouReason: envChoice(process.env.WIZARD_NEEDS_YOU_REASON),
   // Undated chat titles (issue 518): unset follows the owner's wizard/plain-chat-titles switch; 1 on, 0 off.
   plainClashTitles: envChoice(process.env.WIZARD_PLAIN_CHAT_TITLES),
   // Follow main (issue 514): unset follows the owner's wizard/follow-main switch; 1 on, 0 off. The status file is
