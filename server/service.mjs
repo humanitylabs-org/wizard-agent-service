@@ -132,6 +132,7 @@ import { readArchivedSessions } from './archived-sessions.mjs'
 import { createHermesStateHealth } from './hermes-state-health.mjs'
 import { createMainProviderAttach } from './main-provider-attach.mjs'
 import { createPrivateFirst, PRIVATE_FIRST_SWITCH } from './private-first.mjs'
+import { createPrivateMode, PRIVATE_MODE_SWITCH } from './private-mode.mjs'
 import { createPhoneReplyNotes, PHONE_CHAT_REPLIES_SWITCH, CHATS_APP, CHAT_REPLY_TAG } from './phone-reply-notes.mjs'
 export { readArchivedSessions }
 
@@ -3344,16 +3345,31 @@ function buildWizardServer(options, lifetime) {
     firstRun: () => Boolean(settingsPath) && !readSettings(settingsPath).settings.setup?.seen_at,
     blocked: () => options.privateFirst === false,
     log: line => process.stdout.write(`[private-first] ${line}\n`),
-    // The owner's default agent (settings.json agents.default_agent_id), written the way PUT /wizard/v1/settings does.
-    setDefaultAgent: (id) => {
-      if (!settingsPath) return
-      let stored = {}
-      try { stored = JSON.parse(readFileSync(settingsPath, 'utf8')) } catch { /* new settings store */ }
-      mkdirSync(dirname(settingsPath), { recursive: true, mode: 0o700 })
-      const temporary = `${settingsPath}.${process.pid}.tmp`
-      writeFileSync(temporary, `${JSON.stringify({ ...stored, agents: { ...stored.agents, default_agent_id: id } }, null, 2)}\n`, { mode: 0o600 })
-      renameSync(temporary, settingsPath)
-    },
+    setDefaultAgent: (id) => privateFirstSetDefault(id),
+  }) : null
+  // The owner's default agent (settings.json agents.default_agent_id), written the way PUT /wizard/v1/settings does.
+  function privateFirstSetDefault(id) {
+    if (!settingsPath) return
+    let stored = {}
+    try { stored = JSON.parse(readFileSync(settingsPath, 'utf8')) } catch { /* new settings store */ }
+    mkdirSync(dirname(settingsPath), { recursive: true, mode: 0o700 })
+    const temporary = `${settingsPath}.${process.pid}.tmp`
+    writeFileSync(temporary, `${JSON.stringify({ ...stored, agents: { ...stored.agents, default_agent_id: id } }, null, 2)}\n`, { mode: 0o600 })
+    renameSync(temporary, settingsPath)
+  }
+  // Private mode on an existing box (issue 626, private-mode.mjs): the owner's `wizard/private-mode` switch in the Look
+  // file; option privateMode (env WIZARD_PRIVATE_MODE, '1' on / '0' off) wins. Off: nothing here runs.
+  const privateModeSwitchOn = createChannelsSwitch({ id: PRIVATE_MODE_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.privateModeTtlMs ?? 3000 })
+  const privateMode = agents ? createPrivateMode({
+    on: () => channelPart(options.privateMode, privateModeSwitchOn), registry: agents, agentsDir, appsJsonPath,
+    bindings: () => appBindings,
+    // The Service scheduler is made further down; it is only read at request time.
+    scheduler: () => scheduler,
+    defaultAgent: () => agents.defaultAgentId(),
+    setDefaultAgent: (id) => privateFirstSetDefault(id),
+    mainOptions: () => hermesJson('/api/model/options'),
+    privateFirstAgent: () => privateFirst?.privateAgentId?.() ?? null,
+    log: line => process.stdout.write(`[private-mode] ${line}\n`),
   }) : null
   const agentChatInputs = agents ? new AgentChatInputs(bridgeOsHome ? join(bridgeOsHome, 'agent-chat-inputs.sqlite3') : ':memory:') : null
   if (agentChatInputs) lifetime.own(() => agentChatInputs.close())
@@ -8034,6 +8050,41 @@ function buildWizardServer(options, lifetime) {
         }
         if (request.method !== 'GET') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
         sendJson(response, 200, privateFirst.state(), { 'Cache-Control': 'no-store' })
+        return
+      }
+      if (url.pathname === '/wizard/v1/private-mode' || url.pathname.startsWith('/wizard/v1/private-mode/') || url.pathname === '/wizard/v1/privacy-check') {
+        // Private mode on an existing box (issue 626): GET state / the Privacy check; POST one step, `on` or `off`.
+        // The owner's own page only, the same rules as /wizard/v1/private-first. Switch off: state says `on: false`,
+        // the Privacy check is 404 and every change is refused (409 private_mode_off).
+        if (!privateMode) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        const failed = (error, fallback) => {
+          const status = error instanceof AgentError ? error.status : error?.status
+          sendJson(response, Number.isInteger(status) ? status : 500, { ok: false, error: error?.code || error?.error || fallback })
+        }
+        if (url.pathname === '/wizard/v1/privacy-check') {
+          if (request.method !== 'GET') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+          if (!privateMode.on()) { sendJson(response, 404, { error: 'not_found' }); return }
+          try { sendJson(response, 200, await privateMode.privacyCheck(), { 'Cache-Control': 'no-store' }) } catch (error) { failed(error, 'privacy_check_failed') }
+          return
+        }
+        const action = url.pathname.slice('/wizard/v1/private-mode'.length).replace(/^\//u, '')
+        if (!action) {
+          if (request.method !== 'GET') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+          sendJson(response, 200, privateMode.state(), { 'Cache-Control': 'no-store' })
+          return
+        }
+        const step = { agent: 'agent', apps: 'apps', context: 'context', default: 'setDefault', on: 'turnOn', off: 'turnOff' }[action]
+        if (!step) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
+        const refused = setupWriteRefusal(request, tailnetIngress)
+        if (refused) { sendJson(response, refused, { error: refused === 415 ? 'json_required' : 'cross_origin_request' }); return }
+        let value
+        try { value = JSON.parse((await readBoundedBody(request, 16 * 1024)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid body' }); return }
+        if (!value || typeof value !== 'object' || Array.isArray(value)) { sendJson(response, 400, { error: 'invalid body' }); return }
+        try { sendJson(response, 200, await privateMode[step](value), { 'Cache-Control': 'no-store' }) } catch (error) { failed(error, 'private_mode_failed') }
         return
       }
       // Capability registry (issue 463): the owner reads what the main agent finds, the recorded gaps and which agents
