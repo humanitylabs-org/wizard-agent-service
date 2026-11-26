@@ -62,7 +62,7 @@ export function readStandardMemory(statePath, name, secrets = []) {
   } catch (error) { if (error.code === 'ENOENT') return { name, text: '', missing: true }; throw error }
   finally { if (fd !== undefined) closeSync(fd) }
 }
-// Issue 631 (switch wizard/private-routing): the standard agent's imported History (bring_data history mode, #544):
+// Issue 631 (switch wizard/private-routing): the standard agent's imported History (bring_data history mode, issue 544):
 // facts in its holographic fact store (memory_store.db beside state.db; imported ones carry the `imported` tag and an
 // "[Earlier agent, date]" label) and the Markdown chats, memories and skills under Files/Imported. Read-only, bounded,
 // literal words only. Nothing here opens a private agent's home: the paths are the standard agent's.
