@@ -15,6 +15,7 @@ import { existsSync, readFileSync, mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { atomicStoreWrite, validAgentId } from './thread-reference.mjs'
+import { CHOSEN_BY } from './private-routing.mjs'
 
 // `reply`: a message the owner sent inside an existing thread (wizard-ux issue 1808), route `thread`.
 export const SENT_SOURCES = new Set(['orb', 'side', 'new_chat', 'typed', 'reply'])
@@ -101,7 +102,7 @@ export class SentLog {
   }
 
   /** How the take was routed (after the router answered, failed or was skipped). Returns the row. */
-  finish(id, { route = 'agent', decided_by: by = 'fallback', rules = [], model = '', confidence = null, tags = [], urgent = false, correction_id: correction = null, record_id: record = null, thread_id: thread = null, error = '' } = {}) {
+  finish(id, { route = 'agent', decided_by: by = 'fallback', rules = [], model = '', confidence = null, tags = [], urgent = false, correction_id: correction = null, record_id: record = null, thread_id: thread = null, error = '', agent_id: agentId = '', agent_model: agentModel = '', chosen_by: chosenBy = '' } = {}) {
     const row = this.#row(id)
     if (!row) return null
     Object.assign(row, {
@@ -115,6 +116,8 @@ export class SentLog {
     if (thread && THREAD_ID.test(String(thread))) row.thread_id = thread
     if (error) row.error = clip(error, 80)
     else delete row.error
+    // Issue 629 (switch wizard/private-routing): the agent the take was sent to and which rule chose it.
+    if (validAgentId(agentId) && CHOSEN_BY.has(chosenBy)) Object.assign(row, { agent_id: agentId, chosen_by: chosenBy, agent_model: clip(agentModel, 120) })
     this.#save()
     return { ...row }
   }

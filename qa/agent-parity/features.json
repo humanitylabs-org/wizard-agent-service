@@ -725,6 +725,24 @@
       "policy_exemptions": []
     },
     {
+      "id": "private-routing",
+      "description": "Private routing (issue 629, switch wizard/private-routing in the Look file, off by default; WIZARD_PRIVATE_ROUTING 1 forces it on, 0 off): only with a private default agent, POST /wizard/v1/route answers route agent with agent_id, chosen_by (name, private_label, thread, default, rules_only with rule), model and provider when a model was named, thread_id for the thread in front, and summary = the owner's exact words. Order: a spoken agent name or a model name the box runs (from the registry and the model list, at the start or as ask/tell/use X; the main agent is reached only by a model name) settles it without any model; else the private router (privateRouter endpoint host only) adds a personal label in its one call, which can only pick the private agent; else the thread in front (thread_id plus thread_agent or its pin) keeps a reply; else the default private agent. A non-private or missing router is never called and rules decide with chosen_by rules_only. A dump becomes the chosen agent's visible thread. The Sent row keeps agent_id, agent_model and chosen_by, and POST /wizard/v1/sent/<id>/correct {agent} stores one agent example; the private router gets the latest 8 as few-shot lines. Switch off or no private default: the route answer is exactly today's.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP routes with privateRouting on and a fake fast router on 127.0.0.1 written into settings.json. On container and restricted the scene agent is made private and the default: its spoken name gives chosen_by name with no model call, Use fixture gives the main agent on fixture-model, a Messenger question gives private_label, Fix the Chats scroll bug gives default, a reply with thread_id and thread_agent hermes stays in that thread while a Messenger reply there moves to the private agent, every answer's summary is the exact words, the Sent row keeps agent_id and chosen_by, a correction to hermes is one example that the next router prompt carries, and the same fake on 127.0.0.2 (not a private host) is never called while rules answer rules_only. On main and host-profile no private default exists in the scene (main is standard; a profile agent cannot be the default), so the answer is exactly today's and no label is asked. tests/private-routing.test.ts covers the name rule, the choice order, the Done-when utterances, rules_only with a public router and with none, dumps, the Sent correction, the Look switch and switch-off answers. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/private-routing.mjs",
+        "server/voice-router.mjs",
+        "server/service.mjs",
+        "server/sent-log.mjs",
+        "server/agent-inbox.mjs"
+      ],
+      "reference_tests": [
+        "tests/private-routing.test.ts"
+      ],
+      "fixture": "private-routing",
+      "policy_exemptions": []
+    },
+    {
       "id": "orb-dump",
       "description": "Orb dump route (issue 551, on for everyone since wizard-ux issue 1778, WIZARD_AGENT_INBOX=0 turns it off; only when the shell sends accept_dump): POST /wizard/v1/route sorts a new task request into route dump in the same fast-router call, writes its agent inbox record (state running, title, ask, deadline from words like today or by Friday, privacy private) before answering, then creates a hidden worker thread on the main agent and admits its turn on the durable queue with key wizard-inbox-<record id> and a background-task run note. Reply, tell me, a conversation or a short direct question stay route agent; commands and view answers are unchanged; without accept_dump the routing is exactly as before. A worker that cannot start leaves the record waiting on the owner; the same words again start it again. Issue 1569: only a worker thread the Service started for a capture may be hidden, a hidden thread opens by id, and a thread the owner typed in is shown again and never hidden after that.",
       "layer": "server",

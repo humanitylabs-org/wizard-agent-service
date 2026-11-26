@@ -31,6 +31,8 @@ export const LATE_NOTE = 'Stalled: past its deadline with no news. Open it to se
 export const START_FAILED = 'Could not start this task. Open it or say it again.'
 export const SENT_NOTE = 'Sent here from Chats. Open it to read.'
 export const ROUTE_EXAMPLES = 50
+// Issue 629: the owner's "that should have gone to <agent>" corrections kept for the private router's label.
+export const AGENT_EXAMPLES = 50
 export const STALE_MS = 6 * 3600_000
 const NIGHTLY_MS = 24 * 3600_000
 // Finished worker runs older than this are not checked (their records may have been pruned on purpose).
@@ -125,6 +127,8 @@ export class AgentInboxStore {
         if (parsed.rules_flag && typeof parsed.rules_flag === 'object') this.data.rules_flag = parsed.rules_flag
         // Open / Send to inbox taps (wizard-ux issue 1570): the orb router's few-shot examples, newest first.
         if (Array.isArray(parsed.route_examples)) this.data.route_examples = parsed.route_examples
+        // Agent corrections (issue 629): the private router's label examples, newest first.
+        if (Array.isArray(parsed.agent_examples)) this.data.agent_examples = parsed.agent_examples
         // App doors (issue 569): which app doors asked for alert pings, and the alerts each one was given.
         if (parsed.doors && typeof parsed.doors === 'object' && !Array.isArray(parsed.doors)) this.data.doors = parsed.doors
       }
@@ -267,6 +271,23 @@ export class AgentInboxStore {
     this.data.route_examples = [example, ...(Array.isArray(this.data.route_examples) ? this.data.route_examples : [])].slice(0, ROUTE_EXAMPLES)
     this.#save()
     return { ...example }
+  }
+
+  /** Issue 629 (switch wizard/private-routing): the owner said a take should have gone to another agent. One example;
+   *  `personal` is whether the agent he wanted is private, which is all the private router's label may learn. */
+  addAgentExample({ utterance = '', chosen = '', wanted = '', personal = false } = {}) {
+    const text = clip(utterance, 200)
+    const id = value => typeof value === 'string' && /^[a-z][a-z0-9-]{0,30}$/u.test(value)
+    if (!text || !id(wanted) || (chosen && !id(chosen)) || chosen === wanted) return null
+    const example = { id: `ax_${randomUUID().replaceAll('-', '').slice(0, 16)}`, at: this.now(), utterance: text, chosen: chosen || null, wanted, personal: personal === true }
+    this.data.agent_examples = [example, ...(Array.isArray(this.data.agent_examples) ? this.data.agent_examples : [])].slice(0, AGENT_EXAMPLES)
+    this.#save()
+    return { ...example }
+  }
+
+  /** The latest agent corrections, newest first (issue 629). */
+  agentExamples(limit = 8) {
+    return (Array.isArray(this.data.agent_examples) ? this.data.agent_examples : []).slice(0, Math.max(0, Math.min(AGENT_EXAMPLES, Number(limit) || 0))).map(e => ({ ...e }))
   }
 
   /** The newest correction of exactly these words (issue 607: an earlier correction routes them again), or null. */

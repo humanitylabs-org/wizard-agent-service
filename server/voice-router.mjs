@@ -60,7 +60,7 @@ export function examplesBlock(examples = []) {
   return lines.length ? `The owner moved these earlier requests himself; route similar requests the way he wanted:\n${lines.join('\n')}\n\n` : ''
 }
 
-export function routerSystemPrompt({ settings, apps, timezone, view, force, now, dump = false, examples = [] }) {
+export function routerSystemPrompt({ settings, apps, timezone, view, force, now, dump = false, examples = [], privateLabel = '' }) {
   const place = settings?.owner?.place
   let system = ROUTER_SYSTEM
     .replace('%DUMP%', dump ? DUMP_RULE + examplesBlock(examples) : '')
@@ -76,6 +76,8 @@ export function routerSystemPrompt({ settings, apps, timezone, view, force, now,
       + ' ("yes", "go ahead", "no, wait"), corrections, follow-ups that use "this", "that", "it", and replies to a question it asked.'
       + '\nKeep {"route":"command"} for phone/UI commands. Use {"route":"agent"} only for a NEW request unrelated to that window.'
   }
+  // Issue 629 (switch wizard/private-routing): the private router's one extra label, only ever given to a private router.
+  if (privateLabel) system += privateLabel
   return system
 }
 
@@ -197,7 +199,7 @@ export function dumpTitle(cmd, text) {
  *  the reply rules that matched, the model's confidence. With `dump`, the owner's no-reply words and an exact earlier
  *  correction settle a take without the model; with `router: null` (none configured) only those settle it, anything
  *  else is the 404 it always was. The model's `unsure`, like an answer it could not give, opens a visible thread. */
-export async function routeUtterance({ input, settings, router, fetchImpl = fetch, now, dump = false, examples = [], correction = null, timeoutMs = 30_000 }) {
+export async function routeUtterance({ input, settings, router, fetchImpl = fetch, now, dump = false, examples = [], correction = null, timeoutMs = 30_000, privateLabel = '' }) {
   const text = clip(input?.text, 600)
   if (!text) throw Object.assign(new Error('empty'), { status: 400 })
   const apps = (Array.isArray(input?.apps) ? input.apps : []).map((name) => clip(name, 40)).filter(Boolean).slice(0, 60)
@@ -223,7 +225,7 @@ export async function routeUtterance({ input, settings, router, fetchImpl = fetc
     return { cmd: wanted === 'dump' ? dumpCmd() : { route: 'agent', summary: text }, ms: 0, model: '', why }
   }
   if (!router) throw Object.assign(new Error('router_not_configured'), { status: 404 })
-  const system = routerSystemPrompt({ settings, apps, timezone, view, force, now, dump, examples })
+  const system = routerSystemPrompt({ settings, apps, timezone, view, force, now, dump, examples, privateLabel })
   const started = Date.now()
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -244,6 +246,11 @@ export async function routeUtterance({ input, settings, router, fetchImpl = fetc
   const match = content.match(/\{[\s\S]*\}/u)
   let cmd = {}
   try { cmd = match ? JSON.parse(match[0]) : {} } catch { cmd = {} }
+  // Issue 629: the private label rides on the answer's `why`, never on the command the shell reads.
+  if (privateLabel && cmd && typeof cmd === 'object') {
+    why.personal = cmd.personal === true
+    delete cmd.personal
+  }
   const confidence = Number(cmd?.confidence)
   if (cmd?.confidence != null && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1) why.confidence = confidence
   if (dump && cmd.route === 'unsure') {
