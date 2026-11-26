@@ -114,6 +114,7 @@ import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, importAgentHistorySch
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { handleAgentNotesApi } from './agent-notes-http.mjs'
 import { createLookup } from './lookup.mjs'
+import { createChannelEmoji } from './channel-emoji-ask.mjs'
 import { loadAgentSessionRows, projectProfileSessions, decorateThreadAgent, decorateThreadAgentPayload, handleAgentsApi, handleAppBindingApi, isPrivateAgent, mayOpenAgent, proxyToAgent, resolveProxyAgent } from './agents-http.mjs'
 import { placeAgentFiles } from './agent-files.mjs'
 import { createIncognito, isIncognitoPath } from './incognito.mjs'
@@ -6824,6 +6825,8 @@ function buildWizardServer(options, lifetime) {
 
   // AI Look up (lookup.mjs): stateless fast-model explanation; the broker token lives only in this process's env.
   const aiLookup = createLookup({ env: options.lookupEnv ?? process.env, fetchImpl: rawFetchImpl })
+  // Channel emoji from a model (channel-emoji-ask.mjs, wizard-ux issue 1605): the same broker, its own prompt, name only.
+  const channelEmoji = createChannelEmoji({ env: options.lookupEnv ?? process.env, fetchImpl: rawFetchImpl })
   const incognito = createIncognito({ registry: agents, runtime: agentRuntime, fetchImpl: rawFetchImpl,
     upstreamHost: options.agentUpstreamHost || '',
     proxyContext: { sendJson, isAllowedProxyRequest, secretGuard, mainSecrets: agentCtx?.mainSecrets || [],
@@ -8032,6 +8035,13 @@ function buildWizardServer(options, lifetime) {
         // local Wizard path (served above), so it opens inside Wizard instead of listing as backend-only.
         const localPath = localAppRoutesOn() && loopbackRequest(request, { tailnetIngress }) ? (app) => localLauncherPath(localAppRoutes(), app) : null
         sendJson(response, 200, readApps({ appsJsonPath, launcherPath, localPath }), { 'Cache-Control': 'no-store' })
+        return
+      }
+      if (url.pathname === '/wizard/v1/channel-emoji') {
+        if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (request.headers['sec-fetch-site'] === 'cross-site') { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        await channelEmoji.handle(request, response, { sendJson, readBody: readBoundedBody, isPrivate: id => Boolean(agents) && isPrivateAgent(agents, id) })
         return
       }
       if (url.pathname === '/wizard/v1/lookup/stream') {

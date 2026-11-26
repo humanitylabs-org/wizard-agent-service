@@ -20,3 +20,13 @@ No alternate-model fallback; nothing is persisted or logged. A closed client can
 Private (Tinfoil) agents and incognito threads are never sent to a cloud model.
 
 Tests: `node --test tests/lookup.node.mjs`.
+
+## Channel emoji from a model (wizard-ux issue 1605)
+
+`POST /wizard/v1/channel-emoji {name, agent?}` rides the same broker with its own short system prompt
+(`server/channel-emoji-ask.mjs`). The shell calls it in the background after New channel creates a channel whose
+name has no emoji and matches no keyword (switch `wizard/channel-model-emoji`, off by default). Only the name (at
+most 60 characters) is sent. The answer must be exactly one emoji (not 💬 or #️⃣): `200 {emoji}`; anything else,
+no broker, a busy service or a 7-second deadline is `503 channel_emoji_unavailable`, and the channel keeps 💬. A
+private (Tinfoil) or recovery agent is refused with `403 private_agent` before any call. Owner only; nothing is
+stored or logged.
