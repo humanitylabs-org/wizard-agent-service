@@ -23,6 +23,8 @@ const history = async s => {
   assert.equal(r.status, 200)
   return (await r.json()).data
 }
+// Issue 631: what the private-routing-edges scene's notifications slot was handed.
+export const privateEdgeNotes = []
 const admit = async (s, body) => {
   const r = await s.request('/v1/runs', post({ session_id: 'wizard_parity', ...body }))
   assert.equal(r.status, 202)
@@ -1620,6 +1622,101 @@ export const serverChecks = {
     const owner = (await (await s.raw('/wizard/v1/agent-inbox/sweep')).json()).card
     assert.deepEqual(owner.waiting.items.find(i => i.id === id), { ...owner.waiting.items.find(i => i.id === id), state: 'answered', answer: 'no' })
     for (const r of s.runs.values()) if (r.status === 'running') r.status = 'completed'
+  },
+  // Issue 631 (switch wizard/private-routing, on in this scene): with a private default agent nothing from its work
+  // leaks through the edges. Its alerts and door pings carry no words; the Daily, the signal sweep card (typed in its
+  // thread, posted, or a scheduled sweep made for main) are its own; Open / Send to inbox move its threads through its
+  // own Hermes. A standard agent's alert keeps its words. Main and host-profile cannot have a private default: today's.
+  'private-routing-edges': async s => {
+    privateEdgeNotes.length = 0
+    const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const until = async (read, want, label) => {
+      let last
+      for (let n = 0; n < 80; n++) { last = await read(); if (want(last)) return last; await new Promise(r => setTimeout(r, 25)) }
+      assert.fail(`${label}: ${JSON.stringify(last)}`)
+    }
+    const tokens = join(s.root, 'os', 'app-tokens')
+    mkdirSync(tokens, { recursive: true })
+    const DOOR = `parity-edges-${'e'.repeat(32)}`
+    writeFileSync(join(tokens, 'parity-door'), `${DOOR}\n`)
+    const door = (method, body) => ({ method, headers: { Authorization: `Bearer ${DOOR}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
+    assert.equal((await (await s.raw('/wizard/v1/agent-inbox/doors', door('POST', { pings: true }))).json()).pings, true)
+    const alert = async (agent, item, words) => {
+      const r = await s.raw('/wizard/v1/agent-inbox/events', json('POST', { agent, type: 'payment_failed', source: { app: 'wizard-money', item }, title: `Synthetic ${item} title`, ask: words }))
+      assert.equal(r.status, 201, await r.clone().text())
+      return (await r.json()).record
+    }
+    const pings = async () => (await (await s.raw('/wizard/v1/agent-inbox/pings?keep=1', door('GET'))).json()).pings
+    if (['main', 'host-profile'].includes(s.kind)) {
+      const r = await alert(s.id, 'edge-standard', 'Synthetic standard words')
+      await until(async () => privateEdgeNotes.find(n => n.key === `agent-alert:${r.id}`), Boolean, `${s.kind}: the alert is pushed`)
+      assert.deepEqual(privateEdgeNotes.map(n => [n.title, n.message]), [['Synthetic edge-standard title', 'Synthetic standard words']], `${s.kind}: a standard alert keeps its words`)
+      assert.equal((await pings()).find(p => p.id === r.id)?.ask, 'Synthetic standard words', `${s.kind}: a standard ping keeps its words`)
+      const card = (await (await s.raw('/wizard/v1/agent-inbox/sweep', json('POST', {}))).json()).card
+      assert.equal(card.agent, 'hermes', `${s.kind}: no private default, the main agent's Daily as today`)
+      if (s.kind === 'host-profile') assert.equal((await s.raw('/wizard/v1/agent-inbox/send', json('POST', { agent: s.id, thread_id: 'wizard_parity' }))).status, 409, 'a standard routed thread still does not move')
+      return
+    }
+    s.setSupervisorSeal('private', false)
+    const settingsPath = join(s.root, 'os', 'settings.json')
+    const current = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {}
+    mkdirSync(dirname(settingsPath), { recursive: true })
+    writeFileSync(settingsPath, JSON.stringify({ ...current, agents: { default_agent_id: s.id } }))
+    // 1. A private run's alert: the push and the door ping carry no words; a standard agent's alert is unchanged.
+    const quiet = await alert(s.id, 'edge-private', 'Synthetic codeword PURPLE-OTTER')
+    const loud = await alert('hermes', 'edge-standard', 'Synthetic standard words')
+    await until(async () => privateEdgeNotes.length >= 2 ? privateEdgeNotes : null, Boolean, 'both alerts are pushed')
+    const pushed = Object.fromEntries(privateEdgeNotes.map(n => [n.key, n]))
+    assert.deepEqual([pushed[`agent-alert:${quiet.id}`].title, pushed[`agent-alert:${quiet.id}`].message], ['Wizard: 1 new item', 'Open Wizard to read it.'])
+    assert.ok(!JSON.stringify(pushed[`agent-alert:${quiet.id}`]).includes('PURPLE-OTTER') && !JSON.stringify(pushed[`agent-alert:${quiet.id}`]).includes('edge-private'), 'no task text in the private push')
+    assert.deepEqual([pushed[`agent-alert:${loud.id}`].title, pushed[`agent-alert:${loud.id}`].message], ['Synthetic edge-standard title', 'Synthetic standard words'])
+    const given = Object.fromEntries((await pings()).map(p => [p.id, p]))
+    assert.deepEqual([given[quiet.id].title, given[quiet.id].ask, given[quiet.id].content_free], ['Wizard: 1 new item', '', true])
+    assert.equal(given[loud.id].ask, 'Synthetic standard words')
+    assert.equal((await (await s.raw(`/wizard/v1/agent-inbox/${quiet.id}`)).json()).record.ask, 'Synthetic codeword PURPLE-OTTER', 'inside Wizard the words are still there')
+    // 2. The sweep card goes into the private agent's own Daily (seeded once for it).
+    const card = (await (await s.raw('/wizard/v1/agent-inbox/sweep', json('POST', {}))).json()).card
+    assert.equal(card.agent, s.id, 'the card is the private agent\u2019s')
+    const channels = await (await s.raw(`/wizard/v1/channels?agent=${s.id}`)).json()
+    assert.ok((channels.channels || []).some(c => c.kind === 'daily'), 'the private agent has its own Daily')
+    const rows = async thread => { const r = await (await s.request(`/api/sessions/${encodeURIComponent(thread)}/messages?order=oldest&limit=500&offset=0&view=wizard`)).json(); return r.data || r.messages || [] }
+    assert.equal((await rows(card.thread_id)).at(-1)?.display_kind, 'agent_sweep', 'the card is the last row of the private Daily thread')
+    // Typed in the private agent's thread: a new card, and the turn is told once.
+    const typed = await admit(s, { input: 'Signal sweep' })
+    assert.ok(typed.run_id || typed.id)
+    const fresh = await until(async () => (await (await s.raw('/wizard/v1/agent-inbox/sweep')).json()).card, c => c && c.id !== card.id, 'typing signal sweep posts a card')
+    assert.equal(fresh.agent, s.id)
+    const dispatched = await until(async () => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === 'wizard_parity').at(-1), Boolean, 'the turn is dispatched')
+    assert.match(String(dispatched.body.instructions || ''), /Signal sweep: the owner asked for a signal sweep/u)
+    // A sweep scheduled on the main agent runs on the private agent, in its Daily: main gets no turn and no card.
+    for (const r of s.runs.values()) if (r.status === 'running') r.status = 'completed'
+    const job = await s.raw('/wizard/v1/schedules', post({ name: 'Parity · Private sweep', prompt: 'signal sweep', agent: 'main', enabled: false, when: { every: 3600 }, kind: 'run', thread: 'daily' }))
+    assert.equal(job.status, 201, await job.clone().text())
+    const made = await job.json()
+    assert.equal((await s.raw(`/wizard/v1/schedules/${made.id}/run`, post({}))).status, 202)
+    await s.server.scheduler.tick(false)
+    const occurrence = s.server.scheduler.latest(made.id)
+    assert.equal(occurrence.admitted, 1, occurrence.error || 'admitted')
+    const data = JSON.parse(occurrence.data)
+    assert.deepEqual([data.agent, data.daily], [s.id, (channels.channels || []).find(c => c.kind === 'daily').id], 'the scheduled sweep runs on the private agent in its Daily')
+    await until(async () => (await (await s.raw('/wizard/v1/agent-inbox/sweep')).json()).card, c => c && c.id !== fresh.id && c.agent === s.id, 'the scheduled sweep posts a private card')
+    // 3. Open / Send to inbox on the private agent's thread (the shell names no agent: its pin decides).
+    for (const r of s.runs.values()) if (r.status === 'running') r.status = 'completed'
+    const sendIt = await s.raw('/wizard/v1/agent-inbox/send', json('POST', { thread_id: 'wizard_parity', title: 'Synthetic private chat' }))
+    assert.equal(sendIt.status, 200, await sendIt.clone().text())
+    assert.equal((await sendIt.json()).record.agent, s.id)
+    assert.equal((await (await s.request('/api/sessions/wizard_parity')).json()).session.hidden, true, 'Send to inbox hides it in the private agent\u2019s Hermes')
+    assert.equal((await s.raw('/wizard/v1/agent-inbox/send', json('POST', { agent: s.id, thread_id: card.thread_id }))).status, 409, 'its Daily thread stays in Chats')
+    const listed = await (await s.raw('/wizard/v1/agent-inbox')).json()
+    assert.equal(listed.private_default, s.id)
+    assert.ok(listed.stay.includes(card.thread_id), 'the shell is told the private Daily stays')
+    const openIt = await s.raw('/wizard/v1/agent-inbox/open', json('POST', { agent: s.id, thread_id: 'wizard_parity' }))
+    assert.equal(openIt.status, 200, await openIt.clone().text())
+    assert.equal((await (await s.request('/api/sessions/wizard_parity')).json()).session.hidden, false, 'Open shows it again')
+    // The owner's next turn in a thread he sent to the inbox brings it back too.
+    assert.equal((await s.raw('/wizard/v1/agent-inbox/send', json('POST', { agent: s.id, thread_id: 'wizard_parity' }))).status, 200)
+    await admit(s, { input: 'Synthetic owner words' })
+    await until(async () => (await (await s.request('/api/sessions/wizard_parity')).json()).session.hidden === false, Boolean, 'the owner\u2019s turn lists it again')
   },
   'agent-sweep': async s => {
     const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
 import { scene, image, png, post } from './fixture.mjs'
-import { serverChecks, dailyClock, dailyScheduleToken, sentClock } from './server-checks.mjs'
+import { serverChecks, dailyClock, dailyScheduleToken, sentClock, privateEdgeNotes } from './server-checks.mjs'
 import { queueChecks } from './queue-checks.mjs'
 import { trackerChecks } from './tracker-checks.mjs'
 import { STATUS_PROTOCOL_INSTRUCTIONS } from '../../server/thread-status.mjs'
@@ -26,6 +26,9 @@ const featureScenes = {
   'result-reader': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, resultReaderTtlMs: 0 })),
   'agent-inbox-move': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'private-routing': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), privateRouting: true })),
+  'private-routing-edges': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), privateRouting: true, channelStore: true, channelDaily: true, dailyTimezone: 'UTC',
+    schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false, fixtureUniqueTitles: true,
+    alertNotifier: { available: () => true, send: async note => { privateEdgeNotes.push(note) } } })),
   'sent-log': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), agentInboxNow: () => sentClock.at ?? Date.now() })),
   'agent-alerts': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), channelStore: true, channelDaily: true, dailyTimezone: 'UTC', schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),
   'agent-sweep': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), channelStore: true, channelDaily: true, dailyTimezone: 'UTC', schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false })),

@@ -10,6 +10,7 @@ import { parse as parseYaml } from 'yaml'
 import { lintReport, REPORTER_INSTRUCTIONS } from './reporter.mjs'
 import { parseStatus } from './thread-status.mjs'
 import { trackWork } from './speed-meter.mjs'
+import { isSweepPhrase } from './agent-sweep.mjs'
 // Jobs created before the Reporter (or without a choice) get a kind from what they are: a roundup, brief,
 // review or digest is the product itself and must keep its body (26 Oct 2026: a 2,000-word weekly process
 // review was rewritten down to 150 words). Everything else is a short status report.
@@ -237,7 +238,7 @@ export class Scheduler {
   get channels() { try { return this.channelsOn() === true } catch { return false } }
   // Daily channel (issue 527): `{on(), thread(agent, instant) -> {thread, title, channel} | null, isDaily(agent, channel)}`.
   get dailyOn() { try { return this.daily?.on?.() === true } catch { return false } }
-  constructor({ statePath, deliver, lookup = null, runStatus = null, onWatchResult = null, notifier = null, agentId = agent => agent, channels = false, daily = null, nightly = null, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
+  constructor({ statePath, deliver, lookup = null, runStatus = null, onWatchResult = null, notifier = null, agentId = agent => agent, channels = false, daily = null, nightly = null, sweepAgent = null, now = Date.now, timezone = 'Asia/Bangkok', hermesHome = '', intervalMs = 15_000, trickleMs = 60_000, maxInflight = 6, random = Math.random }) {
     if (!statePath) throw fail('scheduler state path required', 503)
     mkdirSync(dirname(statePath), { recursive: true, mode: 0o700 })
     this.db = new DatabaseSync(statePath)
@@ -270,6 +271,7 @@ export class Scheduler {
     // unavailable at claim time means a notification job falls back to its thread for that occurrence.
     this.notifier = notifier
     this.agentId = agentId
+    this.sweepAgent = sweepAgent
     // Chats channels phase 3 (issue 441): jobs may name the channel their new chats are filed into. A function is
     // read on every use (the owner's Channels switch, wizard-ux issue 1358).
     this.channelsOn = typeof channels === 'function' ? channels : () => channels === true
@@ -598,6 +600,13 @@ export class Scheduler {
     try { return this.daily.thread(this.agentId(job.agent), Math.max(instant, this.now())) || null } catch { return null }
   }
   reserve(job, instant, manual = false) {
+    // Issue 631 (switch wizard/private-routing): with a private default agent, a scheduled "signal sweep" runs on that
+    // agent in its Daily (this occurrence only; the job itself keeps its agent, so the switch off puts it back).
+    if (this.sweepAgent && (job.kind ?? 'run') === 'run' && isSweepPhrase(job.prompt)) {
+      let to = null
+      try { to = this.sweepAgent(job) } catch { to = null }
+      if (to && to !== this.agentId(job.agent)) job = { ...job, agent: to, thread: 'daily', createThread: false, channel: null }
+    }
     // Frozen per occurrence: an empty or stopped notifications slot sends this run to the thread instead.
     let deliver = 'thread'
     if (job.deliver === 'notification' && job.kind !== 'return') {
