@@ -2022,6 +2022,22 @@
       "policy_exemptions": []
     },
     {
+      "id": "agent-approvals",
+      "description": "Command approvals for container agents (issue 597, owner switch wizard/agent-approvals, env WIZARD_AGENT_APPROVALS): each container agent's config.yaml gets approvals.timeout 3600 and approvals.unattended_mode from its agent.json permissions.unattended_approvals (approve by default, deny on the owner's toggle), and a waiting approval prompt says when it closes; an answer after that is refused instead of reaching an agent that already moved on.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's Service run routes with agentApprovals on: admit a run, make the fixture agent wait for an approval stamped 6 minutes ago and read the run (container and restricted: approval.window_s 3600, expires_at = timestamp + 3600, not expired; main and host-profile: no stamp, Hermes keeps its own window), approve it (reaches the agent), then age the prompt past an hour (container and restricted: expired true and POST approval 409 approval_expired without reaching the agent; main and host-profile unchanged). tests/agent-approvals.test.ts covers the generated config (switch off byte-identical, approve, deny, restricted, profile and imported untouched), the per-agent setting (switch off: not stored, not shown, no restart), and the Look-file flip re-applying container agents. Synthetic HTTP fixture evidence; the stock Hermes v2026.9.24 run is in the issue's receipts, not here.",
+      "source_refs": [
+        "server/agents.mjs",
+        "server/routed-run-queue.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/agent-approvals.test.ts"
+      ],
+      "fixture": "agent-approvals",
+      "policy_exemptions": []
+    },
+    {
       "id": "tool-approval",
       "description": "Request approval/clarification from a run",
       "layer": "server",

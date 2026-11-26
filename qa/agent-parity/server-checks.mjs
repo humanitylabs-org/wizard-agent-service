@@ -3040,6 +3040,42 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     await admit(s, { input: 'Synthetic subject follow-up' })
     assert.ok(sent(s).instructions.includes('Parity QA'), 'current subject must reach follow-up instructions')
   },
+  // Issue 597 (switch wizard/agent-approvals, scene option agentApprovals): a container agent's approval prompt says
+  // when its owner-sized window (3600 s) closes; a tap inside it reaches the agent, a tap after it is refused by the
+  // Service and never reaches the agent. Main and host profiles keep Hermes's own window (no stamp, no refusal).
+  'agent-approvals': async s => {
+    const run = await admit(s, { input: 'Synthetic approval wait' })
+    const routed = s.kind === 'container' || s.kind === 'restricted'
+    const upstream = () => [...s.runs.values()].at(-1)
+    for (let n = 0; n < 80 && !upstream(); n++) await new Promise(r => setTimeout(r, 25))
+    assert.ok(upstream(), 'the run reached the agent')
+    const wait = ageS => Object.assign(upstream(), { status: 'waiting_for_approval', approval: { command: "python3 -c 'print(1)'", timestamp: Date.now() / 1000 - ageS, choices: ['once', 'deny'] } })
+    const read = async () => { const r = await s.request(`/v1/runs/${run.run_id}`); assert.equal(r.status, 200); return r.json() }
+    const answers = () => s.seen.filter(x => x.path.endsWith('/approval')).length
+    wait(360)
+    const fresh = await read()
+    if (routed) {
+      assert.equal(fresh.approval?.window_s, 3600, JSON.stringify(fresh))
+      assert.ok(Math.abs(fresh.approval.expires_at - fresh.approval.timestamp - 3600) < 0.001)
+      assert.equal(fresh.approval.expired, undefined, 'six minutes in, the prompt is still open')
+    } else assert.equal(fresh.approval?.expires_at, undefined, 'main and host profiles keep Hermes own window')
+    const before = answers()
+    const tapped = await s.request(`/v1/runs/${run.run_id}/approval`, post({ choice: 'once' }))
+    assert.equal(tapped.status, 200, 'an approval at minute 6 reaches the agent')
+    assert.equal(answers(), before + 1)
+    wait(3700)
+    const old = await read()
+    if (routed) {
+      assert.equal(old.approval?.expired, true, JSON.stringify(old))
+      const late = await s.request(`/v1/runs/${run.run_id}/approval`, post({ choice: 'once' }))
+      assert.equal(late.status, 409)
+      assert.equal((await late.json()).error, 'approval_expired')
+      assert.equal(answers(), before + 1, 'an expired approval never reaches the agent')
+    } else {
+      assert.equal(old.approval?.expired, undefined)
+      assert.equal((await s.request(`/v1/runs/${run.run_id}/approval`, post({ choice: 'once' }))).status, 200)
+    }
+  },
   'tool-approval': async s => {
     const run = await admit(s, { input: 'Synthetic approval request' })
     for (const [action, value] of [['approval', { approval_id: 'synthetic-approval', approved: true }], ['clarify', { answer: 'Synthetic clarification' }]]) {
