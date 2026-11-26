@@ -1936,14 +1936,18 @@
     },
     {
       "id": "reading-position",
-      "description": "Open unread and already-read threads, scroll, receive updates and reopen",
+      "description": "Open unread and already-read threads, scroll, receive updates and reopen. Every return to a thread (Back from a linked thread, Back to the list and open it again, switching threads and coming back; wizard-ux issue 1882) restores the message he was reading mid-thread from the last hour, also when a new reply landed while he was away or the thread turned unread (\u2193 Latest shows it), in the Daily view and every other thread, for main and routed agents alike; a place at the bottom, or none, opens at the newest reply as before",
       "layer": "ux",
-      "how_to_test": "Open unread and already-read threads, scroll, receive updates and reopen; verify correct unread anchor without stealing scroll.",
+      "how_to_test": "Open unread and already-read threads, scroll, receive updates and reopen; verify correct unread anchor without stealing scroll. Issue 1882: in wizard-ux run node --test tests/thread-link-back-place.test.mjs (the real chat-power placement for main, host-profile, container and restricted rows: a plain reopen after a new reply or an unread mark keeps the mid-thread place, a bottom place opens at the new reply, an open from the desktop list pane resets the thread window's placement). Browser: wizard-ux tests/qa-thread-link-back.cjs with QA_ACTS=look,reopen and QA_KINDS=read,unread,newreply,working-newreply,daily,daily-read,routed (routed: a Claude agent's threads with an agent-qualified link) on phone 412x915 browser and document scroll and desktop 1440x900; QA_WEB=<main>/web QA_EXPECT=broken for the baseline. The place rule reads no agent or runtime field. Synthetic browser evidence, not live box proof.",
       "source_refs": [
-        "wizard-ux/web/live.js"
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chat-power.js",
+        "wizard-ux/web/core/chats-daily.js"
       ],
       "reference_tests": [
-        "wizard-ux/qa-chats-parity.cjs"
+        "wizard-ux/qa-chats-parity.cjs",
+        "wizard-ux/tests/thread-link-back-place.test.mjs",
+        "wizard-ux/tests/qa-thread-link-back.cjs"
       ],
       "fixture": null,
       "policy_exemptions": []
