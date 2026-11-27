@@ -140,8 +140,6 @@ server = createWizardServer({
   interfaceManual: envChoice(process.env.WIZARD_INTERFACE_MANUAL),
   // Catch me up (issue 668): unset follows the owner's wizard/catch-me-up switch; 1 on, 0 off.
   catchUp: envChoice(process.env.WIZARD_CATCH_ME_UP),
-  // Undated chat titles (issue 518): unset follows the owner's wizard/plain-chat-titles switch; 1 on, 0 off.
-  plainClashTitles: envChoice(process.env.WIZARD_PLAIN_CHAT_TITLES),
   // Follow main (issue 514): the status file is written by ops/wizard-agent-service-follow-main.py beside the
   // hand-deployed releases.
   followMainStatusPath: process.env.WIZARD_FOLLOW_MAIN_STATUS || resolve(process.env.WIZARD_SERVER_RELEASE_ROOT || resolve(homedir(), '.local/share/wizard-mobile-server'), 'follow-main.json'),

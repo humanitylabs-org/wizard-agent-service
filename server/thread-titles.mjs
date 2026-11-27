@@ -141,9 +141,8 @@ export function topicFor({ appId = '', catalog = [], texts = [], subject = '' } 
 
 // The date clashCandidates adds (issue 518): '(8 Nov)', '(8 Nov 13:05)' or '(8 Nov 13:05 ab12)', never a '#N'.
 const DATED_SUFFIX = /\s+\(\d{1,2} [A-Za-z]{3}(?: \d{2}:\d{2}(?: [a-z0-9]{1,4})?)?\)$/u
-// Owner switch wizard/plain-chat-titles (issue 518): a dated clash title is shown without its date. Hermes keeps
+// Undated chat titles (issue 518, on for everyone): a dated clash title is shown without its date. Hermes keeps
 // its unique stored title; only what the Service serves changes.
-export const PLAIN_TITLES_SWITCH = 'wizard/plain-chat-titles'
 export const undatedTitle = (value) => {
   const title = squash(value)
   const plain = title.replace(DATED_SUFFIX, '')
@@ -358,7 +357,7 @@ export class ThreadTitleStore {
     return visible
   }
 
-  // The title to show without a date the Service added to avoid a clash (issue 518, switch wizard/plain-chat-titles).
+  // The title to show without a date the Service added to avoid a clash (issue 518, on for everyone).
   // Only a date the Service added (the record keeps the title it asked for) is dropped: an owner's own rename, an agent
   // title that names a date itself, a title changed outside the Service, or a thread with no record is shown as is.
   plainTitle(sessionId, title) {

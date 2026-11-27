@@ -426,21 +426,19 @@ describe('the Agent Service applies titles through Hermes', () => {
     expect(titles[0]).toBe('Fix my chat window thing')
     expect(titles.slice(1)).toEqual(clashCandidates('Messenger').slice(0, 2))
     expect(titles.join('|')).not.toMatch(/#\d/u)
-    expect((await list()).title).toBe(clashCandidates('Messenger')[1])
+    expect((await list()).title).toBe('Messenger') // issue 518: the date the Service added is not shown
   })
 
-  it('lists a dated clash title without its date when the switch is on (issue 518)', async () => {
-    for (const on of [false, true]) {
-      const { origin, list, patches, reply, statePath } = await fixture({ title: null, startedAgo: 5, queued: true, apps: [{ id: 'messenger', name: 'Messenger' }], extra: { plainClashTitles: on } })
-      const db = new DatabaseSync(statePath)
-      db.prepare("INSERT INTO sessions VALUES ('wizard_other', 1, 'Messenger', 'llm')").run(); db.close()
-      reply.title = 'Messenger'
-      reply.app_id = 'messenger'
-      await firstSend(origin, `first-send-plain-${on}`, 'Fix my chat window thing now please')
-      await settle(); await list(); await settle()
-      expect(patches.at(-1)?.body.title).toBe(clashCandidates('Messenger')[1]) // Hermes keeps a unique title either way
-      expect((await list()).title).toBe(on ? 'Messenger' : clashCandidates('Messenger')[1])
-    }
+  it('lists a dated clash title without its date, for everyone (issue 518)', async () => {
+    const { origin, list, patches, reply, statePath } = await fixture({ title: null, startedAgo: 5, queued: true, apps: [{ id: 'messenger', name: 'Messenger' }] })
+    const db = new DatabaseSync(statePath)
+    db.prepare("INSERT INTO sessions VALUES ('wizard_other', 1, 'Messenger', 'llm')").run(); db.close()
+    reply.title = 'Messenger'
+    reply.app_id = 'messenger'
+    await firstSend(origin, 'first-send-plain', 'Fix my chat window thing now please')
+    await settle(); await list(); await settle()
+    expect(patches.at(-1)?.body.title).toBe(clashCandidates('Messenger')[1]) // Hermes keeps a unique title
+    expect((await list()).title).toBe('Messenger')
   })
 
   it('never puts a placeholder over a title that exists or one James set', async () => {
