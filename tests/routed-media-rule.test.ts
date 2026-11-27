@@ -8,21 +8,22 @@ import { describe, expect, it } from 'vitest'
 import { AGENT_RUN_INSTRUCTIONS, agentRunInstructions } from '../server/agents-http.mjs'
 import { ROUTED_CHAT_MEDIA_INSTRUCTIONS, WIZARD_CHAT_MEDIA_INSTRUCTIONS } from '../server/chat-presentation.mjs'
 import { projectRoutedAgentMedia } from '../server/service.mjs'
-import { withAskMax } from '../server/thread-status.mjs'
+import { withAskMax, withSmartInbox } from '../server/thread-status.mjs'
 
 const folderRules = (text: string) => text.match(/[^.;]*(?:only when the file sits|inside your own home folder|save it inside|copy it into your own cache)[^.;]*/g) ?? []
 
 const routedVariants = {
   'AGENT_RUN_INSTRUCTIONS': AGENT_RUN_INSTRUCTIONS,
   'agentRunInstructions()': agentRunInstructions('own'),
-  // agent-heavy-relay.mjs sends withAskMax(agentRunInstructions(style), askMax()).
+  // agent-heavy-relay.mjs sends withSmartInbox(withAskMax(agentRunInstructions(style), askMax()), smartInbox()).
   'heavy relay': withAskMax(agentRunInstructions('own'), 140),
+  'heavy relay, Smart inbox on': withSmartInbox(withAskMax(agentRunInstructions('own'), 140), true),
 }
 
 describe('routed agents get one file-sending rule', () => {
   it('the heavy relay builds its instructions from agentRunInstructions', () => {
     const relay = readFileSync(new URL('../server/agent-heavy-relay.mjs', import.meta.url), 'utf8')
-    expect(relay).toMatch(/instructions: \[withAskMax\(agentRunInstructions\(/)
+    expect(relay).toMatch(/instructions: \[withSmartInbox\(withAskMax\(agentRunInstructions\(/)
   })
 
   for (const [name, text] of Object.entries(routedVariants)) {

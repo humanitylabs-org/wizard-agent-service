@@ -222,6 +222,8 @@ server = createWizardServer({
   privateMode: envChoice(process.env.WIZARD_PRIVATE_MODE),
   // Result reader (issue 630): follows the owner's `wizard/result-reader` switch; '1' forces it on, '0' off.
   resultReader: envChoice(process.env.WIZARD_RESULT_READER),
+  // Smart inbox (issue 667): follows the owner's `wizard/smart-inbox` switch; '1' forces it on, '0' off.
+  smartInbox: envChoice(process.env.WIZARD_SMART_INBOX),
   // Private routing (issue 629): follows the owner's `wizard/private-routing` switch; '1' forces it on, '0' off.
   privateRouting: envChoice(process.env.WIZARD_PRIVATE_ROUTING),
   // Five-choice first chat (issue 650): follows the owner's `wizard/first-chat-goals` switch; '1' forces it on, '0' off.
