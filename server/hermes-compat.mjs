@@ -25,6 +25,9 @@ export function admissionFailure(error) {
     permission_denied: 'This chat was started in another app, such as Telegram, so WizardOS can’t add to it. Your message is saved. Reply in that app, or start a new chat.',
     idempotency_key_conflict: 'This reply conflicts with an earlier delivery. It was not sent again.',
     admission_conflict: 'Hermes could not identify this admission safely. It was not sent again.',
+    // wizard-ux issue 1973: a reply sent on the thread's saved route (the phone could not name one) into a thread that has
+    // none. Picking a model saves one, so Retry then works.
+    no_model_route: 'Couldn’t tell which AI runs this chat · tap the model name, pick one, then Retry',
   }
   return messages[code] || null
 }

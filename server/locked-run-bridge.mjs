@@ -121,7 +121,8 @@ export class LockedRunBridge {
     const route = selectLockedRoute(value, stored, this.log)
     if (!route && !value.require_model_lock) return this.rawFetch(url, init)
     if (!route?.model || !route?.provider || !idPattern.test(value.session_id || ''))
-      throw fail('No confirmed model/provider for this message', 400)
+      // A send with no route into a thread with no saved route either (wizard-ux issue 1973): the owner's words say what to do.
+      throw Object.assign(fail('No confirmed model/provider for this message', 400), { code: 'no_model_route' })
     return this.start(value, route, init)
   }
   async start(value, route, init) {
