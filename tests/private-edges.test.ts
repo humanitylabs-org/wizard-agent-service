@@ -1,7 +1,7 @@
-// Issue 631: private mode edges (switch wizard/private-routing, off by default). A private agent's pushes are
+// Issue 631: private mode edges (on for everyone; switch wizard/private-routing removed). A private agent's pushes are
 // content-free, a private default agent owns its Daily, and the private agent's read grant also reaches the standard
 // agent's imported History. The routed paths (sweep, Open / Send, scheduled sweeps) are covered per runtime by the
-// parity check `private-routing-edges`; this file covers the pieces and the switch.
+// parity check `private-routing-edges`; this file covers the pieces.
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -12,7 +12,6 @@ import { createWizardServer, listen } from '../server/service.mjs'
 import { PRIVATE_PUSH_BODY, PRIVATE_PUSH_TITLE, contentFreeNote, contentFreePing, privatePushLink, privatePushes } from '../server/private-edges.mjs'
 import { searchImportedHistory, standardChatRpc } from '../server/standard-chats.mjs'
 import { createChannelStore } from '../server/channel-store.mjs'
-import { PRIVATE_ROUTING_SWITCH } from '../server/private-routing.mjs'
 
 const servers: Server[] = []
 afterEach(async () => { for (const s of servers.splice(0)) await new Promise((r) => s.close(() => r(undefined))) })
@@ -97,7 +96,7 @@ describe('imported History over the read grant (issue 631)', () => {
     expect(searchImportedHistory('', '', 'lighthouse')).toEqual({ facts: [], files: [] })
   })
 
-  it('the tool is listed only with the switch', () => {
+  it('the tool is listed only when the Service hands the History root', () => {
     const agent = { id: 'private', privacy: 'private', permissions: { read_standard_chats: true } }
     const principal = { kind: 'agent', agentId: 'private' }
     const list = (opts?: any) => (standardChatRpc(agent, principal, { jsonrpc: '2.0', id: 1, method: 'tools/list' }, '', [], opts) as any).result.tools.map((t: any) => t.name)
@@ -107,7 +106,7 @@ describe('imported History over the read grant (issue 631)', () => {
     expect(off.result).toEqual({ content: [{ type: 'text', text: 'unknown_tool' }], isError: true })
   })
 
-  async function box(look: boolean) {
+  async function box(lookOff = false) {
     const main = createServer((req, res) => { req.resume(); req.on('end', () => {
       const p = new URL(req.url ?? '/', 'http://x').pathname
       res.writeHead(p === '/health' ? 200 : 404, { 'Content-Type': 'application/json' }); res.end(p === '/health' ? '{"status":"ok"}' : '{}')
@@ -119,13 +118,13 @@ describe('imported History over the read grant (issue 631)', () => {
     mkdirSync(home, { recursive: true }); mkdirSync(join(dir, 'Pages', 'wizard-look'), { recursive: true })
     factStore(join(home, 'memory_store.db'))
     writeFileSync(join(dir, 'apps.json'), JSON.stringify({ schema: 1, apps: [] }))
-    writeFileSync(join(dir, 'Pages', 'wizard-look', 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: look ? { [PRIVATE_ROUTING_SWITCH]: { on: true, at: 1 } } : {} }))
+    writeFileSync(join(dir, 'Pages', 'wizard-look', 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: lookOff ? { 'wizard/private-routing': { on: false, at: 1 } } : {} }))
     const svc = createWizardServer({
       upstreamOrigin: `http://127.0.0.1:${mainAddress.port}`, hermesKey: 'fixture-key', requireAccess: false, agentBridge: false,
       appsJsonPath: join(dir, 'apps.json'), settingsPath: join(dir, 'settings.json'), wizardOsHome: dir, hermesStatePath: join(home, 'state.db'),
       userFilesRoot: files, agentGatewayUrl: 'http://gateway:8923/wizard/mcp', followThrough: false, agentBasePort: 47930, runQueue: false,
       agentRuntime: { apply: async () => ({ ok: true }), start: async () => ({ ok: true }), stop: async () => ({ ok: true }) },
-      pagesRoot: join(dir, 'Pages'), pagesGitDir: join(dir, 'pages-history.git'), pagesWatch: false, privateRoutingTtlMs: 0,
+      pagesRoot: join(dir, 'Pages'), pagesGitDir: join(dir, 'pages-history.git'), pagesWatch: false,
     })
     servers.push(svc)
     const base = `http://127.0.0.1:${(await listen(svc) as import('node:net').AddressInfo).port}`
@@ -136,8 +135,8 @@ describe('imported History over the read grant (issue 631)', () => {
     return { rpc, base, post, made }
   }
 
-  it('the private agent finds an imported fact through its own gateway key; switch off: today\u2019s three tools', async () => {
-    const on = await box(true)
+  it('the private agent finds an imported fact through its own gateway key; an old Look file saying off changes nothing', async () => {
+    const on = await box()
     expect(on.made.agent.permissions.read_standard_chats).toBe(true)
     const listed = await (await on.rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).json()
     expect(listed.result.tools.map((t: any) => t.name)).toContain('standard_history_search')
@@ -146,8 +145,8 @@ describe('imported History over the read grant (issue 631)', () => {
     expect(JSON.parse(call.result.content[0].text).facts[0].text).toContain('called Ingrid')
     // The standard (main) agent's own credential never reaches it: no agent principal, no grant.
     expect((await on.post('/wizard/standard-chats/mcp', { jsonrpc: '2.0', id: 3, method: 'tools/list' })).status).toBe(403)
-    const off = await box(false)
-    const offList = await (await off.rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).json()
-    expect(offList.result.tools.map((t: any) => t.name)).toEqual(['standard_chats_search', 'standard_chat_read', 'standard_memory_read'])
+    const old = await box(true)
+    const oldList = await (await old.rpc({ jsonrpc: '2.0', id: 1, method: 'tools/list' })).json()
+    expect(oldList.result.tools.map((t: any) => t.name)).toEqual(['standard_chats_search', 'standard_chat_read', 'standard_memory_read', 'standard_history_search'])
   })
 })

@@ -1,5 +1,5 @@
-// Private mode edges (issue 631; owner switch `wizard/private-routing`, off by default, the same switch as issue 629).
-// With it on, nothing from a private agent's work leaks through the edges of the box:
+// Private mode edges (issue 631; on for everyone, switch wizard/private-routing removed, as for issue 629).
+// Nothing from a private agent's work leaks through the edges of the box:
 //   pushes  an alert, a scheduled notification run, a phone chat-reply note or an app door's ping whose agent is a
 //           private agent goes out content-free: the title "Wizard: 1 new item", one fixed neutral line instead of
 //           the words (the Notifications app's `notify` refuses an empty message), and a link that opens Wizard
@@ -8,7 +8,7 @@
 //           agent's (service.mjs), so summaries of private work never land in a standard agent's thread.
 //   History the private agent's read-only standard_chats tools also search the standard agent's imported History
 //           (standard-chats.mjs `standard_history_search`).
-// Switch off: every function here hands its input back untouched.
+// A standard agent's input is handed back untouched.
 
 export const PRIVATE_PUSH_TITLE = 'Wizard: 1 new item'
 export const PRIVATE_PUSH_BODY = 'Open Wizard to read it.'

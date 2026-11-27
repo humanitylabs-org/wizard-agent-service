@@ -599,7 +599,7 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
         return id
       })
     },
-    // Issue 631 (switch wizard/private-routing): the private default agent's own Daily, seeded once per agent the way the
+    // Issue 631: the private default agent's own Daily, seeded once per agent the way the
     // main agent's is (an owner's archive or delete of it sticks). An agent that already has a daily channel keeps it.
     seedDailyFor(agent) {
       const who = agentOf(agent)

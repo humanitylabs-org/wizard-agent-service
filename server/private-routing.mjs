@@ -1,6 +1,5 @@
-// Private routing (issue 629; owner switch `wizard/private-routing`, off by default; env WIZARD_PRIVATE_ROUTING '1'
-// forces it on, '0' off). With private mode on (the box's default agent is a private agent), the orb's route answer
-// names the agent each take is for, and the shell sends the owner's exact words to that agent, never through another:
+// Private routing (issue 629; on for everyone, switch wizard/private-routing removed). With private mode on (the
+// box's default agent is a private agent), the orb's route answer names the agent each take is for, and the shell sends the owner's exact words to that agent, never through another:
 //   1. name     rules, no model: an agent's name, or a model name the box can run ("Opus", "Fable", "Claude",
 //               "ChatGPT", "GPT"), said at the start ("Philosopher, ...") or as "ask / tell / use X". Names come from
 //               the agent registry and the box's model list, never from this file.
@@ -10,10 +9,9 @@
 //   4. default  the default agent (the private one).
 // A topic alone never routes to a standard agent. The router model is used only when its endpoint is private
 // (privateRouter); otherwise it is never called and rules 1, 3 and 4 decide (`chosen_by: rules_only`, `rule` says
-// which). Switch off, or no private default agent: nothing here runs and the route answers exactly as before.
+// which). No private default agent: nothing here runs and the route answers as for a standard default agent.
 import { MAIN_AGENT_ID } from './agents.mjs'
 
-export const PRIVATE_ROUTING_SWITCH = 'wizard/private-routing'
 export const CHOSEN_BY = new Set(['name', 'private_label', 'thread', 'default', 'rules_only'])
 export const AGENT_EXAMPLES = 50
 

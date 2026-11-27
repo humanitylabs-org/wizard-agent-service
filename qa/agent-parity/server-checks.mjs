@@ -1356,7 +1356,7 @@ export const serverChecks = {
   // failed. On main a new thread's first typed message is a typed row with would_route, an orb row links to the
   // visible thread it opened, and /correct is Open / Send to inbox. On every other kind the orb's main agent is not in
   // the scene: dumps cannot start (the row shows failed) and that kind's own turns never make main Sent rows.
-  // Issue 629 (switch wizard/private-routing, on in this scene): with a private default agent the orb route names the
+  // Issue 629 (on for everyone): with a private default agent the orb route names the
   // agent each take is for, with the owner's exact words. Main and host-profile cannot hold a private default here,
   // so there the answer must stay exactly today's.
   'private-routing': async s => {
@@ -1425,10 +1425,10 @@ export const serverChecks = {
       assert.ok(prompts.at(-1).includes('"Fix the Chats scroll bug" -> "personal": false'), `${s.kind}: the correction reaches the private router`)
     } finally { await new Promise(r => fake.close(r)); if (otherHost) await new Promise(r => other.close(r)) }
   },
-  // Issue 626 (James, 27 Nov 2026: voice follows the default agent): with a private default agent and private routing
-  // off, an orb take never starts the dump worker on the standard (main) agent and never reaches a router that is not
-  // private; it opens a visible new chat (route agent, the exact words). Main and host-profile cannot hold a private
-  // default here, so there the answer stays exactly today's (the router is asked).
+  // Issue 626 (James, 27 Nov 2026: voice follows the default agent): with a private default agent an orb take never
+  // starts the dump worker on the standard (main) agent and never reaches a router that is not private; it opens a
+  // visible chat on the private default agent (route agent, the exact words, rules_only). Main and host-profile cannot
+  // hold a private default here, so there the answer stays exactly today's (the router is asked).
   'private-default-voice': async s => {
     const { createServer } = await import('node:http')
     let calls = 0
@@ -1462,14 +1462,14 @@ export const serverChecks = {
       assert.equal(privateDefault.id, s.id)
       for (const text of ['Research flights to Lisbon', 'What did Sam say in Messenger yesterday']) {
         const r = await say(text, { accept_dump: true })
-        assert.deepEqual(r.cmd, { route: 'agent', summary: text }, `${s.kind}: a visible new chat with the exact words`)
+        assert.deepEqual(r.cmd, { route: 'agent', summary: text, agent_id: s.id, chosen_by: 'rules_only', rule: 'default' }, `${s.kind}: a visible chat on the private default with the exact words`)
         const row = (await (await s.raw(`/wizard/v1/sent/${r.sent_id}`)).json()).row
-        assert.ok(row.rules_matched.includes('private_default'), `${s.kind}: the Sent row says why`)
+        assert.ok(row.rules_matched.includes('rules_only'), `${s.kind}: the Sent row says why`)
       }
       assert.equal(calls, 0, `${s.kind}: zero calls to a non-private router`)
       assert.deepEqual(await records(), [], `${s.kind}: no dump worker on the standard agent`)
       const typed = await say('Research flights to Lisbon', { accept_dump: true, source: 'typed' })
-      assert.deepEqual(typed.typed, { background: false, why: 'private_default' }, `${s.kind}: a typed task stays visible`)
+      assert.deepEqual(typed.typed, { background: false, why: 'private_routing' }, `${s.kind}: a typed task stays visible`)
     } finally { if (otherHost) await new Promise(r => other.close(r)) }
   },
   'sent-log': async s => {
@@ -1873,7 +1873,7 @@ export const serverChecks = {
     assert.deepEqual(owner.waiting.items.find(i => i.id === id), { ...owner.waiting.items.find(i => i.id === id), state: 'answered', answer: 'no' })
     for (const r of s.runs.values()) if (r.status === 'running') r.status = 'completed'
   },
-  // Issue 631 (switch wizard/private-routing, on in this scene): with a private default agent nothing from its work
+  // Issue 631 (on for everyone): with a private default agent nothing from its work
   // leaks through the edges. Its alerts and door pings carry no words; the Daily, the signal sweep card (typed in its
   // thread, posted, or a scheduled sweep made for main) are its own; Open / Send to inbox move its threads through its
   // own Hermes. A standard agent's alert keeps its words. Main and host-profile cannot have a private default: today's.

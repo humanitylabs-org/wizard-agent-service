@@ -600,7 +600,7 @@ export class Scheduler {
     try { return this.daily.thread(this.agentId(job.agent), Math.max(instant, this.now())) || null } catch { return null }
   }
   reserve(job, instant, manual = false) {
-    // Issue 631 (switch wizard/private-routing): with a private default agent, a scheduled "signal sweep" runs on that
+    // Issue 631: with a private default agent, a scheduled "signal sweep" runs on that
     // agent in its Daily (this occurrence only; the job itself keeps its agent, so the switch off puts it back).
     if (this.sweepAgent && (job.kind ?? 'run') === 'run' && isSweepPhrase(job.prompt)) {
       let to = null
