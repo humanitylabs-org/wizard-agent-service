@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
+import { isOwnerRun, ownerRunReturns } from '../server/owner-run-return.mjs'
 
 // Issue 675 (James, 26 Nov 2026): archived threads came back because every scheduled wake, script-gated check
 // and report posted into them re-opened the thread at admission, before anyone knew the answer was [SILENT].
@@ -133,5 +134,74 @@ describe('an agent-started run in an archived thread (issue 675)', () => {
       body: JSON.stringify({ session_id: 'wizard_origin', input: 'Please draft the launch email.' }) })
     expect(sent.status).toBe(202)
     expect(f.archived()).toBe(false)
+  })
+})
+
+// wizard-ux issue 1997 (James, 27 Nov 2026): the owner archives a thread while his own run is still working and
+// trusts it to come back when there is news. Archive never stops the run; its visible reply brings the thread back
+// to Inbox, and a [SILENT] answer keeps it archived. An archive after the reply has landed stays put.
+describe('the owner archives a thread while his own run works (wizard-ux issue 1997)', () => {
+  const ownerRun = async (f: Awaited<ReturnType<typeof fixture>>, key: string) => {
+    const sent = await fetch(`${f.origin}/wizard/hermes/v1/runs`, { method: 'POST', headers: { ...f.headers, 'Idempotency-Key': key },
+      body: JSON.stringify({ session_id: 'wizard_origin', input: 'Please plan the launch week.' }) })
+    expect(sent.status).toBe(202)
+    return (await sent.json()).run_id as string
+  }
+  const archive = async (f: Awaited<ReturnType<typeof fixture>>) => {
+    const patched = await fetch(`${f.origin}/wizard/hermes/api/sessions/wizard_origin`, { method: 'PATCH', headers: f.headers, body: JSON.stringify({ archived: true }) })
+    expect(patched.status).toBe(200)
+  }
+  const finish = async (f: Awaited<ReturnType<typeof fixture>>, runId: string) => {
+    let last: any = null
+    for (let i = 0; i < 3; i++) last = await (await fetch(`${f.origin}/wizard/hermes/v1/runs/${runId}`, { headers: f.headers })).json()
+    return last
+  }
+
+  it('a visible reply brings the thread back to Inbox, and archiving never stopped the run', async () => {
+    const f = await fixture(report('done', 'Launch week planned'))
+    const runId = await ownerRun(f, 'owner-1997-visible')
+    expect(f.archived()).toBe(false)
+    await archive(f)
+    expect(f.archived()).toBe(true)
+    const run = await finish(f, runId)
+    expect(run.status).toBe('completed')
+    expect(f.archived()).toBe(false)
+  })
+
+  it('a [SILENT] reply keeps it archived', async () => {
+    const f = await fixture('[SILENT]')
+    const runId = await ownerRun(f, 'owner-1997-silent')
+    await archive(f)
+    const run = await finish(f, runId)
+    expect(run.status).toBe('completed')
+    expect(f.archived()).toBe(true)
+  })
+
+  it('an archive after the reply landed stays archived', async () => {
+    const f = await fixture(report('done', 'Launch week planned'))
+    const runId = await ownerRun(f, 'owner-1997-after')
+    expect((await finish(f, runId)).status).toBe('completed')
+    await archive(f)
+    await finish(f, runId)
+    expect(f.archived()).toBe(true)
+  })
+})
+
+describe('which runs bring an archived thread back (wizard-ux issue 1997)', () => {
+  const run = (idempotencyKey: string, extra: any = {}) => ({ sessionId: 'wizard_origin', publicRunId: `p-${idempotencyKey}`, idempotencyKey, ...extra })
+  it('owner turns and agent-inbox answers count; service- and agent-started runs keep their own rules', () => {
+    for (const key of ['owner-turn-1', 'wizard-inbox-answer-1', 'wizard-not-started-requeue-1']) expect(isOwnerRun(run(key))).toBe(true)
+    for (const key of ['wizard-inbox-1', 'schedule:job:1', 'wizard-wake-1', 'wizard-helper-receipt-1', 'wizard-follow-through-1', 'wizard-heavy-1']) expect(isOwnerRun(run(key))).toBe(false)
+    expect(isOwnerRun(run('owner-turn-2', { continuation: { kind: 'watch' } }))).toBe(false)
+    expect(isOwnerRun(run('owner-turn-3', { recoveryAuthorized: true }))).toBe(false)
+  })
+  it('a visible reply or one approval wait returns; [SILENT], empty and failed runs do not', () => {
+    const approvals = new Set<string>()
+    expect(ownerRunReturns(run('a'), { status: 'completed', output: 'Done: the plan is ready.' }, approvals)).toBe(true)
+    expect(ownerRunReturns(run('b'), { status: 'completed', output: '[SILENT]' }, approvals)).toBe(false)
+    expect(ownerRunReturns(run('c'), { status: 'completed', output: '  ' }, approvals)).toBe(false)
+    expect(ownerRunReturns(run('d'), { status: 'failed' }, approvals)).toBe(false)
+    expect(ownerRunReturns(run('e'), { status: 'waiting_for_approval' }, approvals)).toBe(true)
+    expect(ownerRunReturns(run('e'), { status: 'waiting_for_approval' }, approvals)).toBe(false)
   })
 })

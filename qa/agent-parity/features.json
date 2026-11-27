@@ -1259,16 +1259,34 @@
       "policy_exemptions": []
     },
     {
+      "id": "archive-while-working",
+      "description": "wizard-ux issue 1997: the owner may archive a thread while his own run still works (the shell offers Archive and Snooze there). Archive is only the session flag and never stops the run; when that owner run ends with a visible reply (or stops to wait for his approval) the thread comes back to Inbox once, and an empty or [SILENT] reply keeps it archived. Service- and agent-started runs keep their issue 675 rules.",
+      "layer": "server",
+      "how_to_test": "For main, host-profile, container and restricted: send an owner run into the parity thread, archive the thread while the run is running (the run stays running), finish it with a visible reply and read the session: archived is false; repeat with a [SILENT] reply: archived stays true. tests/archived-agent-runs.test.ts covers main through the HTTP proxy, including an archive after the reply landed staying archived. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/owner-run-return.mjs",
+        "server/service.mjs",
+        "server/routed-run-queue.mjs"
+      ],
+      "reference_tests": [
+        "tests/archived-agent-runs.test.ts",
+        "qa/agent-parity/server-checks.mjs"
+      ],
+      "fixture": "archive-while-working",
+      "policy_exemptions": []
+    },
+    {
       "id": "archive-placement",
       "description": "Keep archived stale-running threads in Archive with recovery controls and authoritative state",
       "layer": "ux",
-      "how_to_test": "Archive a synthetic thread while its stale status still says running; through main, host-profile, container and restricted chat routes, verify it appears only in Archive, opens as Archived, and offers Restore plus Snooze.",
+      "how_to_test": "Archive a synthetic thread while its stale status still says running; through main, host-profile, container and restricted chat routes, verify it appears only in Archive, opens as Archived, and offers Restore plus Snooze. wizard-ux issue 1997: a thread that is still working (its run going, or a helper finishing it) offers Snooze and Archive for main, host-profile, container and restricted rows (wizard-ux tests/archive-working-thread.test.mjs), an approval wait offers no Archive, and wizard-ux qa/scripts/qa-archive-working-thread.cjs archives a working thread on phone and desktop without stopping its run.",
       "source_refs": [
         "wizard-ux/web/live.js",
         "wizard-ux/web/core/chats.js"
       ],
       "reference_tests": [
         "wizard-ux/tests/archived-working-threads.test.mjs",
+        "wizard-ux/tests/archive-working-thread.test.mjs",
         "wizard-ux/qa-stopped-done.cjs",
         "wizard-ux/qa-unified-chats.cjs",
         "qa/agent-parity/browser.mjs"

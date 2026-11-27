@@ -119,6 +119,7 @@ import { createRestartGate, restartRequestRefusal } from './restart-gate.mjs'
 import { onboardingTools } from './onboarding.mjs'
 import { followUpThreadNote, followUpTool } from './follow-ups.mjs'
 import { agentReachOutTools, reachOutNote } from './agent-reach-out.mjs'
+import { ownerRunReturns } from './owner-run-return.mjs'
 import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, importAgentHistorySchedules, isSilentResult, isScheduleInput, projectFollowUps, projectFollowUpsPayload, scheduledRunEvents, scheduledThreadOf } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { handleAgentNotesApi } from './agent-notes-http.mjs'
@@ -5369,10 +5370,16 @@ function buildWizardServer(options, lifetime) {
       : (await hermesJson(`/api/sessions/${encodeURIComponent(sessionId)}`))?.session?.archived === true
     // An agent-started run's answer decides whether its archived thread comes back: a [SILENT] or empty answer
     // and a failed run never; needs_you or an approval wait always; another visible answer only when `visible`.
-    const approvalRestored = new Set()
+    const approvalRestored = new Set(), ownerApprovalReturned = new Set()
     const settleAgentStartedRun = async (record, payload) => {
       const started = agentStartedRun(record)
-      if (!started || !record.sessionId || record.runtime !== 'direct') return
+      if (!record.sessionId || record.runtime !== 'direct') return
+      // wizard-ux issue 1997: a thread the owner archived while his own run worked comes back with its visible reply
+      // (or its approval wait); [SILENT] keeps it archived (server/owner-run-return.mjs).
+      if (!started) {
+        if (ownerRunReturns(record, payload, ownerApprovalReturned)) await unarchiveForNewTurn(record.sessionId)
+        return
+      }
       let restore = false
       if (payload?.status === 'waiting_for_approval') {
         if (approvalRestored.has(record.publicRunId)) return

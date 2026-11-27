@@ -65,6 +65,27 @@ export const sentClock = { at: null }
 // Issue 532: the synthetic loopback capability of the main agent's schedule tool in the Daily scene.
 export const dailyScheduleToken = crypto.randomUUID() + crypto.randomUUID() // generated per run, never a fixed value
 export const serverChecks = {
+  // wizard-ux issue 1997: the owner archives a thread while his own run still works. Archive never stops the run;
+  // its visible reply brings the thread back to Inbox, and a [SILENT] reply keeps it archived, for every kind.
+  'archive-while-working': async s => {
+    assert.equal((await s.request('/api/sessions/wizard_parity', { ...post({ hidden: false }), method: 'PATCH' })).status, 200)
+    const archivedNow = async () => (await (await s.request('/api/sessions/wizard_parity')).json()).session.archived === true
+    const round = async (input, output) => {
+      const admitted = await s.request('/v1/runs', post({ session_id: 'wizard_parity', input }))
+      assert.equal(admitted.status, 202)
+      const runId = (await admitted.json()).run_id
+      assert.equal((await s.request('/api/sessions/wizard_parity', { ...post({ archived: true }), method: 'PATCH' })).status, 200)
+      assert.equal(await archivedNow(), true, `${s.kind}: Archive took while the run worked`)
+      const run = [...s.runs.values()].at(-1)
+      assert.equal(run.status, 'running', `${s.kind}: archiving never stopped the run`)
+      Object.assign(run, { status: 'completed', updated_at: Date.now() / 1000, output })
+      s.sessions.get('wizard_parity').messages.push({ role: 'assistant', content: output, timestamp: Date.now() / 1000 + 1 })
+      for (let n = 0; n < 3; n++) assert.equal((await s.request(`/v1/runs/${runId}`)).status, 200)
+      return archivedNow()
+    }
+    assert.equal(await round('Synthetic long task', 'Synthetic visible reply'), false, `${s.kind}: the visible reply brought the thread back`)
+    assert.equal(await round('Synthetic quiet task', '[SILENT]'), true, `${s.kind}: a [SILENT] reply keeps it archived`)
+  },
   // wizard-ux issue 1766: a chat started in another app (Hermes source telegram) keeps that source on every Chats list
   // shape, so the shell says it lives in Telegram instead of offering a Retry Hermes always refuses.
   // Issue 518 (undated chat titles, on for everyone; the wizard/plain-chat-titles switch was removed): a title the Service
