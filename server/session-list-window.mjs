@@ -8,9 +8,12 @@ export const archiveDaysOf = v => Number.isInteger(v) && [0, 1, 3, 7, 14, 30].in
 const priority = new Set(['submitting','queued','running','stopping','waiting_for_approval','unknown','failed','interrupted']);
 const time = v => Date.parse(v ?? '');
 const first = (...vs) => vs.find(v => Number.isFinite(time(v))) || '';
+// A working/failed row is timed by its request; with no request clock (helper follow-through on machine turns,
+// wizard-ux#1994) it falls back to its latest activity, so it never sorts below older rows. Same rule as UX cardAt.
+const activityTime = s => first(s.previewAt,s.activityAt,s.lastUserAt,s.updatedAt);
 export const cardTime = s => priority.has(s.status) && !['waiting_for_approval','unknown'].includes(s.status)
-  ? first(s.assignedAt,s.requestAt,s.lastUserAt,s.previewRole === 'user' ? s.previewAt : undefined)
-  : first(s.previewAt,s.activityAt,s.lastUserAt,s.updatedAt);
+  ? first(s.assignedAt,s.requestAt,s.lastUserAt,s.previewRole === 'user' ? s.previewAt : undefined) || activityTime(s)
+  : activityTime(s);
 export const newestFirst = (a,b) => {
   const x=time(cardTime(a)), y=time(cardTime(b));
   return Number.isFinite(x) !== Number.isFinite(y) ? Number.isFinite(x) ? -1 : 1 : (Number.isFinite(x) ? y-x : 0) || a.title.localeCompare(b.title);
