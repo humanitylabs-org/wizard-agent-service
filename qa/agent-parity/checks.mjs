@@ -20,7 +20,7 @@ const featureScenes = {
   'chat-after-reset-list': kind => scene(kind, { canonicalSessionListing: true, canonicalSessionCacheMs: 0 }),
   'chats-channels': kind => scene(kind, { channelStore: true, channelDaily: false, channelFirstPosts: false, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true }),
   'chats-read-marks': kind => scene(kind, { channelStore: true, channelReadSync: true }),
-  'chats-tags': kind => scene(kind, ({ root }) => ({ pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, channelTagsTtlMs: 0, channelDaily: false, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true, agentInboxStatePath: join(root, 'agent-inbox.json') })),
+  'chats-tags': kind => scene(kind, ({ root }) => ({ pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, channelDaily: false, canonicalSessionListing: true, canonicalSessionCacheMs: 0, fixtureSearchIndex: true, agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'agent-inbox': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'smart-inbox': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, smartInboxTtlMs: 0 })),
   'orb-dump': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json') })),

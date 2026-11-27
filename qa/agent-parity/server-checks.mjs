@@ -1943,7 +1943,7 @@ export const serverChecks = {
   // wizard-ux issue 1258: Channels are on for everyone (the wizard/chat-channels switch is gone). With no Look file, and
   // with an old Look file that still says the switch is off, the channel store, read marks and list fields answer
   // through each runtime's real Service route.
-  // Tags (issue 608, switch wizard/chat-tags, off by default): a chat carries several of its agent's channels.
+  // Tags (issue 608, on for everyone; switch wizard/chat-tags removed): a chat carries several of its agent's channels.
   'chats-tags': async s => {
     const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/chat-tags': { on, at: Date.now() } } })) }
@@ -1964,16 +1964,12 @@ export const serverChecks = {
     const tagsOf = async (agent = s.id) => (await (await s.raw(`/wizard/v1/channels/tags?sessionId=wizard_parity&agent=${agent}`)).json())
     const tag = async body => s.raw('/wizard/v1/channels/tags', json('PUT', { sessionId: 'wizard_parity', agent: s.id, ...body }))
     const feed = async id => (await (await s.request(`/api/sessions?view=list&channel=${id}`)).json()).data.map(x => x.id)
-    // Off (no Look file): today's one-channel Chats, no tags route, no tags on rows.
+    // No switch: an old Look file that still says wizard/chat-tags is off changes nothing; Tags are on.
+    look(false)
     const philosopher = await make('🧠 Philosopher'), wizardos = await make('WizardOS')
     assert.equal((await s.raw('/wizard/v1/channels/membership', json('PUT', { sessionId: 'wizard_parity', channelId: philosopher.id }))).status, 200)
-    assert.equal((await s.raw('/wizard/v1/channels/tags?sessionId=wizard_parity')).status, 404, `${s.kind}: no tags route while the switch is off`)
-    assert.equal((await (await s.raw('/wizard/v1/channels')).json()).tags, undefined, `${s.kind}: the channel list says nothing about tags while off`)
-    const off = await listed(x => x.channel === philosopher.id)
-    assert.equal(off?.channel, philosopher.id); assert.equal(off.tags, undefined, `${s.kind}: rows carry no tags while off`)
-    // On: the chat's channel is its first tag, and it can carry a second one.
-    look(true)
     assert.equal((await (await s.raw('/wizard/v1/channels')).json()).tags, true, `${s.kind}: the channel list says tags are on`)
+    // The chat's channel is its first tag, and it can carry a second one.
     assert.deepEqual((await tagsOf()).tags, [philosopher.id], `${s.kind}: the channel became the first tag`)
     let r = await tag({ add: wizardos.id }); assert.equal(r.status, 200)
     assert.deepEqual(await r.json(), { sessionId: 'wizard_parity', agent: s.id, channel: philosopher.id, tags: [philosopher.id, wizardos.id] })
@@ -1994,11 +1990,11 @@ export const serverChecks = {
     const said = await s.raw('/wizard/v1/route', json('POST', { text: 'Free will again #philosopher', timezone: 'UTC', thread_id: 'wizard_parity' }))
     assert.ok([200, 404].includes(said.status), `${s.kind}: the route answers as before (${said.status})`)
     assert.ok((await tagsOf('hermes')).tags.includes(mainTag.id), `${s.kind}: #philosopher tagged the main agent's thread`)
-    // Off again: the one-channel view of the same data, nothing lost.
-    look(false)
-    assert.equal((await s.raw('/wizard/v1/channels/tags?sessionId=wizard_parity')).status, 404, `${s.kind}: off again hides the route`)
-    const back = await listed(x => x.tags === undefined)
-    assert.deepEqual([back?.channel, back?.tags], [wizardos.id, undefined], `${s.kind}: off again shows the primary tag as the channel`)
+    // With no Look file at all Tags stay on.
+    rmSync(join(s.root, 'Pages', 'wizard-look', 'look.json'), { force: true })
+    assert.equal((await s.raw('/wizard/v1/channels/tags?sessionId=wizard_parity')).status, 200, `${s.kind}: the tags route answers with no Look file`)
+    const back = await listed(x => x.tags?.[0] === wizardos.id)
+    assert.deepEqual([back?.channel, back?.tags?.[0]], [wizardos.id, wizardos.id], `${s.kind}: rows keep carrying tags, primary first`)
   },
   'chats-channels-switch': async s => {
     const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
