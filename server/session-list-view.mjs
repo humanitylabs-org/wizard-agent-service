@@ -143,6 +143,9 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
       request: userText,
       // Agents MVP: the agent this thread is pinned to (server metadata). '' = the main agent.
       agent: typeof item.agent === 'string' ? item.agent : item.agent && typeof item.agent === 'object' && typeof item.agent.id === 'string' ? item.agent.id : '',
+      // wizard-ux issue 1927: Hermes' own pinned flag (sessions.pinned), a thread the owner keeps (Topics). Smart inbox
+      // reads it as a delivery he set up. Its own name, so the shell's `pinned` (Working's pin order) is untouched.
+      ...(item.pinned === true || item.pinned === 1 ? { hermesPinned: true } : {}),
     };
   }
 

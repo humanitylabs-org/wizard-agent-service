@@ -119,6 +119,22 @@ export const serverChecks = {
       assert.equal(item.source, 'telegram', `the list row keeps its source (${query})`)
     }
   },
+  // wizard-ux issue 1927: Hermes' own pinned flag lists as hermesPinned on the compact rows (Smart inbox reads it).
+  'chat-hermes-pin-list': async s => {
+    const row = s.sessions.get('wizard_parity')
+    Object.assign(row, { hidden: false, pinned: true })
+    row.messages.push({ role: 'user', content: 'Synthetic pinned roundup', timestamp: Date.now() / 1000 })
+    for (const query of ['?view=list', '?view=list&window=archive-50&limit=100']) {
+      let item
+      for (let n = 0; n < 40 && !item; n++) {
+        const r = await s.request('/api/sessions' + query); assert.equal(r.status, 200)
+        item = (await r.json()).data.find(x => x.id === 'wizard_parity')
+        if (!item) await new Promise(done => setTimeout(done, 50))
+      }
+      assert.ok(item, `the pinned chat lists (${query})`)
+      assert.equal(item.hermesPinned, true, `the list row keeps Hermes' pin (${query})`)
+    }
+  },
   // Issue 612: after a /new in Telegram, stock Hermes starts a new session whose parent_session_id is the
   // old one (ended session_reset). It is its own conversation and lists; a sub-agent child never does.
   'chat-after-reset-list': async s => {

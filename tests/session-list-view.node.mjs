@@ -118,6 +118,15 @@ test('reply buttons and taps preview as plain words, main and routed (host-profi
     assert.equal(normalizeFull({ ...base, latest_message: { role: 'user', content: taps } }).preview, tapped.preview, `${kind} full = slim`)
   }
 })
+// wizard-ux issue 1927: Hermes' pinned flag reaches the shell as hermesPinned (Smart inbox: a delivery he set up).
+// A row without it carries no key, and the shell's own `pinned` is never set from it.
+test('list rows keep Hermes\' pinned flag as hermesPinned; a row without one has none', () => {
+  assert.equal(listRow({ id: 'wizard_topics', pinned: true }).hermesPinned, true);
+  assert.equal(listRow({ id: 'wizard_topics', pinned: 1 }).hermesPinned, true);
+  assert.equal('hermesPinned' in listRow({ id: 'plain' }), false);
+  assert.equal('hermesPinned' in listRow({ id: 'plain', pinned: false }), false);
+  assert.equal('pinned' in listRow({ id: 'wizard_topics', pinned: true }), false);
+});
 // wizard-os issue 974: the Inbox row's one-line preview is plain text: a Markdown link shows its words, bold marks go,
 // reply-button groups (drawn in the thread) never show as markers or labels, separate lines join with " · ".
 test('list preview is plain text: links as their words, no bold marks, no reply-button markers or labels', () => {
