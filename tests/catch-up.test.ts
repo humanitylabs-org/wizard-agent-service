@@ -1,10 +1,10 @@
-// Issue 668: catch me up (switch wizard/catch-me-up, off by default).
+// Issue 668: catch me up (on for everyone; the wizard/catch-me-up switch was removed).
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { AgentInboxStore } from '../server/agent-inbox.mjs'
-import { BASELINE_PROMPT, CATCH_UP_SWITCH, CATCH_UP_TOOL, createCatchUp, isCatchUpPhrase, lastTurns, startsCatchUp } from '../server/catch-up.mjs'
+import { BASELINE_PROMPT, CATCH_UP_TOOL, createCatchUp, isCatchUpPhrase, lastTurns, startsCatchUp } from '../server/catch-up.mjs'
 import { routeUtterance } from '../server/voice-router.mjs'
 
 let root: string
@@ -45,10 +45,9 @@ describe('the phrase', () => {
     for (const text of ['catch me up on the Sam thread', 'did you catch me up yesterday', 'catch up', 'catch me up and book a table', '']) expect(isCatchUpPhrase(text), text).toBe(false)
     expect(startsCatchUp('Signal sweep.')).toBe(true)
     expect(startsCatchUp('signal sweep the mail')).toBe(false)
-    expect(CATCH_UP_SWITCH).toBe('wizard/catch-me-up')
   })
 
-  it('a spoken "catch me up" is an agent turn before any router is asked, only while the switch is on', async () => {
+  it('a spoken "catch me up" is an agent turn before any router is asked (the Service always passes the phrase test)', async () => {
     let asked = 0
     const fetchImpl = async () => { asked += 1; return new Response(JSON.stringify({ choices: [{ message: { content: '{"route":"command","action":"open_view","view":"inbox"}' } }] })) }
     const router = { url: 'http://127.0.0.1:9/v1', model: 'm' }

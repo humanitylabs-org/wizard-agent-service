@@ -1911,12 +1911,13 @@ export const serverChecks = {
       await until(async () => [...s.runs.values()].at(-1)?.status === 'running' ? 1 : null, Boolean, 'the yes-to-all turn is running')
       await finishLatest('completed', 'Synthetic reply')
       for (const r of s.runs.values()) if (r.status === 'running') r.status = 'completed'
-      // "signal sweep" typed to the main agent posts a new card and tells the turn so, once.
+      // "signal sweep" typed to the main agent is catch me up's alias (issue 668): the built catch-up, no new card.
       const typed = await admit(s, { session_id: card2.thread_id, input: 'Signal sweep' })
-      const fresh = await until(latestCard, c => c && c.id !== card2.id, 'typing signal sweep posts a card')
-      assert.equal(fresh.thread_id, card2.thread_id)
       const dispatched = await until(async () => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === card2.thread_id).at(-1), Boolean, 'the turn is dispatched')
-      assert.match(String(dispatched.body.instructions || ''), /Signal sweep: the owner asked for a signal sweep/u)
+      assert.ok(String(dispatched.body.instructions || '').includes('Reply clear or clear except N.'), 'typed "signal sweep" starts the catch-up')
+      assert.doesNotMatch(String(dispatched.body.instructions || ''), /Signal sweep: the owner asked for a signal sweep/u)
+      assert.equal((await latestCard())?.id, card2.id, 'typing signal sweep posts no card')
+      const fresh = card2
       assert.ok(typed.run_id || typed.id)
       // A sweep the owner scheduled (a thread:'daily' job whose prompt is the phrase) posts a card too, quietly.
       for (const r of s.runs.values()) if (r.status === 'running') r.status = 'completed'
@@ -1929,14 +1930,15 @@ export const serverChecks = {
       await until(latestCard, c => c && c.id !== fresh.id, 'a scheduled sweep posts a card')
       const quiet = await until(async () => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === card2.thread_id && String(r.body?.input || '').startsWith('[Wizard schedule]')).at(-1), Boolean, 'the scheduled turn is dispatched')
       assert.match(String(quiet.body.instructions || ''), /Respond exactly \[SILENT\]/u)
-      // No open Daily: the typed turn is told the card could not be posted, never that it was.
+      // No open Daily: a typed "signal sweep" is still the catch-up, never a card or a word about one.
       for (const r of s.runs.values()) if (r.status === 'running') r.status = 'completed'
       const dailyId = (await (await s.raw('/wizard/v1/channels')).json()).channels.find(c => c.kind === 'daily').id
       assert.equal((await s.raw('/wizard/v1/channels', json('PATCH', { id: dailyId, archived: true }))).status, 200)
       const lastCard = (await latestCard()).id
       await admit(s, { session_id: card2.thread_id, input: 'signal sweep' })
-      const refused = await until(async () => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === card2.thread_id && r.body?.input === 'signal sweep').at(-1), Boolean, 'the refused turn is dispatched')
-      assert.match(String(refused.body.instructions || ''), /could not post the sweep card because there is no open Daily thread/u)
+      const refused = await until(async () => s.seen.filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === card2.thread_id && r.body?.input === 'signal sweep').at(-1), Boolean, 'the turn is dispatched')
+      assert.ok(String(refused.body.instructions || '').includes('Reply clear or clear except N.'), 'still the catch-up')
+      assert.doesNotMatch(String(refused.body.instructions || ''), /sweep card/u)
       assert.equal((await latestCard()).id, lastCard, 'no card without an open Daily')
     }
   },
@@ -3258,8 +3260,8 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.equal((await tips({ action: 'stop' })).stopped, 4)
   },
   'catch-me-up': async s => {
-    // Issue 668 (switch wizard/catch-me-up in the Look file, off by default). Through this kind's own Service routes:
-    // off, "catch me up" is an ordinary turn and the agent has no wizard_catch_up tool; on (main agent only), the turn
+    // Issue 668 (on for everyone; the wizard/catch-me-up switch was removed, and a stored off value changes nothing).
+    // Through this kind's own Service routes, on the main agent only, the turn
     // carries Miguel's prompt with the chats and agent inbox records read for it, the records shown are marked seen,
     // clear/defer act only after the owner's answer, and a second catch-up right after says nothing new. Routed
     // agents never get it.
@@ -3282,15 +3284,12 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     const tools = async () => { const r = await s.agentMcp('tools/list'); assert.equal(r.status, 200, 'own gateway credential and transport'); return (await r.json()).result.tools.map(t => t.name) }
     const tool = async args => { const r = await s.agentMcp('tools/call', { name: 'wizard_catch_up', arguments: args }); assert.equal(r.status, 200); return (await r.json()).result }
     look(false)
-    assert.ok(!(await turn('wizard_parity_cu_off', 'catch me up')).includes(PROMPT), 'switch off: an ordinary turn')
-    assert.ok(!(await tools()).includes('wizard_catch_up'), 'switch off: no wizard_catch_up tool')
-    look(true)
     if (s.id !== 'hermes') {
       assert.ok(!(await turn('wizard_parity', 'catch me up')).includes(PROMPT), 'a routed agent never runs the built catch-up')
       assert.ok(!(await tools()).includes('wizard_catch_up'), 'a routed agent has no wizard_catch_up tool')
       return
     }
-    assert.ok((await tools()).includes('wizard_catch_up'), 'switch on: the main agent has wizard_catch_up')
+    assert.ok((await tools()).includes('wizard_catch_up'), 'the main agent has wizard_catch_up, whatever the Look file holds')
     // Two chats waiting on the owner, and three agent inbox records: a result, an FYI and a confirm ask.
     const at = Date.now() / 1000 - 600
     for (const [id, title, ask] of [['wizard_parity_cu_a', 'Synthetic weekend plan', 'Pick Saturday or Sunday'], ['wizard_parity_cu_b', 'Synthetic desk order', 'Approve the desk order']]) {

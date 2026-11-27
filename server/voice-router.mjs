@@ -211,8 +211,8 @@ export async function routeUtterance({ input, settings, router, fetchImpl = fetc
   const why = { decided_by: 'model', rules: [...rules.rules], urgent: rules.urgent, tags: [...rules.tags], reminder: false }
   const at = now ? +new Date(now) : Date.now()
   const dumpCmd = (cmd = {}) => ({ route: 'dump', title: dumpTitle(cmd, text), deadline: deadlineFrom(text, timezone || settings?.clock?.timezone, at), summary: clip(cmd.summary, 200) || text })
-  // Issue 668 (switch wizard/catch-me-up): "catch me up" said on its own is always a visible turn for the agent, never a
-  // phone command or a background task; the caller passes the phrase test only while the switch is on.
+  // Issue 668: "catch me up" said on its own is always a visible turn for the agent, never a phone command or a
+  // background task; the Service passes the phrase test (catch-up.mjs startsCatchUp).
   if (typeof catchUp === 'function' && catchUp(text)) {
     Object.assign(why, { decided_by: 'owner_words', rules: ['catch_up', ...why.rules] })
     return { cmd: { route: 'agent', summary: text }, ms: 0, model: '', why }
