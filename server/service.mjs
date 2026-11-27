@@ -5233,6 +5233,48 @@ function buildWizardServer(options, lifetime) {
       if (!result.ok) throw Object.assign(new Error('watcher archive preservation failed'), { status: result.status })
       canonicalSessionCache.expiresAt = 0
     }
+    // Issue 675: a run the owner did not send (a scheduled wake or report, a script-gated check, a helper, heavy-job
+    // or agent-inbox result, an app wake) never re-opens an archived thread at admission; it may answer [SILENT].
+    // Returns null for the owner's own turns (they re-open at once), else { visible }: whether a visible answer
+    // is itself the result the owner asked to get back (a reminder, a once-run, a helper result for the owner's
+    // own request). Repeating wakes and reports come back only when they end needing the owner.
+    const agentStartedRun = (record) => {
+      const key = String(record.idempotencyKey || '')
+      const kind = record.continuation?.kind
+      if (record.recoveryAuthorized || kind === BACKGROUND_RECOVERY_KIND || kind === 'watch') return null
+      if (kind === HEAVY_KIND || record.continuation || /^(?:wizard-helper-receipt-|wizard-follow-through-|wizard-heavy-)/u.test(key)) return { visible: true }
+      // `schedule:<job id>:<instant>`, and `…:reporter` for the reporter's rewrite of that answer.
+      if (key.startsWith('schedule:')) {
+        let job = null
+        try { job = scheduler?.get(key.split(':')[1]) ?? null } catch { job = null }
+        return { visible: job?.kind === 'remind' || Boolean(job?.when?.once) }
+      }
+      if (key.startsWith(INBOX_RUN_PREFIX) && !key.startsWith(`${INBOX_RUN_PREFIX}answer-`)) return { visible: false }
+      if (key.startsWith(APP_WAKE_RUN_PREFIX)) return { visible: false }
+      return null
+    }
+    const sessionArchivedNow = async (sessionId) => sessionArchivedReader
+      ? sessionArchivedReader(sessionId)
+      : (await hermesJson(`/api/sessions/${encodeURIComponent(sessionId)}`))?.session?.archived === true
+    // An agent-started run's answer decides whether its archived thread comes back: a [SILENT] or empty answer
+    // and a failed run never; needs_you or an approval wait always; another visible answer only when `visible`.
+    const approvalRestored = new Set()
+    const settleAgentStartedRun = async (record, payload) => {
+      const started = agentStartedRun(record)
+      if (!started || !record.sessionId || record.runtime !== 'direct') return
+      let restore = false
+      if (payload?.status === 'waiting_for_approval') {
+        if (approvalRestored.has(record.publicRunId)) return
+        approvalRestored.add(record.publicRunId)
+        if (approvalRestored.size > 256) approvalRestored.delete(approvalRestored.values().next().value)
+        restore = true
+      } else if (payload?.status === 'completed') {
+        const output = typeof payload.output === 'string' ? payload.output : ''
+        if (!output.trim() || isSilentResult(output)) return
+        restore = parseStatus(output)?.state === 'needs_you' || started.visible
+      }
+      if (restore) await unarchiveForNewTurn(record.sessionId)
+    }
     // Replies into chats a messaging app owns (issue 427, on for everyone; WIZARD_MESSAGING_REPLIES=0 turns it off):
     // they go to the wizard-os plugin in the Hermes gateway (messaging-replies.mjs), never to /v1/runs.
     messagingRepliesOn = () => Boolean(hermesStatePath) && channelOn(options.messagingReplies)
@@ -5325,6 +5367,9 @@ function buildWizardServer(options, lifetime) {
       // Persist the actual decorated wire payload, not just the UI input: capability and
       // instruction changes across a restart must not change an attempted idempotency key.
       queuedBody = Buffer.from(runQueue.freezeDispatchBody(record.publicRunId, queuedBody.toString('utf8')))
+      const agentStarted = record.runtime === 'direct' && record.continuation?.kind !== 'watch' ? agentStartedRun(record) : null
+      let keepArchived = false
+      if (agentStarted && record.sessionId) { try { keepArchived = await sessionArchivedNow(record.sessionId) } catch { keepArchived = false } }
       const result = await fetchImpl(`${upstreamOrigin}/v1/runs`, { method: 'POST', body: queuedBody, headers, redirect: 'manual' })
       const raw = Buffer.from(await result.arrayBuffer())
       if (!result.ok) throw upstreamError(result.status, raw, result.headers.get('retry-after'))
@@ -5348,6 +5393,10 @@ function buildWizardServer(options, lifetime) {
         // Hermes materializes a run by reopening its thread. A queued watcher may dispatch long after the scheduler
         // first accepted it, so preserve Done at the durable launch boundary rather than only beside enqueue.
         if (record.continuation.preserve_archived === true) await preserveWatcherArchive(record.sessionId)
+      } else if (agentStarted) {
+        // Issue 675: Done stays Done while the answer is unknown; settleAgentStartedRun decides at the end.
+        if (keepArchived) await preserveWatcherArchive(record.sessionId).catch(() => undefined)
+        if (['completed', 'waiting_for_approval'].includes(payload.status)) await settleAgentStartedRun(record, payload).catch(() => undefined)
       } else await unarchiveForNewTurn(record.sessionId)
       chatPhotos?.kick('accepted_user') // accepted user message; never upload completion
       return {
@@ -5373,6 +5422,7 @@ function buildWizardServer(options, lifetime) {
       const payload = await hermesJson(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`)
       if (payload.status === 'completed') { chatPhotos?.kick('completed_assistant'); if (record.runtime !== 'operator') { spaceFiling.apply('hermes', record.sessionId, parseStatus(payload.output)); noteRunItems(record.sessionId, payload.output) } }
       if (record.runtime !== 'operator') inboxNoteRun(MAIN_AGENT_ID, record.sessionId, payload, record.publicRunId)
+      if (['completed', 'waiting_for_approval'].includes(payload?.status)) await settleAgentStartedRun(record, payload).catch(() => undefined)
       let capacityStatus = payload.status
       let workerRunId = record.workerRunId
       if (record.runtime === 'operator' && workerRunId) {
