@@ -3149,6 +3149,86 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.ok(personal.tips.every(t => t.text.includes('picked "Find a job"')), 'every tip is built from the pick')
     assert.equal((await tips({ action: 'stop' })).stopped, 4)
   },
+  'catch-me-up': async s => {
+    // Issue 668 (switch wizard/catch-me-up in the Look file, off by default). Through this kind's own Service routes:
+    // off, "catch me up" is an ordinary turn and the agent has no wizard_catch_up tool; on (main agent only), the turn
+    // carries Miguel's prompt with the chats and agent inbox records read for it, the records shown are marked seen,
+    // clear/defer act only after the owner's answer, and a second catch-up right after says nothing new. Routed
+    // agents never get it.
+    const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/catch-me-up': { on, at: Date.now() } } })) }
+    const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const PROMPT = 'End with: Reply clear or clear except N.'
+    const settle = () => { for (const run of s.runs.values()) if (['running', 'queued'].includes(run.status)) Object.assign(run, { status: 'completed', output: 'Synthetic reply', updated_at: Date.now() / 1000 }) }
+    const turn = async (id, input) => {
+      settle()
+      if (!s.sessions.get(id)) await s.request('/api/sessions', post({ id, source: 'wizard-mobile' }))
+      const before = s.seen.length
+      await admit(s, { session_id: id, input })
+      for (let n = 0; n < 120; n++) {
+        const run = s.seen.slice(before).filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === id).at(-1)
+        if (run) { settle(); return String(run.body.instructions || '') }
+        await new Promise(r => setTimeout(r, 25))
+      }
+      assert.fail(`the turn in ${id} never reached the agent`)
+    }
+    const tools = async () => { const r = await s.agentMcp('tools/list'); assert.equal(r.status, 200, 'own gateway credential and transport'); return (await r.json()).result.tools.map(t => t.name) }
+    const tool = async args => { const r = await s.agentMcp('tools/call', { name: 'wizard_catch_up', arguments: args }); assert.equal(r.status, 200); return (await r.json()).result }
+    look(false)
+    assert.ok(!(await turn('wizard_parity_cu_off', 'catch me up')).includes(PROMPT), 'switch off: an ordinary turn')
+    assert.ok(!(await tools()).includes('wizard_catch_up'), 'switch off: no wizard_catch_up tool')
+    look(true)
+    if (s.id !== 'hermes') {
+      assert.ok(!(await turn('wizard_parity', 'catch me up')).includes(PROMPT), 'a routed agent never runs the built catch-up')
+      assert.ok(!(await tools()).includes('wizard_catch_up'), 'a routed agent has no wizard_catch_up tool')
+      return
+    }
+    assert.ok((await tools()).includes('wizard_catch_up'), 'switch on: the main agent has wizard_catch_up')
+    // Two chats waiting on the owner, and three agent inbox records: a result, an FYI and a confirm ask.
+    const at = Date.now() / 1000 - 600
+    for (const [id, title, ask] of [['wizard_parity_cu_a', 'Synthetic weekend plan', 'Pick Saturday or Sunday'], ['wizard_parity_cu_b', 'Synthetic desk order', 'Approve the desk order']]) {
+      await s.request('/api/sessions', post({ id, source: 'wizard-mobile', title }))
+      Object.assign(s.sessions.get(id), { title })
+      s.sessions.get(id).messages.push({ id: `${id}-u`, role: 'user', content: `Synthetic request: ${title}`, timestamp: at },
+        { id: `${id}-a`, role: 'assistant', content: `Synthetic answer: ${title}\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'needs_you', ask })}[/WIZARD_STATUS_V1]`, timestamp: at + 1 })
+    }
+    const ids = {}
+    for (const [key, kind, extra] of [['done', 'result', {}], ['fyi', 'fyi', {}], ['confirm', 'needs_you', { confirm: true }]]) {
+      const made = await s.raw('/wizard/v1/agent-inbox', json('POST', { thread_id: `wizard_parity_bg_${key}`, title: `Synthetic ${key} record`, ask: `Synthetic ${key} ask`, kind, ...extra }))
+      assert.equal(made.status, 201, await made.clone().text())
+      ids[key] = (await made.json()).record.id
+      assert.equal((await s.raw(`/wizard/v1/agent-inbox/${ids[key]}`, json('PATCH', { action: 'snooze' }))).status, 200)
+    }
+    const record = async id => (await (await s.raw(`/wizard/v1/agent-inbox/${id}`)).json()).record
+    const first = await turn('wizard_parity_cu1', 'Catch me up.')
+    assert.ok(first.includes(PROMPT) && first.includes('Never send, archive, pay or reply without my yes.'), 'Miguel\u2019s prompt rides on the turn')
+    for (const id of ['wizard_parity_cu_a', 'wizard_parity_cu_b']) assert.ok(first.includes(`id ${id} |`), `chat ${id} is listed`)
+    assert.ok(first.includes('Pick Saturday or Sunday') && first.includes('Synthetic request: Synthetic desk order'), 'each chat carries its ask and the owner\u2019s last message')
+    for (const id of Object.values(ids)) assert.ok(first.includes(`id ${id}`), `record ${id} is listed`)
+    assert.ok(first.indexOf(`id ${ids.confirm}`) > first.indexOf('Waiting on the owner'), 'the confirm ask is a step-two item')
+    assert.deepEqual([(await record(ids.done)).state, (await record(ids.fyi)).state], ['archived', 'archived'], 'finished and FYI records shown are marked seen')
+    assert.ok((await record(ids.confirm)).caught_up_at, 'the confirm ask shown is stamped seen')
+    // Nothing is cleared before the owner answers.
+    const early = await tool({ action: 'clear', chats: ['wizard_parity_cu_a'] })
+    assert.equal(early.isError, true, 'clear before the owner answers is refused')
+    assert.notEqual(s.sessions.get('wizard_parity_cu_a').archived, true)
+    await turn('wizard_parity_cu1', 'clear')
+    const outside = await tool({ action: 'clear', chats: ['wizard_parity'] })
+    assert.match(outside.content[0].text, /Cleared 0\./u, 'a chat the catch-up did not show is never archived')
+    const cleared = await tool({ action: 'clear', chats: ['wizard_parity_cu_a'], records: [ids.confirm] })
+    assert.ok(!cleared.isError, cleared.content?.[0]?.text)
+    assert.equal(s.sessions.get('wizard_parity_cu_a').archived, true, 'clear archives the chat in Hermes')
+    assert.equal((await record(ids.confirm)).state, 'archived')
+    const deferred = await tool({ action: 'defer', chats: ['wizard_parity_cu_b'], items: ['Synthetic mail from Sam'] })
+    assert.ok(!deferred.isError, deferred.content?.[0]?.text)
+    // A second catch-up right after says nothing new; the deferred item is skipped by name.
+    const second = await turn('wizard_parity_cu2', 'catch me up')
+    assert.ok(second.includes('Nothing new since the last catch-up'), 'a second catch-up says nothing new')
+    assert.ok(!second.includes('id wizard_parity_cu_b |') && !second.includes('id wizard_parity_cu1 |'), 'deferred chats and earlier catch-ups are not listed')
+    assert.ok(second.includes('"Synthetic mail from Sam"'), 'the deferred item is named to skip')
+    // "signal sweep" is the alias: a catch-up, not a sweep card.
+    assert.ok((await turn('wizard_parity_cu3', 'signal sweep')).includes(PROMPT), '"signal sweep" starts the catch-up')
+    assert.equal((await (await s.raw('/wizard/v1/agent-inbox/sweep')).json()).card, null, 'no sweep card is made')
+  },
   'capability-registry': async s => {
     // Issue 463: agents find what the box already does (built-ins, host voice service, app jobs) before installing
     // their own. On for everyone (the wizard/capability-registry switch was removed), whatever the Look file holds.

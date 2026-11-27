@@ -744,6 +744,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "catch-me-up",
+      "description": "Catch me up (issue 668, switch wizard/catch-me-up in the Look file, off by default; WIZARD_CATCH_ME_UP 1 forces it on, 0 off): while on, the owner's \"catch me up\" (or \"signal sweep\", its alias) to the main agent is built before the turn is admitted (server/catch-up.mjs): the run note carries Miguel's catch-up prompt verbatim plus the chats waiting on the owner (last 7 days, not archived, his last message and the last reply), the agent inbox records new since the last catch-up (caps 7 waiting / 10 finished, overflow as N more) and the deferred list; shown records are marked seen (finished/FYI archived, waiting stamped caught_up_at), and a catch-up right after says nothing new. The main agent's gateway tool wizard_catch_up clears (Hermes archive + snooze cleared + saved result dismissed; records archived) and defers only items that catch-up showed, and only after the owner answered in its thread. The orb router settles a spoken \"catch me up\" as an agent turn. Pull-only: nothing is scheduled. Routed agents never get it. Off: an ordinary turn and no tool.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP routes with the switch flipped in <root>/Pages/wizard-look/look.json: off, \"catch me up\" reaches the agent with no catch-up note and the agent's own gateway lists no wizard_catch_up; on, routed kinds stay exactly the same, and on main two waiting chats and three agent inbox records (result, fyi, confirm) all appear in the run note with the prompt, the result and fyi records are archived and the confirm is stamped seen, clear before the owner's answer is refused, after his \"clear\" it archives the shown chat in Hermes and the confirm record and refuses a chat the catch-up did not show, defer skips a chat and names an item, a second catch-up says nothing new, and \"signal sweep\" starts the catch-up with no sweep card. tests/catch-up.test.ts covers the phrase, the caps and overflow, the marking, the refusals and the voice router. Synthetic HTTP fixture evidence, not live box proof: the agent's wording comes from the prompt.",
+      "source_refs": [
+        "server/catch-up.mjs",
+        "server/service.mjs",
+        "server/index.mjs",
+        "server/voice-router.mjs"
+      ],
+      "reference_tests": [
+        "tests/catch-up.test.ts"
+      ],
+      "fixture": "catch-me-up",
+      "policy_exemptions": []
+    },
+    {
       "id": "result-reader",
       "description": "Result reader (issue 630, switch wizard/result-reader in the Look file, off by default; WIZARD_RESULT_READER 1 forces it on, 0 off; needs the agent inbox): when a worker run on a linked inbox record finishes, a fixed stateless reader (server/result-reader.mjs, no memory, no tools) calls ONLY the private fast router (privateRouter endpoint host) at temperature 0 with bounded facts (agent, agent kind, duration, ok/failed/killed, error text, owed background work, the status line as a hint, the last 4,000 characters of the final reply) and the owner's latest 8 corrections (Not urgent / Should have alerted, Open / Send to inbox). Its strict JSON (kind needs_you | result | fyi, urgent, failed, ask capped at 140, options only on needs_you) files the record through the inbox's own mapping (owed work, confirm lines and answered records behave as before); urgent raises the severity to high so the alert gate (rules, examples, 3-a-day cap) decides. The reader wins over the status line; the record keeps classified_by (reader | status_line | fallback), status_line and reader, a disagreement (another kind, or done on a failed run) is counted, GET /wizard/v1/agent-inbox carries reader counts, and a Sent row whose record it filed shows filed_by. One read per finished run however often it is polled. Invalid JSON, an HTTP error or a timeout: filed exactly as today (classified_by status_line, or fallback with no status line), logged. No private router: never called, logged once, records exactly as today. Switch off: records byte-identical to today.",
       "layer": "server",
