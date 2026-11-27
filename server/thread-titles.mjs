@@ -84,6 +84,41 @@ export function looksLikeSentence(title) {
   return text.replace(CLASH_SUFFIX, '').split(/\s+/u).filter(word => word !== '·').length > 4
 }
 
+// A title that is not a label (issue 694): a leading verb (a task line), more than six words outside a " · " surface,
+// sentence punctuation inside, a cut-off ending, or longer than the cap. Used to refuse proposals on every agent and to
+// spot a current title that must give way to a label.
+export function isSentenceTitle(title) {
+  const text = squash(title).replace(CLASH_SUFFIX, '')
+  if (!text) return false
+  if (text.length > TITLE_MAX || LEADING_VERB.test(text) || /(?:…|\.\.\.)$/u.test(text)) return true
+  const words = text.split(/\s+/u).filter(word => word !== '·')
+  if (!text.includes(' · ') && words.length > 6) return true
+  return /[.!?;](?:\s|$)|,\s/u.test(text.replace(/[.!?]+$/u, ''))
+}
+
+// A short label cut from a sentence title (issue 694): the first clause, leading verb and filler dropped, stopping at
+// the first connector, at most four words and TITLE_MAX characters. '' when nothing label-like is left.
+const LABEL_FILLER = new Set(['a', 'an', 'the', 'my', 'our', 'your', 'their', 'his', 'her', 'its', 'this', 'that', 'these', 'those', 'some', 'any', 'all', 'everything', 'anything', 'something', 'every', 'me', 'us', 'you', 'i', 'we', 'it', 'right', 'now', 'today', 'please', 'pls', 'just', 'really', 'again', 'quickly', 'also', 'maybe', 'bro', 'hey', 'hi', 'yo', 'ok', 'okay', 'so', 'well', 'actually', 'can', 'could', 'would', 'will', 'let\'s', 'lets', 'take', 'look', 'quick'])
+const LABEL_STOP = new Set(['after', 'before', 'when', 'while', 'because', 'to', 'for', 'in', 'on', 'at', 'with', 'from', 'into', 'about', 'of', 'by', 'via', 'and', 'or', 'but', 'if', 'then', 'than', 'which', 'who', 'where', 'why', 'how', 'is', 'are', 'was', 'were', 'be', 'am', 'do', 'does', 'did', 'not', 'what', 'tell', 'needs'])
+export function labelFrom(value) {
+  let line = spellProductName(squash(value)).replace(CLASH_SUFFIX, '').replace(/(?:…|\.\.\.)$/u, '')
+  line = line.split(/(?<=[.!?;])\s|,\s/u).find(part => /[\p{L}\p{N}]{3,}/u.test(part)) ?? ''
+  for (let before = ''; before !== line;) { before = line; line = line.replace(FIRST_FILLER, '').replace(LEADING_VERB, '').trim() }
+  const out = []
+  for (const raw of line.split(/\s+/u)) {
+    const word = raw.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '')
+    const bare = word.toLocaleLowerCase().replace(/’/gu, '\'')
+    if (!word || word === '·' || LABEL_FILLER.has(bare) || /^(?:i|we|you)'/u.test(bare)) continue
+    if (LABEL_STOP.has(bare)) { if (out.length) break; continue }
+    if ([...out, word].join(' ').length > TITLE_MAX) break
+    out.push(word)
+    if (out.length === 4) break
+  }
+  const title = normalizeTitle(out.join(' '))
+  const label = title ? title.charAt(0).toLocaleUpperCase() + title.slice(1) : ''
+  return label.length >= 3 && !isSentenceTitle(label) && !looksLikeOpener(label) ? label : ''
+}
+
 // Opener words, not a topic: a sentence, a first-person or conversational fragment, a comma clause.
 const CHATTER = /(?:^|\s)(?:i|i'm|i'd|i've|my|me|we|you|your|our|isn't|aren't|don't|doesn't|won't|can't|couldn't|could|would|should|actually|just|bro|hey|please)(?=[\s,.]|$)|[,;?!]/iu
 export function looksLikeOpener(title) {
@@ -378,12 +413,23 @@ export function titleToApply({ currentTitle, proposed, record, assistantAt, topi
   if (assistantAt !== null && assistantAt !== undefined && record?.appliedFor === assistantAt) return ''
   let next = normalizeTitle(proposed)
   if (!next || next.length < 3) return ''
+  // Issue 694: the thread must end with a label. A sentence title (the opener's, Hermes's own, or an old task line) or the
+  // Service's first-message placeholder gives way even when the agent echoes it or proposes another sentence.
+  const needsLabel = record?.provisional === true || isSentenceTitle(currentTitle)
+  // A task line or sentence is never applied, on any agent (routed agents pass no topic).
+  const sentence = isSentenceTitle(next) || isSentenceTitle(squash(proposed).replace(/[.!?。]+$/u, ''))
   if (topic !== undefined) {
     const echoedPlaceholder = record?.provisional === true && titleKey(next) === titleKey(record.title || currentTitle)
-    if (echoedPlaceholder || looksLikeOpener(next)) {
-      next = normalizeTitle(topic)
-      if (!next || next.length < 3 || looksLikeOpener(next)) return ''
+    if (echoedPlaceholder || sentence || looksLikeOpener(next)) {
+      // The topic stands in only for a title that must give way; a label stays when the proposal is unusable.
+      next = needsLabel ? normalizeTitle(topic) : ''
+      if (!next || next.length < 3 || looksLikeOpener(next) || isSentenceTitle(next)) next = ''
     }
+  } else if (sentence) next = ''
+  if (!next) {
+    if (!needsLabel) return ''
+    next = labelFrom(proposed) || labelFrom(currentTitle) || labelFrom(record?.title)
+    if (!next) return ''
   }
   const currentKey = titleKey(currentTitle)
   const nextKey = titleKey(next)
@@ -391,6 +437,23 @@ export function titleToApply({ currentTitle, proposed, record, assistantAt, topi
   // A narrower proposal is not evidence of a project change. Keep the existing home
   // even if the model drifts into Project · Feature (including suffixed canonical titles).
   // Semantic project changes and legacy broadening remain the shared prompt's job.
-  if (currentKey && !record?.provisional && nextKey.startsWith(`${currentKey} · `)) return ''
+  if (currentKey && !record?.provisional && !needsLabel && nextKey.startsWith(`${currentKey} · `)) return ''
   return next
+}
+
+// Every stored title the one-time label repair (issue 694) may look at: visible top-level threads, oldest first. Read-only.
+export function readSentenceTitles(sessionDbPath, limit = 5000) {
+  if (!sessionDbPath || !existsSync(sessionDbPath)) return []
+  let database
+  try {
+    database = new DatabaseSync(sessionDbPath, { readOnly: true })
+    const columns = new Set(database.prepare('PRAGMA table_info(sessions)').all().map((column) => column.name))
+    const where = ['title IS NOT NULL', ...(columns.has('hidden') ? ['COALESCE(hidden, 0) = 0'] : []), ...(columns.has('parent_session_id') ? ['parent_session_id IS NULL'] : [])]
+    const rows = database.prepare(`SELECT id, title FROM sessions WHERE ${where.join(' AND ')} ORDER BY started_at LIMIT ?`).all(limit)
+    return rows.filter((row) => typeof row.id === 'string' && ID.test(row.id) && isSentenceTitle(row.title)).map((row) => ({ id: row.id, title: row.title }))
+  } catch {
+    return []
+  } finally {
+    try { database?.close() } catch { /* already closed */ }
+  }
 }

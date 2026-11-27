@@ -19,7 +19,7 @@ export function createRoutedPresentation({ registry, subjects, spaces, heavyStat
       if (applied?.subject) { currentSubjects.set(pair(agent, row.id), applied.subject); if (currentSubjects.size > 2000) currentSubjects.delete(currentSubjects.keys().next().value) }
       const record = titles.get(row.id)
       // Hermes remains canonical; user titles and explicit owner renames are never overwritten.
-      const unknownAuthority = !record && row.title && !['llm', 'auto'].includes(row.title_source)
+      const unknownAuthority = !record && row.title && !['llm', 'auto', 'derived'].includes(row.title_source)
       const proposal = unknownAuthority || row.title_source === 'user' && !record ? '' : titleToApply({ currentTitle: row.title, proposed: applied?.title, record, assistantAt })
       if (proposal) {
         const patchHeaders = new Headers(headers); patchHeaders.set('Content-Type', 'application/json')
