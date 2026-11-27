@@ -126,6 +126,7 @@ test('list rows keep Hermes\' pinned flag as hermesPinned; a row without one has
   assert.equal('hermesPinned' in listRow({ id: 'plain' }), false);
   assert.equal('hermesPinned' in listRow({ id: 'plain', pinned: false }), false);
   assert.equal('pinned' in listRow({ id: 'wizard_topics', pinned: true }), false);
+});
 // wizard-os issue 974: the Inbox row's one-line preview is plain text: a Markdown link shows its words, bold marks go,
 // reply-button groups (drawn in the thread) never show as markers or labels, separate lines join with " · ".
 test('list preview is plain text: links as their words, no bold marks, no reply-button markers or labels', () => {
