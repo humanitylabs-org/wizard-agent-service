@@ -135,3 +135,53 @@ describe('an agent-started run in an archived thread (issue 675)', () => {
     expect(f.archived()).toBe(false)
   })
 })
+
+// wizard-ux issue 1997 (James, 27 Nov 2026): the owner archives a thread while his own run is still working and
+// trusts it to come back when there is news. Archive never stops the run; its visible reply brings the thread back
+// to Inbox, and a [SILENT] answer keeps it archived. An archive after the reply has landed stays put.
+describe('the owner archives a thread while his own run works (wizard-ux issue 1997)', () => {
+  const ownerRun = async (f: Awaited<ReturnType<typeof fixture>>, key: string) => {
+    const sent = await fetch(`${f.origin}/wizard/hermes/v1/runs`, { method: 'POST', headers: { ...f.headers, 'Idempotency-Key': key },
+      body: JSON.stringify({ session_id: 'wizard_origin', input: 'Please plan the launch week.' }) })
+    expect(sent.status).toBe(202)
+    return (await sent.json()).run_id as string
+  }
+  const archive = async (f: Awaited<ReturnType<typeof fixture>>) => {
+    const patched = await fetch(`${f.origin}/wizard/hermes/api/sessions/wizard_origin`, { method: 'PATCH', headers: f.headers, body: JSON.stringify({ archived: true }) })
+    expect(patched.status).toBe(200)
+  }
+  const finish = async (f: Awaited<ReturnType<typeof fixture>>, runId: string) => {
+    let last: any = null
+    for (let i = 0; i < 3; i++) last = await (await fetch(`${f.origin}/wizard/hermes/v1/runs/${runId}`, { headers: f.headers })).json()
+    return last
+  }
+
+  it('a visible reply brings the thread back to Inbox, and archiving never stopped the run', async () => {
+    const f = await fixture(report('done', 'Launch week planned'))
+    const runId = await ownerRun(f, 'owner-1997-visible')
+    expect(f.archived()).toBe(false)
+    await archive(f)
+    expect(f.archived()).toBe(true)
+    const run = await finish(f, runId)
+    expect(run.status).toBe('completed')
+    expect(f.archived()).toBe(false)
+  })
+
+  it('a [SILENT] reply keeps it archived', async () => {
+    const f = await fixture('[SILENT]')
+    const runId = await ownerRun(f, 'owner-1997-silent')
+    await archive(f)
+    const run = await finish(f, runId)
+    expect(run.status).toBe('completed')
+    expect(f.archived()).toBe(true)
+  })
+
+  it('an archive after the reply landed stays archived', async () => {
+    const f = await fixture(report('done', 'Launch week planned'))
+    const runId = await ownerRun(f, 'owner-1997-after')
+    expect((await finish(f, runId)).status).toBe('completed')
+    await archive(f)
+    await finish(f, runId)
+    expect(f.archived()).toBe(true)
+  })
+})

@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { existsSync } from 'node:fs'
 import { createHash, randomUUID } from 'node:crypto'
 import { DurableRunQueue, queuedInputTextOf } from './run-queue.mjs'
+import { ownerRunReturns } from './owner-run-return.mjs'
 import { readSteerResentHttp } from './hermes-http-readers.mjs'
 import { normalizeProviderPreflightFailure, projectProviderSignInHistory, projectProviderSignInEvent } from './run-provider-failure.mjs'
 const terminal = new Set(['completed','failed','cancelled','interrupted'])
@@ -31,6 +32,14 @@ export function createRoutedQueues({ registry, queuedHistory, restoreOwnerTurns 
         if (!response.ok) throw Object.assign(new Error('routed admission unavailable'),{status:response.status,upstreamError:payload.error,retryAfter:response.headers.get('retry-after')})
         return payload
       }
+      const ownerApprovals = new Set()
+      const unarchiveRouted = async sessionId => {
+        try {
+          const id = encodeURIComponent(sessionId)
+          if ((await call(`/api/sessions/${id}`))?.session?.archived !== true) return
+          await call(`/api/sessions/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({archived:false})})
+        } catch { /* the reply is kept; Restore stays available */ }
+      }
       const queue = new DurableRunQueue({keepOwnerTurns,providerAccessRecovery,providerAccessWindowSeconds,providerFailureDismissed,providerSignInReady,agentId:agent.id,statePath:join(registry.agentsDir,agent.id,'wizard-run-queue.sqlite3'),maxActive,pollIntervalMs,launchWaitMs,launchHold,
         // An external CLI turn remains protected by Hermes' 409 admission. Only
         // this agent's queue is reconciled here, never another agent's state.db.
@@ -49,7 +58,11 @@ export function createRoutedQueues({ registry, queuedHistory, restoreOwnerTurns 
           }
           return {upstreamRunId:payload.run_id||payload.id,capacityStatus:payload.status,payload}
         },
-        lookup:async record=>{ const payload=await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`); if(normalizeProviderPreflightFailure(payload).status==='completed') onStatus?.(agent.id,record.sessionId,payload.output); onRun?.(agent.id,record.sessionId,payload,record.publicRunId); return {payload} },
+        lookup:async record=>{ const payload=await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`); if(normalizeProviderPreflightFailure(payload).status==='completed') onStatus?.(agent.id,record.sessionId,payload.output); onRun?.(agent.id,record.sessionId,payload,record.publicRunId)
+          // wizard-ux issue 1997: a thread the owner archived while his own run worked comes back with its visible
+          // reply (or approval wait), exactly as on main (server/owner-run-return.mjs); [SILENT] keeps it archived.
+          if(ownerRunReturns(record,normalizeProviderPreflightFailure(payload),ownerApprovals)) await unarchiveRouted(record.sessionId)
+          return {payload} },
         // A steer this agent accepted but never consumed is replayed once, like main; only this agent's history is read.
         steerDelivered:(record,text)=>readSteerResentHttp(path=>call(path),record.sessionId,record.createdAt,text,queuedInputTextOf(record.body)),
       })
