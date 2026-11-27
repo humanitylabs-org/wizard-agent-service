@@ -139,7 +139,8 @@ describe('the Sent log store', () => {
     const rows = [
       // newest first, as the log keeps them
       { ...base, id: 'sent_ccccccccccccccccccccccc3', at: at + 60_000, source: 'typed', agent: 'hermes', text: 'Something typed', route: 'agent', thread_id: 'wizard_typed', run_key: 'kt' },
-      { ...base, id: 'sent_bbbbbbbbbbbbbbbbbbbbbbb2', at: at + 3000, source: 'new_chat', agent: 'hermes', text: `Because our clips pipeline isn't running${block}`, route: 'agent', decided_by: 'owner_words', thread_id: 'wizard_1795780294769_da9122aea463', run_key: 'voice-1', notify_when_done: true },
+      { ...base, id: 'sent_bbbbbbbbbbbbbbbbbbbbbbb2', at: at + 3000, source: 'new_chat', agent: 'hermes', text: `Because our clips pipeline isn't running${block}`, route: 'agent', decided_by: 'owner_words', thread_id: 'wizard_1795780294769_da9122aea463', run_key: 'voice-1', notify_when_done: true,
+        record_id: 'inbox_0123456789abcdef01234567', correction_id: 'ex_0123456789abcdef', corrected: { should_reply: false, at: at + 9000 } },
       { ...base, id: 'sent_aaaaaaaaaaaaaaaaaaaaaaa1', at, source: 'orb', agent: 'hermes', text: "Because our clips pipeline isn't running", route: 'agent', decided_by: 'model', thread_id: null, run_key: null },
       // a new_chat row with no orb twin keeps its row, without the file block
       { ...base, id: 'sent_ddddddddddddddddddddddd4', at: at - 3_600_000, source: 'new_chat', agent: 'hermes', text: `Untouched voice note${block}`, route: 'agent', thread_id: 'wizard_alone', run_key: 'k4' },
@@ -151,7 +152,9 @@ describe('the Sent log store', () => {
       ['sent_aaaaaaaaaaaaaaaaaaaaaaa1', 'orb', 'wizard_1795780294769_da9122aea463', "Because our clips pipeline isn't running"],
       ['sent_ddddddddddddddddddddddd4', 'new_chat', 'wizard_alone', 'Untouched voice note'],
     ])
-    expect(log.get('sent_aaaaaaaaaaaaaaaaaaaaaaa1')).toMatchObject({ run_key: 'voice-1', notify_when_done: true })
+    // A correction made on the chat's row before the upgrade moves with it (its inbox record and the example it taught).
+    expect(log.get('sent_aaaaaaaaaaaaaaaaaaaaaaa1')).toMatchObject({ run_key: 'voice-1', notify_when_done: true,
+      record_id: 'inbox_0123456789abcdef01234567', correction_id: 'ex_0123456789abcdef', corrected: { should_reply: false } })
     // Written back once, and a second load changes nothing.
     expect(JSON.parse(readFileSync(path, 'utf8')).rows).toHaveLength(3)
     expect(new SentLog(path).all()).toEqual(log.all())

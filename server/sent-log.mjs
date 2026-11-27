@@ -96,6 +96,11 @@ export class SentLog {
       if (chat.notify_when_done && !orb.notify_when_done) { orb.notify_when_done = true; if (chat.notified_run) orb.notified_run = chat.notified_run }
       if (Array.isArray(chat.tags) && chat.tags.length) orb.tags = cleanTags([...(orb.tags || []), ...chat.tags])
       if (chat.urgent === true) orb.urgent = true
+      // A correction made on the chat's row (its inbox record, the example it taught) moves with it.
+      if (chat.record_id) orb.record_id = chat.record_id
+      if (chat.correction_id) orb.correction_id = chat.correction_id
+      if (chat.corrected) orb.corrected = chat.corrected
+      if (chat.outcome && !orb.outcome) orb.outcome = chat.outcome
       merged.add(chat)
       changed = true
     }
