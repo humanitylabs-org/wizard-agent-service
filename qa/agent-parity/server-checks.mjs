@@ -11,6 +11,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { post, png, scene } from './fixture.mjs'
 import { PRESETS } from '../../server/agents.mjs'
+import { sameWords as sameWordsOf } from '../../server/sent-log.mjs'
 import { createChannelStore } from '../../server/channel-store.mjs'
 import { importInboxUploads } from '../../server/inbox-import.mjs'
 import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
@@ -1466,6 +1467,23 @@ export const serverChecks = {
       assert.deepEqual([(await row(walk.sent_id)).decided_by, (await row(walk.sent_id)).rules_matched], ['owner_words', ['wants_reply:walk me through']])
       assert.equal((await s.request('/v1/runs', post({ session_id: 'wizard_sent_orb', input: 'Walk me through the budget' }))).status, 202)
       await settle(async () => (await row(walk.sent_id)).thread_id === 'wizard_sent_orb', 'the orb row links to its visible thread')
+      // Issue 707: a spoken take is the same: the shell sends the transcript with the recording attached (the Service
+      // adds its file block to the turn), and that new chat is still the orb's one row, never a second new_chat row.
+      const spokenWords = 'Because our clips pipeline isn\'t running, tell me why'
+      const spokenTake = (await (await say(spokenWords)).json())
+      assert.equal(spokenTake.cmd.route, 'agent')
+      const voice = Buffer.alloc(44 + 3200)
+      voice.write('RIFF', 0); voice.writeUInt32LE(voice.length - 8, 4); voice.write('WAVEfmt ', 8)
+      voice.writeUInt32LE(16, 16); voice.writeUInt16LE(1, 20); voice.writeUInt16LE(1, 22)
+      voice.writeUInt32LE(16000, 24); voice.writeUInt32LE(32000, 28); voice.writeUInt16LE(2, 32); voice.writeUInt16LE(16, 34)
+      voice.write('data', 36); voice.writeUInt32LE(3200, 40)
+      const recording = await s.upload(voice, 'wizard-voice-707.wav', 'audio/wav'); assert.equal(recording.status, 201)
+      assert.ok([200, 201].includes((await s.request('/api/sessions', post({ id: 'wizard_sent_spoken', source: 'wizard-mobile' }))).status))
+      assert.equal((await s.request('/v1/runs', post({ session_id: 'wizard_sent_spoken', input: spokenWords, wizard_file_ids: [(await recording.json()).file.id] }))).status, 202)
+      await settle(async () => (await row(spokenTake.sent_id)).thread_id === 'wizard_sent_spoken', 'the spoken orb row links to its new chat')
+      await new Promise(r => setTimeout(r, 100))
+      assert.deepEqual((await rows()).filter(x => x.thread_id === 'wizard_sent_spoken' || sameWordsOf(x.text) === sameWordsOf(spokenWords)).map(x => [x.id, x.source]),
+        [[spokenTake.sent_id, 'orb']], 'one spoken take, one Sent row')
       // A typed first message is a typed row: visible thread, classified silently.
       reply = { route: 'dump', title: 'New phone', confidence: 0.8 }
       // (the shell makes a new chat's session, untitled, before its first turn)

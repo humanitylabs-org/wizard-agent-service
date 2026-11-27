@@ -4479,7 +4479,8 @@ function buildWizardServer(options, lifetime) {
     try {
       let input
       try { input = JSON.parse(bodyText)?.input } catch { return }
-      const text = visibleInputText(input).trim()
+      // His words only: a spoken turn's recording rides as a file block, which never matches the orb's words (issue 707).
+      const text = ownerWords(input)
       if (!text || (typeof input === 'string' && MACHINE_INPUT.test(text))) return
       const linked = sentLog.linkTurn({ agent: MAIN_AGENT_ID, thread: sessionId, text, run_key: runKey })
       if (linked) { sentTagsApply(linked); return }
@@ -4501,7 +4502,7 @@ function buildWizardServer(options, lifetime) {
     try {
       let input
       try { input = JSON.parse(bodyText)?.input } catch { return null }
-      const said = visibleInputText(input).trim()
+      const said = ownerWords(input)
       if (said && typeof input === 'string' && MACHINE_INPUT.test(said)) return null
       if (!said && !voice) return null
       const words = said ? replyRules(said) : { intent: '', rules: ['voice'], tags: [], urgent: false }

@@ -48,6 +48,9 @@ const clip = (value, max) => {
   const text = String(value ?? '').replace(/\s+/gu, ' ').trim()
   return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text
 }
+/** The owner's words without the Service's marker blocks: a spoken turn carries its recording as a [WIZARD_FILES_V1]
+ *  block (issue 707), which is never part of what he said (a clipped block has no closing tag). */
+export const withoutMarkers = value => String(value ?? '').replace(/\[(WIZARD_[A-Z0-9_]+_V1)\][\s\S]*?(?:\[\/\1\]|$)/gu, ' ').replace(/\s+/gu, ' ').trim()
 /** Words compared for "the same take": case, spacing and closing punctuation do not count. */
 export const sameWords = value => String(value ?? '').toLowerCase().replace(/\s+/gu, ' ').replace(/[\s.!?…]+$/u, '').trim()
 const cleanTags = value => [...new Set((Array.isArray(value) ? value : []).map(t => String(t ?? '').toLowerCase().trim()).filter(t => /^[\p{L}\p{N}][\p{L}\p{N}_-]{0,31}$/u.test(t)))].slice(0, 8)
@@ -66,6 +69,38 @@ export class SentLog {
       // Smart inbox (issue 667): the runs that ended needing nothing from the owner, beyond what the reply rows say.
       if (Array.isArray(parsed?.quiet_runs)) this.data.quiet_runs = parsed.quiet_runs.filter(q => q && THREAD_ID.test(String(q.thread)) && KEY.test(String(q.run)))
     } catch { /* an unreadable log starts empty; the original bytes stay on disk until the next write */ }
+    if (this.#repairSpoken()) this.#save()
+  }
+
+  /** Issue 707: before the fix, a spoken orb take that opened a new chat wrote two rows: the orb's, with no thread, and
+   *  the new chat's (source new_chat), whose words carried the recording's file block so they never matched. Each such
+   *  pair becomes the orb's one row, linked to the chat; any row's words lose a file block. Returns whether it changed. */
+  #repairSpoken() {
+    let changed = false
+    for (const row of this.data.rows) {
+      if (typeof row.text !== 'string' || !/\[WIZARD_[A-Z0-9_]+_V1\]/u.test(row.text)) continue
+      row.text = clip(withoutMarkers(row.text), MAX_TEXT) || 'Voice message'
+      changed = true
+    }
+    const merged = new Set()
+    for (const chat of this.data.rows) {
+      if (chat.source !== 'new_chat' || !chat.thread_id) continue
+      const words = sameWords(chat.text)
+      const orb = this.data.rows.find(r => r !== chat && !merged.has(r) && r.agent === chat.agent && (r.source === 'orb' || r.source === 'side')
+        && !r.thread_id && !r.record_id && (r.route === 'agent' || r.route === 'command' || r.route == null)
+        && (chat.at || 0) >= (r.at || 0) && (chat.at || 0) - (r.at || 0) < SENT_LINK_MS && sameWords(r.text) === words)
+      if (!orb || this.data.rows.some(r => r !== chat && r.agent === chat.agent && r.thread_id === chat.thread_id && r.source !== 'reply')) continue
+      orb.thread_id = chat.thread_id
+      if (!orb.run_key && chat.run_key) orb.run_key = chat.run_key
+      if (!orb.run_id && chat.run_id) orb.run_id = chat.run_id
+      if (chat.notify_when_done && !orb.notify_when_done) { orb.notify_when_done = true; if (chat.notified_run) orb.notified_run = chat.notified_run }
+      if (Array.isArray(chat.tags) && chat.tags.length) orb.tags = cleanTags([...(orb.tags || []), ...chat.tags])
+      if (chat.urgent === true) orb.urgent = true
+      merged.add(chat)
+      changed = true
+    }
+    if (merged.size) this.data.rows = this.data.rows.filter(r => !merged.has(r))
+    return changed
   }
 
   #save() {
@@ -156,7 +191,7 @@ export class SentLog {
   linkTurn({ agent = 'hermes', thread = '', text = '', run_key: runKey = '' } = {}) {
     if (!THREAD_ID.test(String(thread))) return null
     const t = this.now()
-    const words = sameWords(clip(text, MAX_TEXT))
+    const words = sameWords(clip(withoutMarkers(text), MAX_TEXT))
     let row = this.data.rows.find(r => r.agent === agent && r.thread_id === thread)
     if (!row && words) {
       row = this.data.rows.find(r => r.agent === agent && r.source !== 'typed' && !r.thread_id && !r.record_id && t - (r.at || 0) < SENT_LINK_MS

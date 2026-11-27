@@ -121,6 +121,42 @@ describe('the Sent log store', () => {
     expect(log.typed({ thread: 'wizard_t3', text: 'Plan dinner' })?.id).toBe(typed?.id)
   })
 
+  it('issue 707: a spoken new chat (its recording rides as a file block) links to the orb row with the same words', () => {
+    const c = clock(), log = new SentLog('', { now: c.now })
+    const orb = log.open({ text: 'Most of the UX changes I have ready' }).row
+    log.finish(orb.id, { route: 'agent', decided_by: 'model' })
+    c.at += 3000
+    const block = '[WIZARD_FILES_V1]\n[{"id":"wf_1","filename":"wizard-voice.wav","trusted_path":"/files/Inbox/wizard-voice.wav"}]\n[/WIZARD_FILES_V1]'
+    expect(log.linkTurn({ thread: 'wizard_v1', text: `Most of the UX changes I have ready\n\n${block}`, run_key: 'kv' }))
+      .toMatchObject({ id: orb.id, source: 'orb', thread_id: 'wizard_v1', run_key: 'kv' })
+    expect(log.all()).toHaveLength(1)
+  })
+
+  it('issue 707: an old orb row plus its spoken new_chat twin becomes one row linked to the chat, on load', () => {
+    const dir = home(), path = join(dir, 'sent-log.json'), at = Date.parse('2026-11-27T11:56:00Z')
+    const block = ' [WIZARD_FILES_V1] [{"id":"wf_2","trusted_path":"/files/Inbox/wizard-voice.wav"}] [/WIZARD_FILES_V1]'
+    const base = { idempotency_key: null, rules_matched: [], model: '', tags: [], urgent: false, correction_id: null, record_id: null, routed_at: at }
+    const rows = [
+      // newest first, as the log keeps them
+      { ...base, id: 'sent_ccccccccccccccccccccccc3', at: at + 60_000, source: 'typed', agent: 'hermes', text: 'Something typed', route: 'agent', thread_id: 'wizard_typed', run_key: 'kt' },
+      { ...base, id: 'sent_bbbbbbbbbbbbbbbbbbbbbbb2', at: at + 3000, source: 'new_chat', agent: 'hermes', text: `Because our clips pipeline isn't running${block}`, route: 'agent', decided_by: 'owner_words', thread_id: 'wizard_1795780294769_da9122aea463', run_key: 'voice-1', notify_when_done: true },
+      { ...base, id: 'sent_aaaaaaaaaaaaaaaaaaaaaaa1', at, source: 'orb', agent: 'hermes', text: "Because our clips pipeline isn't running", route: 'agent', decided_by: 'model', thread_id: null, run_key: null },
+      // a new_chat row with no orb twin keeps its row, without the file block
+      { ...base, id: 'sent_ddddddddddddddddddddddd4', at: at - 3_600_000, source: 'new_chat', agent: 'hermes', text: `Untouched voice note${block}`, route: 'agent', thread_id: 'wizard_alone', run_key: 'k4' },
+    ]
+    writeFileSync(path, JSON.stringify({ schema: 1, rows, check: null }))
+    const log = new SentLog(path)
+    expect(log.all().map(r => [r.id, r.source, r.thread_id, r.text])).toEqual([
+      ['sent_ccccccccccccccccccccccc3', 'typed', 'wizard_typed', 'Something typed'],
+      ['sent_aaaaaaaaaaaaaaaaaaaaaaa1', 'orb', 'wizard_1795780294769_da9122aea463', "Because our clips pipeline isn't running"],
+      ['sent_ddddddddddddddddddddddd4', 'new_chat', 'wizard_alone', 'Untouched voice note'],
+    ])
+    expect(log.get('sent_aaaaaaaaaaaaaaaaaaaaaaa1')).toMatchObject({ run_key: 'voice-1', notify_when_done: true })
+    // Written back once, and a second load changes nothing.
+    expect(JSON.parse(readFileSync(path, 'utf8')).rows).toHaveLength(3)
+    expect(new SentLog(path).all()).toEqual(log.all())
+  })
+
   it('the nightly check flags rows with no final state after 6 h, once a day; the log survives a restart', () => {
     const d = home(), path = join(d, 'sent-log.json'), c = clock(), logged: string[] = []
     const log = new SentLog(path, { now: c.now, log: m => logged.push(m) })
