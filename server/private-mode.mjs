@@ -1,6 +1,6 @@
 // Private mode on an existing box (issue 626; spec "Private mode as an opt-in", sections 4, 6 and 8.1-8.2).
-// Behind the owner's `wizard/private-mode` switch (Look file); env WIZARD_PRIVATE_MODE=1 forces it on and 0 off.
-// Off by default: with it off nothing here runs, the state answers `on: false` and every change is refused.
+// On for everyone (James said yes at show-and-tell, 27 Nov 2026: the `wizard/private-mode` switch is removed).
+// The state keeps `on: true` so an older shell that still reads it sees private mode as available.
 //
 // Turning private mode on is four steps the Settings › Privacy sheet runs one by one (or `on` runs them together):
 //   agent    the private agent, made through the same registry path as issue 545 (DECISIONS 115) (private preset, a confidential
@@ -20,7 +20,6 @@ import { randomBytes } from 'node:crypto'
 import { dirname, join } from 'node:path'
 import { MAIN_AGENT_ID, isConfidentialProvider, isPersonalDataApp, isStandardOnlyApp, personalDataReads } from './agents.mjs'
 
-export const PRIVATE_MODE_SWITCH = 'wizard/private-mode'
 export const PRIVATE_MODE_SCHEMA = 'wizard.private-mode/1'
 export const PRIVACY_CHECK_SCHEMA = 'wizard.privacy-check/1'
 export const PRIVATE_MODE_STEPS = ['agent', 'apps', 'context', 'default']
@@ -70,26 +69,24 @@ export function jobRunsOnApp(job, app) {
 }
 
 /**
- * on(): the switch. registry: the agent registry. agentsDir: where `.private-mode.json` lives. appsJsonPath: the
+ * registry: the agent registry. agentsDir: where `.private-mode.json` lives. appsJsonPath: the
  * installed apps. bindings(): the app bindings (or null). scheduler(): the Service scheduler (or null).
  * defaultAgent()/setDefaultAgent(id): the owner's default agent. mainOptions(): the main Hermes's model options.
  * privateFirstAgent(): the private agent issue 545 set up, when there is one.
  */
-export function createPrivateMode({ on, registry, agentsDir, appsJsonPath = '', bindings = () => null, scheduler = () => null, defaultAgent, setDefaultAgent, mainOptions = async () => null, privateFirstAgent = () => null, log = () => {} }) {
+export function createPrivateMode({ registry, agentsDir, appsJsonPath = '', bindings = () => null, scheduler = () => null, defaultAgent, setDefaultAgent, mainOptions = async () => null, privateFirstAgent = () => null, log = () => {} }) {
   const recordPath = join(agentsDir, '.private-mode.json')
   const record = () => {
     const value = readJson(recordPath)
     return value?.schema === 1 ? value : { schema: 1 }
   }
   const save = (patch) => { const next = { ...record(), ...patch, schema: 1 }; writeJson(recordPath, next); return next }
-  const isOn = () => { try { return on() === true } catch { return false } }
   let chain = Promise.resolve()
   const serial = (fn) => {
     const next = chain.then(fn, fn)
     chain = next.catch(() => undefined)
     return next
   }
-  const needOn = () => { if (!isOn()) throw refusal(409, 'private_mode_off') }
   const installed = () => {
     const apps = readJson(appsJsonPath)?.apps
     return (Array.isArray(apps) ? apps : []).filter((app) => typeof app?.id === 'string' && APP_ID_RE.test(app.id))
@@ -115,22 +112,19 @@ export function createPrivateMode({ on, registry, agentsDir, appsJsonPath = '', 
 
   function state() {
     const kept = record()
-    const switchOn = isOn()
     const privateId = privateAgentId()
     const steps = kept.steps && typeof kept.steps === 'object' ? kept.steps : {}
     const next = !privateId ? 'agent' : PRIVATE_MODE_STEPS.find((step) => !steps[step]) ?? 'done'
     const mode = !privateId || kept.mode === 'off' && !Object.keys(steps).length ? 'off' : next === 'done' ? 'on' : 'setting_up'
     const apps = kept.apps && typeof kept.apps === 'object' ? kept.apps : {}
     return {
-      schema: PRIVATE_MODE_SCHEMA, on: switchOn,
-      ...(switchOn ? {
-        mode, next_step: mode === 'off' && privateId ? 'agent' : next, standard_agent: MAIN_AGENT_ID, private_agent: privateId,
-        agent_created: kept.agent_created === true,
-        moved_apps: Object.keys(apps).filter((id) => apps[id]?.state === 'moved').sort(),
-        context: kept.context?.granted === true ? { granted: true, how: kept.context.how } : { granted: false, ...(kept.context?.reason ? { reason: kept.context.reason } : {}) },
-        default_agent: currentDefault(),
-        ...(kept.turned_off_at ? { turned_off_at: kept.turned_off_at } : {}),
-      } : {}),
+      schema: PRIVATE_MODE_SCHEMA, on: true,
+      mode, next_step: mode === 'off' && privateId ? 'agent' : next, standard_agent: MAIN_AGENT_ID, private_agent: privateId,
+      agent_created: kept.agent_created === true,
+      moved_apps: Object.keys(apps).filter((id) => apps[id]?.state === 'moved').sort(),
+      context: kept.context?.granted === true ? { granted: true, how: kept.context.how } : { granted: false, ...(kept.context?.reason ? { reason: kept.context.reason } : {}) },
+      default_agent: currentDefault(),
+      ...(kept.turned_off_at ? { turned_off_at: kept.turned_off_at } : {}),
     }
   }
 
@@ -367,9 +361,9 @@ export function createPrivateMode({ on, registry, agentsDir, appsJsonPath = '', 
   }
 
   // ---- the operations ----
-  const run = (fn) => serial(async () => { needOn(); return fn() })
+  const run = (fn) => serial(fn)
   return {
-    on: isOn, state, privateAgentId,
+    state, privateAgentId,
     agent: (body) => run(async () => ({ ...(await agentStep(body)), state: state() })),
     apps: (body) => run(async () => ({ results: await appsStep(body), state: state() })),
     context: (body) => run(async () => ({ ...(await contextStep(body)), state: state() })),
@@ -399,7 +393,6 @@ export function createPrivateMode({ on, registry, agentsDir, appsJsonPath = '', 
       return { ok: true, results, state: state() }
     }),
     async privacyCheck() {
-      if (!isOn()) throw refusal(409, 'private_mode_off')
       let options = null
       try { options = await mainOptions() } catch { options = null }
       const defaultId = currentDefault()

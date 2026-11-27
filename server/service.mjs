@@ -136,7 +136,7 @@ import { readArchivedSessions } from './archived-sessions.mjs'
 import { createHermesStateHealth } from './hermes-state-health.mjs'
 import { createMainProviderAttach } from './main-provider-attach.mjs'
 import { createPrivateFirst, PRIVATE_FIRST_SWITCH } from './private-first.mjs'
-import { createPrivateMode, PRIVATE_MODE_SWITCH, isPersonalDataApp } from './private-mode.mjs'
+import { createPrivateMode, isPersonalDataApp } from './private-mode.mjs'
 import { RESULT_READER_SWITCH, createResultReader, readerFacts } from './result-reader.mjs'
 import { PRIVATE_ROUTING_SWITCH, routingNames, nameRule, chooseAgent, privateLabelBlock } from './private-routing.mjs'
 import { FIRST_CHAT_SWITCH, FIRST_CHAT_NOTE } from './first-chat.mjs'
@@ -3338,9 +3338,6 @@ function buildWizardServer(options, lifetime) {
     writeFileSync(temporary, `${JSON.stringify({ ...stored, agents: { ...stored.agents, default_agent_id: id } }, null, 2)}\n`, { mode: 0o600 })
     renameSync(temporary, settingsPath)
   }
-  // Private mode on an existing box (issue 626, private-mode.mjs): the owner's `wizard/private-mode` switch in the Look
-  // file; option privateMode (env WIZARD_PRIVATE_MODE, '1' on / '0' off) wins. Off: nothing here runs.
-  const privateModeSwitchOn = createChannelsSwitch({ id: PRIVATE_MODE_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.privateModeTtlMs ?? 3000 })
   // Private routing (issue 629, private-routing.mjs): the owner's `wizard/private-routing` switch in the Look file; option
   // privateRouting (env WIZARD_PRIVATE_ROUTING, '1' on / '0' off) wins. Off: the orb route answers exactly as before.
   const privateRoutingSwitchOn = createChannelsSwitch({ id: PRIVATE_ROUTING_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.privateRoutingTtlMs ?? 3000 })
@@ -3357,10 +3354,19 @@ function buildWizardServer(options, lifetime) {
     try { id = agents.defaultAgentId() } catch { return '' }
     return id && id !== MAIN_AGENT_ID && agentIsPrivate(id) && agents.read(id)?.role !== 'recovery' ? id : ''
   }
+  // Issue 626 (James, 27 Nov 2026: voice follows the default agent): with a private default agent, private mode's or
+  // one the owner made, no orb words reach the standard agent or a standard router, whatever the routing switch says.
+  const defaultAgentPrivate = () => {
+    if (!agents) return false
+    let id = ''
+    try { id = agents.defaultAgentId() } catch { return false }
+    return Boolean(id) && id !== MAIN_AGENT_ID && agentIsPrivate(id) && agents.read(id)?.role !== 'recovery'
+  }
   const privatePushOn = () => Boolean(agents) && privateRoutingOn()
   const quietPushes = (notifier, view = '') => privatePushes(notifier, { on: privatePushOn, isPrivate: agentIsPrivate, shellUrl: () => shellUrlFromApps(appsJsonPath), view })
+  // Private mode on an existing box (issue 626, private-mode.mjs), on for everyone.
   const privateMode = agents ? createPrivateMode({
-    on: () => channelPart(options.privateMode, privateModeSwitchOn), registry: agents, agentsDir, appsJsonPath,
+    registry: agents, agentsDir, appsJsonPath,
     bindings: () => appBindings,
     // The Service scheduler is made further down; it is only read at request time.
     scheduler: () => scheduler,
@@ -8649,8 +8655,7 @@ function buildWizardServer(options, lifetime) {
       }
       if (url.pathname === '/wizard/v1/private-mode' || url.pathname.startsWith('/wizard/v1/private-mode/') || url.pathname === '/wizard/v1/privacy-check') {
         // Private mode on an existing box (issue 626): GET state / the Privacy check; POST one step, `on` or `off`.
-        // The owner's own page only, the same rules as /wizard/v1/private-first. Switch off: state says `on: false`,
-        // the Privacy check is 404 and every change is refused (409 private_mode_off).
+        // The owner's own page only, the same rules as /wizard/v1/private-first.
         if (!privateMode) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
@@ -8661,7 +8666,6 @@ function buildWizardServer(options, lifetime) {
         }
         if (url.pathname === '/wizard/v1/privacy-check') {
           if (request.method !== 'GET') { sendJson(response, 405, { error: 'method_not_allowed' }); return }
-          if (!privateMode.on()) { sendJson(response, 404, { error: 'not_found' }); return }
           try { sendJson(response, 200, await privateMode.privacyCheck(), { 'Cache-Control': 'no-store' }) } catch (error) { failed(error, 'privacy_check_failed') }
           return
         }
@@ -8763,7 +8767,9 @@ function buildWizardServer(options, lifetime) {
         // Issue 551: only a shell that handles the dump route asks for it, and only the owner's own same-origin JSON
         // request may start a background task. Anything else routes exactly as before.
         // Private routing: no dump (its worker runs only on the main, standard agent); the chosen agent's thread instead.
-        const dump = !privateRoute && input?.accept_dump === true && agentInboxOn() && ownerLike(principalOf(request)) && !skinOriginRefused(request)
+        // Issue 626: the same with a private default agent and private routing off (voice follows the default agent).
+        const privateDefault = !privateRoute && defaultAgentPrivate()
+        const dump = !privateRoute && !privateDefault && input?.accept_dump === true && agentInboxOn() && ownerLike(principalOf(request)) && !skinOriginRefused(request)
           && /^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))
         const said = typeof input?.text === 'string' ? input.text.replace(/\s+/gu, ' ').trim() : ''
         // Issue 669 (Smart inbox, switch wizard/smart-inbox): a typed new chat the shell asks about (source typed with
@@ -8774,7 +8780,7 @@ function buildWizardServer(options, lifetime) {
         if (input?.source === 'typed' && input?.accept_dump === true) {
           const visible = why => sendJson(response, 200, { cmd: { route: 'agent', summary: said }, ms: 0, model: '', typed: { background: false, why } })
           if (!said) { sendJson(response, 400, { error: 'invalid_request' }); return }
-          if (!dump) { visible(privateRoute ? 'private_routing' : 'not_allowed'); return }
+          if (!dump) { visible(privateRoute ? 'private_routing' : privateDefault ? 'private_default' : 'not_allowed'); return }
           const gate = typedRoutingState().view
           if (!gate.on) { visible(gate.switch ? 'not_proven' : 'switch_off'); return }
           const kept = keepsVisible(said)
@@ -8832,6 +8838,14 @@ function buildWizardServer(options, lifetime) {
             model: routed?.model || '', confidence: routed?.why?.confidence, tags: words.tags, urgent: words.urgent, error,
             ...(cmd.agent_id ? { agent_id: cmd.agent_id, agent_model: cmd.model || '', chosen_by: cmd.chosen_by, thread_id: cmd.thread_id } : {}) })
           sendJson(response, 200, { cmd, ms: routed?.ms ?? 0, model: routed?.model || '', ...sentId })
+          return
+        }
+        if (privateDefault && !(fast && privateRouter(fast))) {
+          // Issue 626: a private default agent and no private router: his words go to no model here. The take opens a
+          // visible new chat, which starts on the default (private) agent.
+          if (!said) { sendJson(response, 400, { error: 'invalid_request', ...sentId }); return }
+          fallback('private_default')
+          sendJson(response, 200, { cmd: { route: 'agent', summary: said }, ms: 0, model: '', ...sentId })
           return
         }
         try {
