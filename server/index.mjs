@@ -137,6 +137,7 @@ server = createWizardServer({
   appWake: envChoice(process.env.WIZARD_APP_WAKE),
   // Replies into messaging-app chats (issue 427): on for everyone; WIZARD_MESSAGING_REPLIES=0 turns them off.
   messagingReplies: envChoice(process.env.WIZARD_MESSAGING_REPLIES),
+  // The shell's interface manual (wizard-ux issue 1437): on for everyone; WIZARD_INTERFACE_MANUAL=0 keeps it out.
   interfaceManual: envChoice(process.env.WIZARD_INTERFACE_MANUAL),
   // Catch me up (issue 668): unset follows the owner's wizard/catch-me-up switch; 1 on, 0 off.
   catchUp: envChoice(process.env.WIZARD_CATCH_ME_UP),
