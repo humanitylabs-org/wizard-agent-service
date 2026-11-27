@@ -64,9 +64,6 @@ import { REPLY_ACTIONS_SWITCH, createReplyActions, replyActionsNote } from './re
 import { QUICK_LINKS_SWITCH, quickLinksNote } from './quick-links.mjs'
 import { createCapabilities } from './capabilities.mjs'
 // wizard-ux issue 1437: the shell app whose skill is the generated interface manual (on for everyone).
-// Command approvals for container agents (issue 597): approvals block in each container agent's config.yaml, a
-// per-agent setting in the Agents app, and approval prompts that show when they close.
-export const AGENT_APPROVALS_SWITCH = 'wizard/agent-approvals'
 const INTERFACE_MANUAL_APPS = new Set(['wizard-ux'])
 import { createRouteTable, launcherPath as localLauncherPath, loopbackRequest, serveLocalAppRoute, upgradeLocalAppRoute } from './local-app-routes.mjs'
 import { ThreadItemStore, ingestHistory, trackerEnabled, expandReplyToInput, countItems, ITEMS_INSTRUCTIONS } from './thread-items.mjs'
@@ -3252,10 +3249,6 @@ function buildWizardServer(options, lifetime) {
   // Private first (issue 545, private-first.mjs): the owner's `wizard/private-first-setup` switch in the Look file;
   // option privateFirst (env WIZARD_PRIVATE_FIRST, '1' on / '0' off) wins, because a fresh box has no Look file yet.
   const privateFirstSwitchOn = createChannelsSwitch({ id: PRIVATE_FIRST_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.privateFirstTtlMs ?? 3000 })
-  // Issue 597: the owner's `wizard/agent-approvals` switch; option agentApprovals (env WIZARD_AGENT_APPROVALS, '1' on /
-  // '0' off) wins. Read on every config write; a flip re-applies the container agents' harness (watch below).
-  const agentApprovalsSwitchOn = createChannelsSwitch({ id: AGENT_APPROVALS_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.agentApprovalsTtlMs ?? 3000 })
-  const agentApprovalsOn = () => channelPart(options.agentApprovals, agentApprovalsSwitchOn)
   // Standard first (wizard-ux issue 1800): the owner's Set up private AI in the Welcome turns it on for this box too.
   const privateFirstOn = () => channelPart(options.privateFirst, () => privateFirstSwitchOn() || privateFirst?.optedIn?.() === true)
   // Local app routes (wizard-app-manager issue 629, local-app-routes.mjs): on for everyone (switch removed); only a
@@ -3274,7 +3267,6 @@ function buildWizardServer(options, lifetime) {
     return Boolean(bridge && bridge.agentFor(request) === GATEWAY_MAIN_AGENT)
   }
   const agents = options.agents !== false && agentsDir ? createAgentRegistry({
-    agentApprovals: agentApprovalsOn,
     privateFirstAgent: () => (privateFirst?.on() ? privateFirst.privateAgentId() : null),
     mainHome: options.hermesHome || process.env.HERMES_HOME || join(homedir(), '.hermes'),
     agentsDir, fetchImpl, runtime: agentRuntime, appsJsonPath, settingsPath, mainOrigin: upstreamOrigin, mainUpstreamOrigin: upstreamOrigin, mainKey: hermesKey,
@@ -10204,19 +10196,6 @@ function buildWizardServer(options, lifetime) {
     server.once('listening', () => {
       server.agentHarnessesReady = server.agentSocketsReady.then(() => trackWork('agent harness migration', () => agents.migrateManagedHarnesses()))
       void server.agentHarnessesReady.catch(() => undefined)
-      // Issue 597: flipping wizard/agent-approvals changes what each container agent's config.yaml should hold; the
-      // same migration rewrites only the stale ones and re-applies them. Off and never flipped: nothing runs.
-      let approvalsWas = agentApprovalsOn(), approvalsBusy = false
-      const approvalsWatch = setInterval(() => {
-        const now = agentApprovalsOn()
-        if (approvalsBusy || now === approvalsWas || lifetime.closing) return
-        approvalsBusy = true
-        void Promise.resolve(server.agentHarnessesReady).catch(() => undefined)
-          .then(() => trackWork('agent approvals switch', () => agents.migrateManagedHarnesses()))
-          .catch(() => undefined).finally(() => { approvalsWas = now; approvalsBusy = false })
-      }, options.agentApprovalsWatchMs ?? 5000)
-      approvalsWatch.unref?.()
-      lifetime.own(() => clearInterval(approvalsWatch), () => clearInterval(approvalsWatch))
     })
     lifetime.own(() => agentSockets.close(), () => agentSockets.close())
   } else server.agentSocketsReady = Promise.resolve()

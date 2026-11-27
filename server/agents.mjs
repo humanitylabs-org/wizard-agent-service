@@ -39,7 +39,7 @@ export const OUTSIDE_TOOLS = [
   { id: 'spotify', label: 'Spotify' },
 ]
 const OUTSIDE_IDS = new Set(OUTSIDE_TOOLS.map((tool) => tool.id))
-// Command approvals for container agents (issue 597, switch `wizard/agent-approvals`). The container is the agent's
+// Command approvals for container agents (issue 597; on for everyone). The container is the agent's
 // sandbox, so on the Hermes API server (an "unattended" surface to stock Hermes) flagged work runs by default:
 //   approve  execute_code and flagged commands run; the smart guardian still refuses clearly destructive ones, and
 //            anything it would escalate is refused at once (no prompt nobody may see);
@@ -58,9 +58,9 @@ export function unattendedApprovals(agent) {
   return mode === 'deny' || mode === 'ask' ? mode : 'approve'
 }
 /** Seconds an owner approval prompt stays open for this agent, or 0 when the Service does not set it. */
-export function approvalWindowSeconds(agent, on) {
+export function approvalWindowSeconds(agent) {
   // Imported Hermes homes keep their own config.yaml (the Service never writes it), so their window is Hermes's own.
-  return on === true && agent?.runtime?.kind === 'container' && !agent.imported ? APPROVAL_WINDOW_S : 0
+  return agent?.runtime?.kind === 'container' && !agent.imported ? APPROVAL_WINDOW_S : 0
 }
 // Toolsets that touch files; `files: none` turns them off as well.
 const FILE_TOOLSETS = ['file', 'terminal', 'code_execution']
@@ -418,7 +418,7 @@ const standardChatsEndpoint = (gatewayUrl, explicit = '') => {
 }
 
 /** Harness config for a container Hermes. The file is Service-owned; the owner edits the agent through the API. */
-export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, gatewayUrl = '', standardChatsUrl = '', approvals = false } = {}) {
+export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, gatewayUrl = '', standardChatsUrl = '' } = {}) {
   // The attestation proxy sidecar, named per agent (agent_runtime.py service_names).
   tinfoilUrl = tinfoilUrl || `http://agent-${agent.id}-tinfoil:3301/v1`
   const granted = new Set(agent.permissions.outside_tools)
@@ -448,7 +448,7 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
   // persistence. Pin its supported secure setting for the restricted grant.
   const redactSecrets = agent.runtime?.isolation === 'restricted' && agent.privacy === 'standard' && agent.model.provider === 'anthropic'
   // Issue 597: in approve and deny nobody is prompted; a would-be prompt is refused at once.
-  const noPrompt = approvalWindowSeconds(agent, approvals) > 0 && unattendedApprovals(agent) !== 'ask'
+  const noPrompt = approvalWindowSeconds(agent) > 0 && unattendedApprovals(agent) !== 'ask'
   if (redactSecrets || noPrompt) {
     lines.push('security:')
     if (redactSecrets) lines.push('  redact_secrets: true')
@@ -459,7 +459,7 @@ export function hermesConfigYaml(agent, { tinfoilUrl = '', contextLength = 0, ga
       `    base_url: ${yamlString(tinfoilUrl)}`, '    key_env: TINFOIL_API_KEY')
   }
   if (!agent.model.fallback) lines.push('fallback_providers: []')
-  if (approvalWindowSeconds(agent, approvals)) {
+  if (approvalWindowSeconds(agent)) {
     // Issue 597: stock Hermes treats the API server as unattended (execute_code and flagged commands with nobody to
     // answer resolve from unattended_mode, instantly). A prompt Wizard shows the owner waits the owner-sized window.
     const mode = unattendedApprovals(agent)
@@ -562,10 +562,6 @@ export function createAgentRegistry(options = {}) {
   const standardUrlFor = agent => standardChatsEndpoint(gatewayUrlFor(agent),restricted(agent) ? '' : options.standardChatsUrl || '')
   const assertStandardTransport = agent => { if (agent.permissions.read_standard_chats && !standardUrlFor(agent)) fail(409,'standard_chats_unconfigured','agent.permissions.read_standard_chats') }
   const appsChanged = () => { try { options.onAppsChanged?.() } catch { /* the gateway re-reads on its next call */ } }
-  // Issue 597: the owner's `wizard/agent-approvals` switch (a function read on every config write, or a boolean).
-  const approvalsOn = () => { try { return typeof options.agentApprovals === 'function' ? options.agentApprovals() === true : options.agentApprovals === true } catch { return false } }
-  // With the switch off the setting is neither shown nor stored, so nothing changes for anyone.
-  const withoutApprovals = (permissions) => { if (!permissions || approvalsOn()) return permissions; const { unattended_approvals: _off, ...rest } = permissions; return rest }
   const statusCache = new Map()
 
   const listIds = (value) => (Array.isArray(value) ? value.filter((id) => typeof id === 'string' && /^[a-z0-9][a-z0-9._-]{0,63}$/u.test(id)) : [])
@@ -1002,8 +998,8 @@ export function createAgentRegistry(options = {}) {
       outside_tools: OUTSIDE_TOOLS,
       files: FILES_LEVELS,
       other_agents: OTHER_AGENTS_LEVELS,
-      // Issue 597: present only while the switch is on; the Agents app shows the per-agent toggle from it.
-      ...(approvalsOn() ? { approvals: { unattended: UNATTENDED_APPROVALS, default: 'approve', window_s: APPROVAL_WINDOW_S } } : {}),
+      // Issue 597: the Agents app shows the per-agent toggle from it.
+      approvals: { unattended: UNATTENDED_APPROVALS, default: 'approve', window_s: APPROVAL_WINDOW_S },
     }
   }
 
@@ -1041,7 +1037,7 @@ export function createAgentRegistry(options = {}) {
   function harnessStale(agent) {
     if (['profile', 'external'].includes(agent.runtime.kind)) return false
     const home = join(folder(agent.id), restricted(agent) ? 'managed' : 'home')
-    const expected = hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: gatewayUrlFor(agent), standardChatsUrl: standardUrlFor(agent), approvals: approvalsOn() })
+    const expected = hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: gatewayUrlFor(agent), standardChatsUrl: standardUrlFor(agent) })
     // Compare against the stamp of what the Service last wrote: Hermes itself may normalise config.yaml on start.
     const stamp = createHash('sha256').update(expected).digest('hex')
     try { return readFileSync(join(folder(agent.id), 'config.sha256'), 'utf8').trim() !== stamp } catch { return existsSync(home) }
@@ -1079,7 +1075,7 @@ export function createAgentRegistry(options = {}) {
     const agentGateway = gatewayUrlFor(agent)
     writeTextAtomic(join(home, '.env'), agentEnvFile({ apiKey: key, gatewayKey: wantsGateway(agent, agentGateway) || (agent.privacy === 'private' && agent.permissions.read_standard_chats && standardUrlFor(agent)) ? gateway : '' }))
     installSupervisorAssets(home)
-    const config = hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: agentGateway, standardChatsUrl: standardUrlFor(agent), approvals: approvalsOn() })
+    const config = hermesConfigYaml(agent, { tinfoilUrl: options.tinfoilUrl, contextLength: options.contextLength, gatewayUrl: agentGateway, standardChatsUrl: standardUrlFor(agent) })
     writeTextAtomic(join(home, 'config.yaml'), config)
     writeTextAtomic(join(dir, 'config.sha256'), `${createHash('sha256').update(config).digest('hex')}\n`)
   }
@@ -1146,7 +1142,7 @@ export function createAgentRegistry(options = {}) {
     const presetId = body.permissions?.preset ?? 'standard'
     const preset = PRESET.get(presetId)
     if (!preset) fail(400, 'unknown_preset', 'agent.permissions.preset')
-    const { preset: _ignored, ...overrides } = withoutApprovals(body.permissions ?? {})
+    const { preset: _ignored, ...overrides } = body.permissions ?? {}
     const permissions = { preset: preset.id, ...normalizePermissions(preset.permissions, overrides) }
     if (preset.privacy !== 'private' && overrides.wizard_apps === undefined && overrides.agent_apps === undefined) {
       // Miguel, 29 Oct 2026: a new standard agent starts with everything on: every installed app the main agent would
@@ -1287,7 +1283,7 @@ export function createAgentRegistry(options = {}) {
       else delete next.memory
     }
     if (body.permissions !== undefined) {
-      const { preset, ...rest } = withoutApprovals(body.permissions ?? {}) ?? {}
+      const { preset, ...rest } = body.permissions ?? {}
       if (preset !== undefined && preset !== agent.permissions.preset) fail(409, 'preset_fixed', 'agent.permissions.preset', 'adjust fields instead of switching preset')
       next.permissions = { preset: agent.permissions.preset, ...normalizePermissions(agent.permissions, rest) }
     }
@@ -1644,13 +1640,12 @@ export function createAgentRegistry(options = {}) {
     grants, addGrant, removeGrant, readableSources, prepareImport,
     publicAgent: async (agent) => {
       const out = publicAgent(agent, await status(agent), defaultAgentId())
-      // Issue 597: container agents show their approvals mode while the switch is on; never otherwise.
-      if (approvalsOn() && agent.runtime?.kind === 'container' && agent.id !== MAIN_AGENT_ID) out.permissions.unattended_approvals = unattendedApprovals(agent)
+      // Issue 597: container agents show their approvals mode; other agents never do.
+      if (agent.runtime?.kind === 'container' && agent.id !== MAIN_AGENT_ID) out.permissions.unattended_approvals = unattendedApprovals(agent)
       else delete out.permissions.unattended_approvals
       return out
     },
-    approvalsOn,
-    approvalWindow: (agentOrId) => { try { const agent = typeof agentOrId === 'string' ? read(agentOrId) : agentOrId; return approvalWindowSeconds(agent, approvalsOn()) } catch { return 0 } },
+    approvalWindow: (agentOrId) => { try { const agent = typeof agentOrId === 'string' ? read(agentOrId) : agentOrId; return approvalWindowSeconds(agent) } catch { return 0 } },
     threadAgent: (agentOrId) => {
       const agent = typeof agentOrId === 'string' ? read(agentOrId) : agentOrId
       return agent ? threadAgent(agent) : null
