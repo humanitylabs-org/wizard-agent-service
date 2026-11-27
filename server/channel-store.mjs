@@ -335,6 +335,29 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
         return store.covers(r.id)
       })
     },
+    // One entry at a time (shell edits from several devices: a stale device never erases another's entry).
+    addCover(id, phrase) {
+      const [p] = coverList([phrase])
+      return tx(() => {
+        const r = mustChannel(id), rows = st.covers.all(r.id)
+        const listed = rows.filter(x => !x.negative && x.source !== 'learned')
+        if (!listed.some(x => x.phrase.toLocaleLowerCase() === p.toLocaleLowerCase())) {
+          if (listed.length >= COVERS_MAX) fail(400, 'invalid_covers')
+          st.dropCover.run(r.id, p, 1); st.addCover.run(r.id, p, 'owner', 0, now())
+        }
+        st.setMeta.run(`covers_seeded:${r.id}`, meta(`covers_seeded:${r.id}`) || now()); version++
+        return store.covers(r.id)
+      })
+    },
+    removeCover(id, phrase) {
+      const [p] = coverList([phrase])
+      return tx(() => {
+        const r = mustChannel(id)
+        for (const x of st.covers.all(r.id)) if (!x.negative && x.source !== 'learned' && x.phrase.toLocaleLowerCase() === p.toLocaleLowerCase()) st.dropCover.run(r.id, x.phrase, 0)
+        st.setMeta.run(`covers_seeded:${r.id}`, meta(`covers_seeded:${r.id}`) || now()); version++
+        return store.covers(r.id)
+      })
+    },
     // Seeded once per channel (the first time auto tags see it); an owner's later edit is never re-seeded.
     seedCovers(id, phrases) {
       if (typeof id !== 'string' || !CHANNEL_ID.test(id) || meta(`covers_seeded:${id}`)) return false
@@ -720,11 +743,16 @@ export function channelRequest(store, method, membership, params, body, options 
     return add ? store.addTag({ sessionId: body.sessionId, channelId: body.add, agent: body.agent, by: 'owner' })
       : store.removeTag({ sessionId: body.sessionId, channelId: body.remove, agent: body.agent, by: 'owner' })
   }
-  // /wizard/v1/channels/covers (issue 702, auto tags on): GET ?id= -> {id, covers, learned, not}; PUT {id, covers: [...]}.
+  // /wizard/v1/channels/covers (issue 702, auto tags on): GET ?id= -> {id, covers, learned, not}; PUT {id, add: phrase} |
+  // {id, remove: phrase} (one entry, what the shell sends) | {id, covers: [...]} (the whole list).
   if (membership === 'covers') {
     if (method === 'GET') return store.covers(params.get('id'))
     if (method !== 'PUT') fail(405, 'method_not_allowed')
-    only('id', 'covers')
+    only('id', 'covers', 'add', 'remove')
+    const ops = ['covers', 'add', 'remove'].filter(k => Object.hasOwn(body, k))
+    if (ops.length !== 1) fail(400, 'invalid_request')
+    if (ops[0] === 'add') return store.addCover(body.id, body.add)
+    if (ops[0] === 'remove') return store.removeCover(body.id, body.remove)
     return store.setCovers(body.id, body.covers)
   }
   if (membership) {

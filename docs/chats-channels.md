@@ -191,8 +191,9 @@ the status-line `channel` works exactly as in phase 3 and Tags. Code: `server/au
   entries (`kind: question | lookup | evaluation | digest | report | reminder | todo`) in `channels.sqlite`
   `channel_covers`. The first time auto tags see a channel it is seeded once: its name's own words and its learned
   subjects, or, for a channel named Reports, the kinds question/lookup/evaluation/digest/report, and for Reminders
-  reminder/todo. `GET /wizard/v1/channels/covers?id=` -> `{id, covers, learned, not}`; `PUT {id, covers: [...]}`
-  replaces the owner's list (at most 40 entries of 60 characters; what was learned stays). The channel list says
+  reminder/todo. `GET /wizard/v1/channels/covers?id=` -> `{id, covers, learned, not}`; `PUT {id, add: phrase}` or
+  `{id, remove: phrase}` changes one entry (what the shell sends, so two devices never erase each other's edit);
+  `PUT {id, covers: [...]}` replaces the owner's list (at most 40 entries of 60 characters; what was learned stays). The channel list says
   `autoTags: true`, so the shell offers What goes here… on a channel's sheet.
 - **Tagging.** On every status line and list row the chat's title, subject, app id and first owner message are matched
   against every channel of its agent (never Alerts or Daily): a listed phrase anywhere, the chat's kind, a learned

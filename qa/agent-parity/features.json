@@ -2753,6 +2753,21 @@
       "policy_exemptions": []
     },
     {
+      "id": "chat-auto-tags-covers",
+      "description": "What goes here… in Chats (wizard-ux, the shell half of issue 702; the service half is chats-auto-tags): while the box's auto tags are on (its channel list says autoTags: true; box switch wizard/auto-tags, off by default) a channel's long-press sheet offers What goes here… (never on Alerts or Daily), which shows the channel's covers one per line plus what the box learned, and Save sends only the lines added and removed, one PUT /wizard/v1/channels/covers {id, add|remove} each, so two devices editing at once both keep their change. Off, or on an older box, nothing is drawn and nothing is asked.",
+      "layer": "ux",
+      "how_to_test": "wizard-ux tests/chat-channel-store.test.mjs (auto tags cases) runs the real live.js channel store and the chats.js channel sheet against a fake box: the store reads covers and writes one entry per PUT, two devices editing from stale lists both keep their change, the sheet is offered on main and routed (host-profile, container, restricted) channels and saves to that channel only, never on Alerts, and auto tags off draws and asks nothing. Synthetic fixture evidence, not live box proof.",
+      "source_refs": [
+        "wizard-ux/web/core/chats-chanui.js",
+        "wizard-ux/web/live-channels.js"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/chat-channel-store.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "chat-daily-channel",
       "description": "The Daily channel in Chats (wizard-ux issue 1469, part of the Channels switch wizard/chat-channels; the service half is chats-daily-channel): a tap on the channel of kind daily opens its newest day thread in the ordinary thread view (an empty Today line under it before today's first post), each earlier day folded above it with its opener and message count, unfolding in place through the normal history read and paging older days from /days?cursor; a send from that view asks POST /wizard/v1/channels/<id>/today first and goes into the thread the box names (a send at 04:59 continues yesterday's, the first send after 05:00 moves the view to today's thread with the draft), for the channel's own agent: a routed agent's day threads are pinned to that agent so the history read and the send use its route.",
       "layer": "ux",

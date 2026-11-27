@@ -73,6 +73,12 @@ describe('covers in the channel store', () => {
     expect(channelRequest(s, 'GET', 'covers', new URLSearchParams({ id: c.id }), null).covers).toEqual(['clips', 'kind: report'])
     expect(channelRequest(s, 'PUT', 'covers', new URLSearchParams(), { id: c.id, covers: ['podcast'] }).covers).toEqual(['podcast'])
     expect(() => channelRequest(s, 'PUT', 'covers', new URLSearchParams(), { id: c.id, covers: [], extra: 1 })).toThrow('invalid_request')
+    // One entry at a time: two devices editing from stale lists both keep their change.
+    expect(channelRequest(s, 'PUT', 'covers', new URLSearchParams(), { id: c.id, add: 'TSR' }).covers).toEqual(['podcast', 'TSR'])
+    expect(channelRequest(s, 'PUT', 'covers', new URLSearchParams(), { id: c.id, add: 'tsr' }).covers).toEqual(['podcast', 'TSR'])
+    expect(channelRequest(s, 'PUT', 'covers', new URLSearchParams(), { id: c.id, remove: 'Podcast' }).covers).toEqual(['TSR'])
+    expect(() => channelRequest(s, 'PUT', 'covers', new URLSearchParams(), { id: c.id, add: 'x', remove: 'y' })).toThrow('invalid_request')
+    expect(() => channelRequest(s, 'PUT', 'covers', new URLSearchParams(), { id: c.id, add: 'kind: nope' })).toThrow('invalid_covers')
     expect(channelRequest(s, 'GET', false, new URLSearchParams(), null, { autoTags: true }).autoTags).toBe(true)
     expect(channelRequest(s, 'GET', false, new URLSearchParams(), null, {}).autoTags).toBeUndefined()
     s.remove(c.id)
