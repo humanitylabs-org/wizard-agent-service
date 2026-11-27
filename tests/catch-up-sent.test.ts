@@ -150,6 +150,28 @@ describe('catch me up clears Sent (switch on)', () => {
   })
 })
 
+describe('catch me up clears Sent: edges', () => {
+  it('threads that are not finished never use up the room: an old finished one past 200 waiting ones is still offered', async () => {
+    const waiting = Array.from({ length: 210 }, (_, n) => ({ id: `wizard_wait_${n}`, age: 40 * DAY + n * 60_000, state: 'needs_you' }))
+    const b = box([...waiting, { id: 'wizard_done_old', age: 90 * DAY }])
+    const { note, sent } = await b.catchUp.compose({ threadId: 'wizard_cu1' })
+    expect(sent).toEqual(['wizard_done_old'])
+    expect(note).not.toContain('were not checked')
+  })
+
+  it('clear checks each Sent thread again: one that got a new reply, runs or waits on him since the catch-up stays', async () => {
+    const b = box([{ id: 'wizard_a', age: 9 * DAY }, { id: 'wizard_b', age: 9 * DAY }, { id: 'wizard_c', age: 9 * DAY }, { id: 'wizard_d', age: 9 * DAY }])
+    await b.catchUp.compose({ threadId: 'wizard_cu1' })
+    Object.assign(b.all.get('wizard_b')!, { at: clock + 60_000 })
+    Object.assign(b.all.get('wizard_c')!, { working: true })
+    Object.assign(b.all.get('wizard_d')!, { state: 'needs_you' })
+    b.catchUp.ownerTurn('wizard_cu1', 'clear')
+    const done = await b.clear({ sent: true })
+    expect(b.archived).toEqual(['wizard_a'])
+    for (const id of ['wizard_b', 'wizard_c', 'wizard_d']) expect(done.content[0].text).toContain(`${id} (changed since the catch-up`)
+  })
+})
+
 describe('switch off', () => {
   it('the note, the tool and clear are exactly as before', async () => {
     const threads = [{ id: 'wizard_a', age: 2 * DAY }, { id: 'wizard_b', age: 9 * DAY }, { id: 'wizard_c', age: 40 * DAY }]

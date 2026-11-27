@@ -40,10 +40,12 @@ const MAX_SHOWN_RECORDS = 1000
 const MAX_HISTORY = 10
 // A clear or defer must come within this time of the catch-up it answers.
 export const ANSWER_WINDOW_MS = 24 * 3600_000
-// Issue 710: at most this many Sent threads are checked per catch-up (newest first); the rest wait for the next one.
+// Issue 710: at most this many finished Sent threads are offered per catch-up (newest first); the rest wait for the next.
 export const SENT_READS = 200
 // Titles named on the Sent count line (the rest are a count).
 export const SENT_TITLES = 20
+// No catch-up reads more Sent threads than this while looking for finished ones.
+export const SENT_MAX_READS = 600
 const MAX_CLEARED = 2000
 
 // Miguel's prompt, verbatim (the issue's baseline; James, 26 Nov: "could be our baseline and you would just be adding
@@ -110,6 +112,9 @@ export function lastTurns(page) {
 const isWaitingRecord = r => (r.kind === 'needs_you' || r.kind === 'confirm') && (r.state === 'new' || r.state === 'surfaced')
 const isFinishedRecord = r => (r.kind === 'result' || r.kind === 'fyi' || r.kind === 'note') && (r.state === 'new' || r.state === 'surfaced')
 const byNewest = (a, b) => (b.updated_at || 0) - (a.updated_at || 0) || String(a.id).localeCompare(String(b.id))
+
+// Issue 710: a Sent thread is finished when the last word is the agent's and it waits on nothing from the owner.
+const finishedTurns = turns => Boolean(turns?.answered) && turns.status?.state !== 'needs_you' && turns.status?.state !== 'check'
 
 function emptyState() { return { schema: 1, last: null, history: [], shown_records: {}, deferred: { chats: {}, items: [] }, cleared: {} } }
 
@@ -195,10 +200,16 @@ export function createCatchUp({ statePath = '', now = Date.now, inbox = null, re
         return true
       })
       .sort((a, b) => seconds(b.at) - seconds(a.at))
-    const reads = candidates.slice(0, SENT_READS)
+    // Kept or deferred and unchanged since: skipped without a read.
+    const fresh = candidates.filter(row => { const d = state.deferred.chats[String(row.id)]; return !(d && seconds(row.at) <= (d.last_at || 0)) })
     const out = []
-    for (let i = 0; i < reads.length; i += 5) {
-      const batch = await Promise.all(reads.slice(i, i + 5).map(async row => {
+    let read = 0
+    // Read newest first until SENT_READS finished threads are found; threads that turn out not to be finished never
+    // use up the room, but no catch-up reads more than SENT_MAX_READS.
+    while (read < fresh.length && out.length < SENT_READS && read < SENT_MAX_READS) {
+      const slice = fresh.slice(read, read + 5)
+      read += slice.length
+      const batch = await Promise.all(slice.map(async row => {
         const id = String(row.id)
         try {
           let title = row.title, listed = row.listed === true, at = seconds(row.at)
@@ -214,16 +225,14 @@ export function createCatchUp({ statePath = '', now = Date.now, inbox = null, re
         } catch { return null }
       }))
       for (const item of batch) {
-        if (!item?.turns.answered) continue
-        const state_ = item.turns.status?.state
-        if (state_ === 'needs_you' || state_ === 'check') continue
+        if (!finishedTurns(item?.turns)) continue
         const at = Math.max(item.at, item.turns.at || 0)
         const deferred = state.deferred.chats[item.id]
         if (deferred && at <= (deferred.last_at || 0)) continue
-        out.push({ id: item.id, title: clip(item.title || item.turns.mine || 'Untitled chat', 80), at, listed: item.listed })
+        if (out.length < SENT_READS) out.push({ id: item.id, title: clip(item.title || item.turns.mine || 'Untitled chat', 80), at, listed: item.listed })
       }
     }
-    return { list: out, more: candidates.length - reads.length, failed: false }
+    return { list: out, more: fresh.length - read, failed: false }
   }
 
   /** Records new since the last catch-up: never shown, or changed after they were shown. */
@@ -311,6 +320,19 @@ export function createCatchUp({ statePath = '', now = Date.now, inbox = null, re
     // Issue 710: `sent: true` is every finished chat in Sent this catch-up offered, except the ones in `keep`.
     const keep = sentShown ? new Set(ids(args.keep, 1000)) : new Set()
     const sentIds = sentShown && args.sent === true ? Object.keys(sentShown).filter(id => !keep.has(id)) : []
+    // A Sent thread is checked again right before it is archived: one that runs, waits on him, was snoozed or got a new
+    // reply since the catch-up showed it stays.
+    let sentNow = null
+    const changedSince = async chat => {
+      if (!sentShown || !Object.hasOwn(sentShown, chat) || Object.hasOwn(last.chats || {}, chat)) return false
+      try {
+        sentNow ??= new Map((await readSent() || []).map(row => [String(row?.id), row]))
+        const row = sentNow.get(chat)
+        if (!row || row.archived || row.hidden || row.snoozed || row.working) return true
+        const turns = lastTurns(await readTurns(chat))
+        return !finishedTurns(turns) || (turns.at || 0) > seconds(sentShown[chat])
+      } catch { return true }
+    }
     const chatIds = [...new Set([...ids(args.chats), ...sentIds])], recordIds = ids(args.records)
     if (!chatIds.length && !recordIds.length && !keep.size) return refuse(sentShown ? 'Name the chats (ids) and/or agent inbox records (ids) the owner said yes to clearing, or sent: true for the finished chats in Sent.' : 'Name the chats (ids) and/or agent inbox records (ids) the owner said yes to clearing.')
     const shownRecords = new Set(Object.keys(state.shown_records))
@@ -318,6 +340,7 @@ export function createCatchUp({ statePath = '', now = Date.now, inbox = null, re
     const t = now()
     for (const chat of chatIds) {
       if (!Object.hasOwn(last.chats || {}, chat) && !(sentShown && Object.hasOwn(sentShown, chat))) { skipped.push(`${chat} (not in this catch-up)`); continue }
+      if (await changedSince(chat)) { skipped.push(`${chat} (changed since the catch-up: running, waiting on him or a new reply)`); continue }
       try {
         await archiveChat(chat); done.push(`chat ${chat}`)
         // A Sent thread outside the listing: the shell can't see it archived, so the Sent log leaves its sends out.
