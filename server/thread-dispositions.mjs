@@ -31,6 +31,16 @@ export class ThreadDispositionStore {
 
   get(scope) { return structuredClone(this.scopes.get(scope) ?? {}) }
 
+  /** When the thread was snoozed (ms), in any scope; 0 when it is not snoozed. */
+  deferredAt(runtime, sessionId, agentId = 'hermes') {
+    let at = 0
+    for (const records of this.scopes.values()) {
+      const record = records[sideKey(agentId, `${runtime}:${sessionId}`)]
+      if (record?.deferred) at = Math.max(at, Date.parse(record.updatedAt) || 1)
+    }
+    return at
+  }
+
   clearSession(runtime, sessionId, agentId = 'hermes') {
     for (const [scope, records] of this.scopes) {
       if (records[sideKey(agentId, `${runtime}:${sessionId}`)]?.deferred) this.set(scope, runtime, sessionId, false, agentId)

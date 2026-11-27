@@ -3513,6 +3513,72 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     const spoken = await turn('wizard_parity_cu4', 'Catch me up.', { wizard_file_ids: [(await upload.json()).file.id] })
     assert.ok(spoken.includes(PROMPT), 'a spoken "catch me up" (recording attached) starts the catch-up')
   },
+  'catch-up-sent': async s => {
+    // Issue 710 (switch wizard/catch-up-sent in the Look file, off by default): with it on, "catch me up" on the main
+    // agent offers every finished thread in Sent, whatever its age, as one count line; "clear" (sent: true) archives
+    // exactly those, a running thread stays, and the Sent log leaves out the sends of a cleared thread older than the
+    // chat listing. Off: the note and the Sent log are as before. Routed agents never get a catch-up.
+    const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/catch-up-sent': { on, at: Date.now() } } })) }
+    const running = 'wizard_parity_sent_run'
+    const settle = () => { for (const run of s.runs.values()) if (run.session_id !== running && ['running', 'queued'].includes(run.status)) Object.assign(run, { status: 'completed', output: 'Synthetic reply', updated_at: Date.now() / 1000 }) }
+    const turn = async (id, input) => {
+      settle()
+      if (!s.sessions.get(id)) await s.request('/api/sessions', post({ id, source: 'wizard-mobile' }))
+      const before = s.seen.length
+      await admit(s, { session_id: id, input })
+      for (let n = 0; n < 200; n++) {
+        const run = s.seen.slice(before).filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === id).at(-1)
+        if (run) { settle(); return String(run.body.instructions || '') }
+        await new Promise(r => setTimeout(r, 25))
+      }
+      assert.fail(`the turn in ${id} never reached the agent`)
+    }
+    look(true)
+    if (s.id !== 'hermes') {
+      const note = await turn('wizard_parity', 'catch me up')
+      assert.ok(!note.includes('in Sent') && !note.includes('Reply clear or clear except N.'), 'a routed agent never runs the catch-up, Sent or not')
+      return
+    }
+    // Threads he sent into (seeded in the Sent log by the scene): finished 1, 8 and 30 days ago, and one still running.
+    const D = 86400
+    const now = Date.now() / 1000
+    for (const [id, age] of [['wizard_parity_sent_1d', 1 * D], ['wizard_parity_sent_8d', 8 * D], ['wizard_parity_sent_30d', 30 * D + 3600], [running, 600]]) {
+      await s.request('/api/sessions', post({ id, source: 'wizard-mobile', title: `Synthetic ${id}` }))
+      const row = s.sessions.get(id)
+      Object.assign(row, { title: `Synthetic ${id}`, created_at: now - age, started_at: now - age })
+      row.messages.push({ id: `${id}-u`, role: 'user', content: `Synthetic task ${id}`, timestamp: now - age })
+      if (id !== running) row.messages.push({ id: `${id}-a`, role: 'assistant', content: `Synthetic answer ${id}`, timestamp: now - age + 60 })
+    }
+    await admit(s, { session_id: running, input: 'Synthetic keep going' })
+    const finished = ['wizard_parity_sent_1d', 'wizard_parity_sent_8d', 'wizard_parity_sent_30d']
+    const sentThreads = async () => new Set((await (await s.raw('/wizard/v1/sent?limit=200')).json()).rows.map(r => r.thread_id))
+    // Off: no Sent line, and the catch-up offers only the recent chat, as before.
+    look(false)
+    const off = await turn('wizard_parity_sent_cu0', 'catch me up')
+    assert.ok(off.includes('Reply clear or clear except N.') && !off.includes('in Sent') && !off.includes('"sent": true'), 'switch off: no Sent line')
+    assert.ok(off.includes('id wizard_parity_sent_1d |') && !off.includes('wizard_parity_sent_8d') && !off.includes('wizard_parity_sent_30d'), 'switch off: only the last 7 days')
+    // On.
+    look(true)
+    const on = await turn('wizard_parity_sent_cu1', 'catch me up')
+    const line = on.slice(on.indexOf('Finished chats in Sent'), on.indexOf('Acting on his answer'))
+    assert.ok(line.includes('ONE count line, "3 finished chats in Sent"'), `one count line for the three: ${line}`)
+    for (const id of finished) assert.ok(line.includes(`id ${id} |`), `${id} is on the Sent line`)
+    assert.ok(!on.includes(running), 'the running thread is never offered')
+    const tool = async args => { const r = await s.agentMcp('tools/call', { name: 'wizard_catch_up', arguments: args }); assert.equal(r.status, 200); return (await r.json()).result }
+    assert.equal((await tool({ action: 'clear', sent: true })).isError, true, 'nothing is cleared before his answer')
+    assert.ok(finished.every(id => s.sessions.get(id).archived !== true))
+    await turn('wizard_parity_sent_cu1', 'clear')
+    const cleared = await tool({ action: 'clear', sent: true })
+    assert.ok(!cleared.isError, cleared.content?.[0]?.text)
+    for (const id of finished) assert.equal(s.sessions.get(id).archived, true, `${id} is archived in Hermes`)
+    assert.notEqual(s.sessions.get(running).archived, true, 'the running thread stays')
+    // The Sent log: the 30-day thread (outside the chat listing) is left out; the running one is still there.
+    const left = await sentThreads()
+    assert.ok(!left.has('wizard_parity_sent_30d') && left.has(running), `Sent log rows after clear: ${[...left].join(', ')}`)
+    look(false)
+    await new Promise(r => setTimeout(r, 5))
+    assert.ok((await sentThreads()).has('wizard_parity_sent_30d'), 'switch off: the Sent log is as before')
+  },
   'capability-registry': async s => {
     // Issue 463: agents find what the box already does (built-ins, host voice service, app jobs) before installing
     // their own. On for everyone (the wizard/capability-registry switch was removed), whatever the Look file holds.

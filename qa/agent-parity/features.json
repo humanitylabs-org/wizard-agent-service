@@ -800,6 +800,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "catch-up-sent",
+      "description": "Catch me up clears Sent (issue 710, switch wizard/catch-up-sent in the Look file, off by default; WIZARD_CATCH_UP_SENT 1 forces it on, 0 off; needs the agent inbox's Sent log). On, the main agent's catch-up (server/catch-up.mjs) also reads every thread the Sent tab shows, whatever its age: the Sent log's threads, plus with Smart inbox on every other listed thread; with Smart inbox on, a listed thread the shell's Inbox rule keeps in Inbox (an answer to his words, a delivery he set up: smartPlace in server/catch-up.mjs mirrors wizard-ux smartPlace) is not on the Sent line and stays listed on its own. It offers the finished ones (not archived, hidden, snoozed, running on the queue or in the Sent log, his message not the newest, last reply not needs_you or check; not Daily/Alerts, a catch-up or kept/deferred unless it changed) as ONE count line in Clear all (up to 20 ids and titles), and those chats are not listed one by one. Threads past the 30-day chat listing are read one by one (GET /api/sessions/<id>); an archived one is remembered. wizard_catch_up clear takes sent: true (every chat on the Sent line) and keep (\"clear except N\": kept chats are not offered until they change), archives like Archive (Hermes archive + snooze cleared + saved result dismissed), and still refuses before the owner's answer. GET /wizard/v1/sent leaves out the sends from before the clear of a thread the catch-up archived while it was outside the chat listing, until it is listed again unarchived. A thread revived later is offered again at the next catch-up. Off: the note, the tool's schema and the Sent log are as before. Routed agents never get a catch-up.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP routes with the switch flipped in <root>/Pages/wizard-look/look.json and the Sent log seeded with four threads (finished 1, 8 and 30 days ago, one still running on the queue): routed kinds get no catch-up; on main, off: the note has no Sent line and offers only the 1-day chat; on: one count line \"3 finished chats in Sent\" naming the three, the running one absent, clear sent:true before his answer refused, after \"clear\" the three are archived in Hermes and the running one is not, and GET /wizard/v1/sent leaves out the 30-day thread's sends (back when the switch is off). tests/catch-up-sent.test.ts covers the ages, waiting/snoozed/archived/running exclusions, clear except N, a revived thread and the byte-identical note with the switch off. Synthetic HTTP fixture evidence, not live box proof: the agent's wording comes from the prompt.",
+      "source_refs": [
+        "server/catch-up.mjs",
+        "server/service.mjs",
+        "server/index.mjs",
+        "server/thread-dispositions.mjs"
+      ],
+      "reference_tests": [
+        "tests/catch-up-sent.test.ts"
+      ],
+      "fixture": "catch-up-sent",
+      "policy_exemptions": []
+    },
+    {
       "id": "result-reader",
       "description": "Result reader (issue 630, switch wizard/result-reader in the Look file, off by default; WIZARD_RESULT_READER 1 forces it on, 0 off; needs the agent inbox): when a worker run on a linked inbox record finishes, a fixed stateless reader (server/result-reader.mjs, no memory, no tools) calls ONLY the private fast router (privateRouter endpoint host) at temperature 0 with bounded facts (agent, agent kind, duration, ok/failed/killed, error text, owed background work, the status line as a hint, the last 4,000 characters of the final reply) and the owner's latest 8 corrections (Not urgent / Should have alerted, Open / Send to inbox). Its strict JSON (kind needs_you | result | fyi, urgent, failed, ask capped at 140, options only on needs_you) files the record through the inbox's own mapping (owed work, confirm lines and answered records behave as before); urgent raises the severity to high so the alert gate (rules, examples, 3-a-day cap) decides. The reader wins over the status line; the record keeps classified_by (reader | status_line | fallback), status_line and reader, a disagreement (another kind, or done on a failed run) is counted, GET /wizard/v1/agent-inbox carries reader counts, and a Sent row whose record it filed shows filed_by. One read per finished run however often it is polled. Invalid JSON, an HTTP error or a timeout: filed exactly as today (classified_by status_line, or fallback with no status line), logged. No private router: never called, logged once, records exactly as today. Switch off: records byte-identical to today.",
       "layer": "server",

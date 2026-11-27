@@ -74,7 +74,7 @@ import { APP_WAKE_CONTRACT, APP_WAKE_RUN_PREFIX, createWakeLedger, parseWakeEven
 import { AgentInboxStore, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, START_FAILED, appDoor, recordApp } from './agent-inbox.mjs'
 import { SentLog } from './sent-log.mjs'
 import { isSweepPhrase, isScheduledSweep, withCardRow, WAITING_CAP, DONE_CAP } from './agent-sweep.mjs'
-import { createCatchUp, startsCatchUp } from './catch-up.mjs'
+import { createCatchUp, startsCatchUp, CATCH_UP_SENT_SWITCH } from './catch-up.mjs'
 import { AlertRulesFile, createAlertGate, privateRouter } from './agent-alerts.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
 import { replyRules, routeUtterance, dumpTitle, deadlineFrom } from './voice-router.mjs'
@@ -3226,6 +3226,10 @@ function buildWizardServer(options, lifetime) {
   // inbox behave exactly as before.
   const smartInboxSwitchOn = createChannelsSwitch({ id: SMART_INBOX_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.smartInboxTtlMs ?? 3000 })
   const smartInboxOn = () => channelPart(options.smartInbox, smartInboxSwitchOn)
+  // Catch me up clears Sent (issue 710): the owner's `wizard/catch-up-sent` switch in the Look file; WIZARD_CATCH_UP_SENT
+  // '1' forces it on, '0' off. Off: the catch-up, its tool and the Sent log behave exactly as before.
+  const catchUpSentSwitchOn = createChannelsSwitch({ id: CATCH_UP_SENT_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.catchUpSentTtlMs ?? 3000 })
+  const catchUpSentOn = () => channelPart(options.catchUpSent, catchUpSentSwitchOn)
   const osInstructions = (sessionId) => {
     if (!bridge || gatewayOnly) return ''
     const apps = bridge.apps()
@@ -4764,6 +4768,33 @@ function buildWizardServer(options, lifetime) {
     if (!scheduled && !(ownerSweep && principal?.kind === 'owner' && isSweepPhrase(text))) return null
     return { scheduled }
   }
+  const catchUpSentThreads = async () => {
+    const listing = await readCanonicalSessionsHttp((path) => hermesJson(path), { limit: 2000, archived: archivedListReader, parents: canonicalSessionParents })
+    const listed = new Map(listing.map(row => [String(row.id), row]))
+    const queue = inboxQueue(MAIN_AGENT_ID)
+    const running = id => { try { return (queue?.queuedForSession('direct', id) || []).some(turn => turn.terminalAt == null) } catch { return false } }
+    const fromSent = new Map()
+    for (const row of sentLog.all()) {
+      if ((row.agent || MAIN_AGENT_ID) !== MAIN_AGENT_ID || typeof row.thread_id !== 'string' || !row.thread_id) continue
+      const had = fromSent.get(row.thread_id)
+      if (!had || (Number(row.at) || 0) > had.at) fromSent.set(row.thread_id, { at: Number(row.at) || 0, newest: row })
+    }
+    const out = []
+    const smart = smartInboxOn()
+    const thread = (id, sentAt, last, fallbackTitle) => {
+      const row = listed.get(id)
+      const snoozedAt = threadDispositionStore.deferredAt('direct', id)
+      out.push({ id, title: row?.title || fallbackTitle, at: Math.max(sentAt, (Number(row?.last_active) || 0) * 1000), listed: Boolean(row),
+        archived: row?.archived === true, hidden: row?.hidden === true, snoozed: snoozedAt > 0 && !(sentAt > snoozedAt),
+        working: last?.state === 'routing' || last?.state === 'running' || running(id),
+        // Smart inbox: what the shell's Inbox rule reads (his newest send, and whether it is a delivery he set up).
+        ...(smart ? { smart, last, delivery: row?.source === 'cron' || /^cron_/u.test(id) || row?.pinned === true } : {}) })
+    }
+    for (const [id, { at, newest }] of fromSent) thread(id, at, sentView(newest), String(newest.text || '').split('\n').find(line => line.trim())?.trim() || '')
+    // Smart inbox: Sent also holds every other thread Inbox doesn't (a watch, a schedule, one older than the log).
+    if (smart) for (const [id] of listed) if (!fromSent.has(id)) thread(id, 0, null, listed.get(id)?.title || '')
+    return out
+  }
   // Catch me up (issue 668): built before the turn is admitted (the queue may dispatch at once); its run note carries it.
   catchUp = createCatchUp({
     statePath: options.catchUpStatePath ? resolve(String(options.catchUpStatePath))
@@ -4779,6 +4810,14 @@ function buildWizardServer(options, lifetime) {
       try { await backgroundResults?.dismiss(id, '') } catch { /* nothing saved to dismiss */ }
     },
     skipThreads: () => fixedChannelThreads(resolve(bridgeOsHome || wizardOsHome(), 'channels.sqlite'), MAIN_AGENT_ID),
+    // Issue 710: the threads the Sent tab shows, any age (the Sent log's threads; with Smart inbox on, every other listed
+    // thread too), with what the shell keys off: archived, snoozed (unless he sent after the snooze), running.
+    sentOn: () => agentInboxOn() && catchUpSentOn(),
+    readSent: () => catchUpSentThreads(),
+    readSession: async (id) => {
+      try { const value = await hermesJson(`/api/sessions/${encodeURIComponent(id)}`); return value?.session ?? (value?.id ? value : null) }
+      catch { return null }
+    },
   })
   const catchUpNotes = new Map()
   const catchUpForTurn = async (sessionId, body) => {
@@ -7826,7 +7865,11 @@ function buildWizardServer(options, lifetime) {
             const page = sentLog.list({ limit: url.searchParams.get('limit') || 50, before: url.searchParams.get('before') || '' })
             // Issue 669: each typed row says what its guess was and whether it matched; the page carries the match rate.
             const typed = typedRoutingState()
-            const rows = page.rows.map(row => {
+            // Issue 710: a thread the catch-up archived while it was older than the chat listing has no list row the shell
+            // can see archived, so its sends from before the clear are left out (until it is listed again, not archived).
+            const gone = catchUpSentOn() ? catchUp.cleared() : {}
+            const back = id => canonicalSessionCache.sessions?.some?.(row => String(row?.id) === id && !row.archived)
+            const rows = page.rows.filter(row => !(row.thread_id && Object.hasOwn(gone, row.thread_id) && (Number(row.at) || 0) <= gone[row.thread_id].at && !back(row.thread_id))).map(row => {
               const view = sentView(row), judged = typed.verdicts.get(row.id)
               return judged ? { ...view, typed_guess: judged.guess, typed_verdict: judged.verdict } : view
             })

@@ -223,6 +223,8 @@ server = createWizardServer({
   autoTags: envChoice(process.env.WIZARD_AUTO_TAGS),
   // Smart inbox (issue 667): follows the owner's `wizard/smart-inbox` switch; '1' forces it on, '0' off.
   smartInbox: envChoice(process.env.WIZARD_SMART_INBOX),
+  // Catch me up clears Sent (issue 710): follows the owner's `wizard/catch-up-sent` switch; '1' forces it on, '0' off.
+  catchUpSent: envChoice(process.env.WIZARD_CATCH_UP_SENT),
   // Private routing (issue 629): follows the owner's `wizard/private-routing` switch; '1' forces it on, '0' off.
   privateRouting: envChoice(process.env.WIZARD_PRIVATE_ROUTING),
   // Five-choice first chat (issue 650): follows the owner's `wizard/first-chat-goals` switch; '1' forces it on, '0' off.

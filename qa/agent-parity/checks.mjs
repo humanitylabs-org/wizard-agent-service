@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
+import { mkdirSync, writeFileSync } from 'node:fs'
 import { scene, image, png, post } from './fixture.mjs'
 import { serverChecks, dailyClock, dailyScheduleToken, sentClock, privateEdgeNotes } from './server-checks.mjs'
 import { queueChecks } from './queue-checks.mjs'
@@ -29,6 +30,17 @@ const featureScenes = {
   'result-reader': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, resultReaderTtlMs: 0 })),
   'first-chat-goals': kind => scene(kind, ({ root }) => ({ pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, firstChatGoalsTtlMs: 0, schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: true, schedulerIntervalMs: 3_600_000, agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' })),
   'catch-me-up': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' })),
+  // Issue 710: the main agent's Sent log holds four threads he sent into (seeded before the Service starts).
+  'catch-up-sent': kind => scene(kind, ({ root }) => {
+    mkdirSync(root, { recursive: true })
+    const D = 86400_000, now = Date.now()
+    const rows = [['wizard_parity_sent_1d', D], ['wizard_parity_sent_8d', 8 * D], ['wizard_parity_sent_30d', 30 * D + 3600_000], ['wizard_parity_sent_run', 600_000]].map(([thread, age], n) => ({
+      id: `sent_${String(n + 1).padStart(24, '0')}`, idempotency_key: null, at: now - age, source: 'typed', agent: 'hermes', text: `Synthetic task ${thread}`, route: 'agent', decided_by: 'owner_words',
+      rules_matched: ['typed'], model: '', tags: [], urgent: false, correction_id: null, thread_id: thread, record_id: null, run_key: `parity-sent-${n}`, routed_at: now - age }))
+    writeFileSync(join(root, 'sent-log.json'), JSON.stringify({ schema: 1, rows, check: null }))
+    return { agentInboxStatePath: join(root, 'agent-inbox.json'), pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, catchUpSentTtlMs: 0,
+      agentBridge: true, bridgeWriteSkills: false, mcpToken: 'parity-main-gateway', agentGatewayUrl: 'http://gateway/wizard/mcp' }
+  }),
   'agent-inbox-move': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'private-routing': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), privateRouting: true })),
   'private-routing-edges': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), privateRouting: true, channelStore: true, channelDaily: true, dailyTimezone: 'UTC',
