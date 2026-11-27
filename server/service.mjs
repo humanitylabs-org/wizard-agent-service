@@ -8353,6 +8353,9 @@ function buildWizardServer(options, lifetime) {
             voice: await sttAvailable(), router: Boolean(resolveFastRouter(settings, router)), files: Boolean(inboxToken || mediaFiles),
             resumable_uploads: Boolean(uploads), upload_destinations: Boolean(uploads && userFiles),
             approvals: true, steer: true, joined_delegation: joinedDelegation !== 'off' && contract.join, markdown: contract.markdown,
+            // An archived thread comes back to Inbox when the owner's own run ends with a visible reply (owner-run-return.mjs,
+            // wizard-ux issue 1997): the shell only promises "comes back when it's done" when this is true.
+            archive_returns_with_reply: true,
           },
         }), { 'Cache-Control': 'no-store' })
         return

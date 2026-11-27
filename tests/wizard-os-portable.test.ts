@@ -107,7 +107,7 @@ describe('WizardOS settings, bootstrap and apps', () => {
       owner: { name: 'Ada', place: 'Lisbon' }, agent: { name: 'Merlin' },
       clock: { timezone: 'Europe/Lisbon', day_starts_at: '05:30' },
     })
-    expect(body.capabilities).toMatchObject({ joined_delegation: false, markdown: false, router: false })
+    expect(body.capabilities).toMatchObject({ joined_delegation: false, markdown: false, router: false, archive_returns_with_reply: true })
     expect(body.endpoints.route).toBe('')
   })
 
