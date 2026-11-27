@@ -843,6 +843,10 @@ export function createAgentBridge({
       log(JSON.stringify({ event: 'call', app: '', tool: clean(String(name), 80), agent: agentId, ms: 0, ok: false }))
       return failure(`No installed app has a tool called ${clean(String(name), 80)}. Call ${META_TOOL} to see what is installed.`)
     }
+    return runAppTool(app, tool, args, agentId, started)
+  }
+
+  async function runAppTool(app, tool, args, agentId, started = Date.now()) {
     let result
     let ok = false
     if (app.status !== 'running') result = failure(`${app.name} is installed but ${app.status}. Tell the owner; \`wam doctor\` shows why.`)
@@ -862,6 +866,23 @@ export function createAgentBridge({
     }
     log(JSON.stringify({ event: 'call', app: app.id, tool, agent: agentId, ms: Date.now() - started, ok }))
     return result
+  }
+
+  // One app's own tool, called for the owner on an agent's grant (a reply button's app action, wizard-ux issue 1973):
+  // never a gateway builtin or shared tool, only a tool of an app this agent may use. `tool` may carry the app's
+  // prefix or the full name the agent sees (mcp__<server>__<prefix>__<tool>).
+  async function callAppTool(appId, tool, args, agentId = GATEWAY_MAIN_AGENT) {
+    refresh()
+    const app = visible(agentId).find((a) => a.id === appId)
+    if (!app) {
+      const off = apps.find((a) => !a.private && a.id === appId)
+      log(JSON.stringify({ event: 'call', app: clean(String(appId), 64), tool: clean(String(tool), 80), agent: agentId, ms: 0, ok: false, ...(off ? { denied: true } : {}) }))
+      return failure(off ? `${agentLabel(agentId)} is not allowed to use ${off.name}. The owner can turn it on in Connections.` : `No installed app called ${clean(String(appId), 64)}.`)
+    }
+    let name = String(tool || '')
+    for (const p of [agentToolName(app.prefix, '', harness), `${app.prefix}__`]) if (name.startsWith(p)) { name = name.slice(p.length); break }
+    if (!/^[A-Za-z0-9_.-]{1,64}$/u.test(name)) return failure(`${app.name} has no tool called ${clean(String(tool), 80)}.`)
+    return runAppTool(app, name, args, agentId)
   }
 
   // ---------- streamable HTTP server side ----------
@@ -992,7 +1013,7 @@ export function createAgentBridge({
   refresh()
 
   return {
-    handle, kernel, listTools, callTool, refresh: () => { if (refresh()) notifyChanged() }, agentFor: authorized,
+    handle, kernel, listTools, callTool, callAppTool, refresh: () => { if (refresh()) notifyChanged() }, agentFor: authorized,
     // An agent's app list changed (#58): rewrite the main agent's pointer skills and tell open sessions.
     appsChanged: () => { refresh(); rewriteSkills(); notifyChanged() },
     // A switch that gates an app's skill changed (appSkillOn): copy or remove those skills, nothing else.

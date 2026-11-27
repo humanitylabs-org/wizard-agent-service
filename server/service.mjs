@@ -60,6 +60,7 @@ import { createSpaceFiling } from './thread-spaces.mjs'
 import { AUTO_TAGS_SWITCH, createAutoTagger, readRecentChats } from './auto-tags.mjs'
 import { createChannelsSwitch, channelOn, channelPart } from './channels-switch.mjs'
 import { REPLY_BUTTONS_SWITCH, replyButtonsNote } from './reply-buttons.mjs'
+import { REPLY_ACTIONS_SWITCH, createReplyActions, replyActionsNote } from './reply-actions.mjs'
 import { createCapabilities } from './capabilities.mjs'
 // wizard-ux issue 1437: the shell app whose skill is the generated interface manual (on for everyone).
 // Command approvals for container agents (issue 597): approvals block in each container agent's config.yaml, a
@@ -3173,7 +3174,14 @@ function buildWizardServer(options, lifetime) {
   // Reply buttons (wizard-ux issue 1889, reply-buttons.mjs): while the owner's switch is on, every main and routed run
   // is told how to write tap-to-answer buttons and what a taps message means. `options.replyButtons` forces it (tests).
   const replyButtonsSwitchOn = createChannelsSwitch({ id: REPLY_BUTTONS_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.replyButtonsTtlMs ?? 3000 })
-  const buttonsNote = () => replyButtonsNote(() => channelPart(options.replyButtons, replyButtonsSwitchOn))
+  // Action buttons (wizard-ux issue 1973, reply-actions.mjs; switch wizard/reply-actions, off by default): a button may
+  // act on an installed app directly with no agent turn. Its run note rides with the buttons note, only while both are on.
+  const replyActionsSwitchOn = createChannelsSwitch({ id: REPLY_ACTIONS_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.replyActionsTtlMs ?? 3000 })
+  const replyActionsOn = () => channelPart(options.replyActions, replyActionsSwitchOn)
+  const buttonsNote = () => {
+    const note = replyButtonsNote(() => channelPart(options.replyButtons, replyButtonsSwitchOn))
+    return note ? [note, replyActionsNote(replyActionsOn)].filter(Boolean).join('\n') : ''
+  }
   const capabilities = createCapabilities({
     apps: (agentId) => bridge?.apps(agentId) || [],
     allApps: () => bridge?.apps() || [],
@@ -6860,6 +6868,25 @@ function buildWizardServer(options, lifetime) {
     try { payload = raw ? JSON.parse(raw) : {} } catch { payload = {} }
     return { status: result.status, ok: result.ok, payload }
   }
+  // Action buttons (wizard-ux issue 1973): the tapped message is read from the thread's own history through this
+  // service's own proxy (main and routed agents alike, each scoped to its agent), and the app is called on that agent's
+  // grant. Outcomes are kept per thread on the box.
+  const replyActions = bridge ? createReplyActions({
+    statePath: options.replyActionsStatePath ?? (bridgeOsHome ? join(bridgeOsHome, 'reply-actions.json') : ''),
+    findMessage: async (agent, thread, message) => {
+      const scope = agent ? `&agent=${encodeURIComponent(agent)}` : ''
+      for (let offset = 0; offset < 1000; offset += 100) {
+        const got = await deliverySession(`${PROXY_PREFIX}/api/sessions/${encodeURIComponent(thread)}/messages?order=latest&limit=100&offset=${offset}${scope}`)
+        if (!got.ok) return null
+        const rows = got.payload?.data || got.payload?.messages || got.payload?.items || []
+        const hit = rows.find(row => row && String(row.id ?? row.message_id ?? '') === message)
+        if (hit) return hit
+        if (got.payload?.has_more !== true && rows.length < 100) return null
+      }
+      return null
+    },
+    callApp: (agent, app, tool, args) => bridge.callAppTool(app, tool, args, agent || GATEWAY_MAIN_AGENT),
+  }) : null
   // Which agent a share goes to, and where its files are stored. Without an agents registry only the
   // main agent exists; options.resolveShareAgent replaces this when one is present.
   const resolveShareAgent = options.resolveShareAgent ?? shareRouting?.resolveShareAgent ?? (async (agentId) => {
@@ -7717,6 +7744,29 @@ function buildWizardServer(options, lifetime) {
         } catch (error) {
           const status = Number(error?.status) || 500
           sendJson(response, status, { error: error?.code || 'wake_failed' }, status === 429 ? { 'Retry-After': '60' } : {})
+        }
+        return
+      }
+      // Action buttons (wizard-ux issue 1973, switch wizard/reply-actions): POST /wizard/v1/reply-actions {thread, message,
+      // group, button, agent?} runs the button's app action read from the thread's own history (no agent run, no model);
+      // GET /wizard/v1/reply-actions?thread=<id>[&agent=<id>] lists the thread's saved outcomes. Owner only; off: 404.
+      if (url.pathname === '/wizard/v1/reply-actions') {
+        if (!replyActions || !replyActionsOn()) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (isAgentIngress(request) || !ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        if (!['GET', 'POST'].includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' }); return }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        try {
+          if (request.method === 'GET') {
+            sendJson(response, 200, replyActions.list(url.searchParams.get('agent') || '', url.searchParams.get('thread') || ''), { 'Cache-Control': 'no-store' })
+          } else {
+            let input
+            try { input = JSON.parse((await readBoundedBody(request, 4096)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
+            const record = await replyActions.tap(input && typeof input === 'object' ? input : {})
+            sendJson(response, 200, { ok: record.ok, action: record }, { 'Cache-Control': 'no-store' })
+          }
+        } catch (error) {
+          sendJson(response, Number.isInteger(error?.status) ? error.status : 500, { error: error?.error || 'reply_action_failed', ...(error?.detail ? { detail: error.detail } : {}) })
         }
         return
       }
@@ -9816,6 +9866,13 @@ function buildWizardServer(options, lifetime) {
             const ownerRetry = !saved && ownerTurnRetry && runQueue?.admittedForSession('direct', row.id).length > 0
               ? await fullRetryInput(async offset => ownerRetryRows(JSON.parse(restoreOwnerTurns(Buffer.from(JSON.stringify(await retryPage(offset))), runQueue, row.id, ownerTurnRowMeta, { screenshots: ownerScreenshotTurns }).toString('utf8'))))
               : ''
+            // The thread's saved route, exactly as its list row has it (filterSessionList): Hermes' session API omits the
+            // provider, and a shell that has only this read (an archived thread opened from its pin) must not have to
+            // guess it from the phone's model list (wizard-ux issue 1973).
+            if (truth?.route && truth.route.model === detailed.model) {
+              detailed.provider = truth.route.provider
+              if (truth.routeUpdatedAt) detailed.wizard_model_lock_updated_at = truth.routeUpdatedAt
+            }
             detailed.wizard_retry_input = saved ? queuedInputTextOf(saved.body) : ownerRetry || truth?.requestPreview || await fullRetryInput(retryPage)
             if (saved) {
               detailed.wizard_retry_run_id = saved.publicRunId

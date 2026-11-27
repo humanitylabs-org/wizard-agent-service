@@ -2567,6 +2567,27 @@
       "policy_exemptions": []
     },
     {
+      "id": "chat-reply-actions",
+      "description": "wizard-ux issue 1973 part 2 (switch wizard/reply-actions, off by default, on top of wizard/reply-buttons): a [WIZARD_BUTTONS_V1] button may declare \"action\":{\"app\",\"tool\",\"args\"}. A tap posts only {thread, message, group, button, agent} to POST /wizard/v1/reply-actions (owner only); the Service reads the action from that message in the thread's own history through its own proxy (main and routed agents alike, scoped to the thread's agent), calls the app's tool through the gateway (agent-bridge callAppTool) on that agent's app grant, starts no run and calls no model, and saves the outcome per thread (GET /wizard/v1/reply-actions?thread=): the picked button and one machine line from the app's answer, or the failure, shown inline with Retry. An unknown, not granted or not installed app is refused and saved as a failure. Buttons without an action keep the chat-reply-buttons behaviour. While both switches are on every main and routed run carries the action-button note (server/reply-actions.mjs).",
+      "layer": "ux",
+      "how_to_test": "In this repo run npx vitest run tests/reply-actions.test.ts: for main, host-profile, container and restricted threads a tap changes a synthetic app's own state with no run admitted, a second tap replays the saved outcome, the outcome survives a restart, a routed agent cannot reach an app it is not granted, a failing app is saved as a failure and Retry works once it is back, the run note appears only while both switches are on, and an agent credential is refused. In wizard-ux run node --test tests/reply-actions.test.mjs (the real chat-kit + action-cards render and tap path for main and routed threads, switch off byte-identical) and the browser proof wizard-ux/tests/qa-reply-button-actions.cjs (phone and desktop, two skins, fake box). Synthetic evidence, not live box proof.",
+      "source_refs": [
+        "wizard-ux/web/core/chat-kit.js",
+        "wizard-ux/web/core/action-cards.js",
+        "wizard-ux/web/core/chats-bind.js",
+        "server/reply-actions.mjs",
+        "server/agent-bridge.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/reply-actions.test.ts",
+        "wizard-ux/tests/reply-actions.test.mjs",
+        "wizard-ux/tests/qa-reply-button-actions.cjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "chats-sent-tab",
       "description": "wizard-ux issue 1778 (on for everyone; the wizard/chats-inbox and wizard/agent-inbox switches are gone): the main agent's Chats list gets bottom tabs Inbox, Tags and Sent. Sent reads the Sent log (GET /wizard/v1/sent, issue 607), shows each capture's route, live state and why, opens the thread it ran in by id (a background row through its agent inbox record), and posts Should have replied / Didn't need a reply (POST /wizard/v1/sent/<id>/correct). The Sent log holds the owner's own captures to the main agent, so a routed agent's Chats list (host-profile, container, restricted) keeps today's look with no tabs; its threads and their parity are unchanged. Replies typed in a thread (wizard-ux issue 1808) are Reply rows with the agent's one-line answer and no correction; a main-agent thread the box marks quietReply (the owner's reply asked for no answer and the agent ended done or fyi) is not unread and not in Inbox / Ready, and an ask, a failure or a run still going never is. Routed agents' lists carry no such mark and are unchanged.",
       "layer": "ux",
