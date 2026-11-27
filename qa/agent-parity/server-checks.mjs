@@ -1998,6 +1998,83 @@ export const serverChecks = {
     const back = await listed(x => x.tags?.[0] === wizardos.id)
     assert.deepEqual([back?.channel, back?.tags?.[0]], [wizardos.id, wizardos.id], `${s.kind}: rows keep carrying tags, primary first`)
   },
+  // Issue 702: automatic chat tags (switch wizard/auto-tags, off by default) through each runtime's real Service route.
+  'chats-auto-tags': async s => {
+    const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+    const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/auto-tags': { on, at: Date.now() } } })) }
+    const make = async name => { const r = await s.raw('/wizard/v1/channels', json('POST', { name, agent: s.id })); assert.equal(r.status, 201); return r.json() }
+    const tagsOf = async id => (await (await s.raw(`/wizard/v1/channels/tags?sessionId=${id}&agent=${s.id}`)).json()).tags
+    const listAll = async () => { if (s.kind === 'main') await (await s.request('/api/sessions?limit=100')).json(); return (await (await s.request('/api/sessions?view=list&limit=100')).json()).data }
+    const settle = async (id, want) => { let last = []; for (let n = 0; n < 40; n++) { await listAll(); await new Promise(r => setTimeout(r, 25)); last = await tagsOf(id); if (want(last)) return last } return last }
+    const chat = async (id, title, first, status) => {
+      if (!s.sessions.has(id)) assert.equal((await s.request('/api/sessions', post({ id, title, source: 'wizard-mobile' }))).status, 201)
+      const row = s.sessions.get(id); row.hidden = false; row.title = title; row.preview = first
+      row.messages.push({ role: 'user', timestamp: Date.now() / 1000 - 5, content: first })
+      const r = await s.request('/v1/runs', post({ session_id: id, input: first })); assert.equal(r.status, 202)
+      const runId = (await r.json()).run_id
+      const output = `Synthetic reply\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'done', ask: 'Done', title, ...status })}[/WIZARD_STATUS_V1]`
+      Object.assign([...s.runs.values()].at(-1), { status: 'completed', updated_at: Date.now() / 1000, output })
+      row.messages.push({ role: 'assistant', timestamp: Date.now() / 1000, content: output })
+      assert.equal((await s.request(`/v1/runs/${runId}`)).status, 200)
+    }
+    const content = await make('Synthetic Content'), reports = await make('Synthetic Reports')
+    const roundup = 'wizard_1795700000001_aaaaaaaaaaaa', factCheck = 'wizard_1795700000002_aaaaaaaaaaaa', other = 'wizard_1795700000003_aaaaaaaaaaaa'
+    // Off (no Look file): nothing changes. No covers route, no flag on the list, the agent's refused hint still tags nothing.
+    assert.equal((await s.raw(`/wizard/v1/channels/covers?id=${content.id}`)).status, 404, `${s.kind}: no covers route while off`)
+    assert.equal((await (await s.raw('/wizard/v1/channels')).json()).autoTags, undefined, `${s.kind}: the list says nothing while off`)
+    await chat(roundup, 'Synthetic clips roundup', 'Give me a roundup of the synthetic clips', { channel: reports.id, subject: 'Content' })
+    assert.ok(!sent(s).instructions.includes('the Service tags each chat itself'), `${s.kind}: no tag note while off`)
+    assert.deepEqual(await settle(roundup, t => t.length > 0), [], `${s.kind}: off, the refused hint tags nothing`)
+    // On: the owner's covers decide, the roundup gets Content and its report kind, a refused hint is logged and told.
+    look(true)
+    assert.equal((await (await s.raw('/wizard/v1/channels')).json()).autoTags, true, `${s.kind}: the list says auto tags are on`)
+    const put = await s.raw('/wizard/v1/channels/covers', json('PUT', { id: content.id, covers: ['clips', 'fact check'] }))
+    assert.equal(put.status, 200); assert.deepEqual((await put.json()).covers, ['clips', 'fact check'])
+    assert.equal((await s.raw('/wizard/v1/channels/covers', json('PUT', { id: content.id, covers: ['kind: nonsense'] }))).status, 400)
+    const one = await s.raw('/wizard/v1/channels/covers', json('PUT', { id: content.id, add: 'Synthetic extra' }))
+    assert.deepEqual((await one.json()).covers, ['clips', 'fact check', 'Synthetic extra'], `${s.kind}: one entry added`)
+    assert.deepEqual((await (await s.raw('/wizard/v1/channels/covers', json('PUT', { id: content.id, remove: 'synthetic extra' }))).json()).covers, ['clips', 'fact check'], `${s.kind}: one entry removed`)
+    assert.deepEqual((await (await s.raw(`/wizard/v1/channels/covers?id=${reports.id}`)).json()).covers.filter(c => c.startsWith('kind:')).length, 0, `${s.kind}: nothing seeded before the first decision`)
+    await chat(roundup, 'Synthetic clips roundup', 'Give me a roundup of the synthetic clips', { channel: reports.id, subject: 'Content' })
+    const both = await settle(roundup, t => t.length >= 2)
+    assert.deepEqual([...both].sort(), [content.id, reports.id].sort(), `${s.kind}: the roundup carries Content and Reports`)
+    assert.ok((await (await s.raw(`/wizard/v1/channels/covers?id=${reports.id}`)).json()).covers.includes('kind: report'), `${s.kind}: Reports was seeded with its kinds`)
+    await chat(factCheck, 'Synthetic fact check', 'Fact check the synthetic claims', { channel: reports.id, subject: 'Content' })
+    assert.deepEqual(await settle(factCheck, t => t.length > 0), [content.id], `${s.kind}: the fact check lands in Content only`)
+    await chat(factCheck, 'Synthetic fact check', 'Fact check the synthetic claims again', { subject: 'Content' })
+    assert.ok(sent(s).instructions.includes('the Service tags each chat itself') && sent(s).instructions.includes('refused: subject Content'), `${s.kind}: the next run note tells the agent what was refused`)
+    // The owner removes Content: never put back, by the classifier or by the agent's route.
+    assert.equal((await s.raw('/wizard/v1/channels/tags', json('PUT', { sessionId: factCheck, agent: s.id, remove: content.id }))).status, 200)
+    await chat(factCheck, 'Synthetic fact check redux', 'Fact check the synthetic clips', { channel: content.id, subject: 'Content' })
+    assert.ok(!(await settle(factCheck, t => t.includes(content.id))).includes(content.id), `${s.kind}: a removed tag never comes back`)
+    const refused = await s.request(`/api/sessions/${factCheck}`, { ...post({ tags: [content.id] }), method: 'PATCH' })
+    assert.equal(refused.status, 409, `${s.kind}: the agent's route refuses a removed tag`)
+    assert.equal((await refused.json()).refused[0].reason, 'the owner removed this tag')
+    // A refusal is the answer even with other fields in the same PATCH (they are not sent on as if it worked).
+    const mixed = await s.request(`/api/sessions/${factCheck}`, { ...post({ tags: [content.id], title: 'Synthetic renamed by a refused PATCH' }), method: 'PATCH' })
+    assert.equal(mixed.status, 409, `${s.kind}: a refused tag with a title is still refused`)
+    assert.notEqual(s.sessions.get(factCheck).title, 'Synthetic renamed by a refused PATCH', `${s.kind}: the title went nowhere`)
+    // A deleted or mistyped chat id gets a 404 and no tag row.
+    const ghost = 'wizard_1795700000099_aaaaaaaaaaaa'
+    assert.equal((await s.request(`/api/sessions/${ghost}`, { ...post({ tags: [reports.id] }), method: 'PATCH' })).status, 404, `${s.kind}: no tags on a chat that does not exist`)
+    assert.deepEqual(await tagsOf(ghost), [], `${s.kind}: no ghost tag row`)
+    // The agent's add-tag route works on an untagged chat, by name too.
+    await chat(other, 'Synthetic garden fence', 'Paint the synthetic fence', { subject: 'Home' })
+    assert.deepEqual(await tagsOf(other), [], `${s.kind}: nothing fits the fence chat`)
+    const added = await s.request(`/api/sessions/${other}`, { ...post({ tags: ['Synthetic Reports'] }), method: 'PATCH' })
+    assert.equal(added.status, 200, `${s.kind}: the add-tag route answers`)
+    assert.deepEqual((await added.json()).tags, [reports.id])
+    // Editing covers changes the next decision with no agent rule.
+    await s.raw('/wizard/v1/channels/covers', json('PUT', { id: content.id, covers: ['clips', 'fence'] }))
+    await chat(other, 'Synthetic garden fence', 'Paint the synthetic fence', { subject: 'Home' })
+    assert.ok((await settle(other, t => t.includes(content.id))).includes(content.id), `${s.kind}: the edited covers tag the fence chat`)
+    // Off again: the routes go away and a new chat is not tagged.
+    look(false)
+    assert.equal((await s.raw(`/wizard/v1/channels/covers?id=${content.id}`)).status, 404, `${s.kind}: covers route gone when off`)
+    const late = 'wizard_1795700000004_aaaaaaaaaaaa'
+    await chat(late, 'Synthetic clips batch', 'More synthetic clips', { subject: 'Content' })
+    assert.deepEqual(await settle(late, t => t.length > 0), [], `${s.kind}: off again, nothing is tagged`)
+  },
   'chats-channels-switch': async s => {
     const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/chat-channels': { on, at: Date.now() } } })) }

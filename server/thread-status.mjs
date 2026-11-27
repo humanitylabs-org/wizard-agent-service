@@ -80,6 +80,9 @@ const clip = (value, max) => {
   return text.length > max ? `${text.slice(0, max - 1).trimEnd()}…` : text
 }
 
+// Issue 702 (auto tags): a status line may name several channels; the Service takes them as hints. Agents are told
+// about `channels` only while the switch is on, so with it off no status carries the field.
+const statusChannels = v => Array.isArray(v) ? [...new Set(v.filter(x => normalizeSpaceId(x)))].slice(0, 8) : []
 export function normalizeStatus(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const state = String(value.state ?? '').trim().toLowerCase().replace(/[\s-]+/gu, '_')
@@ -91,7 +94,7 @@ export function normalizeStatus(value) {
   const title = normalizeTitle(value.title)
   const appId = normalizeAppId(value.app_id)
   const items = normalizeItems(value.items)
-  return { state: mapped, ask, ...(items.length ? { items } : {}), ...(subject ? { subject } : {}), ...(title ? { title } : {}), ...(appId ? { app_id: appId } : {}), ...(normalizeSpaceId(value.space) ? { space: value.space } : {}), ...(normalizeSpaceId(value.channel) ? { channel: value.channel } : {}) }
+  return { state: mapped, ask, ...(items.length ? { items } : {}), ...(subject ? { subject } : {}), ...(title ? { title } : {}), ...(appId ? { app_id: appId } : {}), ...(normalizeSpaceId(value.space) ? { space: value.space } : {}), ...(normalizeSpaceId(value.channel) ? { channel: value.channel } : {}), ...(statusChannels(value.channels).length ? { channels: statusChannels(value.channels) } : {}) }
 }
 
 // The last status marker in a reply, or null.

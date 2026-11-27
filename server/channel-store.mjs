@@ -25,6 +25,35 @@ export const DAILY_ID = 'daily'
 export const DAILY_DAY_STARTS_AT = '05:00'
 const DAY_KEY = /^\d{4}-\d{2}-\d{2}$/
 export const CHANNEL_SUBJECTS_MAX = 12
+// Covers (issue 702): at most this many listed phrases per channel, and this many learned ones (oldest dropped first).
+export const COVERS_MAX = 40
+export const COVERS_LEARNED_MAX = 60
+export const COVER_MAX_LENGTH = 60
+// `kind: <kind>` entries match on what kind of chat it is, not its topic.
+export const CHAT_KINDS = ['question', 'lookup', 'evaluation', 'digest', 'report', 'reminder', 'todo']
+const KIND_ENTRY = /^kind\s*:\s*([a-z-]+)$/iu
+/** One covers entry, cleaned: trimmed single-spaced text, or `kind: <kind>` in lower case; '' when not valid. */
+export function cleanCover(v) {
+  if (typeof v !== 'string') return ''
+  const t = v.replace(/[\u0000-\u001f\u007f]/gu, ' ').replace(/\s+/gu, ' ').trim()
+  if (!t || t.length > COVER_MAX_LENGTH) return ''
+  const kind = t.match(KIND_ENTRY)
+  if (kind) return CHAT_KINDS.includes(kind[1].toLowerCase()) ? `kind: ${kind[1].toLowerCase()}` : ''
+  return /[\p{L}\p{N}]/u.test(t) ? t : ''
+}
+// An owner's list: every entry valid and at most COVERS_MAX (a 400 otherwise); `lenient` drops bad entries instead.
+function coverList(phrases, { lenient = false } = {}) {
+  if (!Array.isArray(phrases)) { if (lenient) return []; fail(400, 'invalid_covers') }
+  const out = [], seen = new Set()
+  for (const p of phrases) {
+    const c = cleanCover(p)
+    if (!c) { if (lenient) continue; fail(400, 'invalid_covers') }
+    const key = c.toLocaleLowerCase()
+    if (!seen.has(key)) { seen.add(key); out.push(c) }
+  }
+  if (out.length > COVERS_MAX) { if (lenient) return out.slice(0, COVERS_MAX); fail(400, 'invalid_covers') }
+  return out
+}
 const FILED_BY = new Set(['owner', 'agent', 'migration'])
 // Read watermarks (issue 471): the shell's keys are `general`, `general|<agent>` and `<agent>|<channel id>`.
 export const CHANNEL_READS_SCHEMA = 'wizard.channel-reads/1'
@@ -60,7 +89,9 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     CREATE TABLE IF NOT EXISTS tags(agent TEXT NOT NULL, session_id TEXT NOT NULL, channel_id TEXT NOT NULL, tagged_at TEXT NOT NULL,
       tagged_by TEXT NOT NULL CHECK(tagged_by IN ('owner','agent','migration')), PRIMARY KEY(agent, session_id, channel_id));
     CREATE INDEX IF NOT EXISTS tags_channel ON tags(channel_id, tagged_at);
-    CREATE TABLE IF NOT EXISTS tag_removed(agent TEXT NOT NULL, session_id TEXT NOT NULL, channel_id TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(agent, session_id, channel_id));`)
+    CREATE TABLE IF NOT EXISTS tag_removed(agent TEXT NOT NULL, session_id TEXT NOT NULL, channel_id TEXT NOT NULL, at TEXT NOT NULL, PRIMARY KEY(agent, session_id, channel_id));
+    CREATE TABLE IF NOT EXISTS channel_covers(channel_id TEXT NOT NULL, phrase TEXT NOT NULL, source TEXT NOT NULL CHECK(source IN ('owner','seed','learned')),
+      negative INTEGER NOT NULL DEFAULT 0, at TEXT NOT NULL, PRIMARY KEY(channel_id, phrase, negative));`)
   const q = sql => db.prepare(sql)
   // Issue 520 follow-up: the first build also learned subjects from migration-filed chats. Drop what it learned once;
   // owner-filed chats teach their subjects again on their next status line.
@@ -129,7 +160,21 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     forgetRemoved: q('DELETE FROM tag_removed WHERE agent=? AND session_id=?'),
     removeChannelRemoved: q('DELETE FROM tag_removed WHERE channel_id=?'),
     copyTags: q("INSERT OR IGNORE INTO tags(agent,session_id,channel_id,tagged_at,tagged_by) SELECT agent, session_id, channel_id, filed_at, filed_by FROM membership"),
+    // Covers (issue 702, switch wizard/auto-tags): what each channel is about, in plain words. `owner` entries are the
+    // owner's own list, `seed` what the Service put there first (name, learned subjects, kinds), `learned` what the
+    // owner's own tag adds taught; `negative` rows are what his removals taught (never this kind of chat).
+    covers: q('SELECT phrase, source, negative FROM channel_covers WHERE channel_id=? ORDER BY negative, CASE source WHEN \'learned\' THEN 1 ELSE 0 END, at, rowid'),
+    allCovers: q('SELECT channel_id, phrase, source, negative FROM channel_covers ORDER BY at, rowid'),
+    dropListed: q("DELETE FROM channel_covers WHERE channel_id=? AND negative=0 AND source IN ('owner','seed')"),
+    addCover: q('INSERT INTO channel_covers(channel_id,phrase,source,negative,at) VALUES(?,?,?,?,?) ON CONFLICT(channel_id,phrase,negative) DO UPDATE SET at=excluded.at'),
+    addCoverKeep: q('INSERT OR IGNORE INTO channel_covers(channel_id,phrase,source,negative,at) VALUES(?,?,?,?,?)'),
+    dropCover: q('DELETE FROM channel_covers WHERE channel_id=? AND phrase=? AND negative=?'),
+    learnedCount: q("SELECT COUNT(*) AS n FROM channel_covers WHERE channel_id=? AND source='learned'"),
+    learnedPrune: q("DELETE FROM channel_covers WHERE rowid IN (SELECT rowid FROM channel_covers WHERE channel_id=? AND source='learned' ORDER BY at ASC, rowid LIMIT ?)"),
+    removeCovers: q('DELETE FROM channel_covers WHERE channel_id=?'),
   }
+  // Bumped by every change a tagging decision reads (channels, their covers), so a decision memo knows when to look again.
+  let version = 0
   const tx = fn => { db.exec('BEGIN IMMEDIATE'); try { const v = fn(); db.exec('COMMIT'); return v } catch (e) { try { db.exec('ROLLBACK') } catch {} throw e } }
   // Tags (issue 608): every one-channel write keeps the tag table in step (called inside a transaction), so the two never
   // disagree whichever way the switch stood: filing adds the tag, a move replaces the primary tag, unfiling drops all.
@@ -184,6 +229,7 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
         if (reuseName) { const same = st.sameName.get(owner, name.trim()); if (same) return store.get(same.id) }
         const id = wanted || freeId(`channel-${randomUUID()}`)
         insertChannel({ id, agent: owner, name: name.trim(), ord: st.maxOrd.get(owner).n + 1, createdAt: now() })
+        version++
         return store.get(id)
       })
     },
@@ -191,6 +237,7 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     update(id, change = {}) {
       return tx(() => {
         const r = mustChannel(id)
+        version++
         if (Object.hasOwn(change, 'name')) { if (!validChannelName(change.name)) fail(400, 'invalid_name'); st.rename.run(change.name.trim(), id) }
         if (Object.hasOwn(change, 'archived')) {
           if (typeof change.archived !== 'boolean') fail(400, 'invalid_archived')
@@ -232,11 +279,12 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
     remove(id) {
       return tx(() => {
         mustChannel(id)
+        version++
         // A chat whose primary tag this was keeps its other tags: the oldest becomes its primary (issue 608).
         const tagged = st.channelTags.all(id)
         st.removeMembers.run(id); st.removeChannelTags.run(id); st.removeChannelRemoved.run(id)
         for (const r of tagged) if (!st.member.get(r.agent, r.session_id)) promote(r.agent, r.session_id)
-        st.removeSubjects.run(id); st.removeDays.run(id); st.remove.run(id); return { deleted: id }
+        st.removeSubjects.run(id); st.removeCovers.run(id); st.removeDays.run(id); st.remove.run(id); return { deleted: id }
       })
     },
     // The membership row ({channel_id, filed_by}) or null.
@@ -249,11 +297,109 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
       if (typeof id !== 'string' || !CHANNEL_ID.test(id) || typeof subject !== 'string' || !subject || subject.length > 40) return false
       return tx(() => {
         if (!st.channel.get(id)) return false
+        if (!st.hasSubject.get(id, subject)) version++
         st.learn.run(id, subject, now())
         const over = st.subjectCount.get(id).n - CHANNEL_SUBJECTS_MAX
         if (over > 0) st.subjectPrune.run(id, id, over)
         return true
       })
+    },
+    // Covers (issue 702). -> {id, covers: [the owner's list, seeded entries included], learned: [...], not: [...]}
+    covers(id) {
+      const r = mustChannel(id), rows = st.covers.all(r.id)
+      return { id: r.id, covers: rows.filter(x => !x.negative && x.source !== 'learned').map(x => x.phrase),
+        learned: rows.filter(x => !x.negative && x.source === 'learned').map(x => x.phrase), not: rows.filter(x => x.negative).map(x => x.phrase),
+        seeded: Boolean(meta(`covers_seeded:${r.id}`)) }
+    },
+    // Every channel's covers in one read: Map(channel id -> {covers, learned, not}).
+    coversAll() {
+      const out = new Map()
+      for (const r of st.allCovers.all()) {
+        if (!out.has(r.channel_id)) out.set(r.channel_id, { covers: [], learned: [], not: [] })
+        out.get(r.channel_id)[r.negative ? 'not' : r.source === 'learned' ? 'learned' : 'covers'].push(r.phrase)
+      }
+      return out
+    },
+    coversVersion: () => version,
+    // A small marker of the auto-tag passes (issue 702): `auto_tags_backfill`, `auto_tags_nightly`.
+    marker(name) { return /^auto_tags_[a-z_]+$/.test(name) ? meta(name) : null },
+    setMarker(name, value) { if (/^auto_tags_[a-z_]+$/.test(name)) st.setMeta.run(name, String(value)) },
+    // The owner's list replaces the listed entries (his own and the seeded ones); what was learned stays.
+    setCovers(id, phrases) {
+      const list = coverList(phrases)
+      return tx(() => {
+        const r = mustChannel(id), at = now()
+        st.dropListed.run(r.id); version++
+        for (const p of list) { st.dropCover.run(r.id, p, 1); st.addCover.run(r.id, p, 'owner', 0, at) }
+        st.setMeta.run(`covers_seeded:${r.id}`, at)
+        return store.covers(r.id)
+      })
+    },
+    // One entry at a time (shell edits from several devices: a stale device never erases another's entry).
+    addCover(id, phrase) {
+      const [p] = coverList([phrase])
+      return tx(() => {
+        const r = mustChannel(id), rows = st.covers.all(r.id)
+        const listed = rows.filter(x => !x.negative && x.source !== 'learned')
+        if (!listed.some(x => x.phrase.toLocaleLowerCase() === p.toLocaleLowerCase())) {
+          if (listed.length >= COVERS_MAX) fail(400, 'invalid_covers')
+          st.dropCover.run(r.id, p, 1); st.addCover.run(r.id, p, 'owner', 0, now())
+        }
+        st.setMeta.run(`covers_seeded:${r.id}`, meta(`covers_seeded:${r.id}`) || now()); version++
+        return store.covers(r.id)
+      })
+    },
+    removeCover(id, phrase) {
+      const [p] = coverList([phrase])
+      return tx(() => {
+        const r = mustChannel(id)
+        for (const x of st.covers.all(r.id)) if (!x.negative && x.source !== 'learned' && x.phrase.toLocaleLowerCase() === p.toLocaleLowerCase()) st.dropCover.run(r.id, x.phrase, 0)
+        st.setMeta.run(`covers_seeded:${r.id}`, meta(`covers_seeded:${r.id}`) || now()); version++
+        return store.covers(r.id)
+      })
+    },
+    // Seeded once per channel (the first time auto tags see it); an owner's later edit is never re-seeded.
+    seedCovers(id, phrases) {
+      if (typeof id !== 'string' || !CHANNEL_ID.test(id) || meta(`covers_seeded:${id}`)) return false
+      const list = coverList(phrases, { lenient: true })
+      return tx(() => {
+        if (!st.channel.get(id) || meta(`covers_seeded:${id}`)) return false
+        const at = now(); version++
+        for (const p of list) st.addCoverKeep.run(id, p, 'seed', 0, at)
+        st.setMeta.run(`covers_seeded:${id}`, at)
+        return true
+      })
+    },
+    // What an owner's tag teaches: `negative` false for an add (a removal of the opposite lesson), true for a removal.
+    learnCover(id, phrase, negative = false) {
+      const [p] = coverList([phrase], { lenient: true })
+      if (!p || typeof id !== 'string' || !CHANNEL_ID.test(id)) return false
+      return tx(() => {
+        if (!st.channel.get(id)) return false
+        const rows = st.covers.all(id)
+        if (negative && rows.some(x => x.phrase === p && !x.negative && x.source !== 'learned')) return false // the owner's own list wins
+        // The opposite lesson goes (only a learned one: the owner's listed entries change only through his list).
+        if (rows.some(x => x.phrase === p && Boolean(x.negative) !== negative && (x.negative || x.source === 'learned'))) st.dropCover.run(id, p, negative ? 0 : 1)
+        st.addCover.run(id, p, 'learned', negative ? 1 : 0, now()); version++
+        const over = st.learnedCount.get(id).n - COVERS_LEARNED_MAX
+        if (over > 0) st.learnedPrune.run(id, over)
+        return true
+      })
+    },
+    // Why tagIfAllowed would refuse this tag ('' when it would add it), for the log and the agent's run note.
+    tagRefusal(agent, sessionId, channelId) {
+      if (!validThreadId(sessionId) || typeof channelId !== 'string' || !CHANNEL_ID.test(channelId)) return 'unknown channel'
+      const who = agentOf(agent), r = st.channel.get(channelId)
+      if (!r) return 'unknown channel'
+      if (r.agent !== who) return 'another agent\u2019s channel'
+      if (r.archived) return 'channel archived'
+      if (r.kind === 'alerts') return 'Alerts is filed by the Service'
+      if (r.kind === 'daily') return 'Daily holds one chat per day'
+      if (st.removed.get(who, sessionId, r.id)) return 'the owner removed this tag'
+      const member = st.member.get(who, sessionId)
+      if (!member && st.tombstoned.get(who, sessionId)) return 'the owner took this chat out of every channel'
+      if (member?.channel_id === r.id || st.tag.get(who, sessionId, r.id)) return 'already tagged'
+      return ''
     },
     channelOf(agent, sessionId) { return validThreadId(sessionId) ? st.member.get(agentOf(agent), sessionId)?.channel_id || '' : '' },
     members(id) { mustChannel(id); return st.members.all(id).map(r => ({ sessionId: r.session_id, filedAt: r.filed_at, filedBy: r.filed_by })) },
@@ -370,6 +516,26 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
         if (!member) st.file.run(who, sessionId, r.id, at, by)
         return true
       })
+    },
+    // Several agent tags in one transaction (issue 702: the tags a list rebuild found), each by tagIfAllowed's rules.
+    // -> [true | false] per item.
+    tagMany(items) {
+      if (!Array.isArray(items) || !items.length) return []
+      if (!tagsLive) store.migrateTags()
+      return tx(() => items.map(({ agent, sessionId, channelId }) => {
+        if (!validThreadId(sessionId) || typeof channelId !== 'string' || !CHANNEL_ID.test(channelId)) return false
+        let who
+        try { who = agentOf(agent) } catch { return false }
+        const r = st.channel.get(channelId)
+        if (!r || r.agent !== who || r.archived || st.removed.get(who, sessionId, r.id)) return false
+        const member = st.member.get(who, sessionId)
+        if (!member && st.tombstoned.get(who, sessionId)) return false
+        if (member?.channel_id === r.id || st.tag.get(who, sessionId, r.id)) return false
+        const at = now()
+        tagFiled(who, sessionId, r.id, at, 'agent')
+        if (!member) st.file.run(who, sessionId, r.id, at, 'agent')
+        return true
+      }))
     },
     // A deleted thread leaves its channel.
     forget(agent, sessionId) { if (validThreadId(sessionId)) { st.unfile.run(agentOf(agent), sessionId); st.untombstone.run(agentOf(agent), sessionId); st.forgetDay.run(agentOf(agent), sessionId); tagsGone(agentOf(agent), sessionId) } },
@@ -577,6 +743,18 @@ export function channelRequest(store, method, membership, params, body, options 
     return add ? store.addTag({ sessionId: body.sessionId, channelId: body.add, agent: body.agent, by: 'owner' })
       : store.removeTag({ sessionId: body.sessionId, channelId: body.remove, agent: body.agent, by: 'owner' })
   }
+  // /wizard/v1/channels/covers (issue 702, auto tags on): GET ?id= -> {id, covers, learned, not}; PUT {id, add: phrase} |
+  // {id, remove: phrase} (one entry, what the shell sends) | {id, covers: [...]} (the whole list).
+  if (membership === 'covers') {
+    if (method === 'GET') return store.covers(params.get('id'))
+    if (method !== 'PUT') fail(405, 'method_not_allowed')
+    only('id', 'covers', 'add', 'remove')
+    const ops = ['covers', 'add', 'remove'].filter(k => Object.hasOwn(body, k))
+    if (ops.length !== 1) fail(400, 'invalid_request')
+    if (ops[0] === 'add') return store.addCover(body.id, body.add)
+    if (ops[0] === 'remove') return store.removeCover(body.id, body.remove)
+    return store.setCovers(body.id, body.covers)
+  }
   if (membership) {
     if (method === 'GET') {
       if (params.has('channel')) return { channel: params.get('channel'), members: store.members(params.get('channel')) }
@@ -592,7 +770,8 @@ export function channelRequest(store, method, membership, params, body, options 
   if (method === 'GET') {
     const agent = params.get('agent')
     if (agent !== null && !CHANNEL_AGENT.test(agent)) fail(400, 'invalid_agent')
-    return store.list({ ...(agent ? { agent } : {}), tags: options.tags === true })
+    const listed = store.list({ ...(agent ? { agent } : {}), tags: options.tags === true })
+    return options.autoTags === true ? { ...listed, autoTags: true } : listed
   }
   if (method === 'POST') { only('name', 'agent'); return store.create({ name: body.name, agent: body.agent }) }
   const keys = Object.keys(body)
