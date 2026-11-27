@@ -12,6 +12,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { post, png, scene } from './fixture.mjs'
 import { PRESETS } from '../../server/agents.mjs'
+import { sameWords as sameWordsOf } from '../../server/sent-log.mjs'
 import { createChannelStore } from '../../server/channel-store.mjs'
 import { importInboxUploads } from '../../server/inbox-import.mjs'
 import { guardOwnedOpenWork } from '../../server/owned-open-work.mjs'
@@ -1447,6 +1448,42 @@ export const serverChecks = {
       }
       const json = body => ({ method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       assert.deepEqual(await rows(), [], `${s.kind}: nothing sent yet`)
+      // Issue 707: a spoken take: the shell sends the transcript with the recording attached (the Service adds its file
+      // block to the turn). On main that new chat is the orb's one row, never a second new_chat row; on any other kind
+      // the turn is that agent's own and adds no main Sent row.
+      const spoken = async () => {
+        reply = { route: 'agent', summary: 'x' }
+        const words = 'Because our clips pipeline isn\'t running, tell me why'
+        const before = (await rows()).length
+        const take = (await (await say(words)).json())
+        assert.equal(take.cmd.route, 'agent')
+        const voice = Buffer.alloc(44 + 3200)
+        voice.write('RIFF', 0); voice.writeUInt32LE(voice.length - 8, 4); voice.write('WAVEfmt ', 8)
+        voice.writeUInt32LE(16, 16); voice.writeUInt16LE(1, 20); voice.writeUInt16LE(1, 22)
+        voice.writeUInt32LE(16000, 24); voice.writeUInt32LE(32000, 28); voice.writeUInt16LE(2, 32); voice.writeUInt16LE(16, 34)
+        voice.write('data', 36); voice.writeUInt32LE(3200, 40)
+        const recording = await s.upload(voice, 'wizard-voice-707.wav', 'audio/wav'); assert.equal(recording.status, 201)
+        const thread = `wizard_sent_spoken_${s.kind.replace(/[^a-z]/gu, '')}`
+        assert.ok([200, 201].includes((await s.request('/api/sessions', post({ id: thread, source: 'wizard-mobile' }))).status))
+        assert.ok([200, 202].includes((await s.request('/v1/runs', post({ session_id: thread, input: words, wizard_file_ids: [(await recording.json()).file.id] }))).status))
+        if (s.kind === 'main') await settle(async () => (await row(take.sent_id)).thread_id === thread, 'the spoken orb row links to its new chat')
+        await new Promise(r => setTimeout(r, 100))
+        const mine = (await rows()).filter(x => x.thread_id === thread || sameWordsOf(x.text) === sameWordsOf(words))
+        assert.deepEqual(mine.map(x => [x.id, x.source, x.thread_id]), [[take.sent_id, 'orb', s.kind === 'main' ? thread : null]], `${s.kind}: one spoken take, one Sent row`)
+        assert.equal((await rows()).length, before + 1, `${s.kind}: the spoken take adds one row`)
+        assert.ok(!JSON.stringify(await rows()).includes('WIZARD_FILES_V1'), `${s.kind}: no file block in Sent words`)
+        if (s.kind !== 'main') return
+        // Files with no words are still his send: a new chat and a reply that carry only a document each keep a row.
+        const doc = await s.upload(Buffer.from('synthetic notes 707'), 'notes-707.txt', 'text/plain'); assert.equal(doc.status, 201)
+        const docId = (await doc.json()).file.id
+        assert.ok([200, 201].includes((await s.request('/api/sessions', post({ id: 'wizard_sent_doc', source: 'wizard-mobile' }))).status))
+        assert.equal((await s.request('/v1/runs', post({ session_id: 'wizard_sent_doc', input: '', wizard_file_ids: [docId] }))).status, 202)
+        const first = await settle(async () => (await rows()).find(x => x.thread_id === 'wizard_sent_doc'), 'a files-only first turn keeps a row')
+        assert.deepEqual([first.source, first.text], ['typed', 'Attachment'])
+        assert.equal((await s.request('/v1/runs', post({ session_id: 'wizard_sent_doc', input: '', wizard_file_ids: [docId] }))).status, 202)
+        const again = await settle(async () => (await rows()).find(x => x.thread_id === 'wizard_sent_doc' && x.source === 'reply'), 'a files-only reply keeps a row')
+        assert.deepEqual([again.text, again.wants_reply, again.rules_matched], ['Attachment', true, ['files']])
+      }
       // A router that throws: the row was written first, it says fallback, and the shell opens its visible thread.
       reply = 'throw'
       let r = await say('Book a dentist appointment for next week')
@@ -1501,6 +1538,7 @@ export const serverChecks = {
         assert.ok([200, 202].includes(typed.status))
         await new Promise(r => setTimeout(r, 100))
         assert.equal((await rows()).length, 7, `${s.kind}: this agent's own turns are not main Sent rows`)
+        await spoken()
         return
       }
       assert.equal((await row(note.sent_id)).state, 'running', 'the hidden worker runs')
@@ -1518,6 +1556,7 @@ export const serverChecks = {
       assert.deepEqual([(await row(walk.sent_id)).decided_by, (await row(walk.sent_id)).rules_matched], ['owner_words', ['wants_reply:walk me through']])
       assert.equal((await s.request('/v1/runs', post({ session_id: 'wizard_sent_orb', input: 'Walk me through the budget' }))).status, 202)
       await settle(async () => (await row(walk.sent_id)).thread_id === 'wizard_sent_orb', 'the orb row links to its visible thread')
+      await spoken()
       // A typed first message is a typed row: visible thread, classified silently.
       reply = { route: 'dump', title: 'New phone', confidence: 0.8 }
       // (the shell makes a new chat's session, untitled, before its first turn)

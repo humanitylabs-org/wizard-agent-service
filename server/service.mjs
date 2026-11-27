@@ -4480,9 +4480,13 @@ function buildWizardServer(options, lifetime) {
     try {
       let input
       try { input = JSON.parse(bodyText)?.input } catch { return }
-      const text = visibleInputText(input).trim()
-      if (!text || (typeof input === 'string' && MACHINE_INPUT.test(text))) return
-      const linked = sentLog.linkTurn({ agent: MAIN_AGENT_ID, thread: sessionId, text, run_key: runKey })
+      // His words only: a spoken turn's recording rides as a file block, which never matches the orb's words (issue 707).
+      // A turn with files and no words is still his send: it keeps a row named for what he sent.
+      const raw = visibleInputText(input).trim()
+      if (!raw || (typeof input === 'string' && MACHINE_INPUT.test(raw))) return
+      const said = ownerWords(input)
+      const text = said || (voice ? 'Voice message' : 'Attachment')
+      const linked = said ? sentLog.linkTurn({ agent: MAIN_AGENT_ID, thread: sessionId, text, run_key: runKey }) : null
       if (linked) { sentTagsApply(linked); return }
       const row = sentLog.typed({ agent: MAIN_AGENT_ID, thread: sessionId, text, run_key: runKey, source: voice ? 'new_chat' : 'typed' })
       if (!row) return
@@ -4502,14 +4506,16 @@ function buildWizardServer(options, lifetime) {
     try {
       let input
       try { input = JSON.parse(bodyText)?.input } catch { return null }
-      const said = visibleInputText(input).trim()
+      const said = ownerWords(input)
       if (said && typeof input === 'string' && MACHINE_INPUT.test(said)) return null
-      if (!said && !voice) return null
-      const words = said ? replyRules(said) : { intent: '', rules: ['voice'], tags: [], urgent: false }
+      // Files with no words (issue 707: the file block is not his words) are still a reply he sent.
+      const files = !said && visibleInputText(input).trim() !== ''
+      if (!said && !voice && !files) return null
+      const words = said ? replyRules(said) : { intent: '', rules: [voice ? 'voice' : 'files'], tags: [], urgent: false }
       // Smart inbox (issue 667): words that ask to be told when it is done want the finished result, once.
       const notify = smartInboxOn() && asksToBeTold(said)
       const wants = !said || words.intent === 'agent' || said.includes('?') || notify
-      const row = sentLog.reply({ agent: MAIN_AGENT_ID, thread: sessionId, text: said || 'Voice message', run_key: runKey, wants_reply: wants,
+      const row = sentLog.reply({ agent: MAIN_AGENT_ID, thread: sessionId, text: said || (voice ? 'Voice message' : 'Attachment'), run_key: runKey, wants_reply: wants,
         rules: words.rules.length ? words.rules : [wants ? 'question' : 'statement'], tags: words.tags, urgent: words.urgent, steer, run_id: runId })
       if (notify && row && !row.notify_when_done) sentLog.update(row.id, { notify_when_done: true })
       sentTagsApply(row)
