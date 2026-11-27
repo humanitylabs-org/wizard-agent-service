@@ -725,6 +725,25 @@
       "policy_exemptions": []
     },
     {
+      "id": "first-chat-goals",
+      "description": "Five-choice first chat (issue 650, switch wizard/first-chat-goals in the Look file, off by default; WIZARD_FIRST_CHAT_GOALS 1 forces it on, 0 off): while on, every run of every agent carries one run-note line (server/first-chat.mjs FIRST_CHAT_NOTE) that sends a first chat or a 'what can you do?' to the wizard-guide section 'First chat: five choices' (wizard-app-manager), and wizard_tips start {pick, about} builds four day 2-5 tips from the owner's pick and words (a business or job pick may get a Goals app offered in tip 4, only when one is installed) instead of the five fixed topics. The tap-to-pick buttons are the reply marker [WIZARD_CHOICES_V1]{\"choices\":[...]}[/WIZARD_CHOICES_V1], drawn by wizard-ux under the same switch and kept out of the Chats list preview here (session-list-view.mjs). Off: no note, and wizard_tips ignores a pick and starts the five fixed tips exactly as before.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP routes with the switch flipped in <root>/Pages/wizard-look/look.json and the scheduler timer on: off, a new chat's first message reaches the agent with no first-chat note and wizard_tips start with a pick (through that agent's own gateway credential) starts the five fixed tips; on, the same first message carries the note naming 'First chat: five choices' and the same call builds four tips from the pick ('find a JOB' kept as 'Find a job'). tests/first-chat.test.ts covers the choices, the pick, the day 2-5 schedule, the Goals-app rule and the switch; tests/session-list-view.node.mjs keeps the marker out of the list preview for main and every routed kind. Synthetic HTTP fixture evidence, not live box proof: the agent's wording comes from the wizard-guide skill.",
+      "source_refs": [
+        "server/first-chat.mjs",
+        "server/onboarding.mjs",
+        "server/service.mjs",
+        "server/index.mjs",
+        "server/session-list-view.mjs"
+      ],
+      "reference_tests": [
+        "tests/first-chat.test.ts",
+        "tests/session-list-view.node.mjs"
+      ],
+      "fixture": "first-chat-goals",
+      "policy_exemptions": []
+    },
+    {
       "id": "result-reader",
       "description": "Result reader (issue 630, switch wizard/result-reader in the Look file, off by default; WIZARD_RESULT_READER 1 forces it on, 0 off; needs the agent inbox): when a worker run on a linked inbox record finishes, a fixed stateless reader (server/result-reader.mjs, no memory, no tools) calls ONLY the private fast router (privateRouter endpoint host) at temperature 0 with bounded facts (agent, agent kind, duration, ok/failed/killed, error text, owed background work, the status line as a hint, the last 4,000 characters of the final reply) and the owner's latest 8 corrections (Not urgent / Should have alerted, Open / Send to inbox). Its strict JSON (kind needs_you | result | fyi, urgent, failed, ask capped at 140, options only on needs_you) files the record through the inbox's own mapping (owed work, confirm lines and answered records behave as before); urgent raises the severity to high so the alert gate (rules, examples, 3-a-day cap) decides. The reader wins over the status line; the record keeps classified_by (reader | status_line | fallback), status_line and reader, a disagreement (another kind, or done on a failed run) is counted, GET /wizard/v1/agent-inbox carries reader counts, and a Sent row whose record it filed shows filed_by. One read per finished run however often it is polled. Invalid JSON, an HTTP error or a timeout: filed exactly as today (classified_by status_line, or fallback with no status line), logged. No private router: never called, logged once, records exactly as today. Switch off: records byte-identical to today.",
       "layer": "server",

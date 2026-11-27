@@ -138,6 +138,16 @@ export const PRIVATE_DEFAULT_SLOTS = Object.freeze(['transcript-redaction'])
 export const PRIVATE_DATA_SLOTS = Object.freeze(['meeting-transcripts', 'meeting-recording', ...PRIVATE_DEFAULT_SLOTS])
 export const isPrivateApp = (app) => app?.privacy === 'private'
   || (Array.isArray(app?.provides) && app.provides.some((slot) => PRIVATE_DATA_SLOTS.includes(slot)))
+// wizard-os#929 (spec/WIZARD_MD.md "Personal data"): an app says it holds the owner's personal data with
+// `personal_data: <what it reads>` (or `true`) in its wizard.md, copied into apps.json by the App Manager. Only a label:
+// unlike `privacy: private` it changes nothing about which agents can use the app. The private tag and the private-data
+// slots count as personal data too; an app with no declaration is not personal.
+export const isPersonalDataApp = (app) => isPrivateApp(app) || app?.personal_data === true
+  || (typeof app?.personal_data === 'string' && app.personal_data.trim() !== '')
+/** The app's own line of what it reads ("reads your email"), one line of at most 80 characters, or ''. */
+export const personalDataReads = (app) => (typeof app?.personal_data === 'string'
+  ? app.personal_data.replace(/[\u0000-\u001f\u007f]+/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, 80).trim().replace(/\.+$/u, '')
+  : '')
 // Issue 598 (DECISIONS 115, spec/AGENTS.md section 10): Claude and ChatGPT only ever run on the standard agent. Their
 // connection apps (an AI connection with no private inference) are never granted to a private agent, so it can't
 // reach a non-confidential provider through their tools. Tinfoil provides private inference and stays allowed.
@@ -746,11 +756,15 @@ export function createAgentRegistry(options = {}) {
     const kind = appKinds().get(appId)
     if (!kind) fail(404, 'app_not_found', 'app.id')
     const privateApp = privateApps().has(appId)
+    const personal = personalApps()
     const all = list().filter(agent => agent.role !== 'recovery' && (agent.id === MAIN_AGENT_ID || agent.runtime.kind !== 'external'))
     return {
       app_id: appId, kind, privacy: privateApp ? 'private' : 'standard',
       // A private app on a box with no private agent: the install sheet offers to set one up (James, 23 Oct 2026).
       ...(privateApp ? { needs_private_agent: !all.some((agent) => agent.privacy === 'private') } : {}),
+      // The app's own personal-data declaration (wizard-os#929): a label only, read by the install sheet's private AI
+      // card (wizard/private-ai-nudge); which agents can use the app is unchanged by it.
+      ...(personal.has(appId) ? { personal_data: true, ...(personal.get(appId) ? { personal_data_reads: personal.get(appId) } : {}) } : {}),
       agents: all.map((agent) => ({ ...threadAgent(agent), enabled: agentAppIds(agent).has(appId), is_default: agent.id === defaultAgentId() })),
     }
   }
@@ -939,6 +953,12 @@ export function createAgentRegistry(options = {}) {
       }
     }
     return out
+  }
+
+  /** Installed apps that declare personal data (wizard-os#929): id -> their line of what they read ('' when none). */
+  function personalApps() {
+    const apps = readJson(appsJsonPath)?.apps
+    return new Map((Array.isArray(apps) ? apps : []).filter(isPersonalDataApp).map((app) => [app.id, personalDataReads(app)]))
   }
 
   /** Installed private apps (tagged `privacy: private`, or providing a private-data slot). Private agents get them by default. */
