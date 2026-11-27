@@ -3269,11 +3269,11 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const PROMPT = 'End with: Reply clear or clear except N.'
     const settle = () => { for (const run of s.runs.values()) if (['running', 'queued'].includes(run.status)) Object.assign(run, { status: 'completed', output: 'Synthetic reply', updated_at: Date.now() / 1000 }) }
-    const turn = async (id, input) => {
+    const turn = async (id, input, extra = {}) => {
       settle()
       if (!s.sessions.get(id)) await s.request('/api/sessions', post({ id, source: 'wizard-mobile' }))
       const before = s.seen.length
-      await admit(s, { session_id: id, input })
+      await admit(s, { session_id: id, input, ...extra })
       for (let n = 0; n < 120; n++) {
         const run = s.seen.slice(before).filter(r => r.method === 'POST' && r.path.endsWith('/v1/runs') && r.body?.session_id === id).at(-1)
         if (run) { settle(); return String(run.body.instructions || '') }
@@ -3335,6 +3335,15 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     // "signal sweep" is the alias: a catch-up, not a sweep card.
     assert.ok((await turn('wizard_parity_cu3', 'signal sweep')).includes(PROMPT), '"signal sweep" starts the catch-up')
     assert.equal((await (await s.raw('/wizard/v1/agent-inbox/sweep')).json()).card, null, 'no sweep card is made')
+    // Said, not typed: the shell sends the transcript with the recording attached, and it is still the catch-up.
+    const voice = Buffer.alloc(44 + 3200)
+    voice.write('RIFF', 0); voice.writeUInt32LE(voice.length - 8, 4); voice.write('WAVEfmt ', 8)
+    voice.writeUInt32LE(16, 16); voice.writeUInt16LE(1, 20); voice.writeUInt16LE(1, 22)
+    voice.writeUInt32LE(16000, 24); voice.writeUInt32LE(32000, 28); voice.writeUInt16LE(2, 32); voice.writeUInt16LE(16, 34)
+    voice.write('data', 36); voice.writeUInt32LE(3200, 40)
+    const upload = await s.upload(voice, 'wizard-voice-catch-up.wav', 'audio/wav'); assert.equal(upload.status, 201)
+    const spoken = await turn('wizard_parity_cu4', 'Catch me up.', { wizard_file_ids: [(await upload.json()).file.id] })
+    assert.ok(spoken.includes(PROMPT), 'a spoken "catch me up" (recording attached) starts the catch-up')
   },
   'capability-registry': async s => {
     // Issue 463: agents find what the box already does (built-ins, host voice service, app jobs) before installing
