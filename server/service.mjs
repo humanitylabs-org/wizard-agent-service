@@ -71,7 +71,7 @@ import { APP_WAKE_CONTRACT, APP_WAKE_RUN_PREFIX, createWakeLedger, parseWakeEven
 import { AgentInboxStore, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, START_FAILED, appDoor, recordApp } from './agent-inbox.mjs'
 import { SentLog } from './sent-log.mjs'
 import { isSweepPhrase, isScheduledSweep, withCardRow, WAITING_CAP, DONE_CAP } from './agent-sweep.mjs'
-import { createCatchUp, CATCH_UP_SWITCH, startsCatchUp } from './catch-up.mjs'
+import { createCatchUp, startsCatchUp } from './catch-up.mjs'
 import { AlertRulesFile, createAlertGate, privateRouter } from './agent-alerts.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
 import { replyRules, routeUtterance, dumpTitle, deadlineFrom } from './voice-router.mjs'
@@ -3146,13 +3146,10 @@ function buildWizardServer(options, lifetime) {
   const firstChatSwitchOn = createChannelsSwitch({ id: FIRST_CHAT_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.firstChatGoalsTtlMs ?? 3000 })
   const firstChatOn = () => channelPart(options.firstChatGoals, firstChatSwitchOn)
   const firstChatNote = () => (firstChatOn() ? FIRST_CHAT_NOTE : '')
-  // Catch me up (issue 668, catch-up.mjs): the owner's `wizard/catch-me-up` switch in the Look file; option catchUp (env
-  // WIZARD_CATCH_ME_UP, '1' on / '0' off) wins. On: "catch me up" (or "signal sweep") to the main agent runs the built
-  // catch-up and the main agent gets the wizard_catch_up tool. Off: nothing is read, written or offered.
-  const catchUpSwitchOn = createChannelsSwitch({ id: CATCH_UP_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.catchUpTtlMs ?? 3000 })
-  const catchUpOn = () => channelPart(options.catchUp, catchUpSwitchOn)
+  // Catch me up (issue 668, catch-up.mjs; on for everyone, the wizard/catch-me-up switch was removed): "catch me up" (or
+  // "signal sweep") to the main agent runs the built catch-up and the main agent gets the wizard_catch_up tool.
   let catchUp = null
-  const catchUpTools = agentId => (catchUp && agentId === GATEWAY_MAIN_AGENT && catchUpOn() ? catchUp.tools : null)
+  const catchUpTools = agentId => (catchUp && agentId === GATEWAY_MAIN_AGENT ? catchUp.tools : null)
   let followUps = null
   // wizard_start_thread / wizard_schedule for routed agents (server/agent-reach-out.mjs); bound with the scheduler.
   let reachOut = null
@@ -3617,7 +3614,7 @@ function buildWizardServer(options, lifetime) {
       if (!agentInboxOn() || !sessionId || agent?.id !== privateDefaultId()) return ''
       const principal = principalOf(request)
       if (principal?.kind === 'owner') inboxOwnerTurn(agent.id, sessionId)
-      const asked = noteSweepRequest(sessionId, Buffer.from(JSON.stringify(value ?? {})), principal, request)
+      const asked = noteSweepRequest(sessionId, Buffer.from(JSON.stringify(value ?? {})), principal, request, { ownerSweep: true })
       if (!asked) return ''
       await sweepForTurn(sessionId, asked)
       return sweepRunNote(sessionId)
@@ -4664,14 +4661,14 @@ function buildWizardServer(options, lifetime) {
   // "signal sweep" said or typed to the main agent (or a sweep the owner scheduled): the card is posted at once and
   // the turn itself is told so, once, in its run note, so the reply never repeats the card.
   const sweepNotes = new Map()
-  const noteSweepRequest = (sessionId, body, principal, request) => {
+  // ownerSweep: the owner's own typed "signal sweep" posts a card too (the private default agent, which has no catch-up).
+  const noteSweepRequest = (sessionId, body, principal, request, { ownerSweep = false } = {}) => {
     if (!sessionId || !agentInboxOn()) return null
     let text = ''
     try { text = visibleInputText(parseJsonBody(body).input) } catch { return null }
     const scheduled = principal?.kind === 'service' && typeof request.headers['x-wizard-schedule-kind'] === 'string' && isScheduledSweep(text)
-    if (!scheduled && !(principal?.kind === 'owner' && isSweepPhrase(text))) return null
-    // Issue 668: while catch me up is on, the owner's own "signal sweep" is its alias (a scheduled sweep stays a card).
-    if (!scheduled && catchUpOn()) return null
+    // Issue 668: on the main agent the owner's own "signal sweep" is the catch-up's alias, so only a scheduled one is a card.
+    if (!scheduled && !(ownerSweep && principal?.kind === 'owner' && isSweepPhrase(text))) return null
     return { scheduled }
   }
   // Catch me up (issue 668): built before the turn is admitted (the queue may dispatch at once); its run note carries it.
@@ -4692,7 +4689,7 @@ function buildWizardServer(options, lifetime) {
   })
   const catchUpNotes = new Map()
   const catchUpForTurn = async (sessionId, body) => {
-    if (!sessionId || !catchUpOn()) return false
+    if (!sessionId) return false
     let text = ''
     try { text = visibleInputText(parseJsonBody(body).input) } catch { return false }
     if (!startsCatchUp(text.trim())) return false
@@ -8642,7 +8639,7 @@ function buildWizardServer(options, lifetime) {
           // Issue 607: an earlier correction of exactly these words routes them the way the owner wanted.
           const correction = dump ? agentInbox.correctionFor(said) : null
           // A background task must be decided before the shell gives up waiting (it opens a visible thread at 6 s).
-          const routed = await routeUtterance({ input, settings, router: fast, fetchImpl, dump, examples, correction, ...(dump ? { timeoutMs: 5_000 } : {}), ...(catchUpOn() ? { catchUp: startsCatchUp } : {}) })
+          const routed = await routeUtterance({ input, settings, router: fast, fetchImpl, dump, examples, correction, ...(dump ? { timeoutMs: 5_000 } : {}), catchUp: startsCatchUp })
           if (routed.cmd?.route === 'dump') {
             try { routed.cmd = { ...routed.cmd, ...captureDump(input.text, routed.cmd, { urgent: routed.why?.urgent === true, tags: routed.why?.tags || [] }) } }
             catch (error) {
@@ -9462,10 +9459,10 @@ function buildWizardServer(options, lifetime) {
           // A "signal sweep" turn: the card is posted first (the queue may dispatch at once), then its run note says so.
           const sweepAsked = queuedAdmission.runtime === 'direct' ? noteSweepRequest(queuedAdmission.sessionId, body, principal, request) : null
           if (sweepAsked) await sweepForTurn(queuedAdmission.sessionId, sweepAsked)
-          // Issue 668: the owner's "catch me up" (switch on) is built here; any other owner turn may answer the last one.
+          // Issue 668: the owner's "catch me up" is built here; any other owner turn may answer the last one.
           const ownerDirect = queuedAdmission.runtime === 'direct' && principal.kind === 'owner' && !queuedAdmission.continuation
           const catchUpAsked = ownerDirect ? await catchUpForTurn(queuedAdmission.sessionId, body) : false
-          if (ownerDirect && !catchUpAsked && catchUpOn()) { try { catchUp.ownerTurn(queuedAdmission.sessionId, visibleInputText(parseJsonBody(body).input)) } catch { /* not an answer */ } }
+          if (ownerDirect && !catchUpAsked) { try { catchUp.ownerTurn(queuedAdmission.sessionId, visibleInputText(parseJsonBody(body).input)) } catch { /* not an answer */ } }
           // Issue 1808: any later owner turn in the thread is a reply row, written before the turn is admitted.
           const replyRow = queuedAdmission.runtime === 'direct' && principal.kind === 'owner' && !queuedAdmission.continuation && !firstOwnerTurn && agentInboxOn()
             ? sentReply(queuedAdmission.sessionId, body.toString('utf8'), queuedAdmission.idempotencyKey, audioPaths.length > 0) : null

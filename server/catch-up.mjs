@@ -1,6 +1,6 @@
-// Catch me up (issue 668; owner switch `wizard/catch-me-up`, off by default; env WIZARD_CATCH_ME_UP '1' on / '0' off
-// wins). James, 26 Nov 2026: things that do not need him wait in the agent inbox until he says "catch me up", and
-// Miguel's catch-up prompt (tried by James on 25 Nov) is the baseline every owner gets.
+// Catch me up (issue 668; on for everyone, the wizard/catch-me-up switch was removed). James, 26 Nov 2026: things
+// that do not need him wait in the agent inbox until he says "catch me up", and Miguel's catch-up prompt (tried by
+// James on 25 Nov) is the baseline every owner gets.
 //
 // When the owner says or types "catch me up" (or "signal sweep", the older name) to his main agent, the Service:
 //  - builds the catch-up before the turn is admitted: the chats waiting on him (last 7 days, not archived, his last
@@ -13,7 +13,6 @@
 // (Hermes archive + snooze cleared + saved result dismissed) and archives agent inbox records; `defer` keeps the
 // "not now" list. Both refuse until the owner has answered in that catch-up's thread, and only for what it showed,
 // so nothing is archived without his yes. Pull-only: nothing here is scheduled or pushed.
-// Off: no note, no tool, nothing read or written; "catch me up" is an ordinary message as before.
 
 import { existsSync, mkdirSync, readFileSync } from 'node:fs'
 import { dirname } from 'node:path'
@@ -22,7 +21,6 @@ import { atomicStoreWrite } from './thread-reference.mjs'
 import { parseStatus } from './thread-status.mjs'
 import { isSweepPhrase, WAITING_CAP, DONE_CAP } from './agent-sweep.mjs'
 
-export const CATCH_UP_SWITCH = 'wizard/catch-me-up'
 export const CATCH_UP_TOOL = 'wizard_catch_up'
 export const CHAT_DAYS = 7
 export const CHAT_CAP = 15
@@ -50,7 +48,7 @@ export const BASELINE_PROMPT = [
 // "catch me up" said or typed on its own: an optional greeting or "please" around it, punctuation, any case.
 const PHRASE = /^\s*(?:(?:hey|hi|ok(?:ay)?)[\s,]+)?(?:wizard[\s,]+)?(?:(?:please|can you|could you|would you)\s+)?catch\s+me\s+up(?:[\s,]+(?:please|wizard))*[\s.!?]*$/iu
 export const isCatchUpPhrase = text => typeof text === 'string' && text.length <= 80 && PHRASE.test(text)
-/** The phrases that start a catch-up while the switch is on: "catch me up", and "signal sweep" as its alias. */
+/** The phrases that start a catch-up: "catch me up", and "signal sweep" as its alias. */
 export const startsCatchUp = text => isCatchUpPhrase(text) || isSweepPhrase(text)
 
 const clip = (value, max) => {
