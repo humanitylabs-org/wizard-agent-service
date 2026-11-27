@@ -2678,7 +2678,7 @@ def status(_args: dict) -> dict:
 # ---------------------------------------------------------------------------- Bring your Wizard (history mode)
 # Issue 544: someone with an old Hermes agent brings its PAST into WizardOS, read-only: chats, memories, facts and
 # skills become History the new agent searches, never the old agent itself. The Importer turns it on per scan
-# (``history: true``) behind its ``hermes-history`` switch; without it nothing below runs. What changes then:
+# (``history: true``) for another Hermes agent, on for everyone; without it nothing below runs. What changes then:
 # * only a Hermes source, only its own home (never a ``profiles/<name>`` inside a backup), never a private agent;
 # * every text is scrubbed (the stock redactor plus a check for random-looking strings) before it is written;
 # * memories go to a dated History file, never into the always-on memory (only the owner's approved card does);

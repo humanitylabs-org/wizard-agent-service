@@ -116,7 +116,7 @@ async def scan(request: Request, response: Response):
     _guard(request)
     args = await _body(request)
     dest = _dest(args.get("dest"))
-    history = {"history": True} if args.get("history") is True else {}  # the Importer's hermes-history switch
+    history = {"history": True} if args.get("history") is True else {}  # the Importer's Bring your Wizard scan
     args = {k: args[k] for k in ("path", "paths", "scan_id") if k in args}
     _paths_ok(args)
     args.update(history)

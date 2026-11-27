@@ -103,8 +103,9 @@ from the copied store; undo removed every file, skill, fact, memory entry and th
 ## Bring your Wizard: an earlier agent's past as History (issue 544)
 
 Someone who already has a Hermes agent brings its past (not the agent) into WizardOS, read-only. The Importer turns
-this on per scan with `history: true`, only while its `hermes-history` app switch is on (`Switch:
-importer:hermes-history`); without the flag nothing below runs and a Hermes import works as before.
+this on per scan with `history: true` for every Hermes source except the agent's own home (on for everyone since the
+issue was approved; the Importer's `hermes-history` switch is gone). Without the flag (the "Move this agent into Wizard
+OS" flow) nothing below runs and a Hermes import works as before.
 
 - Source: a `hermes backup` zip (or a Hermes folder on this box). Only its own home is read, through the same allowlist
   (sessions, memories, `memory_store.db` facts, skills, and `cron/jobs.json` only). `config.yaml`, `.env`,

@@ -1,6 +1,6 @@
 """bring_data.py, Bring your Wizard (issue 544): an earlier Hermes agent's past as read-only History.
 
-The Importer turns it on per scan (``history: true``, behind its ``hermes-history`` switch). The fixture is shaped
+The Importer turns it on per scan (``history: true``, on for everyone). The fixture is shaped
 like a real ``hermes backup`` zip (the home's files at the zip root): besides the history it carries config.yaml,
 .env, auth.json, plugins/, cron output and a second profile, none of which may come in. Synthetic data only.
 """
