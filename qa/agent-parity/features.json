@@ -872,7 +872,7 @@
     },
     {
       "id": "private-routing",
-      "description": "Private routing (issue 629, switch wizard/private-routing in the Look file, off by default; WIZARD_PRIVATE_ROUTING 1 forces it on, 0 off): only with a private default agent, POST /wizard/v1/route answers route agent with agent_id, chosen_by (name, private_label, thread, default, rules_only with rule), model and provider when a model was named, thread_id for the thread in front, and summary = the owner's exact words. Order: a spoken agent name or a model name the box runs (from the registry and the model list, at the start or as ask/tell/use X; the main agent is reached only by a model name) settles it without any model; else the private router (privateRouter endpoint host only) adds a personal label in its one call, which can only pick the private agent; else the thread in front (thread_id plus thread_agent or its pin) keeps a reply; else the default private agent. A non-private or missing router is never called and rules decide with chosen_by rules_only. A dump becomes the chosen agent's visible thread. The Sent row keeps agent_id, agent_model and chosen_by, and POST /wizard/v1/sent/<id>/correct {agent} stores one agent example; the private router gets the latest 8 as few-shot lines. Switch off or no private default: the route answer is exactly today's.",
+      "description": "Private routing (issue 629, switch wizard/private-routing in the Look file, off by default; WIZARD_PRIVATE_ROUTING 1 forces it on, 0 off): only with a private default agent, POST /wizard/v1/route answers route agent with agent_id, chosen_by (name, private_label, thread, default, rules_only with rule), model and provider when a model was named, thread_id for the thread in front, and summary = the owner's exact words. Order: a spoken agent name or a model name the box runs (from the registry and the model list, at the start or as ask/tell/use X; the main agent is reached only by a model name) settles it without any model; else the private router (privateRouter endpoint host only) adds a personal label in its one call, which can only pick the private agent; else the thread in front (thread_id plus thread_agent or its pin) keeps a reply; else the default private agent. A non-private or missing router is never called and rules decide with chosen_by rules_only. A dump becomes the chosen agent's visible thread. The Sent row keeps agent_id, agent_model and chosen_by, and POST /wizard/v1/sent/<id>/correct {agent} stores one agent example; the private router gets the latest 8 as few-shot lines. No private default: the route answer is exactly today's; switch off with a private default: see private-default-voice (no dump, no non-private router).",
       "layer": "server",
       "how_to_test": "Through each runtime's actual Service HTTP routes with privateRouting on and a fake fast router on 127.0.0.1 written into settings.json. On container and restricted the scene agent is made private and the default: its spoken name gives chosen_by name with no model call, Use fixture gives the main agent on fixture-model, a Messenger question gives private_label, Fix the Chats scroll bug gives default, a reply with thread_id and thread_agent hermes stays in that thread while a Messenger reply there moves to the private agent, every answer's summary is the exact words, the Sent row keeps agent_id and chosen_by, a correction to hermes is one example that the next router prompt carries, and the same fake on 127.0.0.2 (not a private host) is never called while rules answer rules_only. On main and host-profile no private default exists in the scene (main is standard; a profile agent cannot be the default), so the answer is exactly today's and no label is asked. tests/private-routing.test.ts covers the name rule, the choice order, the Done-when utterances, rules_only with a public router and with none, dumps, the Sent correction, the Look switch and switch-off answers. Synthetic HTTP fixture evidence, not live box proof.",
       "source_refs": [
@@ -886,6 +886,22 @@
         "tests/private-routing.test.ts"
       ],
       "fixture": "private-routing",
+      "policy_exemptions": []
+    },
+    {
+      "id": "private-default-voice",
+      "description": "Voice follows the default agent (issue 626, on for everyone): with a private default agent (private mode on, or one the owner made) and private routing off, POST /wizard/v1/route never starts the orb's dump worker on the standard (main) agent and never calls a router that is not private (privateRouter endpoint host). With no private router the take answers route agent with the owner's exact words (a visible new chat on the default agent) and the Sent row is decided_by fallback with rule private_default; a typed accept_dump answers typed {background: false, why: private_default}. A private router may still route, never into a dump. A standard default agent: the route is exactly today's.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP routes with privateRouting forced off and a fake fast router on 127.0.0.2 (not a private host) that would answer a dump. On container and restricted the scene agent is made private and the default: Research flights to Lisbon and a Messenger question with accept_dump each answer route agent with the exact words, their Sent rows carry rule private_default, the fake router is called zero times, GET agent-inbox has no records, and a typed accept_dump answers background false with why private_default. On main and host-profile no private default exists in the scene, so the router is asked as today. tests/private-routing.test.ts covers the same with a public router, a typed message, and a private router that may route but never dump. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/service.mjs",
+        "server/voice-router.mjs",
+        "server/agent-inbox.mjs"
+      ],
+      "reference_tests": [
+        "tests/private-routing.test.ts"
+      ],
+      "fixture": "private-default-voice",
       "policy_exemptions": []
     },
     {
