@@ -891,6 +891,54 @@ export const serverChecks = {
   // Issue 549: the agent inbox. One record per background task, captured as running before its worker starts and
   // updated from every finished run on its thread (status line, no status line, a killed worker), through each
   // runtime's real Service routes; the record survives a restart.
+  // Issue 667 (Smart inbox, switch wizard/smart-inbox in the Look file): every agent's injected contract makes needs_you a
+  // blocker only and check the confirm kind. On the main agent (the Sent log's agent) a run ending check is one
+  // agent-inbox record (kind confirm) and the list row goes quiet; a blocker never does. Routed agents get the same
+  // contract and keep their lists as today. Switch off: today's contract, no record, no quiet mark.
+  'smart-inbox': async s => {
+    const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/smart-inbox': { on, at: Date.now() } } })) }
+    const line = value => `Synthetic reply\n[WIZARD_STATUS_V1]${JSON.stringify(value)}[/WIZARD_STATUS_V1]`
+    const records = async () => (await (await s.raw('/wizard/v1/agent-inbox')).json()).records.filter(r => r.thread_id === 'wizard_parity')
+    const listed = async () => (await (await s.request('/api/sessions?view=list')).json()).data.find(x => x.id === 'wizard_parity')
+    const finish = async (id, output) => {
+      Object.assign([...s.runs.values()].at(-1), { status: 'completed', updated_at: Date.now() / 1000, output })
+      assert.equal((await s.request(`/v1/runs/${id}`)).status, 200)
+    }
+    const until = async (ok, label) => {
+      let last
+      for (let n = 0; n < 80; n++) { last = await ok(); if (last) return last; await new Promise(r => setTimeout(r, 25)) }
+      assert.fail(label)
+    }
+    // (the shell makes a new chat's session, untitled, before its first turn)
+    assert.ok([200, 201].includes((await s.request('/api/sessions', post({ id: 'wizard_parity', source: 'wizard-mobile' }))).status))
+    look(false)
+    let run = await admit(s, { input: 'Synthetic first message: plan the week' })
+    assert.ok(String(sent(s).instructions).includes('own judgment is the missing piece'), `${s.kind}: switch off keeps today's contract`)
+    assert.ok(!String(sent(s).instructions).includes('needs_you (a blocker only'), `${s.kind}: switch off, no Smart inbox wording`)
+    await finish(run.run_id, line({ state: 'check', ask: 'Synthetic fix is live. Say if it looks right' }))
+    await new Promise(r => setTimeout(r, 150))
+    assert.deepEqual(await records(), [], `${s.kind}: switch off files nothing`)
+    look(true)
+    run = await admit(s, { input: 'Synthetic second message: fix the names through the builder' })
+    assert.ok(String(sent(s).instructions).includes('needs_you (a blocker only'), `${s.kind}: every agent's contract says needs_you is a blocker only`)
+    assert.ok(String(sent(s).instructions).includes('check (a confirm ask that can wait'), `${s.kind}: and check is the confirm kind`)
+    await finish(run.run_id, line({ state: 'check', ask: 'Synthetic names fix is live. Say if it looks right' }))
+    if (s.kind === 'main') {
+      const filed = await until(async () => (await records())[0], 'a confirm ask is one agent-inbox record')
+      assert.deepEqual([filed.kind, filed.state, filed.ask, filed.filed], ['confirm', 'new', 'Synthetic names fix is live. Say if it looks right', 'smart_inbox'])
+      await until(async () => (await listed())?.quietReply === true, 'the confirm thread goes quiet')
+      assert.equal((await s.request(`/v1/runs/${run.run_id}`)).status, 200)
+      assert.equal((await records()).length, 1, 'polled again: still one record')
+      run = await admit(s, { input: 'Synthetic third message: ok' })
+      await finish(run.run_id, line({ state: 'needs_you', ask: 'Synthetic release is ready. Reply ship to send it' }))
+      await until(async () => (await listed())?.quietReply !== true, 'a blocker is never quiet')
+      assert.equal((await records()).length, 1, 'a blocker is not filed')
+    } else {
+      await new Promise(r => setTimeout(r, 150))
+      assert.deepEqual(await records(), [], `${s.kind}: the Sent log and its filing are the main agent's`)
+      assert.notEqual((await listed())?.quietReply, true, `${s.kind}: its list keeps today's marks`)
+    }
+  },
   'agent-inbox': async s => {
     const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const record = async id => { const r = await s.raw(`/wizard/v1/agent-inbox/${id}`); assert.equal(r.status, 200); return (await r.json()).record }

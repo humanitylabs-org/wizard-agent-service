@@ -19,7 +19,8 @@ export const SWEEP_KIND = 'agent_sweep'
 const PHRASE = /^\s*signal[\s-]+sweep[\s.!?]*$/iu
 const SEVERITY_RANK = { urgent: 3, high: 2, normal: 1, low: 0 }
 // Alerts are their own loud channel; they never ride on the card.
-const LATER_KINDS = new Set(['fyi', 'note'])
+// A confirm ask (issue 667, Smart inbox) waits here too: it is for the owner's next look, never a Waiting item.
+const LATER_KINDS = new Set(['fyi', 'note', 'confirm'])
 
 export const isSweepPhrase = text => typeof text === 'string' && PHRASE.test(text)
 /** A scheduled sweep: a schedule brief (`[Wizard schedule] ...`) whose prompt is the phrase on its own line. */

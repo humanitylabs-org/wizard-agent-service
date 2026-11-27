@@ -48,6 +48,31 @@ export const STATUS_PROTOCOL_INSTRUCTIONS = (() => {
 })()
 // Own: the one style source is the agent's own persona, so the owner's "reply like this from now on" lands there.
 export const OWN_STYLE_SOURCE = 'Wizard adds no reply-style rules: how you write comes from your own persona and memory. When the owner asks to change how you reply from now on, record it in your own persona file (SOUL.md in your home for Hermes) so it holds on every surface.'
+
+// Smart inbox (issue 667, owner switch `wizard/smart-inbox`, off by default; the same switch as the shell's Inbox rule,
+// wizard-ux issue 1883): needs_you is a blocker only, and a confirm / QA / "try it" ask is check, which the Service
+// files in the agent inbox for catch me up instead of the owner's Inbox. The two state definitions are swapped inside
+// the contract every agent gets (Wizard and Own reply styles alike), so no agent persona needs the rule.
+export const SMART_INBOX_SWITCH = 'wizard/smart-inbox'
+const NEEDS_YOU_RULE = 'needs_you (only when the user\'s request cannot move forward until they do one specific thing: decide, approve, reply, install, scan, or act; an optional next step or an idea you could pursue is not needs_you, use done or fyi; implementing requested work is never an optional next step)'
+const SMART_NEEDS_YOU_RULE = 'needs_you (a blocker only: the work cannot move until the user decides, approves, answers an unclear instruction, or gives missing information, access or a step only they can take; if you have what you need to file, build or finish, do it now and never bounce it back; an optional next step or an idea you could pursue is not needs_you, use done or fyi; implementing requested work is never an optional next step; asking the user to confirm, check, QA or try finished work is never needs_you, use check)'
+const CHECK_RULE_START = 'check (only when the user\'s own judgment is the missing piece'
+const CHECK_RULE_END = 'send check only after it has landed)'
+const SMART_CHECK_RULE = 'check (a confirm ask that can wait: finished work for the user to try, check, QA or confirm, such as "the fix went through the builder, check it", "QA this" or "tell me if it feels right"; Wizard files it in the user\'s agent inbox for their next catch me up, so it never interrupts them; use it only once the change is already running where the user will try it. While a build, publish or self-update is still on its way, use fyi, keep checking, and send check only after it has landed)'
+/** The status contract with the Smart inbox definitions of needs_you and check (`on` false: the text unchanged). */
+export function withSmartInbox(text, on) {
+  if (on !== true || typeof text !== 'string') return text
+  const start = text.indexOf(CHECK_RULE_START)
+  const end = start < 0 ? -1 : text.indexOf(CHECK_RULE_END, start)
+  const checked = end < 0 ? text : `${text.slice(0, start)}${SMART_CHECK_RULE}${text.slice(end + CHECK_RULE_END.length)}`
+  return checked.replace(NEEDS_YOU_RULE, SMART_NEEDS_YOU_RULE)
+}
+// Words in the owner's message that ask to be told when the work is finished (let me know when it's ready).
+const NOTIFY_LEAD = /\b(?:let me know|tell me|ping me|notify me|message me|text me|update me|get back to me|keep me posted|report back)\b[\s,]*(?:when|once|as soon as|after|if)\b/iu
+const NOTIFY_TAIL = /\b(?:when|once|as soon as)\b[^.?!\n]{1,80}?[\s,]+(?:let me know|tell me|ping me|notify me|message me|text me)\b/iu
+/** Did the owner's words ask to be told when the work is done? Whole phrases only. */
+export const asksToBeTold = text => typeof text === 'string' && (NOTIFY_LEAD.test(text) || NOTIFY_TAIL.test(text))
+
 export const statusInstructions = style => style === 'own' ? STATUS_PROTOCOL_INSTRUCTIONS : STATUS_INSTRUCTIONS
 
 const clip = (value, max) => {

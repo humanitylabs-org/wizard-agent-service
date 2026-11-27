@@ -742,6 +742,27 @@
       "policy_exemptions": []
     },
     {
+      "id": "smart-inbox",
+      "description": "Smart inbox (issue 667, switch wizard/smart-inbox in the Look file, the same switch as the shell's Inbox rule from wizard-ux issue 1883, off by default; WIZARD_SMART_INBOX 1 forces it on, 0 off). On: the status contract injected into every agent's runs (main, routed and heavy relay, Wizard and Own reply styles) defines needs_you as a blocker only (a decision, approval, unclear instruction or missing input; if the agent can file, build or finish it does so) and check as the confirm kind (try it, QA it, confirm it) that waits for catch me up. On the main agent, when a run ends: check writes one agent-inbox record (kind confirm, filed smart_inbox, the ask in plain words; a newer one on the same thread archives the older open one; it is never the thread's worker record) and marks the run quiet; a run with no owner Sent row (a watch, a schedule, a helper result) files done as result, a final fyi as fyi and check as confirm, and is quiet, and a [SILENT] answer is only quiet; the owner's first message or reply is quiet when his words asked for no answer and the run ended done, fyi or check; needs_you and failed runs are never quiet or filed. Words that ask to be told (let me know when, tell me when, ping me once) set notify_when_done on the Sent row and the next finished result (done or check) in that thread is not quiet and not filed, once (notified_run). The list row's wizard_quiet_reply / quietReply reads these quiet runs; a check Sent row reads done. Routed agents get the contract only; their lists and records are unchanged. Off: contract, Sent rows, records and quiet marks exactly as before.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP routes with the switch flipped in <root>/Pages/wizard-look/look.json: off, the dispatched run's instructions keep today's needs_you/check wording and a run ending check files nothing; on, the instructions say needs_you is a blocker only and check is the confirm kind for every kind; on main a run ending check is one confirm record (polled twice: still one) and the list row is quietReply, and a following needs_you is never quiet or filed; on host-profile, container and restricted nothing is filed and the list keeps today's marks. tests/smart-inbox.test.ts covers the confirm record and quiet mark, a quiet first message, let me know when (not quiet once, then quiet again), needs_you and failed never quiet, agent-started done filed as result and quiet, a silent wake quiet with no record, the Look switch read live, switch off unchanged, the contract swap in both contracts, the notify phrases, the store's one-record-per-run rule and the Sent log's quiet runs across a restart. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/thread-status.mjs",
+        "server/sent-log.mjs",
+        "server/agent-inbox.mjs",
+        "server/agent-sweep.mjs",
+        "server/service.mjs",
+        "server/agents-http.mjs",
+        "server/agent-heavy-relay.mjs",
+        "server/index.mjs"
+      ],
+      "reference_tests": [
+        "tests/smart-inbox.test.ts"
+      ],
+      "fixture": "smart-inbox",
+      "policy_exemptions": []
+    },
+    {
       "id": "private-routing",
       "description": "Private routing (issue 629, switch wizard/private-routing in the Look file, off by default; WIZARD_PRIVATE_ROUTING 1 forces it on, 0 off): only with a private default agent, POST /wizard/v1/route answers route agent with agent_id, chosen_by (name, private_label, thread, default, rules_only with rule), model and provider when a model was named, thread_id for the thread in front, and summary = the owner's exact words. Order: a spoken agent name or a model name the box runs (from the registry and the model list, at the start or as ask/tell/use X; the main agent is reached only by a model name) settles it without any model; else the private router (privateRouter endpoint host only) adds a personal label in its one call, which can only pick the private agent; else the thread in front (thread_id plus thread_agent or its pin) keeps a reply; else the default private agent. A non-private or missing router is never called and rules decide with chosen_by rules_only. A dump becomes the chosen agent's visible thread. The Sent row keeps agent_id, agent_model and chosen_by, and POST /wizard/v1/sent/<id>/correct {agent} stores one agent example; the private router gets the latest 8 as few-shot lines. Switch off or no private default: the route answer is exactly today's.",
       "layer": "server",

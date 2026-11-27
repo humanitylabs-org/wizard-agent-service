@@ -63,6 +63,8 @@ export class SentLog {
     try {
       const parsed = JSON.parse(readFileSync(path, 'utf8'))
       if (parsed?.schema === 1 && Array.isArray(parsed.rows)) this.data = { schema: 1, rows: parsed.rows.filter(r => r && ROW_ID.test(String(r.id))), check: parsed.check ?? null }
+      // Smart inbox (issue 667): the runs that ended needing nothing from the owner, beyond what the reply rows say.
+      if (Array.isArray(parsed?.quiet_runs)) this.data.quiet_runs = parsed.quiet_runs.filter(q => q && THREAD_ID.test(String(q.thread)) && KEY.test(String(q.run)))
     } catch { /* an unreadable log starts empty; the original bytes stay on disk until the next write */ }
   }
 
@@ -222,6 +224,42 @@ export class SentLog {
     if (!runId || !THREAD_ID.test(String(thread))) return false
     const rows = this.data.rows.filter(r => r.agent === agent && r.source === 'reply' && r.thread_id === thread && r.run_id === runId)
     return rows.some(r => !r.steer) && rows.every(r => r.wants_reply === false && QUIET_OUTCOMES.has(r.outcome?.state))
+  }
+
+  /** Smart inbox (issue 667): the owner's own rows on one run (the first message's row by its run key, reply and steer
+   *  rows by run id or key). None: nobody typed it, the run was started by the agent or the Service. */
+  ownerRowsForRun(thread, runId = '', runKey = '', agent = 'hermes') {
+    if (!THREAD_ID.test(String(thread)) || (!runId && !runKey)) return []
+    return this.data.rows.filter(r => r.agent === agent && r.thread_id === thread
+      && ((runId && r.run_id === runId) || (runKey && r.run_key === runKey))).map(r => ({ ...r }))
+  }
+
+  /** The oldest owner row in the thread that asked to be told when the work is done and has not been told yet. */
+  pendingNotify(thread, agent = 'hermes') {
+    if (!THREAD_ID.test(String(thread))) return null
+    const row = this.data.rows.filter(r => r.agent === agent && r.thread_id === thread && r.notify_when_done === true && !r.notified_run).at(-1)
+    return row ? { ...row } : null
+  }
+
+  /** Was this run the one that told the owner what he asked to hear about? */
+  notifiedBy(thread, runId, agent = 'hermes') {
+    return Boolean(runId) && this.data.rows.some(r => r.agent === agent && r.thread_id === thread && r.notified_run === runId)
+  }
+
+  /** Smart inbox: a run that ended with nothing for the owner (kept once per run id, newest 2000). */
+  markQuiet(thread, runIds = [], agent = 'hermes') {
+    if (!THREAD_ID.test(String(thread))) return false
+    const list = this.data.quiet_runs ||= []
+    const fresh = [...new Set(runIds)].filter(run => typeof run === 'string' && KEY.test(run) && !list.some(q => q.agent === agent && q.thread === thread && q.run === run))
+    if (!fresh.length) return false
+    for (const run of fresh) list.unshift({ agent, thread, run, at: this.now() })
+    if (list.length > MAX_ROWS) list.length = MAX_ROWS
+    this.#save()
+    return true
+  }
+
+  quietRun(thread, runId, agent = 'hermes') {
+    return Boolean(runId) && (this.data.quiet_runs || []).some(q => q.agent === agent && q.thread === thread && q.run === runId)
   }
 
   /** The nightly check: rows sent more than SENT_FINAL_MS ago (within the last week) whose live state (`stateOf(row)`)
