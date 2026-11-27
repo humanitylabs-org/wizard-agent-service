@@ -163,10 +163,15 @@ console.log(hermesConfigYaml({id:'cobalt-proof',privacy:'standard',model:{provid
             report['native_backup_contains_facts_db'] = True
             # The second home starts from the native backup, not a hand-copied DB.
             docker('cp', str(temp / 'facts.zip'), names[1] + ':/opt/data/facts.zip')
+            # Hermes v0.22+ writes backups 0600 and `docker cp` lands the copy as root: hand it to the agent's uid,
+            # as a restore does, or the import reads it as "Not a valid zip file".
+            docker('run', '--rm', '--network', 'none', '--user', '0:0', '--entrypoint', 'chown', '-v', volumes[1] + ':/opt/data', IMAGE, '10000:10000', '/opt/data/facts.zip')
             docker('run', '--rm', '-i', '--network', 'none', '--user', '10000:10000', '-e', 'HOME=/opt/data', '-e', 'HERMES_HOME=/opt/data', '-v', volumes[1] + ':/opt/data', '--entrypoint', PYTHON, IMAGE, '-c', "import sys; from pathlib import Path; Path('/opt/data/config.yaml').write_text(sys.stdin.read())", input=config)
+            # Import into the stopped home, as Wizard's restore and importer do: Hermes v0.22+ refuses an import
+            # while a gateway owns the profile.
+            docker('run', '--rm', '--network', 'none', '--user', '10000:10000', '-e', 'HOME=/opt/data', '-e', 'HERMES_HOME=/opt/data', '-v', volumes[1] + ':/opt/data', '--entrypoint', PYTHON, IMAGE, '-c', "import sys; from types import SimpleNamespace; from hermes_cli.backup import run_import; sys.exit(run_import(SimpleNamespace(zipfile='/opt/data/facts.zip',force=True)) or 0)")
             docker('start', names[1])
             healthy(names[1])
-            docker('exec', names[1], PYTHON, '-c', "from types import SimpleNamespace; from hermes_cli.backup import run_import; run_import(SimpleNamespace(zipfile='/opt/data/facts.zip',force=True))")
             # Exercise Wizard's real import transformer on the restored config.
             sys.path.insert(0, str(ROOT / 'ops/agent-runtime'))
             import hermes_import as importer
