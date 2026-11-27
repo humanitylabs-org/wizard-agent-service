@@ -71,6 +71,7 @@ import { APP_WAKE_CONTRACT, APP_WAKE_RUN_PREFIX, createWakeLedger, parseWakeEven
 import { AgentInboxStore, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, START_FAILED, appDoor, recordApp } from './agent-inbox.mjs'
 import { SentLog } from './sent-log.mjs'
 import { isSweepPhrase, isScheduledSweep, withCardRow, WAITING_CAP, DONE_CAP } from './agent-sweep.mjs'
+import { createCatchUp, CATCH_UP_SWITCH, startsCatchUp } from './catch-up.mjs'
 import { AlertRulesFile, createAlertGate, privateRouter } from './agent-alerts.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
 import { replyRules, routeUtterance } from './voice-router.mjs'
@@ -3144,6 +3145,13 @@ function buildWizardServer(options, lifetime) {
   const firstChatSwitchOn = createChannelsSwitch({ id: FIRST_CHAT_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.firstChatGoalsTtlMs ?? 3000 })
   const firstChatOn = () => channelPart(options.firstChatGoals, firstChatSwitchOn)
   const firstChatNote = () => (firstChatOn() ? FIRST_CHAT_NOTE : '')
+  // Catch me up (issue 668, catch-up.mjs): the owner's `wizard/catch-me-up` switch in the Look file; option catchUp (env
+  // WIZARD_CATCH_ME_UP, '1' on / '0' off) wins. On: "catch me up" (or "signal sweep") to the main agent runs the built
+  // catch-up and the main agent gets the wizard_catch_up tool. Off: nothing is read, written or offered.
+  const catchUpSwitchOn = createChannelsSwitch({ id: CATCH_UP_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.catchUpTtlMs ?? 3000 })
+  const catchUpOn = () => channelPart(options.catchUp, catchUpSwitchOn)
+  let catchUp = null
+  const catchUpTools = agentId => (catchUp && agentId === GATEWAY_MAIN_AGENT && catchUpOn() ? catchUp.tools : null)
   let followUps = null
   // wizard_start_thread / wizard_schedule for routed agents (server/agent-reach-out.mjs); bound with the scheduler.
   let reachOut = null
@@ -3152,7 +3160,7 @@ function buildWizardServer(options, lifetime) {
   // wizard_transcribe on the gateway (server/transcribe.mjs): the box's Wizard Voice Service on loopback, for the
   // agent's own audio files. Bound with the agent registry (it resolves each agent's home).
   let transcribeTools = null
-  const builtinTools = (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(reachOut?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId), ...(transcribeTools?.list(agentId) || [])]
+  const builtinTools = (agentId) => [...(catchUpTools(agentId)?.list() || []), ...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(reachOut?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId), ...(transcribeTools?.list(agentId) || [])]
   // System capability registry (issue 463, capabilities.mjs), on for everyone: the wizard_capabilities tool, the
   // generated kernel index line and the routed run note.
   const interfaceManualSwitchOn = createChannelsSwitch({ id: INTERFACE_MANUAL_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.interfaceManualTtlMs ?? 3000 })
@@ -3171,7 +3179,7 @@ function buildWizardServer(options, lifetime) {
     ? createAgentBridge({
       builtins: {
         list: (agentId) => [...builtinTools(agentId), ...capabilities.list(agentId)],
-        call: async (name, args, agentId) => (await capabilities.call(name, args, agentId)) ?? (await transcribeTools?.call(name, args, agentId)) ?? (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await reachOut?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
+        call: async (name, args, agentId) => (await catchUpTools(agentId)?.call(name, args)) ?? (await capabilities.call(name, args, agentId)) ?? (await transcribeTools?.call(name, args, agentId)) ?? (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await reachOut?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
       },
       capabilities: (agentId) => capabilities.jobs(agentId),
       appSkillOn: (appId) => (INTERFACE_MANUAL_APPS.has(appId) ? interfaceManualOn() : true),
@@ -4579,7 +4587,47 @@ function buildWizardServer(options, lifetime) {
     try { text = visibleInputText(parseJsonBody(body).input) } catch { return null }
     const scheduled = principal?.kind === 'service' && typeof request.headers['x-wizard-schedule-kind'] === 'string' && isScheduledSweep(text)
     if (!scheduled && !(principal?.kind === 'owner' && isSweepPhrase(text))) return null
+    // Issue 668: while catch me up is on, the owner's own "signal sweep" is its alias (a scheduled sweep stays a card).
+    if (!scheduled && catchUpOn()) return null
     return { scheduled }
+  }
+  // Catch me up (issue 668): built before the turn is admitted (the queue may dispatch at once); its run note carries it.
+  catchUp = createCatchUp({
+    statePath: options.catchUpStatePath ? resolve(String(options.catchUpStatePath))
+      : options.agentInboxStatePath ? join(dirname(resolve(String(options.agentInboxStatePath))), 'catch-up.json') : '',
+    now: options.catchUpNow ?? Date.now,
+    inbox: agentInboxOn() ? agentInbox : null,
+    readChats: () => readCanonicalSessionsHttp((path) => hermesJson(path), { limit: 200 }),
+    readTurns: (id) => hermesJson(`/api/sessions/${encodeURIComponent(id)}/messages?order=latest&limit=12`),
+    // The shell's Archive: Hermes archived (and the snooze cleared), then a saved background result dismissed.
+    archiveChat: async (id) => {
+      await archiveHermesSession(id)
+      canonicalSessionCache.expiresAt = 0
+      try { await backgroundResults?.dismiss(id, '') } catch { /* nothing saved to dismiss */ }
+    },
+    skipThreads: () => fixedChannelThreads(resolve(bridgeOsHome || wizardOsHome(), 'channels.sqlite'), MAIN_AGENT_ID),
+  })
+  const catchUpNotes = new Map()
+  const catchUpForTurn = async (sessionId, body) => {
+    if (!sessionId || !catchUpOn()) return false
+    let text = ''
+    try { text = visibleInputText(parseJsonBody(body).input) } catch { return false }
+    if (!startsCatchUp(text.trim())) return false
+    let note = ''
+    try { note = (await catchUp.compose({ threadId: sessionId })).note }
+    catch (error) {
+      console.warn(`[catch-up] failed: ${error?.message || error}`)
+      note = 'Catch me up: the owner asked for a catch-up, but the Wizard Agent Service could not read his chats and agent inbox just now. Say so in one short line; do not make up a catch-up.'
+    }
+    catchUpNotes.set(sessionId, { note, at: Date.now() })
+    if (catchUpNotes.size > 50) catchUpNotes.delete(catchUpNotes.keys().next().value)
+    return true
+  }
+  const catchUpRunNote = sessionId => {
+    const pending = sessionId ? catchUpNotes.get(sessionId) : null
+    if (!pending) return ''
+    catchUpNotes.delete(sessionId)
+    return Date.now() - pending.at > 10 * 60_000 ? '' : pending.note
   }
   // The sweep runs before the turn is admitted, so the run note says what really happened.
   const sweepForTurn = async (sessionId, asked) => {
@@ -5642,7 +5690,7 @@ function buildWizardServer(options, lifetime) {
   const runTitleNote = (sessionId) => {
     const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes')].filter(Boolean).join('\n')
     if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote, trackerNote('hermes', ''), firstChatNote()].filter(Boolean).join('\n')
-    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId), dailyNote('hermes', sessionId), sweepRunNote(sessionId), dumpRunNote(sessionId), firstChatNote()].filter(Boolean).join('\n')
+    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId), dailyNote('hermes', sessionId), sweepRunNote(sessionId), catchUpRunNote(sessionId), dumpRunNote(sessionId), firstChatNote()].filter(Boolean).join('\n')
   }
   const patchHermesTitle = async (sessionId, title, { exact = false, datedAt = null } = {}) => {
     // A title another thread holds is dated, never numbered (James, 8 Nov: no #N). An exact patch never is.
@@ -8374,7 +8422,7 @@ function buildWizardServer(options, lifetime) {
           // Issue 607: an earlier correction of exactly these words routes them the way the owner wanted.
           const correction = dump ? agentInbox.correctionFor(said) : null
           // A background task must be decided before the shell gives up waiting (it opens a visible thread at 6 s).
-          const routed = await routeUtterance({ input, settings, router: fast, fetchImpl, dump, examples, correction, ...(dump ? { timeoutMs: 5_000 } : {}) })
+          const routed = await routeUtterance({ input, settings, router: fast, fetchImpl, dump, examples, correction, ...(dump ? { timeoutMs: 5_000 } : {}), ...(catchUpOn() ? { catchUp: startsCatchUp } : {}) })
           if (routed.cmd?.route === 'dump') {
             try { routed.cmd = { ...routed.cmd, ...captureDump(input.text, routed.cmd, { urgent: routed.why?.urgent === true, tags: routed.why?.tags || [] }) } }
             catch (error) {
@@ -9194,12 +9242,17 @@ function buildWizardServer(options, lifetime) {
           // A "signal sweep" turn: the card is posted first (the queue may dispatch at once), then its run note says so.
           const sweepAsked = queuedAdmission.runtime === 'direct' ? noteSweepRequest(queuedAdmission.sessionId, body, principal, request) : null
           if (sweepAsked) await sweepForTurn(queuedAdmission.sessionId, sweepAsked)
+          // Issue 668: the owner's "catch me up" (switch on) is built here; any other owner turn may answer the last one.
+          const ownerDirect = queuedAdmission.runtime === 'direct' && principal.kind === 'owner' && !queuedAdmission.continuation
+          const catchUpAsked = ownerDirect ? await catchUpForTurn(queuedAdmission.sessionId, body) : false
+          if (ownerDirect && !catchUpAsked && catchUpOn()) { try { catchUp.ownerTurn(queuedAdmission.sessionId, visibleInputText(parseJsonBody(body).input)) } catch { /* not an answer */ } }
           // Issue 1808: any later owner turn in the thread is a reply row, written before the turn is admitted.
           const replyRow = queuedAdmission.runtime === 'direct' && principal.kind === 'owner' && !queuedAdmission.continuation && !firstOwnerTurn && agentInboxOn()
             ? sentReply(queuedAdmission.sessionId, body.toString('utf8'), queuedAdmission.idempotencyKey, audioPaths.length > 0) : null
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
           if (replyRow && admitted.record?.publicRunId) { try { if (!sentLog.get(replyRow.id)?.run_id) sentLog.update(replyRow.id, { run_id: admitted.record.publicRunId }) } catch { /* the run key still links it */ } }
           if (sweepAsked && admitted.replayed) sweepNotes.delete(queuedAdmission.sessionId)
+          if (catchUpAsked && admitted.replayed) catchUpNotes.delete(queuedAdmission.sessionId)
           if (queuedAdmission.runtime === 'direct' && principal.kind === 'owner' && !queuedAdmission.continuation) inboxOwnerTurn(MAIN_AGENT_ID, queuedAdmission.sessionId)
           if (firstOwnerTurn && !admitted.replayed) sentTurn(queuedAdmission.sessionId, body.toString('utf8'), queuedAdmission.idempotencyKey, audioPaths.length > 0)
           // A durable queue receipt is not proof that Hermes has materialized this session.
