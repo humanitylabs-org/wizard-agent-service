@@ -46,6 +46,7 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
     .replace(/\[WIZARD_ACTION_V1\](?:[\s\S]*?\[\/WIZARD_ACTION_V1\]|[\s\S]*$)/g, ' ') // an app's action card (wizard-ux core/chat-kit.js actionIds, issue 1463)
     .replace(/\[WIZARD_BUTTONS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_BUTTONS_V1\]/g, (_, j) => buttonLabels(j)) // reply buttons: their labels as text (wizard-ux issue 1889)
     .replace(/\[WIZARD_(?:BUTTONS|TAPS)_V1\](?:[\s\S]*?\[\/WIZARD_(?:BUTTONS|TAPS)_V1\]|[\s\S]*$)/g, ' ') // the owner's taps (the Tapped lines stay); unterminated: to the end
+    .replace(/\[WIZARD_CHOICES_V1\](?:[\s\S]*?\[\/WIZARD_CHOICES_V1\]|[\s\S]*$)/g, ' ') // reply buttons (wizard-ux core/chat-kit.js choiceList, issue 650)
     .replace(/^Please use the attached files?\.\s*/, '')
     .replace(/<memory-context>[\s\S]*?<\/memory-context>/g, ' ')
     .replace(/\[(?:Browser dogfooding|System note)[^\]]*\][\s\S]*$/m, ' ')

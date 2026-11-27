@@ -8,6 +8,7 @@ import { createOwnedOpenWorkReader } from './owned-open-work-follow-through.mjs'
 import { readHelperStatuses } from './helper-status.mjs'
 import { pendingHeavyJobs, heavyResultOwed } from './heavy-wait.mjs'
 import { readSupervisorBuildWaits, readSupervisorWaitStamps } from './supervisor-wait.mjs'
+import { readActiveHumanSessionIds, readSessionLeaseHeld } from './active-sessions.mjs'
 
 export function createListEvidenceReader(hermesStatePath) {
   const listTruthReader = createHermesSessionTruthReader(hermesStatePath)
@@ -32,6 +33,12 @@ export function createListEvidenceReader(hermesStatePath) {
           if (kind === 'archive') return { value: readArchivedSessions(db, { limit }) }
           return { value: readHermesFirstRequests(db, ids) }
         } catch (error) { return { failed: { message: String(error?.message ?? error).slice(0, 200), code: error?.errcode ?? error?.code ?? null } } }
+      }
+      // Running turns and one thread's turn lease (issue 584): asked on every queue tick, health call and list
+      // rebuild. Cold, they wait behind the list worker's disk reads; here that wait is off the HTTP thread.
+      if (kind === 'active' || kind === 'lease') {
+        try { return { value: kind === 'active' ? readActiveHumanSessionIds(hermesStatePath, now) : readSessionLeaseHeld(hermesStatePath, ids?.[0], now) } }
+        catch (error) { return { failed: { message: String(error?.message ?? error).slice(0, 200), code: error?.errcode ?? error?.code ?? null } } }
       }
       // A routed agent's list (issue 584): its open-ask evidence from its own state.db, 100 threads per read as
       // before. On the HTTP thread this held every route for seconds on each agent list read.
