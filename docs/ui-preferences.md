@@ -18,6 +18,7 @@ arrays at the root, wrong types and invalid values are rejected (400). Send
 - `compact`: boolean. Default: false.
 - `chatLayout`: `day` (Ready, Yesterday, Past week) or `status` (Working, Ready, Archive). Default: `day`.
 - `workingOrder`: optional `alphabetical`, `newest` or `oldest`. When absent the shell defaults to A to Z; independent of Ready.
+- `phoneSlot`: optional app id (letters, digits, `.`, `_`, `-`, up to 80) or `''`: the app pinned to the phone bar's Messenger slot (wizard-ux#1929, switch `wizard/phone-sections`). `''` = back to Messenger. When absent each phone keeps its own copy.
 - `readyOrder`: `newest`, `oldest`, `priority` or `subject`. Default: `newest`.
 - `replySummary`: optional `{on,start?,length?}` for the shell's short-answer view. `on` is boolean;
   `start` is `collapsed` or `expanded`; `length` is `line`, `sentences` or `paragraph`. Unknown nested

@@ -57,6 +57,9 @@ const validators = {
   // Chats list layout: 'day' (Ready, Yesterday, Past week) or 'status' (Working, Ready, Archive).
   chatLayout: v => v === 'day' || v === 'status',
   workingOrder: v => ['alphabetical', 'newest', 'oldest'].includes(v),
+  // The phone bar's pinned slot (wizard-ux#1929, switch wizard/phone-sections): an installed app id, '' = Messenger.
+  // No default: a box that never stored one leaves each phone's own copy alone.
+  phoneSlot: v => typeof v === 'string' && /^[A-Za-z0-9._-]{0,80}$/.test(v),
   readyOrder: v => ['newest', 'oldest', 'priority', 'subject'].includes(v),
   subjectOrder: v => Array.isArray(v) && v.length <= 60 && v.every(s => typeof s === 'string' && s.length <= 120 && !/[\u0000-\u001f\u007f]/u.test(s)) && new Set(v).size === v.length,
   // Short answer first (the shell's reply-summary view): on while a device wears it, how long replies start, and the
