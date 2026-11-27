@@ -2567,6 +2567,27 @@
       "policy_exemptions": []
     },
     {
+      "id": "chat-reply-actions",
+      "description": "wizard-ux issue 1973 part 2 (switch wizard/reply-actions, off by default, on top of wizard/reply-buttons): a [WIZARD_BUTTONS_V1] button may declare \"action\":{\"app\",\"tool\",\"args\"}. A tap posts only {thread, message, group, button, agent} to POST /wizard/v1/reply-actions (owner only); the Service reads the action from that message in the thread's own history through its own proxy (main and routed agents alike, scoped to the thread's agent), calls the app's tool through the gateway (agent-bridge callAppTool) on that agent's app grant, starts no run and calls no model, and saves the outcome per thread (GET /wizard/v1/reply-actions?thread=): the picked button and one machine line from the app's answer, or the failure, shown inline with Retry. An unknown, not granted or not installed app is refused and saved as a failure. Buttons without an action keep the chat-reply-buttons behaviour. While both switches are on every main and routed run carries the action-button note (server/reply-actions.mjs).",
+      "layer": "ux",
+      "how_to_test": "In this repo run npx vitest run tests/reply-actions.test.ts: for main, host-profile, container and restricted threads a tap changes a synthetic app's own state with no run admitted, a second tap replays the saved outcome, the outcome survives a restart, a routed agent cannot reach an app it is not granted, a failing app is saved as a failure and Retry works once it is back, the run note appears only while both switches are on, and an agent credential is refused. In wizard-ux run node --test tests/reply-actions.test.mjs (the real chat-kit + action-cards render and tap path for main and routed threads, switch off byte-identical) and the browser proof wizard-ux/tests/qa-reply-button-actions.cjs (phone and desktop, two skins, fake box). Synthetic evidence, not live box proof.",
+      "source_refs": [
+        "wizard-ux/web/core/chat-kit.js",
+        "wizard-ux/web/core/action-cards.js",
+        "wizard-ux/web/core/chats-bind.js",
+        "server/reply-actions.mjs",
+        "server/agent-bridge.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/reply-actions.test.ts",
+        "wizard-ux/tests/reply-actions.test.mjs",
+        "wizard-ux/tests/qa-reply-button-actions.cjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "new-chat-quick-links",
       "description": "wizard-ux issue 1965 (switch wizard/new-chat-chips, off by default; WIZARD_NEW_CHAT_CHIPS 1 forces it on, 0 off): a new, empty chat on the main agent shows quick-link chips right above the message box (Catch me up, What's waiting on me, Plan my day; data list QUICK_LINKS in wizard-ux core/chats-status.js). One tap sends the chip's prompt as the owner's message through the thread's own send path (sendChat), no draft and no confirm; the chips go once the chat has a message and step aside while the box has words. They are drawn only on the main agent's new chat because \"catch me up\" runs the built catch-up only there (catch-me-up); a routed agent's new chat shows none. While the switch is on, every main and routed run carries one note on how to answer \"What's waiting on me?\" and \"Plan my day\" (server/quick-links.mjs), so a typed ask gets the same answer on every kind.",
       "layer": "ux",
