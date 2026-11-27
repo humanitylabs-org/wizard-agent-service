@@ -27,22 +27,27 @@ def _shape(h, recipe, runtime_image, what=''):
 
 
 def _previous(doc):
-    """The pin a lock move replaced, kept while For everyone still runs it (wizard-app-store#92).
+    """The pins a lock move replaced, kept while a channel still runs them (wizard-app-store#92).
 
-    A release naming all of it (Hermes and recipe together) stays valid, so the stable snapshot keeps installing
-    until it is promoted onto the new pin; never a mix of the two, and never what check_pin accepts on its own.
+    One pin or a list of them (wizard-app-manager#856: For everyone on one replaced recipe, For testers on another).
+    A release naming all of one of them (Hermes and recipe together) stays valid, so a snapshot keeps installing
+    until it is promoted onto the new pin; never a mix, and never what check_pin accepts on its own.
     """
     prev = doc.get('previous')
     if prev is None:
-        return None
-    if not isinstance(prev, dict) or not isinstance(prev.get('hermes'), dict) or not isinstance(prev.get('agent_recipe'), dict):
+        return []
+    rows = prev if isinstance(prev, list) else [prev]
+    if not rows:
         raise ValueError('Hermes lock: previous needs the replaced hermes pin, agent recipe and runtime image')
-    _shape(prev['hermes'], prev['agent_recipe'], prev.get('runtime_image'), 'previous: ')
-    same_pin = all(prev['hermes'].get(k) == doc['hermes'].get(k) for k in ('tag', 'commit', 'image'))
-    same_recipe = all(prev['agent_recipe'].get(k) == doc['agent_recipe'].get(k) for k in ('app', 'repo', 'commit'))
-    if same_pin and same_recipe:
-        raise ValueError('Hermes lock: previous must differ from the locked pin or recipe')
-    return prev
+    for row in rows:
+        if not isinstance(row, dict) or not isinstance(row.get('hermes'), dict) or not isinstance(row.get('agent_recipe'), dict):
+            raise ValueError('Hermes lock: previous needs the replaced hermes pin, agent recipe and runtime image')
+        _shape(row['hermes'], row['agent_recipe'], row.get('runtime_image'), 'previous: ')
+        same_pin = all(row['hermes'].get(k) == doc['hermes'].get(k) for k in ('tag', 'commit', 'image'))
+        same_recipe = all(row['agent_recipe'].get(k) == doc['agent_recipe'].get(k) for k in ('app', 'repo', 'commit'))
+        if same_pin and same_recipe:
+            raise ValueError('Hermes lock: previous must differ from the locked pin or recipe')
+    return rows
 
 
 def validate(doc, now=None):
@@ -94,8 +99,7 @@ def _pins(release, pin, recipe):
 
 def check_release(release, doc=None):
     doc = load() if doc is None else validate(doc)
-    prev = _previous(doc)
-    if prev and _pins(release, prev['hermes'], prev['agent_recipe']):
+    if any(_pins(release, row['hermes'], row['agent_recipe']) for row in _previous(doc)):
         return release
     check_pin(release.get('hermes'), doc)
     recipe = (release.get('default_apps') or {}).get('agent')
