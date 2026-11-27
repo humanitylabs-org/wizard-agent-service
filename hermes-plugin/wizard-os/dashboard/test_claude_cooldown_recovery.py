@@ -106,26 +106,49 @@ class RecoveryTests(unittest.TestCase):
                 self.assertEqual(self.run_pass([row], Provider(payload, balance))[0]['outcome'], outcome)
         self.assertEqual(self.resets, ['g1'])
 
+    def test_capped_429_status_beside_the_cooldown_is_the_same_refusal(self):
+        # What stock Hermes really writes on a capped-window 429 from a chat (seen with `hermes chat` against a fake
+        # Anthropic): the model cooldown AND last_status 'exhausted', code 429, no billing reason, no reset time.
+        # Before, that status read as a credential bench and the grant was never even probed.
+        row = grant(last_status='exhausted', last_status_at=NOW - 5, last_error_code=429, last_error_reset_at=None,
+                    request_count=1)
+        report = self.run_pass([row, grant('other', token='***' + 'y' * 20, model_cooldowns={})], Provider(usage()))
+        self.assertEqual(report[0]['outcome'], 'released')
+        self.assertEqual(self.resets, ['g1'])
+        # It never turns a hold into a release: a fresh throttle, extra usage off or an empty balance still hold.
+        for row, provider, outcome in ((dict(row, model_cooldowns={MODEL: NOW + 60}), Provider(usage()), 'short_cooldown'),
+                                       (row, Provider(usage(enabled=False)), 'extra_usage_off'),
+                                       (row, Provider(usage(), 0), 'extra_usage_unfunded')):
+            with self.subTest(outcome=outcome):
+                r._PROBED.clear()
+                self.assertEqual(self.run_pass([row], provider)[0]['outcome'], outcome)
+        self.assertEqual(self.resets, ['g1'])
+
     def test_ended_credential_wide_status_is_history_not_a_bench(self):
         # Stock Hermes never selects a row with a model cooldown, so it never clears an `exhausted` status whose
-        # bench already ended. Running benches (reset time ahead, inside the TTL, dead) stay untouched.
-        ended = [grant(last_status='exhausted', last_status_at=NOW - 2 * 3600, last_error_code=429),
-                 grant(last_status='exhausted', last_status_at=NOW - 600, last_error_code=401),
-                 grant(last_status='exhausted', last_status_at=NOW - 60, last_error_reset_at=NOW - 1)]
-        for row in ended:
-            with self.subTest(row=row):
+        # bench already ended. Running benches (billing, auth, reset time ahead, dead) stay untouched.
+        twin = grant('twin', token='***' + 'y' * 20, model_cooldowns={})   # a second live grant: no sole-credential TTL
+        ended = [[grant(last_status='exhausted', last_status_at=NOW - 2 * 3600, last_error_code=402, failure_reason='billing'), twin],
+                 [grant(last_status='exhausted', last_status_at=NOW - 600, last_error_code=401), twin],
+                 [grant(last_status='exhausted', last_status_at=NOW - 60, last_error_code=500, last_error_reset_at=NOW - 1), twin],
+                 [grant(last_status='exhausted', last_status_at=NOW - 120, last_error_code=500)]]     # sole: stock 60 s bench
+        for rows in ended:
+            with self.subTest(row=rows[0]):
                 r._PROBED.clear()
                 r._RELEASED.clear()
-                self.assertEqual(self.run_pass([row], Provider(usage()))[0]['outcome'], 'released')
-        running = [grant(last_status='exhausted', last_status_at=NOW - 600, last_error_code=429),
-                   grant(last_status='exhausted', last_status_at=NOW - 7200, last_error_reset_at=NOW + 600),
-                   grant(last_status='exhausted', last_status_at=NOW - 7200, last_error_reset_at=iso(NOW + 600)),
-                   grant(last_status='exhausted'), grant(last_status='dead', last_status_at=NOW - 9 * 86400)]
+                self.assertEqual(self.run_pass(rows, Provider(usage()))[0]['outcome'], 'released')
+        running = [[grant(last_status='exhausted', last_status_at=NOW - 600, last_error_code=402, failure_reason='billing')],
+                   [grant(last_status='exhausted', last_status_at=NOW - 600, last_error_code=429, failure_reason='billing')],
+                   [grant(last_status='exhausted', last_status_at=NOW - 120, last_error_code=500), twin],
+                   [grant(last_status='exhausted', last_status_at=NOW - 7200, last_error_code=401, last_error_reset_at=NOW + 600)],
+                   [grant(last_status='exhausted', last_status_at=NOW - 7200, last_error_code=500,
+                          last_error_reset_at=iso(NOW + 600))],
+                   [grant(last_status='exhausted')], [grant(last_status='dead', last_status_at=NOW - 9 * 86400)]]
         provider = Provider(usage())
-        for row in running:
-            with self.subTest(row=row):
+        for rows in running:
+            with self.subTest(row=rows[0]):
                 r._PROBED.clear()
-                self.assertEqual(self.run_pass([row], provider)[0]['outcome'], 'credential_benched')
+                self.assertEqual(self.run_pass(rows, provider)[0]['outcome'], 'credential_benched')
         self.assertEqual(provider.calls, [])
         self.assertEqual(len(self.resets), len(ended))
 

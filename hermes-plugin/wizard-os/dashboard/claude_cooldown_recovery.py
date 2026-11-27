@@ -14,7 +14,8 @@ This module clears such a cooldown with stock Hermes' own targeted control (`Cre
   * it is funded: purchased credits above zero, or, when the credit balance can't be read, monthly spend below
     the monthly cap.
 A grant benched credential-wide (auth, billing, dead) is never touched while that bench runs; a credential-wide
-status whose bench has already ended is history, not a bench. Nothing changes the sign-in, the model or the provider.
+status whose bench has already ended is history, and the plain 429 status stock Hermes records beside the capped
+model cooldown is that same refusal, not a separate bench. Nothing changes the sign-in, the model or the provider.
 If the provider refuses again after a release, Hermes re-arms the cooldown and the next probe (at most one per grant
 per PROBE_EVERY) may release it again. The owner can top up any minute and the usage read does not always show it
 (an unreadable credit balance and no new spend read the same before and after), so a refused release is retried at
@@ -46,8 +47,9 @@ _PROBED = {}     # grant id -> monotonic time of the last usage read
 _RELEASED = {}   # grant id -> {'signature', 'count'} of the releases since the paid reading last changed
 _LOGGED = {}     # grant id -> the last outcome logged for it (log on change, not every tick)
 _STATE: dict = {'thread': None, 'last': None}
-EXHAUSTED_TTL = 60 * 60   # stock Hermes' longest credential-wide bench without a provider reset time (429/billing)
-EXHAUSTED_TTL_401 = 5 * 60
+EXHAUSTED_TTL = 60 * 60   # stock Hermes' credential-wide bench lengths (agent/credential_pool.py), for when
+EXHAUSTED_TTL_401 = 5 * 60   # Hermes is not importable
+EXHAUSTED_TTL_SOLE = 60
 log = logging.getLogger('wizard_os.claude_cooldown_recovery')
 WHY = {
     'short_cooldown': 'a short provider throttle; it lifts on its own',
@@ -166,20 +168,44 @@ def _when(value):
     return None
 
 
-def _benched(row, now):
-    """A credential-wide bench that is still running. A model cooldown keeps stock Hermes from ever selecting the
-    row, so it never clears an `exhausted` status whose bench ended: that status is history, not a bench."""
+def _ttl(code, reason, sole):
+    """Stock Hermes' credential-wide bench length (`_exhausted_ttl`); mirrored when Hermes is not importable."""
+    try:
+        from agent.credential_pool import _exhausted_ttl
+        return _exhausted_ttl(code, sole_credential=sole, failure_reason=reason)
+    except Exception:
+        pass
+    if code == 401:
+        return EXHAUSTED_TTL_401
+    if reason == 'billing_unverified' and code != 402:
+        return min(EXHAUSTED_TTL, EXHAUSTED_TTL_SOLE)
+    if code == 402 or reason == 'billing':
+        return EXHAUSTED_TTL
+    return min(EXHAUSTED_TTL, EXHAUSTED_TTL_SOLE) if sole else EXHAUSTED_TTL
+
+
+def _benched(row, now, sole=False):
+    """Whether the sign-in itself is benched (auth, billing, dead), which this module never touches.
+
+    Stock Hermes records a capped-window 429 twice: the model cooldown and a credential-wide `exhausted` status
+    (code 429, no billing reason, no reset time). That status is the same refusal, not a separate bench: decide()
+    still requires the cooldown to end at a used-up window's reset and extra usage to be funded, and a fresh
+    throttle leaves only a short model cooldown, which is never released. A model cooldown also keeps stock Hermes
+    from ever selecting the row, so it never clears an `exhausted` status whose bench ended: that is history."""
     status = row.get('last_status')
     if status in (None, 'ok'):
         return False
     if status != 'exhausted':
         return True   # dead or anything unknown: never touched
+    code, reason = row.get('last_error_code'), row.get('failure_reason')
+    if code == 429 and reason not in ('billing', 'billing_unverified'):
+        return False
     until = _when(row.get('last_error_reset_at'))
     if until is None:
         at = _when(row.get('last_status_at'))
         if at is None:
             return True
-        until = at + (EXHAUSTED_TTL_401 if row.get('last_error_code') == 401 else EXHAUSTED_TTL)
+        until = at + _ttl(code, reason, sole)
     return until > now
 
 
@@ -190,12 +216,12 @@ def _active(row, now):
     return {m: u for m, u in values.items() if isinstance(m, str) and _finite(u) and u > now}
 
 
-def decide(row, payload, balance, now):
+def decide(row, payload, balance, now, sole=False):
     """Pure: 'release' or the reason a grant's cooldowns stay. Never reads or writes anything."""
     cooldowns = _active(row, now)
     if not cooldowns:
         return 'no_cooldown'
-    if _benched(row, now):
+    if _benched(row, now, sole):
         return 'credential_benched'   # auth/billing/dead: not a model window
     if min(cooldowns.values()) - now < MIN_LEFT:
         return 'short_cooldown'       # a fresh throttle lifts on its own
@@ -244,7 +270,9 @@ def recover(read=None, reset=None, get=None, renew=None, now=time.time, clock=ti
     t = now()
     report = []
     seen = set()
-    for token, group in _groups(read('anthropic') or []).items():
+    rows = read('anthropic') or []
+    sole = sum(1 for x in rows if isinstance(x, dict) and x.get('last_status') != 'dead') <= 1
+    for token, group in _groups(rows).items():
         cooled = [r for r in group if _active(r, t)]
         if not cooled:
             continue
@@ -256,7 +284,7 @@ def recover(read=None, reset=None, get=None, renew=None, now=time.time, clock=ti
             _note(cid, 'short_cooldown', models)
             report.append({'outcome': 'short_cooldown', 'models': models})
             continue
-        if any(_benched(r, t) for r in cooled):
+        if any(_benched(r, t, sole) for r in cooled):
             _note(cid, 'credential_benched', models)
             report.append({'outcome': 'credential_benched', 'models': models})
             continue
@@ -299,7 +327,7 @@ def recover(read=None, reset=None, get=None, renew=None, now=time.time, clock=ti
         balance = credit_balance(token, get) if paid is not None and paid[0] else None
         outcome = 'release'
         for r in cooled:
-            outcome = decide(r, payload, balance, t)
+            outcome = decide(r, payload, balance, t, sole)
             if outcome != 'release':
                 break
         signature = (paid, balance)
