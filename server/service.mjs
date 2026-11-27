@@ -58,6 +58,7 @@ import { dayOf, mintDailyThreadId, dailyTitle, openerOf, dailyRunNote, validDay,
 import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigration } from './channel-spaces.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
 import { createChannelsSwitch, channelOn, channelPart, CHAT_TAGS_SWITCH } from './channels-switch.mjs'
+import { REPLY_BUTTONS_SWITCH, replyButtonsNote } from './reply-buttons.mjs'
 import { createCapabilities } from './capabilities.mjs'
 // wizard-ux issue 1437: the shell app whose skill is the generated interface manual, and the switch that lets it in.
 const INTERFACE_MANUAL_SWITCH = 'wizard/interface-manual'
@@ -3165,6 +3166,10 @@ function buildWizardServer(options, lifetime) {
   // generated kernel index line and the routed run note.
   const interfaceManualSwitchOn = createChannelsSwitch({ id: INTERFACE_MANUAL_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.interfaceManualTtlMs ?? 3000 })
   const interfaceManualOn = () => channelPart(options.interfaceManual, interfaceManualSwitchOn)
+  // Reply buttons (wizard-ux issue 1889, reply-buttons.mjs): while the owner's switch is on, every main and routed run
+  // is told how to write tap-to-answer buttons and what a taps message means. `options.replyButtons` forces it (tests).
+  const replyButtonsSwitchOn = createChannelsSwitch({ id: REPLY_BUTTONS_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.replyButtonsTtlMs ?? 3000 })
+  const buttonsNote = () => replyButtonsNote(() => channelPart(options.replyButtons, replyButtonsSwitchOn))
   const capabilities = createCapabilities({
     apps: (agentId) => bridge?.apps(agentId) || [],
     allApps: () => bridge?.apps() || [],
@@ -3558,7 +3563,7 @@ function buildWizardServer(options, lifetime) {
   const heavyNotices = (agentId, sessionId) => heavyWork?.queue.noticeContext(agentId, sessionId) || ''
   const acknowledgeHeavyNotices = (agentId, sessionId, body) => heavyWork?.queue.acknowledgeNotices(agentId, sessionId, body)
   const routedPresentation = agents ? createRoutedPresentation({ registry: agents, subjects: new SubjectCatalog(options.subjectsPath || ''), spaces: spaceFiling,
-    heavyStatus, heavyNotices, trackerNote: (agentId, id) => [trackerNote(agentId, id), dailyNote(agentId, id), capabilities.runNote(agentId), firstChatNote()].filter(Boolean).join('\n') }) : null
+    heavyStatus, heavyNotices, trackerNote: (agentId, id) => [trackerNote(agentId, id), dailyNote(agentId, id), capabilities.runNote(agentId), firstChatNote(), buttonsNote()].filter(Boolean).join('\n') }) : null
   const dismissedFailureStore = new DismissedFailureStore(options.dismissedFailureStatePath ? resolve(String(options.dismissedFailureStatePath)) : '')
   const providerFailureDismissed = record => dismissedFailureStore.isDismissedAfter(record.sessionId, record.createdAt * 1000, record.agent_id)
     || dismissedFailureStore.isDismissed(record.sessionId, record.publicRunId, record.agent_id)
@@ -5742,8 +5747,8 @@ function buildWizardServer(options, lifetime) {
   // Appended to every direct run: the thread's current title and the owner's subject list.
   const runTitleNote = (sessionId) => {
     const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes')].filter(Boolean).join('\n')
-    if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote, trackerNote('hermes', ''), firstChatNote()].filter(Boolean).join('\n')
-    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId), dailyNote('hermes', sessionId), sweepRunNote(sessionId), catchUpRunNote(sessionId), dumpRunNote(sessionId), firstChatNote()].filter(Boolean).join('\n')
+    if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote, trackerNote('hermes', ''), firstChatNote(), buttonsNote()].filter(Boolean).join('\n')
+    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId), dailyNote('hermes', sessionId), sweepRunNote(sessionId), catchUpRunNote(sessionId), dumpRunNote(sessionId), firstChatNote(), buttonsNote()].filter(Boolean).join('\n')
   }
   const patchHermesTitle = async (sessionId, title, { exact = false, datedAt = null } = {}) => {
     // A title another thread holds is dated, never numbered (James, 8 Nov: no #N). An exact patch never is.

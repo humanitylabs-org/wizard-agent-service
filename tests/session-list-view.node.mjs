@@ -101,3 +101,20 @@ test('list rows keep the chat source (telegram, slack); a row without one has no
   assert.equal(listRow({ id: 'tg', source: 'slack', status: 'failed' }).source, 'slack');
   assert.equal('source' in listRow({ id: 'plain' }), false);
 });
+// Reply buttons (wizard-ux issue 1889, switch wizard/reply-buttons): a reply's [WIZARD_BUTTONS_V1] group previews as
+// its labels in brackets, and the owner's taps message as its "Tapped …" line, never the JSON, for every kind.
+test('reply buttons and taps preview as plain words, main and routed (host-profile, container, restricted)', () => {
+  const group = '[WIZARD_BUTTONS_V1]{"group":"Ship desks","buttons":[{"id":"go","label":"Go for it"},{"id":"drop","label":"Drop this"}]}[/WIZARD_BUTTONS_V1]'
+  const taps = 'Tapped Done · Workout\n[WIZARD_TAPS_V1]{"taps":[{"thread":"t","message":"41","group":"Workout","button":"done","label":"Done"}]}[/WIZARD_TAPS_V1]'
+  for (const kind of ['main', 'host-profile', 'container', 'restricted']) {
+    const agent = kind === 'main' ? '' : `qa-${kind}`
+    const base = { id: `buttons-${kind}`, title: 'Synthetic', status: 'completed', ...(agent ? { agent } : {}), wizard_last_user_at: 1700000000 }
+    const reply = listRow({ ...base, latest_message: { role: 'assistant', content: `Ship desks?\n${group}`, timestamp: 1700000100 } })
+    assert.equal(reply.agent, agent, kind)
+    assert.equal(reply.preview, 'Ship desks? [Go for it] [Drop this]', kind)
+    assert.equal(listRow({ ...base, latest_message: { role: 'assistant', content: `Ship desks?\n${group.slice(0, 40)}`, timestamp: 1700000100 } }).preview, 'Ship desks?', `${kind}: cut off`)
+    const tapped = listRow({ ...base, latest_message: { role: 'user', content: taps, timestamp: 1700000200 } })
+    assert.equal(tapped.preview, 'Tapped Done · Workout', kind)
+    assert.equal(normalizeFull({ ...base, latest_message: { role: 'user', content: taps } }).preview, tapped.preview, `${kind} full = slim`)
+  }
+})
