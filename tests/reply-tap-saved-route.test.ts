@@ -31,4 +31,26 @@ describe('the single-thread read names the thread\'s saved provider', () => {
       expect(row.wizard_model_lock_updated_at).toBeUndefined()
     } finally { await s.close() }
   }, 30_000)
+  // A reply the phone could not name a route for goes with none (wizard-ux issue 1973): the thread's model lock runs it,
+  // and a thread with no saved route at all fails in words that say what to do.
+  it('a send with no route runs on the saved lock; with no lock it says what to do', async () => {
+    const s: any = await scene('main', { fixtureSelectorLock: true })
+    try {
+      const sends = () => s.seen.filter((x: any) => x.method === 'POST' && /\/chat\/stream$/.test(x.path))
+      const id = 'wizard_routeless_1973'
+      expect((await s.request('/api/sessions', post({ id, source: 'cron' }))).status).toBe(201)
+      expect((await s.request(`/api/sessions/${id}/model`, post({ model: 'claude-sonnet-5-5', provider: 'anthropic' }))).status).toBe(200)
+      expect((await s.request('/v1/runs', post({ session_id: id, input: 'Tapped Done · Read', require_model_lock: true }))).status).toBe(202)
+      const until = Date.now() + 5000
+      while (!sends().some((x: any) => x.path.includes(id)) && Date.now() < until) await new Promise(r => setTimeout(r, 50))
+      expect(sends().find((x: any) => x.path.includes(id))?.body).toMatchObject({ model: 'claude-sonnet-5-5', provider: 'anthropic' })
+      const none = 'wizard_no_lock_1973'
+      expect((await s.request('/api/sessions', post({ id: none, source: 'cron' }))).status).toBe(201)
+      const r = await s.request('/v1/runs', post({ session_id: none, input: 'Tapped Done · Read', require_model_lock: true }))
+      const run = await r.json()
+      expect(run.status).toBe('failed')
+      expect(run.safe_error).toBe('Couldn’t tell which AI runs this chat · tap the model name, pick one, then Retry')
+      expect(sends().some((x: any) => x.path.includes(none))).toBe(false)
+    } finally { await s.close() }
+  }, 30_000)
 })
