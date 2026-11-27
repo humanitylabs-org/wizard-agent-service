@@ -60,8 +60,7 @@ import { createSpaceFiling } from './thread-spaces.mjs'
 import { createChannelsSwitch, channelOn, channelPart, CHAT_TAGS_SWITCH } from './channels-switch.mjs'
 import { REPLY_BUTTONS_SWITCH, replyButtonsNote } from './reply-buttons.mjs'
 import { createCapabilities } from './capabilities.mjs'
-// wizard-ux issue 1437: the shell app whose skill is the generated interface manual, and the switch that lets it in.
-const INTERFACE_MANUAL_SWITCH = 'wizard/interface-manual'
+// wizard-ux issue 1437: the shell app whose skill is the generated interface manual (on for everyone).
 // Command approvals for container agents (issue 597): approvals block in each container agent's config.yaml, a
 // per-agent setting in the Agents app, and approval prompts that show when they close.
 export const AGENT_APPROVALS_SWITCH = 'wizard/agent-approvals'
@@ -3164,8 +3163,8 @@ function buildWizardServer(options, lifetime) {
   const builtinTools = (agentId) => [...(catchUpTools(agentId)?.list() || []), ...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(reachOut?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId), ...(transcribeTools?.list(agentId) || [])]
   // System capability registry (issue 463, capabilities.mjs), on for everyone: the wizard_capabilities tool, the
   // generated kernel index line and the routed run note.
-  const interfaceManualSwitchOn = createChannelsSwitch({ id: INTERFACE_MANUAL_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.interfaceManualTtlMs ?? 3000 })
-  const interfaceManualOn = () => channelPart(options.interfaceManual, interfaceManualSwitchOn)
+  // The shell's interface manual (wizard-ux issue 1437) is on for everyone; WIZARD_INTERFACE_MANUAL=0 keeps it out.
+  const interfaceManualOn = () => options.interfaceManual !== false
   // Reply buttons (wizard-ux issue 1889, reply-buttons.mjs): while the owner's switch is on, every main and routed run
   // is told how to write tap-to-answer buttons and what a taps message means. `options.replyButtons` forces it (tests).
   const replyButtonsSwitchOn = createChannelsSwitch({ id: REPLY_BUTTONS_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.replyButtonsTtlMs ?? 3000 })
@@ -3199,19 +3198,6 @@ function buildWizardServer(options, lifetime) {
     })
     : null
   if (bridge) lifetime.own(() => bridge.close())
-  // The shell's interface manual (wizard-ux issue 1437): the wizard-ux app's skill reaches the agent only while the
-  // owner's `wizard/interface-manual` switch is on (option interfaceManual, env WIZARD_INTERFACE_MANUAL '1'/'0',
-  // wins). Off = the agent's skills are what they were; turning it off removes the copy again.
-  if (bridge) {
-    // undefined: the first tick always syncs (the Look file is only readable once Pages starts, below).
-    let manualWas
-    const manualWatch = setInterval(() => {
-      const now = interfaceManualOn()
-      if (now !== manualWas) { manualWas = now; bridge.skillsChanged() }
-    }, options.interfaceManualWatchMs ?? 3000)
-    manualWatch.unref?.()
-    lifetime.own(() => clearInterval(manualWatch))
-  }
   const threadApps = bridge ? new ThreadAppSnapshots(options.threadAppsStatePath ? resolve(String(options.threadAppsStatePath)) : '') : null
   // The status ask's length from the owner's short-answer setting (140 unless the reply-summary view set one).
   const askMaxNow = () => askMaxFor(readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')))
