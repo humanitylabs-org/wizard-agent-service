@@ -802,6 +802,12 @@ function visibleInputText(input) {
   }).filter(Boolean).join('\n')
 }
 
+// The owner's own words in a turn, without the Service's marker blocks (a spoken turn carries its recording as a
+// [WIZARD_FILES_V1] block, issue 668): what a phrase test such as "catch me up" must read.
+function ownerWords(input) {
+  return visibleInputText(input).replace(/\[(WIZARD_[A-Z0-9_]+_V1)\][\s\S]*?(?:\[\/\1\]|$)/gu, ' ').trim()
+}
+
 function projectOperatorMessages(result, completions = [], records = []) {
   try {
     const payload = JSON.parse(result.toString('utf8'))
@@ -4663,7 +4669,7 @@ function buildWizardServer(options, lifetime) {
   const noteSweepRequest = (sessionId, body, principal, request, { ownerSweep = false } = {}) => {
     if (!sessionId || !agentInboxOn()) return null
     let text = ''
-    try { text = visibleInputText(parseJsonBody(body).input) } catch { return null }
+    try { text = ownerWords(parseJsonBody(body).input) } catch { return null }
     const scheduled = principal?.kind === 'service' && typeof request.headers['x-wizard-schedule-kind'] === 'string' && isScheduledSweep(text)
     // Issue 668: on the main agent the owner's own "signal sweep" is the catch-up's alias, so only a scheduled one is a card.
     if (!scheduled && !(ownerSweep && principal?.kind === 'owner' && isSweepPhrase(text))) return null
@@ -4689,7 +4695,7 @@ function buildWizardServer(options, lifetime) {
   const catchUpForTurn = async (sessionId, body) => {
     if (!sessionId) return false
     let text = ''
-    try { text = visibleInputText(parseJsonBody(body).input) } catch { return false }
+    try { text = ownerWords(parseJsonBody(body).input) } catch { return false }
     if (!startsCatchUp(text.trim())) return false
     let note = ''
     try { note = (await catchUp.compose({ threadId: sessionId })).note }
@@ -9460,7 +9466,7 @@ function buildWizardServer(options, lifetime) {
           // Issue 668: the owner's "catch me up" is built here; any other owner turn may answer the last one.
           const ownerDirect = queuedAdmission.runtime === 'direct' && principal.kind === 'owner' && !queuedAdmission.continuation
           const catchUpAsked = ownerDirect ? await catchUpForTurn(queuedAdmission.sessionId, body) : false
-          if (ownerDirect && !catchUpAsked) { try { catchUp.ownerTurn(queuedAdmission.sessionId, visibleInputText(parseJsonBody(body).input)) } catch { /* not an answer */ } }
+          if (ownerDirect && !catchUpAsked) { try { catchUp.ownerTurn(queuedAdmission.sessionId, ownerWords(parseJsonBody(body).input)) } catch { /* not an answer */ } }
           // Issue 1808: any later owner turn in the thread is a reply row, written before the turn is admitted.
           const replyRow = queuedAdmission.runtime === 'direct' && principal.kind === 'owner' && !queuedAdmission.continuation && !firstOwnerTurn && agentInboxOn()
             ? sentReply(queuedAdmission.sessionId, body.toString('utf8'), queuedAdmission.idempotencyKey, audioPaths.length > 0) : null
