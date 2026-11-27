@@ -371,6 +371,7 @@ export function createChannelStore(path, { now = () => new Date().toISOString() 
       if (r.agent !== who) return 'another agent\u2019s channel'
       if (r.archived) return 'channel archived'
       if (r.kind === 'alerts') return 'Alerts is filed by the Service'
+      if (r.kind === 'daily') return 'Daily holds one chat per day'
       if (st.removed.get(who, sessionId, r.id)) return 'the owner removed this tag'
       const member = st.member.get(who, sessionId)
       if (!member && st.tombstoned.get(who, sessionId)) return 'the owner took this chat out of every channel'

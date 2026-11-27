@@ -66,6 +66,10 @@ describe('covers in the channel store', () => {
     expect(s.learnCover(c.id, 'clips', true)).toBe(false) // the owner's own list wins over a removal
     expect(s.learnCover(c.id, 'Hermes', true)).toBe(true)
     expect(s.covers(c.id).not).toEqual(['Hermes'])
+    // Alerts and Daily never take a tag from here (Daily keeps one chat per day).
+    s.seedDaily(); s.seedAlerts()
+    expect(s.tagRefusal('hermes', 'wizard_1795700000001_aaaaaaaaaaaa', 'daily')).toBe('Daily holds one chat per day')
+    expect(s.tagRefusal('hermes', 'wizard_1795700000001_aaaaaaaaaaaa', 'alerts')).toBe('Alerts is filed by the Service')
     expect(channelRequest(s, 'GET', 'covers', new URLSearchParams({ id: c.id }), null).covers).toEqual(['clips', 'kind: report'])
     expect(channelRequest(s, 'PUT', 'covers', new URLSearchParams(), { id: c.id, covers: ['podcast'] }).covers).toEqual(['podcast'])
     expect(() => channelRequest(s, 'PUT', 'covers', new URLSearchParams(), { id: c.id, covers: [], extra: 1 })).toThrow('invalid_request')
@@ -223,7 +227,7 @@ describe('reading recent chats for the passes', () => {
     db.prepare('INSERT INTO messages(session_id,role,content,timestamp) VALUES(?,?,?,?)').run(id(1), 'assistant', `done\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'done', ask: 'x', subject: 'Content' })}[/WIZARD_STATUS_V1]`, now - 50)
     db.close()
     expect(readRecentChats(path, now - 7 * 86400)).toEqual([{ id: id(1), title: 'Clips roundup', source: 'wizard-mobile', parent_session_id: null, subject: 'Content', app_id: '' }])
-    expect(readRecentChats(join(dir, 'missing.db'), 0)).toEqual([])
+    expect(readRecentChats(join(dir, 'missing.db'), 0)).toBeNull()
   })
 })
 

@@ -2047,6 +2047,14 @@ export const serverChecks = {
     const refused = await s.request(`/api/sessions/${factCheck}`, { ...post({ tags: [content.id] }), method: 'PATCH' })
     assert.equal(refused.status, 409, `${s.kind}: the agent's route refuses a removed tag`)
     assert.equal((await refused.json()).refused[0].reason, 'the owner removed this tag')
+    // A refusal is the answer even with other fields in the same PATCH (they are not sent on as if it worked).
+    const mixed = await s.request(`/api/sessions/${factCheck}`, { ...post({ tags: [content.id], title: 'Synthetic renamed by a refused PATCH' }), method: 'PATCH' })
+    assert.equal(mixed.status, 409, `${s.kind}: a refused tag with a title is still refused`)
+    assert.notEqual(s.sessions.get(factCheck).title, 'Synthetic renamed by a refused PATCH', `${s.kind}: the title went nowhere`)
+    // A deleted or mistyped chat id gets a 404 and no tag row.
+    const ghost = 'wizard_1795700000099_aaaaaaaaaaaa'
+    assert.equal((await s.request(`/api/sessions/${ghost}`, { ...post({ tags: [reports.id] }), method: 'PATCH' })).status, 404, `${s.kind}: no tags on a chat that does not exist`)
+    assert.deepEqual(await tagsOf(ghost), [], `${s.kind}: no ghost tag row`)
     // The agent's add-tag route works on an untagged chat, by name too.
     await chat(other, 'Synthetic garden fence', 'Paint the synthetic fence', { subject: 'Home' })
     assert.deepEqual(await tagsOf(other), [], `${s.kind}: nothing fits the fence chat`)

@@ -3542,6 +3542,8 @@ function buildWizardServer(options, lifetime) {
     if (backfilled && channelStore.marker('auto_tags_nightly') === today) return null
     const days = backfilled ? 7 : 30
     let rows = readRecentChats(hermesStatePath, nowMs / 1000 - days * 86400)
+    // Unreadable (missing, locked): try again on the next tick; neither pass counts as done.
+    if (rows === null) return null
     // The nightly pass looks only at chats with no tag at all; the backfill at every chat of the window.
     if (backfilled) rows = rows.filter(r => !channelStore.tagsOf(MAIN_AGENT_ID, r.id).length)
     const firsts = rows.length ? readHermesFirstRequests(hermesStatePath, rows.map(r => r.id), { max: 400 }) : new Map()
@@ -3552,7 +3554,19 @@ function buildWizardServer(options, lifetime) {
   }
   // PATCH .../sessions/<id> {tags} -> {status, body}: 200 when a tag was added or was already there, 409 when every one was
   // refused (each with its reason), 400 for a bad list.
-  const autoTagsAnswer = (agent, thread, tags) => {
+  // The chat must exist on that agent first: a deleted or mistyped id gets Hermes' own 404, never a tag row.
+  const autoTagsAnswer = async (agent, thread, tags) => {
+    if (!Array.isArray(tags) || !tags.length || tags.length > 10) return { status: 400, body: { error: 'invalid_tags' } }
+    let known = false
+    try {
+      if (agentCtx) known = await agentCtx.sessionExists(agent, thread)
+      else {
+        const reply = await fetchImpl(`${upstreamOrigin}/api/sessions/${encodeURIComponent(thread)}`, { headers: hermesKey ? { Authorization: ['Bearer', hermesKey].join(' ') } : {}, redirect: 'error', signal: AbortSignal.timeout(4000) })
+        await reply.body?.cancel().catch(() => undefined)
+        known = reply.ok
+      }
+    } catch { return { status: 503, body: { error: 'agent_unavailable' } } }
+    if (!known) return { status: 404, body: { error: 'not_found' } }
     try {
       const tagged = autoTagger.agentTags(agent, thread, tags)
       return { status: tagged.added.length || !tagged.refused.length ? 200 : 409, body: tagged }
@@ -9436,7 +9450,7 @@ function buildWizardServer(options, lifetime) {
           let requested = null
           try { requested = JSON.parse(body.toString('utf8')) } catch { requested = null }
           if (requested && typeof requested === 'object' && !Array.isArray(requested) && Object.hasOwn(requested, 'tags')) {
-            const tagged = autoTagsAnswer(MAIN_AGENT_ID, decodeURIComponent(tagsPatchId), requested.tags)
+            const tagged = await autoTagsAnswer(MAIN_AGENT_ID, decodeURIComponent(tagsPatchId), requested.tags)
             const { tags: _tags, ...rest } = requested
             if (tagged.status !== 200 || !Object.keys(rest).length) { sendJson(response, tagged.status, tagged.body, { 'Cache-Control': 'no-store' }); return }
             body = Buffer.from(JSON.stringify(rest))

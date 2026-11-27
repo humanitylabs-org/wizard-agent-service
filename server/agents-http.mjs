@@ -763,10 +763,11 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
   // Issue 702 (auto tags on): the agent's add-tag route, as on the main agent's path. `tags` never reaches Hermes.
   const tagsPatchId = method === 'PATCH' && value && Object.hasOwn(value, 'tags') ? upstreamPath.match(/^\/api\/sessions\/([^/]+)$/u)?.[1] : undefined
   if (tagsPatchId && typeof ctx.autoTagsPatch === 'function') {
-    const tagged = ctx.autoTagsPatch(agent.id, decodeURIComponent(tagsPatchId), value.tags)
+    const tagged = await ctx.autoTagsPatch(agent.id, decodeURIComponent(tagsPatchId), value.tags)
     if (tagged) {
       const { tags: _tags, ...rest } = value
-      if (!Object.keys(rest).length) { sendJson(response, tagged.status, tagged.body); return }
+      // A refused, invalid or unknown-chat answer is the answer: the other fields are not sent on as if it worked.
+      if (tagged.status !== 200 || !Object.keys(rest).length) { sendJson(response, tagged.status, tagged.body); return }
       value = rest
     }
   }

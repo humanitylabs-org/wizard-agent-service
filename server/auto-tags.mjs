@@ -394,10 +394,11 @@ export function createAutoTagger({ store = () => null, on = () => false, schedul
 /**
  * The main agent's visible chats active since `sinceSeconds`, read-only from its Hermes state.db, for the nightly pass
  * and the backfill: [{id, title, source, parent_session_id, subject, app_id}] newest first. The first owner message is
- * added by the caller (session-truth readHermesFirstRequests). [] when the file is missing or unreadable.
+ * added by the caller (session-truth readHermesFirstRequests). null when the file is missing or unreadable, so a pass
+ * that could not read never counts as done.
  */
 export function readRecentChats(path, sinceSeconds, { limit = 2000 } = {}) {
-  if (!path || !existsSync(path)) return []
+  if (!path || !existsSync(path)) return null
   let db
   try {
     db = new DatabaseSync(path, { readOnly: true })
@@ -411,5 +412,5 @@ export function readRecentChats(path, sinceSeconds, { limit = 2000 } = {}) {
       try { status = parseStatus(String(last.get(r.id)?.content || '')) } catch { status = null }
       return { id: r.id, title: String(r.title || ''), source: String(r.source || ''), parent_session_id: r.parent_session_id || null, subject: status?.subject || '', app_id: status?.app_id || '' }
     })
-  } catch { return [] } finally { try { db?.close() } catch { /* read-only */ } }
+  } catch { return null } finally { try { db?.close() } catch { /* read-only */ } }
 }
