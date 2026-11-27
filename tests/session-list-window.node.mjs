@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {selectWindow,archiveCandidate,createListWindows,slimRow} from '../server/session-list-window.mjs';
+import {selectWindow,archiveCandidate,createListWindows,slimRow,cardTime,newestFirst} from '../server/session-list-window.mjs';
 import {normalizeFull} from '../server/session-list-view.mjs';
 const now=1800000000000, old=now/1000-20*86400;
 const rows=Array.from({length:130},(_,i)=>({id:`s${i}`,title:`Synthetic ${i}`,source:'wizard-mobile',last_active:old-i,archived:i%2===0,wizard_request_preview:'original '.repeat(50)+(i===129?'needle-beyond-window':''),latest_message:{role:'assistant',content:'reply '.repeat(50),timestamp:old-i}}));
@@ -67,4 +67,16 @@ test('the owner\'s Auto-archive choice decides which aged threads leave the list
  let days=7; const page=createListWindows({now:()=>now,archiveDays:()=>days}),params=new URLSearchParams({window:'archive-50',view:'list',limit:'100'});
  assert.equal((await page({params,scope:'main',load:async()=>rows})).archive_total,130);
  days=0; assert.equal((await page({params,scope:'main',load:async()=>rows})).archive_total,65);
+});
+test('wizard-ux#1994: a running helper row with no request clock is timed and sorted by its latest activity',()=>{
+ const iso=t=>new Date(t).toISOString(), H=3600e3;
+ const helper={id:'helper',title:'Helper follow-through',status:'running',previewAt:iso(now-0.2*H),previewRole:'assistant',activityAt:iso(now-0.2*H),lastUserAt:null,assignedAt:null,requestAt:null,updatedAt:iso(now-7*24*H)};
+ const older=(id,h)=>({id,title:'Older '+id,status:null,previewAt:iso(now-h*H),updatedAt:iso(now-h*H)});
+ assert.equal(cardTime(helper),helper.previewAt);
+ assert.equal(cardTime({...helper,previewAt:null}),helper.activityAt);
+ assert.deepEqual([older('o12',12),helper,older('o2',2)].sort(newestFirst).map(s=>s.id),['helper','o2','o12']);
+ assert.equal(cardTime({...helper,assignedAt:iso(now-3*H)}),iso(now-3*H),'a request clock still wins for working rows');
+ assert.equal(cardTime({status:'failed',requestAt:iso(now-5*H),previewAt:iso(now-H)}),iso(now-5*H));
+ for(const status of [null,'completed','submitting','queued','running','stopping','waiting_for_approval','unknown','failed','interrupted'])
+  for(const k of ['previewAt','activityAt']) assert.notEqual(cardTime({status,[k]:iso(now-H)}),'',`${status} with only ${k}`);
 });

@@ -80,6 +80,16 @@
       "policy_exemptions": []
     },
     {
+      "id": "chats-helper-row-time",
+      "description": "wizard-ux issue 1994: a thread whose newest turn is a helper result with no owner message since (listed running, waiting on the helper, with no assigned, request or owner clock) still has a list time: its latest activity. Its Chats row shows a time and sorts by it among the other rows; a working row with a request clock keeps that clock.",
+      "layer": "server",
+      "fixture": "chats-helper-row-time",
+      "how_to_test": "For main, host-profile, container and restricted: make the parity thread visible with an earlier assistant answer and then an [ASYNC DELEGATION BATCH COMPLETE] machine turn, add an older plain thread, then read /api/sessions?view=list, ?view=list&window=archive-50 and the slim window: the helper row has a valid time (cardTime) and the window lists it above the older thread. On main the row is listed running, waiting on the helper, with no lastUserAt, assignedAt or requestAt (the reported state; it fails without the fix). Routed kinds list the same thread without the helper projection, so their row is timed by its preview as before. tests/session-list-window.node.mjs covers cardTime and newestFirst directly. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": ["server/session-list-window.mjs"],
+      "reference_tests": ["tests/session-list-window.node.mjs", "qa/agent-parity/server-checks.mjs"],
+      "policy_exemptions": []
+    },
+    {
       "id": "chat-after-reset-list",
       "description": "Issue 612: after a /new (or /reset) in Telegram, stock Hermes starts a new session whose parent_session_id is the old one (ended session_reset). That new conversation is its own chat: it lists in Chats next to the old one and opens with its own messages; a child of a session that did not end at a conversation boundary (a sub-agent run) stays out.",
       "layer": "server",

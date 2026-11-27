@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { cardTime } from '../../server/session-list-window.mjs'
 import assert from 'node:assert/strict'
 import { parse as parseYaml } from 'yaml'
 import { TITLE_INSTRUCTIONS } from '../../server/thread-titles.mjs'
@@ -133,6 +134,36 @@ export const serverChecks = {
       }
       assert.ok(item, `the pinned chat lists (${query})`)
       assert.equal(item.hermesPinned, true, `the list row keeps Hermes' pin (${query})`)
+    }
+  },
+  // wizard-ux issue 1994: a thread whose newest turn is a helper result with no owner message since (the Service
+  // lists it running, waiting on the helper, with no request clock) still has a list time: its latest activity.
+  'chats-helper-row-time': async s => {
+    const row = s.sessions.get('wizard_parity'), at = Date.now() / 1000 - 60
+    row.hidden = false
+    row.messages.splice(0, row.messages.length, { role: 'assistant', timestamp: at - 600, content: 'Synthetic earlier answer' },
+      { role: 'user', timestamp: at, content: '[ASYNC DELEGATION BATCH COMPLETE — deleg_parity_time]\nInternal worker transcript', display_kind: 'async_delegation_complete' })
+    // An older plain thread the helper row must sort above.
+    s.sessions.set('wizard_parity_older', { id: 'wizard_parity_older', source: 'wizard-mobile', title: 'Parity older', created_at: at - 7200, hidden: false,
+      messages: [{ role: 'user', timestamp: at - 7200, content: 'Synthetic older question' }, { role: 'assistant', timestamp: at - 7190, content: 'Synthetic older answer' }] })
+    for (const query of ['?view=list&window=archive-50&limit=100', '?view=list&window=archive-50&fields=slim&limit=100', '?view=list&limit=100']) {
+      let data = [], item
+      for (let n = 0; n < 80; n++) {
+        if (s.kind === 'main') await (await s.request('/api/sessions?limit=100')).json()
+        const r = await s.request('/api/sessions' + query); assert.equal(r.status, 200)
+        data = (await r.json()).data; item = data.find(x => x.id === 'wizard_parity')
+        if (item && data.some(x => x.id === 'wizard_parity_older') && (s.kind !== 'main' || item.status === 'running' || 'cardTime' in item)) break
+        await new Promise(done => setTimeout(done, 25))
+      }
+      assert.ok(item, `${s.kind}: the helper thread lists (${query})`)
+      if (s.kind === 'main' && !('cardTime' in item)) {
+        // The reported state: running, waiting on the helper, no owner clock at all.
+        assert.equal(item.status, 'running', `${s.kind}: listed running (${query})`); assert.equal(item.waitingOn, 'helper')
+        for (const k of ['lastUserAt', 'assignedAt', 'requestAt']) assert.ok(!item[k], `${s.kind}: no ${k} (${query})`)
+      }
+      const t = 'cardTime' in item ? item.cardTime : cardTime(item)
+      assert.ok(Number.isFinite(Date.parse(t)), `${s.kind}: the row has a list time (${query})`)
+      if (query.includes('window=')) assert.ok(data.findIndex(x => x.id === 'wizard_parity') < data.findIndex(x => x.id === 'wizard_parity_older'), `${s.kind}: sorted above the older row (${query})`)
     }
   },
   // Issue 612: after a /new in Telegram, stock Hermes starts a new session whose parent_session_id is the
