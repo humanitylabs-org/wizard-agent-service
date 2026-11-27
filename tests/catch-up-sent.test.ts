@@ -14,9 +14,9 @@ beforeEach(() => { root = mkdtempSync(join(tmpdir(), 'wizard-catch-up-sent-case-
 afterEach(() => rmSync(root, { recursive: true, force: true }))
 
 const status = (state: string, ask = 'Synthetic decision') => `[WIZARD_STATUS_V1]${JSON.stringify({ state, ask })}[/WIZARD_STATUS_V1]`
-type Thread = { id: string, age: number, at?: number, title?: string, state?: string, reply?: string | null, working?: boolean, snoozed?: boolean, archived?: boolean, listed?: boolean }
+type Thread = { id: string, age: number, at?: number, said?: string | null, pinned?: boolean, title?: string, state?: string, reply?: string | null, working?: boolean, snoozed?: boolean, archived?: boolean, listed?: boolean }
 
-function box(threads: Thread[], { on = true } = {}) {
+function box(threads: Thread[], { on = true, smart = false } = {}) {
   const switchOn = { on }
   const archived: string[] = []
   const sessionReads: string[] = []
@@ -37,7 +37,8 @@ function box(threads: Thread[], { on = true } = {}) {
     archiveChat: async (id: string) => { archived.push(id); all.get(id)!.archived = true },
     sentOn: () => switchOn.on,
     readSent: async () => [...all.values()].map(t => ({ id: t.id, title: listedNow(t) ? t.title ?? `Chat ${t.id}` : `Synthetic ask ${t.id}`, at: at(t) * 1000,
-      listed: listedNow(t), archived: listedNow(t) && Boolean(t.archived), hidden: false, snoozed: Boolean(t.snoozed), working: Boolean(t.working) })),
+      listed: listedNow(t), archived: listedNow(t) && Boolean(t.archived), hidden: false, snoozed: Boolean(t.snoozed), working: Boolean(t.working),
+      ...(smart ? { smart, delivery: Boolean(t.pinned), last: t.said === null ? null : { state: 'done', text: t.said ?? `Please do: ${t.title ?? t.id}`, route: 'agent', rules_matched: ['typed'], at: (at(t) - 30) * 1000 } } : {}) })),
     readSession: async (id: string) => { sessionReads.push(id); const t = all.get(id); return t ? { id, title: t.title ?? `Chat ${id}`, archived: Boolean(t.archived), last_active: at(t) } : null },
     log: () => {},
   })
@@ -169,6 +170,28 @@ describe('catch me up clears Sent: edges', () => {
     const done = await b.clear({ sent: true })
     expect(b.archived).toEqual(['wizard_a'])
     for (const id of ['wizard_b', 'wizard_c', 'wizard_d']) expect(done.content[0].text).toContain(`${id} (changed since the catch-up`)
+  })
+})
+
+describe('catch me up clears Sent with Smart inbox on', () => {
+  it('a thread Inbox shows (an answer to his words) is not on the Sent line and is still listed on its own', async () => {
+    const b = box([
+      { id: 'wizard_answer_1d', age: 1 * DAY, title: 'Synthetic answer he asked for' },
+      { id: 'wizard_answer_8d', age: 8 * DAY },
+      { id: 'wizard_thanks', age: 2 * DAY, said: 'ok thanks 👍' },
+      { id: 'wizard_task', age: 3 * DAY },
+      { id: 'wizard_watch', age: 4 * DAY, said: null },
+      { id: 'wizard_pinned', age: 4 * DAY, said: null, pinned: true },
+      { id: 'wizard_old', age: 45 * DAY },
+    ], { smart: true })
+    const { note, sent } = await b.catchUp.compose({ threadId: 'wizard_cu1' })
+    expect(sent!.sort()).toEqual(['wizard_old', 'wizard_thanks', 'wizard_watch'])
+    expect(note).toContain('id wizard_answer_1d | "Synthetic answer he asked for" | finished, not archived')
+    expect(sentLine(note)).not.toContain('wizard_answer')
+    expect(sentLine(note)).not.toContain('wizard_pinned')
+    b.catchUp.ownerTurn('wizard_cu1', 'clear')
+    await b.clear({ sent: true })
+    expect(b.archived.sort()).toEqual(['wizard_old', 'wizard_thanks', 'wizard_watch'])
   })
 })
 

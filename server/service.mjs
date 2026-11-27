@@ -4780,16 +4780,19 @@ function buildWizardServer(options, lifetime) {
       if (!had || (Number(row.at) || 0) > had.at) fromSent.set(row.thread_id, { at: Number(row.at) || 0, newest: row })
     }
     const out = []
-    const thread = (id, sentAt, sendState, fallbackTitle) => {
+    const smart = smartInboxOn()
+    const thread = (id, sentAt, last, fallbackTitle) => {
       const row = listed.get(id)
       const snoozedAt = threadDispositionStore.deferredAt('direct', id)
       out.push({ id, title: row?.title || fallbackTitle, at: Math.max(sentAt, (Number(row?.last_active) || 0) * 1000), listed: Boolean(row),
         archived: row?.archived === true, hidden: row?.hidden === true, snoozed: snoozedAt > 0 && !(sentAt > snoozedAt),
-        working: sendState === 'routing' || sendState === 'running' || running(id) })
+        working: last?.state === 'routing' || last?.state === 'running' || running(id),
+        // Smart inbox: what the shell's Inbox rule reads (his newest send, and whether it is a delivery he set up).
+        ...(smart ? { smart, last, delivery: row?.source === 'cron' || /^cron_/u.test(id) || row?.pinned === true } : {}) })
     }
-    for (const [id, { at, newest }] of fromSent) thread(id, at, sentState(newest), String(newest.text || '').split('\n').find(line => line.trim())?.trim() || '')
+    for (const [id, { at, newest }] of fromSent) thread(id, at, sentView(newest), String(newest.text || '').split('\n').find(line => line.trim())?.trim() || '')
     // Smart inbox: Sent also holds every other thread Inbox doesn't (a watch, a schedule, one older than the log).
-    if (smartInboxOn()) for (const [id, row] of listed) if (!fromSent.has(id) && !row.pinned) thread(id, 0, '', row.title || '')
+    if (smart) for (const [id] of listed) if (!fromSent.has(id)) thread(id, 0, null, listed.get(id)?.title || '')
     return out
   }
   // Catch me up (issue 668): built before the turn is admitted (the queue may dispatch at once); its run note carries it.

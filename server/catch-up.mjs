@@ -116,6 +116,62 @@ const byNewest = (a, b) => (b.updated_at || 0) - (a.updated_at || 0) || String(a
 // Issue 710: a Sent thread is finished when the last word is the agent's and it waits on nothing from the owner.
 const finishedTurns = turns => Boolean(turns?.answered) && turns.status?.state !== 'needs_you' && turns.status?.state !== 'check'
 
+// Smart inbox on (wizard/smart-inbox): "not in Inbox" is the shell's own rule, mirrored here from the same facts (wizard-ux
+// web/core/chats-list-model.js smartPlace, issues 1883, 1927 and 1977): his newest Sent row (the Sent log's view of it)
+// and the last reply. A finished answer to his words is Inbox unless they wanted no answer, set a reminder that has not
+// fired, or went to the background or a command; a thread with no Sent row is Sent unless it is a delivery he set up
+// (a scheduled run or a pinned thread). The shell has no row for a thread past the chat listing, so that one is Sent.
+const TAPS = /\[WIZARD_TAPS_V1\]/u
+const SILENT = /^\s*\[SILENT\]/iu
+const REMIND = /\bremind me\b/iu
+const FIRED_AFTER_MS = 5 * 60_000
+const ASK_WORDS = /\b(?:answer me|tell me|let me know|get back to me|ping me|update me|keep me posted|what do you think)\b/iu
+const ACK_WORDS = ['thank you so much', 'thank you', 'thanks a lot', 'sounds good', 'no worries', 'all good', 'got it', 'very much', 'so much', 'a lot', 'ok', 'okay', 'k', 'kk', 'thanks', 'thank', 'thx', 'ty', 'cheers',
+  'great', 'perfect', 'nice', 'cool', 'awesome', 'good', 'np', 'lovely', 'brilliant', 'excellent', 'noted', 'ta', 'alright', 'many']
+const ACK_MARKS = /[\p{Extended_Pictographic}\u200d\ufe0f\u{1F3FB}-\u{1F3FF}!.,;:~-]/gu
+function ackOnly(text) {
+  let t = String(text || '').replace(ACK_MARKS, ' ').toLowerCase().split(/\s+/u).filter(Boolean).join(' ')
+  while (t) {
+    const w = ACK_WORDS.find(a => t === a || t.startsWith(`${a} `))
+    if (!w) return false
+    t = t.slice(w.length).trim()
+  }
+  return true
+}
+const firstRule = r => String((Array.isArray(r?.rules_matched) && r.rules_matched[0]) || '')
+const shouldReply = r => (typeof r?.corrected?.should_reply === 'boolean' ? r.corrected.should_reply : undefined)
+const noAnswer = r => {
+  if (!r || shouldReply(r) === false || /^no_reply:/u.test(firstRule(r))) return true
+  const t = String(r.text || '').trim()
+  return !t || TAPS.test(t) || ackOnly(t)
+}
+const askedForAnswer = r => {
+  if (!r || r.quiet === true) return false
+  if (shouldReply(r) !== undefined) return shouldReply(r)
+  const first = firstRule(r)
+  if (/^no_reply:/u.test(first)) return false
+  if (/^wants_reply:/u.test(first) || first === 'short_question' || first === 'question' || (r.route === 'thread' && first === 'voice')) return true
+  const t = String(r.text || '')
+  return t.includes('?') || ASK_WORDS.test(t)
+}
+const reminderSet = r => r?.route === 'reminder' || r?.would_route === 'reminder' || REMIND.test(String(r?.text || ''))
+/** Smart inbox: 'inbox' or 'sent' for a finished, listed thread. `last` is his newest Sent row (sent log view) or null,
+ *  `turns` the thread's lastTurns, `delivery` a scheduled run or a pinned thread. Pure. */
+export function smartPlace({ last = null, turns = null, delivery = false } = {}) {
+  if (last?.state === 'failed') return 'inbox'
+  if (last && ['done', 'needs_you'].includes(last.state) && !noAnswer(last) && askedForAnswer(last)) return 'inbox'
+  const readable = !SILENT.test(turns?.reply || '') && (!turns?.status || ['done', 'fyi'].includes(turns.status.state))
+  if (!readable) return 'sent'
+  if (!last) return delivery ? 'inbox' : 'sent'
+  if (last.state !== 'done' && last.state !== 'needs_you') return 'sent'
+  const after = (seconds(turns?.at) - seconds(last.at)) * 1000
+  if ((reminderSet(last) || delivery) && after > FIRED_AFTER_MS) return 'inbox'
+  if (noAnswer(last) || reminderSet(last) || ['dump', 'command'].includes(last.route)) return 'sent'
+  return 'inbox'
+}
+// Issue 710: on the Sent line only when the Sent tab shows it (Smart inbox on: not in Inbox).
+const inSentTab = (row, listed, turns) => !(row?.smart && listed && smartPlace({ last: row.last || null, turns, delivery: Boolean(row.delivery) }) === 'inbox')
+
 function emptyState() { return { schema: 1, last: null, history: [], shown_records: {}, deferred: { chats: {}, items: [] }, cleared: {} } }
 
 /**
@@ -124,8 +180,9 @@ function emptyState() { return { schema: 1, last: null, history: [], shown_recor
  * page, `archiveChat(id)` archives one chat the way the shell's Archive does, `skipThreads()` names threads that are
  * never part of a catch-up (Daily, Alerts).
  * Issue 710 (`sentOn()` true): `readSent()` lists the threads Sent shows, any age, as rows `{ id, title, at (ms),
- * listed, archived, hidden, snoozed, working }` (`listed`: inside the chat listing the shell reads; `archived` is only
- * known for those), and `readSession(id)` reads one unlisted thread's Hermes row (null when it is gone).
+ * listed, archived, hidden, snoozed, working, smart, last, delivery }` (`listed`: inside the chat listing the shell
+ * reads; `archived` is only known for those; `smart`: Smart inbox is on, `last` his newest Sent row, `delivery` a
+ * scheduled or pinned thread), and `readSession(id)` reads one unlisted thread's Hermes row (null when it is gone).
  */
 export function createCatchUp({ statePath = '', now = Date.now, inbox = null, readChats, readTurns, archiveChat, skipThreads = () => [], sentOn = () => false, readSent = async () => [], readSession = async () => null, log = line => console.warn(`[catch-up] ${line}`) } = {}) {
   let state = emptyState()
@@ -225,7 +282,7 @@ export function createCatchUp({ statePath = '', now = Date.now, inbox = null, re
         } catch { return null }
       }))
       for (const item of batch) {
-        if (!finishedTurns(item?.turns)) continue
+        if (!finishedTurns(item?.turns) || !inSentTab(item.row, item.listed, item.turns)) continue
         const at = Math.max(item.at, item.turns.at || 0)
         const deferred = state.deferred.chats[item.id]
         if (deferred && at <= (deferred.last_at || 0)) continue
@@ -330,7 +387,7 @@ export function createCatchUp({ statePath = '', now = Date.now, inbox = null, re
         const row = sentNow.get(chat)
         if (!row || row.archived || row.hidden || row.snoozed || row.working) return true
         const turns = lastTurns(await readTurns(chat))
-        return !finishedTurns(turns) || (turns.at || 0) > seconds(sentShown[chat])
+        return !finishedTurns(turns) || !inSentTab(row, row.listed === true, turns) || (turns.at || 0) > seconds(sentShown[chat])
       } catch { return true }
     }
     const chatIds = [...new Set([...ids(args.chats), ...sentIds])], recordIds = ids(args.records)
