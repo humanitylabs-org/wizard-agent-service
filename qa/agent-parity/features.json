@@ -799,6 +799,22 @@
       "policy_exemptions": []
     },
     {
+      "id": "typed-routing",
+      "description": "Typed messages can go quiet too (issue 669, behind the Smart inbox switch wizard/smart-inbox in the Look file, off by default; WIZARD_SMART_INBOX 1/0 forces it). A typed first message's Sent row keeps its first run's outcome; server/typed-routing.mjs judges each typed shadow guess (background = dump or reminder, visible = anything else; a reply phrase, a question or let me know when is always visible) against what the owner did: his Sent correction first, a blocker or failure is neutral, a reply he typed in the thread means visible, a finished answer left alone for 24 h means background. GET /wizard/v1/sent carries typed_routing (on, switch, graduated, typed, pending, neutral, all / background / visible {judged, matched, rate}, gate) and typed_guess / typed_verdict on each typed row; GET /wizard/v1/sent/typed serves typed_routing alone. The gate counts the background guesses: at least 50 of the newest 200 judged, 90% right. Switch on and gate met: POST /wizard/v1/route with source typed and accept_dump (owner same-origin JSON) decides with the same guess as the shadow one (his words, an exact earlier correction, a private router only, 5 s) and a task starts the orb's hidden worker (record source typed:dump, Sent row source typed route dump with would_route, Sent > Working, a blocker or failure back to Inbox); Should have replied on it opens the thread and counts as a miss. Anything else answers route agent at once with typed.why and no Sent row. Switch off: route agent (why switch_off), nothing captured; the orb route is unchanged. Main agent only: the Sent log and the worker are the main agent's.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP routes with the switch flipped in <root>/Pages/wizard-look/look.json and the gate lowered to 2 judged guesses with no settle time: off, a typed send asked about answers route agent (switch_off); on with nothing judged, not_proven; on main two typed first messages ending done open the gate (each row keeps outcome done and verdict match), a typed task then answers route dump with an inbox record of source typed:dump, and a tell me phrase stays visible; on host-profile, container and restricted the gate stays closed and nothing is captured. tests/typed-routing.test.ts covers the visible phrases, the guess, the judge, the 90%-of-50 gate, a recorded set's routed/visible split and match rate on /sent and /sent/typed, the background start with its hidden worker and replay, Should have replied as a miss, not proven and a bad rate, switch off, and the outcome kept on a live typed row. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/typed-routing.mjs",
+        "server/sent-log.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/typed-routing.test.ts"
+      ],
+      "fixture": "typed-routing",
+      "policy_exemptions": []
+    },
+    {
       "id": "private-routing",
       "description": "Private routing (issue 629, switch wizard/private-routing in the Look file, off by default; WIZARD_PRIVATE_ROUTING 1 forces it on, 0 off): only with a private default agent, POST /wizard/v1/route answers route agent with agent_id, chosen_by (name, private_label, thread, default, rules_only with rule), model and provider when a model was named, thread_id for the thread in front, and summary = the owner's exact words. Order: a spoken agent name or a model name the box runs (from the registry and the model list, at the start or as ask/tell/use X; the main agent is reached only by a model name) settles it without any model; else the private router (privateRouter endpoint host only) adds a personal label in its one call, which can only pick the private agent; else the thread in front (thread_id plus thread_agent or its pin) keeps a reply; else the default private agent. A non-private or missing router is never called and rules decide with chosen_by rules_only. A dump becomes the chosen agent's visible thread. The Sent row keeps agent_id, agent_model and chosen_by, and POST /wizard/v1/sent/<id>/correct {agent} stores one agent example; the private router gets the latest 8 as few-shot lines. Switch off or no private default: the route answer is exactly today's.",
       "layer": "server",

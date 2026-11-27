@@ -135,6 +135,9 @@ export class SentLog {
 
   get(id) { const row = this.#row(id); return row ? { ...row } : null }
 
+  /** Every row, newest first (copies), for the typed match rate (issue 669). */
+  all() { return this.data.rows.map(r => ({ ...r })) }
+
   /** Newest first, `limit` rows after the row `before` (the previous page's `next`). */
   list({ limit = 50, before = '', agent = '' } = {}) {
     const n = Math.max(1, Math.min(200, Number(limit) || 50))
@@ -207,7 +210,8 @@ export class SentLog {
     const outcome = OUTCOMES.has(state) ? state : 'none'
     const changed = []
     for (const row of this.data.rows) {
-      if (row.agent !== agent || row.source !== 'reply' || row.thread_id !== thread || row.outcome) continue
+      // A typed first message keeps its first run's outcome too (issue 669): it is how its shadow guess is judged.
+      if (row.agent !== agent || (row.source !== 'reply' && row.source !== 'typed') || row.thread_id !== thread || row.outcome) continue
       if (!((runId && row.run_id === runId) || (runKey && row.run_key === runKey))) continue
       row.outcome = { state: outcome, answer: clip(answer, 200), at: this.now() }
       if (runId && !row.run_id) row.run_id = runId
