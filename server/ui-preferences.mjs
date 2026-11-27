@@ -60,6 +60,11 @@ const validators = {
   // The phone bar's pinned slot (wizard-ux#1929, switch wizard/phone-sections): an installed app id, '' = Messenger.
   // No default: a box that never stored one leaves each phone's own copy alone.
   phoneSlot: v => typeof v === 'string' && /^[A-Za-z0-9._-]{0,80}$/.test(v),
+  // The phone Apps panel (wizard-ux issue 1955, switch wizard/apps-panel): the owner's Favorites in order, and the apps
+  // taken off Recent (back on it when opened again). App ids; no default, so a box that never stored one leaves each
+  // device's own copy alone.
+  appFavorites: v => appIdList(v),
+  appRecentHidden: v => appIdList(v),
   readyOrder: v => ['newest', 'oldest', 'priority', 'subject'].includes(v),
   subjectOrder: v => Array.isArray(v) && v.length <= 60 && v.every(s => typeof s === 'string' && s.length <= 120 && !/[\u0000-\u001f\u007f]/u.test(s)) && new Set(v).size === v.length,
   // Short answer first (the shell's reply-summary view): on while a device wears it, how long replies start, and the
@@ -72,6 +77,7 @@ const validators = {
   pinnedChats: v => Array.isArray(v) && v.length <= 300 && v.every(s => typeof s === 'string' && /^[A-Za-z0-9._:-]{1,180}$/.test(s)) && new Set(v).size === v.length,
 }
 const isPlainObject = v => !!v && typeof v === 'object' && !Array.isArray(v)
+function appIdList(v) { return Array.isArray(v) && v.length <= 100 && v.every(id => typeof id === 'string' && /^[A-Za-z0-9._-]{1,80}$/.test(id)) && new Set(v).size === v.length }
 
 // Strict: PUT bodies only. Unknown keys or invalid values are a 400.
 export function validateUiPreferences(value) {
