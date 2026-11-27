@@ -18,8 +18,7 @@ const fail = message => { throw new Error(message) }
 const summary = s => ({ id: s.id, name: s.name, count: s.threads.length })
 // `channels` (issue 440, WIZARD_CHANNEL_STORE=1): the same tools read and write the channel store instead.
 const channelSummary = c => ({ id: c.id, name: c.name, count: c.count })
-// `autoEmoji` (wizard-ux issue 1580): the owner's wizard/channel-auto-emoji switch, read at each create; off by default.
-export function createSpacesTools({ path, loadThreads, threadExists, agentExists = () => true, channels = null, autoEmoji = () => false }) {
+export function createSpacesTools({ path, loadThreads, threadExists, agentExists = () => true, channels = null }) {
   const own = (id, agent) => { if (!channels) return readUiPreferences(path).spaces.some(s => s.id === id && spaceAgent(s) === agent); try { return channels.get(id).agent === agent } catch { return false } }
   return {
     list: () => definitions,
@@ -56,7 +55,7 @@ export function createSpacesTools({ path, loadThreads, threadExists, agentExists
               for (const id of new Set(args.thread_ids)) if (!await threadExists(agent, id)) fail('thread_not_found')
             }
           }
-          if (channels) result = channelCall(channels, name, args, agent, own, switchOn(autoEmoji))
+          if (channels) result = channelCall(channels, name, args, agent, own)
           else {
           // No await from this fresh read through atomic rename. Owner PUTs and status filing share this process.
           let spaces = readUiPreferences(path).spaces
@@ -95,15 +94,14 @@ export function createSpacesTools({ path, loadThreads, threadExists, agentExists
 }
 
 // Synchronous from the ownership check through the write; the store's own transaction keeps each change atomic.
-const switchOn = fn => { try { return fn() === true } catch { return false } }
-function channelCall(channels, name, args, agent, own, auto = false) {
+function channelCall(channels, name, args, agent, own) {
   if (name === 'spaces_create') {
-    // wizard-ux issue 1580, switch wizard/channel-auto-emoji on: a fitting emoji goes in front ("Money" -> "💰 Money"); a
-    // channel already named as asked (with or without that emoji) is reused, never made twice. Words compare without a
-    // leading emoji, so "💰 Money" also finds an owner's plain "Money"; an exact name wins. Switch off: the name as given.
+    // wizard-ux issue 1580 (on for everyone): a fitting emoji goes in front ("Money" -> "💰 Money"); a channel already
+    // named as asked (with or without that emoji) is reused, never made twice. Words compare without a leading emoji, so
+    // "💰 Money" also finds an owner's plain "Money"; an exact name wins.
     const typed = args.name.trim(), low = n => n.toLowerCase(), all = channels.list({ agent }).channels
-    const same = all.find(c => low(c.name) === low(typed)) || (auto && all.find(c => low(bareChannelName(c.name)) === low(bareChannelName(typed))))
-    return { space: channelSummary(same ? channels.get(same.id) : channels.create({ name: auto ? channelAutoName(typed) : typed, agent, reuseName: true })) }
+    const same = all.find(c => low(c.name) === low(typed)) || all.find(c => low(bareChannelName(c.name)) === low(bareChannelName(typed)))
+    return { space: channelSummary(same ? channels.get(same.id) : channels.create({ name: channelAutoName(typed), agent, reuseName: true })) }
   }
   if (!own(args.space_id, agent)) fail('not_found') // may have been deleted while checking thread ownership
   if (name === 'spaces_delete') return channels.remove(args.space_id)

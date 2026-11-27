@@ -2186,15 +2186,14 @@ export const serverChecks = {
     look(false)
     const made = await s.raw('/wizard/v1/channels', json('POST', { name: 'Synthetic switch channel', agent: s.id })); assert.equal(made.status, 201, 'an old off value in the Look file is ignored')
     const own = await made.json()
-    // wizard-ux issue 1580 (owner switch wizard/channel-auto-emoji, off by default): with it on, a channel the agent creates
-    // through its own gateway gets a fitting emoji in front ("Money" -> "💰 Money"), is reused rather than made twice, and
-    // a name matching nothing stays as given; with it off every name stays exactly as given.
+    // wizard-ux issue 1580 (on for everyone): a channel the agent creates through its own gateway gets a fitting emoji in
+    // front ("Money" -> "💰 Money"), is reused rather than made twice, and a name matching nothing stays as given.
     const tool = async (name, args) => {
       const r = await s.agentMcp('tools/call', { name, arguments: args }); assert.equal(r.status, 200, 'agent gateway authentication/transport')
       const reply = (await r.json()).result; assert.notEqual(reply.isError, true, JSON.stringify(reply)); return JSON.parse(reply.content[0].text)
     }
-    assert.equal((await tool('spaces_create', { name: 'Podcast' })).space.name, 'Podcast', `${s.kind}: switch off keeps the name`)
-    { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/chat-channels': { on: false, at: Date.now() }, 'wizard/channel-auto-emoji': { on: true, at: Date.now() } } })) }
+    assert.equal((await tool('spaces_create', { name: 'Podcast' })).space.name, '🎙️ Podcast', `${s.kind}: no Look file needed`)
+    { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/chat-channels': { on: false, at: Date.now() }} })) }
     const money = (await tool('spaces_create', { name: 'Money' })).space
     assert.equal(money.name, '💰 Money', `${s.kind}: the agent's channel gets its emoji`)
     assert.equal((await tool('spaces_create', { name: 'Money' })).space.id, money.id, `${s.kind}: reused, never a second Money`)
