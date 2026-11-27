@@ -9,7 +9,6 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
 import * as routing from '../server/private-routing.mjs'
-import { PRIVATE_MODE_SWITCH } from '../server/private-mode.mjs'
 
 const { PRIVATE_ROUTING_SWITCH, agentNames, modelWords, nameRule } = routing
 const routingNames = routing.routingNames as (input: any) => any
@@ -68,7 +67,7 @@ async function box({ routing = true as boolean | null, look = false, privateDefa
   const endpoint = routerHost === 'public' ? 'https://router.example.invalid/v1/chat/completions' : `http://127.0.0.1:${routerAddress.port}/v1/chat/completions`
   if (routerHost !== 'none') writeFileSync(join(dir, 'settings.json'), JSON.stringify({ fast_router: { endpoint, model: 'fixture-router' } }))
   writeFileSync(join(dir, 'Pages', 'wizard-look', 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: {
-    [PRIVATE_MODE_SWITCH]: { on: true, at: 1 }, ...(look ? { [PRIVATE_ROUTING_SWITCH]: { on: true, at: 1 } } : {}) } }))
+    ...(look ? { [PRIVATE_ROUTING_SWITCH]: { on: true, at: 1 } } : {}) } }))
   const fetchImpl = async (url: any, init: any) => {
     if (String(url).includes('router.example.invalid')) {
       calls.public += 1
@@ -82,7 +81,7 @@ async function box({ routing = true as boolean | null, look = false, privateDefa
     agentRuntime: { apply: async () => ({ ok: true }), start: async () => ({ ok: true }), stop: async () => ({ ok: true }) },
     schedulerStatePath: join(dir, 'schedules.sqlite'), schedulerIntervalMs: 3_600_000, followThrough: false, agentBasePort: 47990, runQueue: false,
     agentInboxStatePath: join(dir, 'state', 'agent-inbox.json'),
-    pagesRoot: join(dir, 'Pages'), pagesGitDir: join(dir, 'pages-history.git'), pagesWatch: false, privateModeTtlMs: 0, privateRoutingTtlMs: 0,
+    pagesRoot: join(dir, 'Pages'), pagesGitDir: join(dir, 'pages-history.git'), pagesWatch: false, privateRoutingTtlMs: 0,
     ...(routing === null ? {} : { privateRouting: routing }),
   }) as Server & { scheduler?: any }
   servers.push(svc)
@@ -229,10 +228,40 @@ describe('private routing over HTTP (issue 629)', () => {
       expect(b.calls.private).toBe(3)
       const pub = await box({ ...opts, routerHost: 'public' } as any)
       await pub.route('Fix the Chats scroll bug')
-      expect(pub.calls.public).toBe(1)   // today a non-private router is still used for the orb
+      // A standard default agent: today a non-private router is still used for the orb. A private default agent:
+      // never (issue 626, voice follows the default agent; the next test).
+      expect(pub.calls.public).toBe(opts.privateDefault === false ? 1 : 0)
       // The agent correction exists only for privately routed rows: switch off it is today's 400 (should_reply).
       const sent = (await pub.route('Fix the Chats scroll bug again')).sent_id
       expect((await pub.call('POST', `/wizard/v1/sent/${sent}/correct`, { agent: 'philosopher' })).status).toBe(400)
+    }
+  })
+
+  // owner-correction: humanitylabs-org/wizard-agent-service#626 · 2026-11-27 · "fix the voice leak first (with private mode on, an orb dump or voice router must not reach the standard agent; voice follows the default agent)"
+  it('private mode on, routing switch off: no orb dump on the standard agent and no non-private router (issue 626)', async () => {
+    for (const routing of [null, false]) {
+      const pub = await box({ routing, routerHost: 'public' } as any)
+      pub.setReply({ route: 'dump', title: 'Flights' })
+      for (const text of ['Research flights to Lisbon', 'What did Sam say in Messenger yesterday']) {
+        const r = await pub.route(text, { accept_dump: true })
+        expect(r.cmd).toEqual({ route: 'agent', summary: text })
+        expect(r.model).toBe('')
+        const row = (await pub.call('GET', `/wizard/v1/sent/${r.sent_id}`)).json.row
+        expect(row).toMatchObject({ route: 'agent', decided_by: 'fallback' })
+        expect(row.rules_matched).toContain('private_default')
+      }
+      expect(pub.calls.public).toBe(0)
+      expect((await pub.call('GET', '/wizard/v1/agent-inbox')).json.records ?? []).toEqual([])
+      // A typed message never starts the background worker either.
+      const typed = await pub.route('Research flights to Lisbon', { accept_dump: true, source: 'typed' })
+      expect(typed.typed).toEqual({ background: false, why: 'private_default' })
+      // A private router may still route (only it ever sees the words), but never into a dump.
+      const loop = await box({ routing })
+      loop.setReply({ route: 'dump', title: 'Flights' })
+      const r = await loop.route('Research flights to Lisbon', { accept_dump: true })
+      expect(r.cmd.route).not.toBe('dump')
+      expect(loop.calls.private).toBe(1)
+      expect((await loop.call('GET', '/wizard/v1/agent-inbox')).json.records ?? []).toEqual([])
     }
   })
 })

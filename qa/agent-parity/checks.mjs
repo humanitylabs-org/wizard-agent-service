@@ -42,6 +42,8 @@ const featureScenes = {
   }),
   'agent-inbox-move': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json') })),
   'private-routing': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), privateRouting: true })),
+  // Issue 626: private routing forced off, so only the private-default voice guard keeps the words in.
+  'private-default-voice': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), privateRouting: false })),
   'private-routing-edges': kind => scene(kind, ({ root }) => ({ agentInboxStatePath: join(root, 'agent-inbox.json'), privateRouting: true, channelStore: true, channelDaily: true, dailyTimezone: 'UTC',
     schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerTimezone: 'UTC', schedulerEnabled: false, fixtureUniqueTitles: true,
     alertNotifier: { available: () => true, send: async note => { privateEdgeNotes.push(note) } } })),

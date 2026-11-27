@@ -1,12 +1,12 @@
-// Issue 626: turn private mode on / off on an existing box, plus the Privacy check data. Switch `wizard/private-mode`
-// (Look file) or option privateMode (env WIZARD_PRIVATE_MODE), off by default.
+// Issue 626: turn private mode on / off on an existing box, plus the Privacy check data. On for everyone (James said
+// yes at show-and-tell, 27 Nov 2026: the `wizard/private-mode` switch is removed).
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
-import { PRIVATE_MODE_SWITCH, jobRunsOnApp, providerCompany } from '../server/private-mode.mjs'
+import { jobRunsOnApp, providerCompany } from '../server/private-mode.mjs'
 
 const servers: Server[] = []
 const schedulers: any[] = []
@@ -23,7 +23,7 @@ const APPS = [
   { id: 'wizard-claude', name: 'Claude', status: 'running', provides: ['ai-connection'], mcp: { url: 'http://claude/mcp' } },
 ]
 
-async function box({ on = true as boolean | null, look = undefined as boolean | undefined, standardChats = false, mainApps = undefined as string[] | undefined } = {}) {
+async function box({ look = undefined as boolean | undefined, standardChats = false, mainApps = undefined as string[] | undefined } = {}) {
   const main = createServer((req, res) => {
     req.resume()
     req.on('end', () => {
@@ -44,7 +44,7 @@ async function box({ on = true as boolean | null, look = undefined as boolean | 
   writeFileSync(join(dir, 'agents', '.main-agent.json'), JSON.stringify({ schema: 1, wizard_apps: mainApps ?? ['wizard-mail', 'wizard-notes', 'messenger', 'meditate'], agent_apps: ['wizard-claude'] }))
   if (look !== undefined) {
     mkdirSync(join(dir, 'Pages', 'wizard-look'), { recursive: true })
-    writeFileSync(join(dir, 'Pages', 'wizard-look', 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { [PRIVATE_MODE_SWITCH]: { on: look, at: 1 } } }))
+    writeFileSync(join(dir, 'Pages', 'wizard-look', 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/private-mode': { on: look, at: 1 } } }))
   }
   const applied: string[] = []
   const svc = createWizardServer({
@@ -54,8 +54,7 @@ async function box({ on = true as boolean | null, look = undefined as boolean | 
     schedulerStatePath: join(dir, 'schedules.sqlite'), schedulerIntervalMs: 3_600_000,
     followThrough: false, agentBasePort: 47930, runQueue: false,
     ...(standardChats ? { standardChatsUrl: 'http://wizard-agent-service:8787/wizard/standard-chats/mcp' } : {}),
-    pagesRoot: join(dir, 'Pages'), pagesGitDir: join(dir, 'pages-history.git'), pagesWatch: false, privateModeTtlMs: 0,
-    ...(on === null ? {} : { privateMode: on }),
+    pagesRoot: join(dir, 'Pages'), pagesGitDir: join(dir, 'pages-history.git'), pagesWatch: false,
   }) as Server & { scheduler?: any }
   servers.push(svc)
   schedulers.push(svc.scheduler)
@@ -73,19 +72,16 @@ async function box({ on = true as boolean | null, look = undefined as boolean | 
 }
 
 describe('private mode on an existing box (issue 626)', () => {
-  it('switch off: nothing changes and every change is refused', async () => {
-    const b = await box({ on: null })
-    expect((await b.call('GET', '/wizard/v1/private-mode')).json).toEqual({ schema: 'wizard.private-mode/1', on: false })
-    expect((await b.call('GET', '/wizard/v1/privacy-check')).status).toBe(404)
-    for (const step of ['agent', 'apps', 'context', 'default', 'on', 'off']) expect((await b.call('POST', `/wizard/v1/private-mode/${step}`, {})).status).toBe(409)
-    expect((await b.agents()).map((a) => a.id)).toEqual(['hermes'])
-    expect(existsSync(join(b.dir, 'agents', '.private-mode.json'))).toBe(false)
-    expect(b.applied).toEqual([])
-  })
-
-  it('the Look switch turns it on; the owner page only', async () => {
-    const b = await box({ on: null, look: true })
-    expect((await b.call('GET', '/wizard/v1/private-mode')).json).toMatchObject({ on: true, mode: 'off', next_step: 'agent', private_agent: null })
+  it('no switch: available on every box, even with an old Look file saying off; reading it changes nothing; the owner page only', async () => {
+    for (const look of [undefined, false]) {
+      const b = await box({ look })
+      expect((await b.call('GET', '/wizard/v1/private-mode')).json).toMatchObject({ schema: 'wizard.private-mode/1', on: true, mode: 'off', next_step: 'agent', private_agent: null })
+      expect((await b.call('GET', '/wizard/v1/privacy-check')).status).toBe(200)
+      expect((await b.agents()).map((a) => a.id)).toEqual(['hermes'])
+      expect(existsSync(join(b.dir, 'agents', '.private-mode.json'))).toBe(false)
+      expect(b.applied).toEqual([])
+    }
+    const b = await box()
     expect((await b.call('POST', '/wizard/v1/private-mode/agent', {}, { 'Sec-Fetch-Site': 'cross-site' })).status).toBe(403)
     expect((await b.call('GET', '/wizard/v1/private-mode/agent')).status).toBe(405)
   })

@@ -1425,6 +1425,53 @@ export const serverChecks = {
       assert.ok(prompts.at(-1).includes('"Fix the Chats scroll bug" -> "personal": false'), `${s.kind}: the correction reaches the private router`)
     } finally { await new Promise(r => fake.close(r)); if (otherHost) await new Promise(r => other.close(r)) }
   },
+  // Issue 626 (James, 27 Nov 2026: voice follows the default agent): with a private default agent and private routing
+  // off, an orb take never starts the dump worker on the standard (main) agent and never reaches a router that is not
+  // private; it opens a visible new chat (route agent, the exact words). Main and host-profile cannot hold a private
+  // default here, so there the answer stays exactly today's (the router is asked).
+  'private-default-voice': async s => {
+    const { createServer } = await import('node:http')
+    let calls = 0
+    const answer = (req, res) => { req.resume(); req.on('end', () => {
+      calls += 1
+      res.setHeader('Content-Type', 'application/json')
+      res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ route: 'dump', title: 'Flights', summary: 'router rewrite' }) } }] }))
+    }) }
+    // A router whose host privateRouter() does not trust (127.0.0.2 on Linux; elsewhere an unresolvable host).
+    const other = createServer(answer)
+    const otherHost = await new Promise(r => { other.once('error', () => r('')); other.listen(0, '127.0.0.2', () => r(`127.0.0.2:${other.address().port}`)) })
+    try {
+      const settingsPath = join(s.root, 'os', 'settings.json')
+      const current = existsSync(settingsPath) ? JSON.parse(readFileSync(settingsPath, 'utf8')) : {}
+      mkdirSync(dirname(settingsPath), { recursive: true })
+      const router = { fast_router: { endpoint: `http://${otherHost || 'router.parity.invalid'}/v1/chat/completions`, model: 'fixture-router' } }
+      if (s.kind !== 'main') s.setSupervisorSeal('private', false)
+      writeFileSync(settingsPath, JSON.stringify({ ...current, ...router, ...(s.kind === 'main' ? {} : { agents: { default_agent_id: s.id } }) }))
+      const say = async (text, extra = {}) => (await s.raw('/wizard/v1/route', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, apps: [], ...extra }) })).json()
+      const agents = (await (await s.raw('/wizard/v1/agents')).json()).agents
+      const privateDefault = agents.find(a => a.is_default && a.privacy === 'private')
+      const records = async () => (await (await s.raw('/wizard/v1/agent-inbox')).json()).records ?? []
+      if (!privateDefault) {
+        assert.ok(['main', 'host-profile'].includes(s.kind), `${s.kind}: the private agent can be the default`)
+        if (otherHost) {
+          await say('Research flights to Lisbon')
+          assert.equal(calls, 1, `${s.kind}: no private default, the router is asked as today`)
+        }
+        return
+      }
+      assert.equal(privateDefault.id, s.id)
+      for (const text of ['Research flights to Lisbon', 'What did Sam say in Messenger yesterday']) {
+        const r = await say(text, { accept_dump: true })
+        assert.deepEqual(r.cmd, { route: 'agent', summary: text }, `${s.kind}: a visible new chat with the exact words`)
+        const row = (await (await s.raw(`/wizard/v1/sent/${r.sent_id}`)).json()).row
+        assert.ok(row.rules_matched.includes('private_default'), `${s.kind}: the Sent row says why`)
+      }
+      assert.equal(calls, 0, `${s.kind}: zero calls to a non-private router`)
+      assert.deepEqual(await records(), [], `${s.kind}: no dump worker on the standard agent`)
+      const typed = await say('Research flights to Lisbon', { accept_dump: true, source: 'typed' })
+      assert.deepEqual(typed.typed, { background: false, why: 'private_default' }, `${s.kind}: a typed task stays visible`)
+    } finally { if (otherHost) await new Promise(r => other.close(r)) }
+  },
   'sent-log': async s => {
     const { createServer } = await import('node:http')
     let reply = { route: 'agent', summary: 'x' }
