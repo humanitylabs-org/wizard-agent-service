@@ -70,6 +70,16 @@
       "policy_exemptions": []
     },
     {
+      "id": "chat-hermes-pin-list",
+      "description": "wizard-ux issue 1927: every compact Chats list row (view=list and the archive-50 window) carries hermesPinned: true when Hermes' own pinned flag is set on the session (a thread the owner keeps, like Topics), so the shell's Smart inbox (switch wizard/smart-inbox) can treat its deliveries as something he set up. A row without the flag has no key, and the shell's own pinned field is never set from it.",
+      "layer": "server",
+      "fixture": "chat-hermes-pin-list",
+      "how_to_test": "For main, host-profile, container and restricted: make the parity thread a visible chat with Hermes pinned true and an owner message, then read /api/sessions?view=list and ?view=list&window=archive-50: each row for it carries hermesPinned true. tests/session-list-view.node.mjs covers listRow directly (pinned true or 1 kept as hermesPinned, no key otherwise, no pinned key).",
+      "source_refs": ["server/session-list-view.mjs"],
+      "reference_tests": ["tests/session-list-view.node.mjs", "qa/agent-parity/server-checks.mjs"],
+      "policy_exemptions": []
+    },
+    {
       "id": "chat-after-reset-list",
       "description": "Issue 612: after a /new (or /reset) in Telegram, stock Hermes starts a new session whose parent_session_id is the old one (ended session_reset). That new conversation is its own chat: it lists in Chats next to the old one and opens with its own messages; a child of a session that did not end at a conversation boundary (a sub-agent run) stays out.",
       "layer": "server",
