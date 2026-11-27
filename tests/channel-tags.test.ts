@@ -1,4 +1,4 @@
-// Issue 608 (switch wizard/chat-tags, off by default): channels become tags. A chat carries several of its agent's
+// Issue 608 (on for everyone; switch wizard/chat-tags removed): channels become tags. A chat carries several of its agent's
 // channels; `membership` keeps the primary tag so Daily, agent filing and older shells keep working.
 import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -7,7 +7,6 @@ import { join } from 'node:path'
 import { createChannelStore, channelRequest } from '../server/channel-store.mjs'
 import { createSpaceFiling, TAG_INSTRUCTIONS } from '../server/thread-spaces.mjs'
 import { listRow } from '../server/session-list-view.mjs'
-import { lookSwitchOn, CHAT_TAGS_SWITCH } from '../server/channels-switch.mjs'
 
 const dirs: string[] = [], stores: any[] = []
 afterEach(() => { stores.splice(0).forEach(s => s.close()); dirs.splice(0).forEach(d => rmSync(d, { recursive: true, force: true })) })
@@ -21,13 +20,7 @@ function setup() {
 const ids = (set: any) => [...(set?.ids || [])].sort()
 
 describe('tag store', () => {
-  it('the switch id is wizard/chat-tags and reads off without a Look file', () => {
-    expect(CHAT_TAGS_SWITCH).toBe('wizard/chat-tags')
-    expect(lookSwitchOn('', CHAT_TAGS_SWITCH)).toBe(false)
-    expect(lookSwitchOn(JSON.stringify({ version: 1, tweaks: { 'wizard/chat-tags': { on: true } } }), CHAT_TAGS_SWITCH)).toBe(true)
-  })
-
-  it('a store that never had Tags on writes no tag rows (switch off changes nothing)', () => {
+  it('a store whose tags were never copied writes no tag rows until migrateTags', () => {
     const { d, store, a, b } = setup()
     store.move({ sessionId: 't1', channelId: a.id }); store.move({ sessionId: 't1', channelId: b.id }); store.fileIfUnfiled('hermes', 't2', a.id)
     store.close()
@@ -158,7 +151,7 @@ describe('agent filing with Tags on', () => {
     expect(filing.apply('hermes', 't1', status(b.id))).toBe(false)
     expect(store.tagsOf('hermes', 't1')).toEqual([a.id])
   })
-  it('with Tags off a filed chat stays where it is, as before', () => {
+  it('without tags (the store could not copy them) a filed chat stays where it is', () => {
     const { d, store, a, b } = setup()
     const filing = createSpaceFiling(join(d, 'ui-preferences.json'), store, { agentFiling: true })
     store.move({ sessionId: 't1', channelId: a.id })

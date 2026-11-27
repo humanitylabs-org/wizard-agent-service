@@ -57,7 +57,7 @@ import { createChannelStore, channelRequest, fixedChannelKind, fixedChannelThrea
 import { dayOf, mintDailyThreadId, dailyTitle, openerOf, dailyRunNote, validDay, DAYS_PAGE, DAYS_PAGE_MAX } from './daily-channel.mjs'
 import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigration } from './channel-spaces.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
-import { createChannelsSwitch, channelOn, channelPart, CHAT_TAGS_SWITCH } from './channels-switch.mjs'
+import { createChannelsSwitch, channelOn, channelPart } from './channels-switch.mjs'
 import { REPLY_BUTTONS_SWITCH, replyButtonsNote } from './reply-buttons.mjs'
 import { createCapabilities } from './capabilities.mjs'
 // wizard-ux issue 1437: the shell app whose skill is the generated interface manual (on for everyone).
@@ -3450,13 +3450,11 @@ function buildWizardServer(options, lifetime) {
   // Channel read watermarks (issue 471, needs the channel store): the shell's per-channel read point, shared by the
   // owner's devices, forward only.
   const channelReadSyncOn = () => channelOn(options.channelReadSync) && !!channelStoreNow()
-  // Tags (issue 608, owner switch `wizard/chat-tags`, off by default; env WIZARD_CHANNEL_TAGS '1' forces on, '0' off):
-  // a chat carries several of its agent's channels as tags. The first time it is on, every chat's channel becomes its
-  // first tag; `membership` keeps receiving the primary tag either way, so turning it off loses nothing.
-  const chatTagsSwitchOn = createChannelsSwitch({ id: CHAT_TAGS_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.channelTagsTtlMs ?? 3000 })
+  // Tags (issue 608, on for everyone wherever the store is; switch wizard/chat-tags removed): a chat carries several of
+  // its agent's channels as tags. The first time the store is used, every chat's channel becomes its first tag;
+  // `membership` keeps receiving the primary tag, so Daily, agent filing and older shells keep working.
   let tagsMigrated = false
   const channelTagsOn = () => {
-    if (!channelPart(options.channelTags, chatTagsSwitchOn)) return false
     const store = channelStoreNow()
     if (!store) return false
     if (!tagsMigrated) { try { store.migrateTags() } catch (error) { console.error(`[channels] tags not copied yet: ${String(error?.message || error).slice(0, 160)}`); return false } tagsMigrated = true }
@@ -4373,7 +4371,7 @@ function buildWizardServer(options, lifetime) {
     const { verdicts, ...stats } = match
     return { view: { on: smart && match.graduated, switch: smart, ...stats }, verdicts }
   }
-  // Tags (issue 608, switch wizard/chat-tags): tags the owner said in a capture ("#philosopher", "hashtag philosopher",
+  // Tags (issue 608): tags the owner said in a capture ("#philosopher", "hashtag philosopher",
   // kept on its Sent row) go on the thread it ran in once that thread is known. Only tags that already exist: a tag is
   // a channel of that agent with the same letters and digits ("🧠 Philosopher" is #philosopher); a misheard word
   // never makes a new one. Never blocks or changes the send.
@@ -7959,7 +7957,7 @@ function buildWizardServer(options, lifetime) {
       }
       // Chats channels (issue 440): same owner surface, access and cross-site rules as ui-preferences.
       // Read watermarks (issue 471, WIZARD_CHANNEL_READ_SYNC=1 with the store): /wizard/v1/channels/read.
-      // Tags (issue 608, switch wizard/chat-tags): /wizard/v1/channels/tags, 404 while Tags are off.
+      // Tags (issue 608, on for everyone): /wizard/v1/channels/tags, 404 only without a channel store.
       if (url.pathname === '/wizard/v1/channels' || url.pathname === '/wizard/v1/channels/membership' || url.pathname === '/wizard/v1/channels/read' || url.pathname === '/wizard/v1/channels/tags') {
         const reads = url.pathname.endsWith('/read'), tagRoute = url.pathname.endsWith('/tags')
         const channelStore = channelStoreNow()

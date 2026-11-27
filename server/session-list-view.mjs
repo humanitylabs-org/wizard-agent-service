@@ -169,7 +169,7 @@ export function listRow(item, q = '', channels = null, opts = null) {
     // Hermes' own `preview` is the head of the thread's first user message; the main agent reads the whole one.
     // A main row carries wizard_first_request ('' when it has no visible owner message); routed rows fall back.
     const firstRequest = clean(text(Object.hasOwn(item, 'wizard_first_request') ? item.wizard_first_request : item.preview)).slice(0, FIRST_REQUEST_MAX);
-    // Tags (issue 608, switch wizard/chat-tags): every channel the chat carries, primary (= `channel`) first.
+    // Tags (issue 608, on wherever the store is): every channel the chat carries, primary (= `channel`) first.
     const tags = opts?.tags && channels.tagsOf ? channels.tagsOf(s.agent || s.agent_id || 'hermes', s.id) : null;
     channelFields = { ...(channel ? { channel } : {}), ...(tags ? { tags } : {}), ...(firstRequest && !opts?.firstPosts ? { firstRequest } : {}) };
   }

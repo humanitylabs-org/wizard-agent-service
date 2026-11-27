@@ -3,8 +3,7 @@
 // Channels part (store, posts, read marks, Daily) is on unless a box's WIZARD_CHANNEL_* env sets `0`; agent filing
 // (issue 441) has no setting of its own and follows the store.
 
-// Tags (issue 608): a chat carries several channels as tags. Off by default; the owner's switch or WIZARD_CHANNEL_TAGS.
-export const CHAT_TAGS_SWITCH = 'wizard/chat-tags'
+// Tags (issue 608) follow the store too: on for everyone (switch wizard/chat-tags removed).
 
 /** Is tweak `id` on in the owner's Look file text (version 1, `tweaks[id].on === true`)? */
 export function lookSwitchOn(lookText, id) {

@@ -158,15 +158,15 @@ through the Service drops its row, deleting the channel drops all of them.
 
 ## Tags (issue 608)
 
-Channels become tags: a chat can carry several of its agent's channels. Off by default, behind the owner's switch
-`wizard/chat-tags` (read from the synced Look file; `WIZARD_CHANNEL_TAGS=1` forces it on, `0` off, option
-`channelTags`). With it off nothing changes: no tag rows are written and `/wizard/v1/channels/tags` is a 404.
+Channels become tags: a chat can carry several of its agent's channels. On for everyone wherever the channel store is
+(James's yes, 27 Nov 2026; the switch `wizard/chat-tags`, its env `WIZARD_CHANNEL_TAGS` and option `channelTags` are
+gone). Without a channel store `/wizard/v1/channels/tags` is a 404, like every channel route.
 
 - **Store.** Table `tags(agent, session_id, channel_id, tagged_at, tagged_by)` plus `tag_removed(agent, session_id,
-  channel_id, at)` in `channels.sqlite`. The first time Tags are on, every membership is copied in once (meta
+  channel_id, at)` in `channels.sqlite`. The first time the store is used, every membership is copied in once (meta
   `tags_migrated`): each chat's channel becomes its first tag. `membership` keeps the **primary tag** (the first one,
-  then the oldest left), so Daily day threads, agent filing and older shells keep working and switching Tags off shows
-  each chat in its primary tag's channel, nothing lost. Once migrated, every one-channel write (move, agent filing, a
+  then the oldest left), so Daily day threads, agent filing and older shells (which read one channel per chat) keep
+  working. Once migrated, every one-channel write (move, agent filing, a
   Daily claim, a Spaces migration, unfile, delete) mirrors into `tags`.
 - **API.** `GET /wizard/v1/channels/tags?sessionId=&agent=` → `{sessionId, agent, channel, tags}` (primary first);
   `?channel=<id>` → `{channel, members}`. `PUT {sessionId, agent?, add: <channel id>}` or `{…, remove: <channel id>}`
