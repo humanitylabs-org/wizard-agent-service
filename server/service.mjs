@@ -39,7 +39,7 @@ import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
 import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, fullStatusAsk, withSmartInbox, SMART_INBOX_SWITCH, asksToBeTold, askMaxFor, withAskMax, createHeavyStatusGuard, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
-import { ThreadTitleStore, clashCandidates, provisionalTitleFrom, readMisspelledTitles, readSessionTitle, titleContextLine, titleKey, titleToApply, topicFor } from './thread-titles.mjs'
+import { ThreadTitleStore, appTopicInText, clashCandidates, labelFrom, provisionalTitleFrom, readMisspelledTitles, readSentenceTitles, readSessionTitle, titleContextLine, titleKey, titleToApply, topicFor } from './thread-titles.mjs'
 import { PRODUCT_NAME, misspellsProductName, spellProductName } from './product-name.mjs'
 import { createRoutedPresentation } from './routed-presentation.mjs'
 import { createRoutedQueues } from './routed-run-queue.mjs'
@@ -5937,6 +5937,49 @@ function buildWizardServer(options, lifetime) {
   }
   if (options.respellStoredTitles !== false && hermesStatePath && options.threadTitleStatePath) {
     const timer = setTimeout(() => { void lifetime.track(respellStoredTitles().catch(() => console.error('[titles] WizardOS respell pending'))) }, options.respellDelayMs ?? 20_000)
+    timer.unref?.()
+    lifetime.own(async () => clearTimeout(timer))
+  }
+  // Issue 694: once per install, every stored sentence title the agent or Hermes wrote (an opener's words, a task line)
+  // becomes a short label; owner titles stay as they are (the same lock as every rename). The receipt is the backup;
+  // titles Hermes refused stay in `failed` and are tried again on the next starts (at most 3 passes).
+  const repairSentenceTitles = async () => {
+    const statePath = threadTitleStore.statePath
+    if (!statePath || !titleDbPath()) return
+    const receiptPath = `${statePath}.label-repair.json`
+    let receipt = null
+    if (existsSync(receiptPath)) {
+      try { receipt = JSON.parse(readFileSync(receiptPath, 'utf8')) } catch { return }
+      if (!Array.isArray(receipt?.failed) || !receipt.failed.length || (receipt.passes ?? 1) >= 3) return
+    }
+    const found = readSentenceTitles(titleDbPath()).filter((row) => !receipt || receipt.failed.includes(row.id))
+    if (!receipt) receipt = { schema: 1, started_at: new Date().toISOString(), repaired: [], failed: [], passes: 0 }
+    const failed = []
+    for (const row of found) {
+      try {
+        const current = readSessionTitle(titleDbPath(), row.id)
+        if (!current?.title || titleInFlight.has(row.id)) { if (current?.title) failed.push(row.id); continue }
+        const record = threadTitleStore.get(row.id)
+        if (titleLocked(current, record)) continue
+        const label = appTopicInText(current.title, appCatalog()) || labelFrom(current.title)
+        if (!label || titleKey(label) === titleKey(current.title)) continue
+        const since = current.startedAt > 0 ? new Date(current.startedAt * 1000) : null
+        const applied = await patchHermesTitle(row.id, label, { datedAt: since })
+        if (!applied) { failed.push(row.id); continue }
+        threadTitleStore.recordRename(row.id, { from: current.title, to: applied, asked: label, by: 'agent', since: current.startedAt })
+        receipt.repaired.push({ id: row.id, from: current.title, to: applied })
+      } catch { failed.push(row.id) }
+      await new Promise((resolveGap) => setTimeout(resolveGap, 15))
+    }
+    receipt.failed = failed
+    receipt.passes = (receipt.passes ?? 0) + 1
+    receipt.finished_at = new Date().toISOString()
+    writeFileSync(receiptPath, JSON.stringify(receipt), { mode: 0o600 })
+    canonicalSessionCache.expiresAt = 0
+    if (canonicalSessionReader) void refreshCanonicalSessions().catch(() => undefined)
+  }
+  if (options.repairSentenceTitles !== false && hermesStatePath && options.threadTitleStatePath) {
+    const timer = setTimeout(() => { void lifetime.track(repairSentenceTitles().catch(() => console.error('[titles] label repair pending'))) }, options.titleRepairDelayMs ?? 30_000)
     timer.unref?.()
     lifetime.own(async () => clearTimeout(timer))
   }

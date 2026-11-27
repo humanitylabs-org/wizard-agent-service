@@ -5,10 +5,12 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { STATUS_INSTRUCTIONS, parseStatus } from '../server/thread-status.mjs'
-import { ANCHOR_SECONDS, TITLE_INSTRUCTIONS, ThreadTitleStore, appTopicName, clashCandidates, undatedTitle, looksLikeOpener, looksLikeSentence, normalizeTitle, provisionalTitleFrom, titleContextLine, titleKey, titleToApply, topicFor } from '../server/thread-titles.mjs'
+import { ANCHOR_SECONDS, TITLE_INSTRUCTIONS, TITLE_MAX, isSentenceTitle, labelFrom, ThreadTitleStore, appTopicName, clashCandidates, undatedTitle, looksLikeOpener, looksLikeSentence, normalizeTitle, provisionalTitleFrom, titleContextLine, titleKey, titleToApply, topicFor } from '../server/thread-titles.mjs'
 import { kinds, scene } from '../qa/agent-parity/fixture.mjs'
 import { serverChecks } from '../qa/agent-parity/server-checks.mjs'
 import { WIZARD_RUN_INSTRUCTIONS, createWizardServer, listen } from '../server/service.mjs'
+import { createRoutedPresentation } from '../server/routed-presentation.mjs'
+import { SubjectCatalog } from '../server/thread-subjects.mjs'
 
 const directories: string[] = []
 const servers: Array<ReturnType<typeof createServer>> = []
@@ -100,6 +102,77 @@ describe('when a title changes', () => {
   })
 })
 
+describe('label titles only (issue 694)', () => {
+  const decide = (currentTitle: string, proposed: string, topic?: string, record: any = { locked: false, appliedFor: null, history: [{ by: 'agent' }] }) => (titleToApply as any)({ currentTitle, proposed, record, assistantAt: 9, topic })
+  it('knows a sentence or task line from a label', () => {
+    for (const sentence of ["Review everything in my inbox right now. Now we're trying to", 'Fix archive navigation after thread link', 'Add morning pinned card to inbox', 'Fix thread scroll position memory', 'Review everything in my inbox', 'Bro on music, I am', 'Plan a trip to the coast this summer with friends'])
+      expect(looksLikeSentence(sentence) || isSentenceTitle(sentence), sentence).toBe(true)
+    for (const label of ['Phone navigation redesign', 'Messenger sync bug', 'WizardOS · Desktop', 'Inbox', 'TSR podcast', 'Rabbit R1 setup', 'Node.js upgrade', 'WizardOS · Voice (8 Nov)'])
+      expect(isSentenceTitle(label), label).toBe(false)
+  })
+  it('cuts a sentence down to a short label', () => {
+    expect(labelFrom("Review everything in my inbox right now. Now we're trying to")).toBe('Inbox')
+    expect(labelFrom('Fix archive navigation after thread link')).toBe('Archive navigation')
+    expect(labelFrom('Add morning pinned card to inbox')).toBe('Morning pinned card')
+    expect(labelFrom('Fix thread scroll position memory')).toBe('Thread scroll position memory')
+    expect(labelFrom('Bro on music, I am')).toBe('Music')
+    for (const title of ["Review everything in my inbox right now. Now we're trying to", 'Fix archive navigation after thread link', 'Can you please take a look at the extremely complicated spreadsheet formatting problem'])
+      expect(labelFrom(title).length).toBeLessThanOrEqual(TITLE_MAX)
+  })
+  it('refuses a task-line proposal and keeps the label, on main and routed agents', () => {
+    for (const topic of [undefined, '']) {
+      for (const task of ['Fix archive navigation after thread link', 'Add morning pinned card to inbox', 'Fix thread scroll position memory']) expect(decide('Inbox', task, topic), `${task} ${topic}`).toBe('')
+    }
+    expect(decide('Inbox', 'Fix archive navigation after thread link', 'Mail')).toBe('') // a label stays, even with a topic
+  })
+  it('replaces a sentence title with a label even when the proposal is a sentence too', () => {
+    const opener = "Review everything in my inbox right now. Now we're trying to"
+    for (const topic of [undefined, '']) {
+      expect(decide(opener, opener, topic)).toBe('Inbox')
+      expect(decide(opener, 'Review everything in my inbox', topic)).toBe('Inbox')
+      expect(decide('Inbox', opener, topic)).toBe('')
+      expect(decide('Fix archive navigation after thread link', 'Fix archive navigation after thread link', topic)).toBe('Archive navigation')
+    }
+    expect(decide(opener, opener, 'Mail')).toBe('Mail') // a topic the Service knows wins
+  })
+  it('passes labels unchanged and never touches an owner-set title', () => {
+    for (const label of ['Phone navigation redesign', 'Messenger sync bug', 'WizardOS · Desktop']) {
+      expect(decide('Inbox', label)).toBe(label)
+      expect(decide('Inbox', label, '')).toBe(label)
+      expect(decide(label, label)).toBe('')
+    }
+    const owner = 'My very long owner title that I typed on purpose myself'
+    expect(decide(owner, 'Fix the thing', undefined, { locked: true })).toBe('')
+    expect(decide(owner, owner, '', { locked: true })).toBe('')
+  })
+  it('keeps the title cap the instructions name', () => {
+    expect(TITLE_MAX).toBe(32)
+    expect(TITLE_INSTRUCTIONS).toContain(`at most ${TITLE_MAX} characters`)
+  })
+})
+
+describe('routed agents keep label titles too (issue 694)', () => {
+  it("replaces Hermes's derived opener title with a label and never applies a task line", async () => {
+    const dir = await tempDir()
+    const patches: string[] = []
+    const registry = { agentsDir: join(dir, 'agents'), fetchAgent: async (_agent: unknown, _path: string, init: any) => { patches.push(JSON.parse(init.body).title); return new Response('{}') } }
+    const p = createRoutedPresentation({ registry, subjects: new SubjectCatalog('') } as any)
+    const agent = { id: 'synthetic-routed' }
+    const status = (title: string) => ({ state: 'done', ask: 'Done', title })
+    const opener = "Review everything in my inbox right now. Now we're trying to"
+    let row: any = await p.project(agent, { id: 'r1', title: opener, title_source: 'derived' }, status('Review everything in my inbox'), 10, {})
+    expect(row.title).toBe('Inbox')
+    row = await p.project(agent, { id: 'r1', title: 'Inbox', title_source: 'user' }, status('Fix archive navigation after'), 11, {})
+    row = await p.project(agent, { id: 'r1', title: 'Inbox', title_source: 'user' }, status('Add morning pinned card to inbox'), 12, {})
+    expect(row.title).toBe('Inbox')
+    expect(patches).toEqual(['Inbox'])
+    // An owner title with no record of the agent's stays.
+    row = await p.project(agent, { id: 'r2', title: 'My very long owner title that I typed', title_source: 'user' }, status('Messenger'), 13, {})
+    expect(row.title).toBe('My very long owner title that I typed')
+    expect(patches).toEqual(['Inbox'])
+  })
+})
+
 describe('topic titles: the app or area, never the opener words', () => {
   const catalog = [{ id: 'messenger', name: 'Messenger' }, { id: 'notes', name: 'Notes' }, { id: 'wisdom', name: 'Wisdom' }, { id: 'money', name: 'Money' }, { id: 'meditate-next', name: 'Meditate (test)' }]
 
@@ -125,9 +198,9 @@ describe('topic titles: the app or area, never the opener words', () => {
   it('replaces an echoed placeholder or an opener-word proposal with the topic, and only then', () => {
     const placeholder = { provisional: true, locked: false, appliedFor: null, title: 'Bro on music, I am', history: [] }
     const decide = (currentTitle: string, proposed: string, record: any, topic?: string) => (titleToApply as any)({ currentTitle, proposed, record, assistantAt: 3, topic })
-    // The agent repeats the placeholder (the live failure): topic wins; without a topic the placeholder stays untouched.
+    // The agent repeats the placeholder (the live failure): topic wins; without a topic the placeholder is cut to a label (issue 694).
     expect(decide('Bro on music, I am', 'Bro on music, I am', placeholder, 'Music')).toBe('Music')
-    expect(decide('Bro on music, I am', 'Bro on music, I am', placeholder, '')).toBe('')
+    expect(decide('Bro on music, I am', 'Bro on music, I am', placeholder, '')).toBe('Music')
     // The agent proposes opener words that differ from the placeholder.
     expect(decide('Bro on music, I am', 'Bro on music, I am going to', placeholder, 'Music')).toBe('Music')
     // A real label from the agent still wins over the Service's guess.
@@ -137,8 +210,8 @@ describe('topic titles: the app or area, never the opener words', () => {
     // Owner locks and per-reply once-only stay absolute.
     expect(decide('Mine', 'Mine too', { ...placeholder, locked: true }, 'Music')).toBe('')
     expect((titleToApply as any)({ currentTitle: 'Bro on music, I am', proposed: 'Bro on music, I am', record: { ...placeholder, appliedFor: 3 }, assistantAt: 3, topic: 'Music' })).toBe('')
-    // Without a topic option (routed agents such as Philosopher) behaviour is exactly as before.
-    expect(decide('Review 0xMovez post on X', 'Bro on music, I am', null)).toBe('Bro on music, I am')
+    // Without a topic option (routed agents such as Philosopher) a sentence is never applied either (issue 694): cut to a label.
+    expect(decide('Review 0xMovez post on X', 'Bro on music, I am', null)).toBe('Music')
     expect(decide('WizardOS · Chats', 'Messenger', null, 'Notes')).toBe('Messenger')
   })
 
@@ -219,7 +292,7 @@ describe('topic titles: the app or area, never the opener words', () => {
 })
 
 describe('the Agent Service applies titles through Hermes', () => {
-  async function fixture({ titleSource = 'llm', startedAgo = 5 * 86400, title = 'Review 0xMovez post on X' as string | null, queued = false, apps = null as null | Array<{ id: string, name: string }>, others = [] as Array<[string, string]>, extra = {} as Record<string, unknown> } = {}) {
+  async function fixture({ titleSource = 'llm', startedAgo = 5 * 86400, title = 'Review 0xMovez post on X' as string | null, queued = false, apps = null as null | Array<{ id: string, name: string }>, others = [] as Array<[string, string]>, extra = {} as Record<string, unknown>, proposal = 'DeFleur', subject = 'DeFleur' } = {}) {
     const directory = await tempDir()
     const now = Date.now() / 1000
     const statePath = join(directory, 'state.db')
@@ -233,7 +306,7 @@ describe('the Agent Service applies titles through Hermes', () => {
     for (const [id, held] of others) state.prepare('INSERT INTO sessions VALUES (?, ?, ?, ?)').run(id, now - 86400, held, 'user')
     state.close()
     if (apps) await writeFile(join(directory, 'apps.json'), JSON.stringify({ schema: 1, apps }))
-    const reply: Record<string, string> = { title: 'DeFleur' }
+    const reply: Record<string, string> = { title: proposal, subject }
     const clock = { bump: 0 }
     const patches: Array<{ id: string, body: any }> = []
     const runs: any[] = []
@@ -446,6 +519,50 @@ describe('the Agent Service applies titles through Hermes', () => {
     await fetch(`${origin}/wizard/hermes/v1/runs`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'first-send-2' }, body: JSON.stringify({ session_id: 'wizard_t1', input: [{ role: 'user', content: [{ type: 'text', text: 'Fix the calendar sync bug' }] }] }) })
     await settle()
     expect(patches).toEqual([])
+  })
+
+  // Issue 694: a thread title is always a short label, never the opener's sentence or a task line.
+  const INBOX_OPENER = "Review everything in my inbox right now. Now we're trying to"
+  it('ends with a label when the agent echoes a sentence title back (issue 694)', async () => {
+    const { list, patches, reply } = await fixture({ title: INBOX_OPENER, titleSource: 'derived', startedAgo: 60, subject: '', proposal: INBOX_OPENER })
+    await list(); await settle()
+    expect(patches.map((patch) => patch.body.title)).toEqual(['Inbox'])
+    expect((await list()).title).toBe('Inbox')
+  })
+  it('keeps a label when the agent proposes a task line (issue 694)', async () => {
+    const { list, patches, reply, clock } = await fixture({ title: 'Inbox', titleSource: 'llm', subject: '', proposal: 'Fix archive navigation after thread link' })
+    for (const task of ['Fix archive navigation after thread link', 'Add morning pinned card to inbox', 'Fix thread scroll position memory']) {
+      reply.title = task
+      clock.bump += 1
+      await list(); await settle()
+    }
+    expect(patches).toEqual([])
+    expect((await list()).title).toBe('Inbox')
+  })
+  it('a new chat opened with a long first message has a label after its first reply, even when the agent echoes the opener (issue 694)', async () => {
+    const { origin, list, patches, reply } = await fixture({ title: null, startedAgo: 5, queued: true, subject: '', proposal: 'Review everything in my inbox right' })
+    const opener = 'Can you review everything in my inbox right now and tell me what needs an answer today'
+    await firstSend(origin, 'first-send-694', opener)
+    await settle()
+    const placeholder = patches[0]?.body.title
+    reply.title = placeholder
+    await list(); await settle()
+    const after = (await list()).title
+    expect(after).toBe('Inbox')
+    expect(after.length).toBeLessThanOrEqual(32)
+  })
+  it('repairs stored sentence titles once on update and never touches an owner-set title (issue 694)', async () => {
+    const { list, patches, directory, statePath } = await fixture({ title: 'Fix archive navigation after thread link', titleSource: 'llm', others: [['wizard_mine', 'My very long owner title that I typed on purpose myself']], subject: '', proposal: 'Fix archive navigation after thread link', extra: { titleRepairDelayMs: 5, respellStoredTitles: false } })
+    const fs = await import('node:fs/promises')
+    let done: any = null
+    for (let i = 0; i < 40 && !done; i += 1) { await settle(); try { done = JSON.parse(await fs.readFile(join(directory, 'titles.json.label-repair.json'), 'utf8')) } catch { /* not yet */ } }
+    expect(done).toMatchObject({ failed: [] })
+    expect(done.repaired).toEqual([expect.objectContaining({ id: 'wizard_t1', from: 'Fix archive navigation after thread link', to: 'Archive navigation' })])
+    expect(patches).toEqual([{ id: 'wizard_t1', body: { title: 'Archive navigation' } }])
+    const db = new DatabaseSync(statePath, { readOnly: true })
+    expect((db.prepare('SELECT title FROM sessions WHERE id = ?').get('wizard_mine') as any).title).toBe('My very long owner title that I typed on purpose myself')
+    db.close()
+    expect((await list()).title).toBe('Archive navigation')
   })
 
   it('tells the next run the current title', async () => {
