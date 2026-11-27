@@ -219,6 +219,8 @@ server = createWizardServer({
   privateMode: envChoice(process.env.WIZARD_PRIVATE_MODE),
   // Result reader (issue 630): follows the owner's `wizard/result-reader` switch; '1' forces it on, '0' off.
   resultReader: envChoice(process.env.WIZARD_RESULT_READER),
+  // Automatic chat tags (issue 702): follows the owner's `wizard/auto-tags` switch; '1' forces it on, '0' off.
+  autoTags: envChoice(process.env.WIZARD_AUTO_TAGS),
   // Smart inbox (issue 667): follows the owner's `wizard/smart-inbox` switch; '1' forces it on, '0' off.
   smartInbox: envChoice(process.env.WIZARD_SMART_INBOX),
   // Private routing (issue 629): follows the owner's `wizard/private-routing` switch; '1' forces it on, '0' off.

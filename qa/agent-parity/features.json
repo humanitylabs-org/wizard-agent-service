@@ -654,6 +654,25 @@
       "policy_exemptions": []
     },
     {
+      "id": "chats-auto-tags",
+      "description": "Automatic chat tags (issue 702, switch wizard/auto-tags, off by default; env WIZARD_AUTO_TAGS forces it): each channel has an owner-editable covers list (plain words and kind entries such as `kind: report`, seeded from its name, learned subjects and kinds for Reports/Reminders channels), and the Service tags every chat itself from its title, subject, app id and first owner message on each status line and list row; the status-line channel (and the new channels list) is a hint. Refusals are logged and told to the agent once in its next run note, a removed tag never comes back, owner tag edits teach the covers, child chats inherit their parent's tags, ambiguous chats go only to a private fast model, a nightly pass and a one-time 30-day backfill cover the main agent's chats, and PATCH /api/sessions/<id> {tags} lets the agent add a tag.",
+      "layer": "server",
+      "how_to_test": "Through each runtime's actual Service HTTP route (main, host-profile, container TCP, restricted Unix ingress) with a Pages root: with no Look file the covers route is 404, the channel list has no autoTags flag, the run note has no tag note and a refused Reports hint tags nothing; with wizard/auto-tags on in the Look file the list says autoTags, PUT covers on the Content channel, a clips roundup whose status names Reports with subject Content carries Content and Reports, a fact check carries Content only and the next run note says Reports was refused, an owner removal is never re-added by the classifier and the agent's PATCH tags is refused (409) for it, the agent's PATCH tags adds Reports by name to an untagged chat, editing covers tags the next decision, and turning the switch off again removes the route and tags nothing new. tests/auto-tags.test.ts covers the classifier (the six clips chats, the five report chats, precision cases), the covers store, the private-model bar, the nightly pass leftovers and the list-rebuild cost. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": [
+        "server/auto-tags.mjs",
+        "server/channel-store.mjs",
+        "server/thread-status.mjs",
+        "server/routed-presentation.mjs",
+        "server/agents-http.mjs",
+        "server/service.mjs"
+      ],
+      "reference_tests": [
+        "tests/auto-tags.test.ts"
+      ],
+      "fixture": "chats-auto-tags",
+      "policy_exemptions": []
+    },
+    {
       "id": "chats-read-marks",
       "description": "Channel read watermarks (issue 471, WIZARD_CHANNEL_READ_SYNC=1 with WIZARD_CHANNEL_STORE=1): /wizard/v1/channels/read keeps the shell's read point per channel (and General per agent) in channels.sqlite, forward only, so reading a channel to the bottom on one device clears it on the owner's other devices.",
       "layer": "server",

@@ -760,6 +760,16 @@ export async function proxyToAgent(ctx, { agent, method, upstreamPath, searchPar
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new AgentError(400, 'invalid_json', 'request.body')
   }
   const wizardRequestHash = hasBody ? createHash('sha256').update(body).digest('hex') : undefined
+  // Issue 702 (auto tags on): the agent's add-tag route, as on the main agent's path. `tags` never reaches Hermes.
+  const tagsPatchId = method === 'PATCH' && value && Object.hasOwn(value, 'tags') ? upstreamPath.match(/^\/api\/sessions\/([^/]+)$/u)?.[1] : undefined
+  if (tagsPatchId && typeof ctx.autoTagsPatch === 'function') {
+    const tagged = ctx.autoTagsPatch(agent.id, decodeURIComponent(tagsPatchId), value.tags)
+    if (tagged) {
+      const { tags: _tags, ...rest } = value
+      if (!Object.keys(rest).length) { sendJson(response, tagged.status, tagged.body); return }
+      value = rest
+    }
+  }
   // The model picker shows only this agent's allowed models.
   if (method === 'GET' && upstreamPath === '/api/model/options') {
     sendJson(response, 200, {

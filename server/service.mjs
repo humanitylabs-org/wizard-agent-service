@@ -57,6 +57,7 @@ import { createChannelStore, channelRequest, fixedChannelKind, fixedChannelThrea
 import { dayOf, mintDailyThreadId, dailyTitle, openerOf, dailyRunNote, validDay, DAYS_PAGE, DAYS_PAGE_MAX } from './daily-channel.mjs'
 import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigration } from './channel-spaces.mjs'
 import { createSpaceFiling } from './thread-spaces.mjs'
+import { AUTO_TAGS_SWITCH, createAutoTagger, readRecentChats } from './auto-tags.mjs'
 import { createChannelsSwitch, channelOn, channelPart } from './channels-switch.mjs'
 import { REPLY_BUTTONS_SWITCH, replyButtonsNote } from './reply-buttons.mjs'
 import { createCapabilities } from './capabilities.mjs'
@@ -3518,7 +3519,58 @@ function buildWizardServer(options, lifetime) {
     if (!spaceFilings.has(key)) spaceFilings.set(key, createSpaceFiling(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), store, { agentFiling, scheduledThread, tags }))
     return spaceFilings.get(key)
   }
-  const spaceFiling = { runNote: (...args) => spaceFilingNow().runNote(...args), apply: (...args) => spaceFilingNow().apply(...args) }
+  // Automatic tags (issue 702, auto-tags.mjs): the owner's `wizard/auto-tags` switch in the Look file, off by default;
+  // option autoTags (env WIZARD_AUTO_TAGS, '1' on / '0' off) wins. Needs the channel store (and so Tags). On, the
+  // Service tags every chat from what it is about against each channel's covers; the agent's channel is a hint.
+  const autoTagsSwitchOn = createChannelsSwitch({ id: AUTO_TAGS_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.autoTagsTtlMs ?? 3000 })
+  const autoTagsOn = () => channelPart(options.autoTags, autoTagsSwitchOn) && channelTagsOn()
+  const autoTagger = createAutoTagger({
+    store: () => channelStoreNow(), on: autoTagsOn, scheduled: (agent, thread) => scheduledThread(agent, thread),
+    firstMessage: (agent, thread) => agent === MAIN_AGENT_ID && hermesStatePath ? readHermesFirstRequests(hermesStatePath, [thread], { max: 400 }).get(thread) || '' : '',
+    // Only a PRIVATE fast router ever sees a chat (the Alert rules rule, issue 552); none: ambiguous chats wait.
+    router: () => { try { const fast = resolveFastRouter(readSettings(settingsPath).settings, router); return fast && privateRouter(fast) ? fast : null } catch { return null } },
+    fetchImpl: options.autoTagsFetch ?? fetch, defer: true,
+  })
+  // The nightly pass and the one-time 30-day backfill (issue 702), main agent only (its state.db is the Service's to
+  // read): decided tags go on, the chats still untagged are listed once in the agent's next run note for its sweep.
+  const autoTagsPass = () => {
+    if (!autoTagsOn() || !hermesStatePath) return null
+    const channelStore = channelStoreNow()
+    const nowMs = (options.autoTagsNow ?? Date.now)()
+    const today = dayOf(nowMs, dailyTimeZone())
+    const backfilled = channelStore.marker('auto_tags_backfill')
+    if (backfilled && channelStore.marker('auto_tags_nightly') === today) return null
+    const days = backfilled ? 7 : 30
+    let rows = readRecentChats(hermesStatePath, nowMs / 1000 - days * 86400)
+    // The nightly pass looks only at chats with no tag at all; the backfill at every chat of the window.
+    if (backfilled) rows = rows.filter(r => !channelStore.tagsOf(MAIN_AGENT_ID, r.id).length)
+    const firsts = rows.length ? readHermesFirstRequests(hermesStatePath, rows.map(r => r.id), { max: 400 }) : new Map()
+    const result = autoTagger.sweep(MAIN_AGENT_ID, rows.map(r => ({ ...r, first: firsts.get(r.id) || '' })))
+    if (!backfilled) channelStore.setMarker('auto_tags_backfill', new Date(nowMs).toISOString())
+    channelStore.setMarker('auto_tags_nightly', today)
+    return { ...result, days }
+  }
+  // PATCH .../sessions/<id> {tags} -> {status, body}: 200 when a tag was added or was already there, 409 when every one was
+  // refused (each with its reason), 400 for a bad list.
+  const autoTagsAnswer = (agent, thread, tags) => {
+    try {
+      const tagged = autoTagger.agentTags(agent, thread, tags)
+      return { status: tagged.added.length || !tagged.refused.length ? 200 : 409, body: tagged }
+    } catch (error) { return error?.status === 400 ? { status: 400, body: { error: error.message } } : { status: 503, body: { error: 'channels_unavailable' } } }
+  }
+  if (options.autoTagsPassMs !== 0) {
+    const passTimer = setInterval(() => { try { autoTagsPass() } catch (error) { console.error(`[auto-tags] pass failed: ${String(error?.message || error).slice(0, 160)}`) } }, options.autoTagsPassMs ?? 10 * 60_000)
+    passTimer.unref?.()
+    lifetime.own(() => clearInterval(passTimer))
+  }
+  const spaceFiling = {
+    runNote: (agent, thread) => [spaceFilingNow().runNote(agent), autoTagsOn() ? autoTagger.runNote(agent, thread) : ''].filter(Boolean).join(' '),
+    apply: (agent, thread, status, row = null) => {
+      const filed = spaceFilingNow().apply(agent, thread, status)
+      try { autoTagger.apply(agent, thread, status, row) } catch (error) { console.error(`[auto-tags] ${String(error?.message || error).slice(0, 160)}`) }
+      return filed
+    },
+  }
   // Where a chat the scheduler (or the Supervisor) just opened goes: the job's channel when it names an open one of
   // that agent, else Alerts for the main agent; a routed agent's chat with no channel stays unfiled. Never a move.
   const fileOpenedThread = (agent, occurrence) => {
@@ -3737,6 +3789,8 @@ function buildWizardServer(options, lifetime) {
   })
   // Deletes clean the store even while Channels are off, so turning them on again never brings a deleted thread back.
   if (agentCtx) agentCtx.channelStoreOpened = () => openedChannelStore
+  // Issue 702: the add-tag route for a routed agent's own chats. null while auto tags are off (Hermes answers as before).
+  if (agentCtx) agentCtx.autoTagsPatch = (agent, thread, tags) => autoTagsOn() ? autoTagsAnswer(agent, thread, tags) : null
   // Issue 446: a routed agent's owner-turn restore (WIZARD_ROUTED_OWNER_TURNS), the one its view=wizard history uses.
   if (agentCtx) agentCtx.ownerTurnRestore = async agent => {
     if (!routedQueues || !routedOwnerTurns) return null
@@ -5823,7 +5877,7 @@ function buildWizardServer(options, lifetime) {
   }
   // Appended to every direct run: the thread's current title and the owner's subject list.
   const runTitleNote = (sessionId) => {
-    const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes')].filter(Boolean).join('\n')
+    const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes', typeof sessionId === 'string' ? sessionId : '')].filter(Boolean).join('\n')
     if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote, trackerNote('hermes', ''), firstChatNote(), buttonsNote()].filter(Boolean).join('\n')
     return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId), dailyNote('hermes', sessionId), sweepRunNote(sessionId), catchUpRunNote(sessionId), dumpRunNote(sessionId), firstChatNote(), buttonsNote()].filter(Boolean).join('\n')
   }
@@ -6051,7 +6105,7 @@ function buildWizardServer(options, lifetime) {
         }
       }
       // Fold the agent's subject into the owner's list (subjects.json) for Ready's By subject order.
-      spaceFiling.apply('hermes', session.id, session.wizard_attention)
+      spaceFiling.apply('hermes', session.id, session.wizard_attention, session)
       const attention = session.wizard_attention ? subjectCatalog.apply(session.id, session.wizard_attention) : null
       if (attention?.subject) {
         servedSubjects.delete(session.id)
@@ -7961,11 +8015,28 @@ function buildWizardServer(options, lifetime) {
       // Chats channels (issue 440): same owner surface, access and cross-site rules as ui-preferences.
       // Read watermarks (issue 471, WIZARD_CHANNEL_READ_SYNC=1 with the store): /wizard/v1/channels/read.
       // Tags (issue 608, on for everyone): /wizard/v1/channels/tags, 404 only without a channel store.
-      if (url.pathname === '/wizard/v1/channels' || url.pathname === '/wizard/v1/channels/membership' || url.pathname === '/wizard/v1/channels/read' || url.pathname === '/wizard/v1/channels/tags') {
-        const reads = url.pathname.endsWith('/read'), tagRoute = url.pathname.endsWith('/tags')
+      // Issue 702 (auto tags on): GET the passes' state and the chats left for the agent's sweep; POST runs the pass now
+      // (the nightly pass, or the one-time 30-day backfill when it has not run yet). 404 while the switch is off.
+      if (url.pathname === '/wizard/v1/channels/auto-tags') {
+        if (!autoTagsOn()) { sendJson(response, 404, { error: 'not_found' }); return }
+        if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
+        if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
+        if (!['GET', 'POST'].includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' }); return }
+        if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
+        try {
+          const channelStore = channelStoreNow()
+          if (request.method === 'POST') channelStore.setMarker('auto_tags_nightly', '')
+          const pass = request.method === 'POST' ? autoTagsPass() : null
+          sendJson(response, 200, { on: true, backfill: channelStore.marker('auto_tags_backfill') || null, nightly: channelStore.marker('auto_tags_nightly') || null, leftovers: autoTagger.leftovers(), ...(pass ? { pass } : {}) }, { 'Cache-Control': 'no-store' })
+        } catch (error) { sendJson(response, 503, { error: 'channels_unavailable', detail: String(error?.message || error).slice(0, 120) }) }
+        return
+      }
+      // Covers (issue 702, auto tags on): /wizard/v1/channels/covers, 404 while the switch is off.
+      if (url.pathname === '/wizard/v1/channels' || url.pathname === '/wizard/v1/channels/membership' || url.pathname === '/wizard/v1/channels/read' || url.pathname === '/wizard/v1/channels/tags' || url.pathname === '/wizard/v1/channels/covers') {
+        const reads = url.pathname.endsWith('/read'), tagRoute = url.pathname.endsWith('/tags'), coversRoute = url.pathname.endsWith('/covers')
         const channelStore = channelStoreNow()
-        if (!channelStore || (reads && !channelReadSyncOn()) || (tagRoute && !channelTagsOn())) { sendJson(response, 404, { error: 'not_found' }); return }
-        const membership = reads ? 'read' : tagRoute ? 'tags' : url.pathname.endsWith('/membership')
+        if (!channelStore || (reads && !channelReadSyncOn()) || (tagRoute && !channelTagsOn()) || (coversRoute && !autoTagsOn())) { sendJson(response, 404, { error: 'not_found' }); return }
+        const membership = reads ? 'read' : tagRoute ? 'tags' : coversRoute ? 'covers' : url.pathname.endsWith('/membership')
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (!ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
         const methods = membership ? ['GET', 'PUT'] : ['GET', 'POST', 'PATCH']
@@ -7978,8 +8049,12 @@ function buildWizardServer(options, lifetime) {
           if (!body || typeof body !== 'object' || Array.isArray(body)) { sendJson(response, 400, { error: 'invalid_request' }); return }
         }
         try {
-          sendJson(response, request.method === 'POST' ? 201 : 200, channelRequest(channelStore, request.method, membership, url.searchParams, body, { daily: channelDailyOn(), tags: channelTagsOn() }), { 'Cache-Control': 'no-store' })
-        } catch (error) { sendJson(response, [400, 404, 409].includes(error?.status) ? error.status : 503, { error: [400, 404, 409].includes(error?.status) ? error.code || 'invalid_request' : 'channels_unavailable' }) }
+          const autoTags = autoTagsOn()
+          const answer = channelRequest(channelStore, request.method, membership, url.searchParams, body, { daily: channelDailyOn(), tags: channelTagsOn(), autoTags })
+          // Issue 702: what the owner's own tag edit teaches that channel's covers (an add teaches it, a removal the opposite).
+          if (autoTags && tagRoute && request.method === 'PUT') autoTagger.learnOwner(answer.agent, answer.sessionId, Object.hasOwn(body, 'add') ? body.add : body.remove, Object.hasOwn(body, 'add'))
+          sendJson(response, request.method === 'POST' ? 201 : 200, answer, { 'Cache-Control': 'no-store' })
+        } catch (error) { sendJson(response, [400, 404, 405, 409].includes(error?.status) ? error.status : 503, { error: [400, 404, 405, 409].includes(error?.status) ? error.code || 'invalid_request' : 'channels_unavailable' }) }
         return
       }
       if (url.pathname.startsWith('/wizard/views/')) {
@@ -9353,6 +9428,20 @@ function buildWizardServer(options, lifetime) {
         const hasBody = request.method === 'PATCH' || request.method === 'POST' && !upstreamPath.endsWith('/stop')
         if (hasBody && !String(request.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) { sendJson(response, 415, { error: 'json_required' }); return }
         let body = hasBody ? (agentResolution?.bodyRead ? agentResolution.body : unscopedBody ?? await readBoundedBody(request)) : undefined
+        // Issue 702 (auto tags on): the agent's add-tag route. PATCH /api/sessions/<id> {"tags": [...]} adds those channel
+        // tags (ids or names) the way the Service's own tagging does, refusing a tag the owner removed. Hermes has no tags
+        // field, so they never reach it; any other fields in the same PATCH still do.
+        const tagsPatchId = !operator && request.method === 'PATCH' && body ? upstreamPath.match(/^\/api\/sessions\/([^/]+)$/u)?.[1] : undefined
+        if (tagsPatchId && autoTagsOn()) {
+          let requested = null
+          try { requested = JSON.parse(body.toString('utf8')) } catch { requested = null }
+          if (requested && typeof requested === 'object' && !Array.isArray(requested) && Object.hasOwn(requested, 'tags')) {
+            const tagged = autoTagsAnswer(MAIN_AGENT_ID, decodeURIComponent(tagsPatchId), requested.tags)
+            const { tags: _tags, ...rest } = requested
+            if (tagged.status !== 200 || !Object.keys(rest).length) { sendJson(response, tagged.status, tagged.body, { 'Cache-Control': 'no-store' }); return }
+            body = Buffer.from(JSON.stringify(rest))
+          }
+        }
         if (mainProviderAttachOn() && !operator && body && request.method === 'POST'
           && (upstreamPath === '/v1/runs' || upstreamPath === '/api/sessions' || /^\/api\/sessions\/[^/]+\/model$/u.test(upstreamPath))) {
           let requested = null

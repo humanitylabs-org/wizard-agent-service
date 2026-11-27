@@ -180,3 +180,38 @@ gone). Without a channel store `/wizard/v1/channels/tags` is a 404, like every c
 - **Said tags.** Tags in a capture (`#philosopher`, "hashtag philosopher", on its Sent row) go on the thread the take
   ran in, for tags that already exist (same letters and digits as the channel name, so "🧠 Philosopher" is
   `#philosopher`). A word that names no tag makes none.
+
+## Automatic tags (issue 702)
+
+Off by default: the owner's `wizard/auto-tags` switch in the Look file (option `autoTags`, env `WIZARD_AUTO_TAGS`: `1`
+on, `0` off, unset follows the switch). Needs the channel store. Off, nothing below runs: no covers route, no tag note,
+the status-line `channel` works exactly as in phase 3 and Tags. Code: `server/auto-tags.mjs`.
+
+- **Covers.** Each channel has a list of plain words or phrases (`clips`, `Clips Pipeline`, `fact check`) and kind
+  entries (`kind: question | lookup | evaluation | digest | report | reminder | todo`) in `channels.sqlite`
+  `channel_covers`. The first time auto tags see a channel it is seeded once: its name's own words and its learned
+  subjects, or, for a channel named Reports, the kinds question/lookup/evaluation/digest/report, and for Reminders
+  reminder/todo. `GET /wizard/v1/channels/covers?id=` -> `{id, covers, learned, not}`; `PUT {id, covers: [...]}`
+  replaces the owner's list (at most 40 entries of 60 characters; what was learned stays). The channel list says
+  `autoTags: true`, so the shell offers What goes here… on a channel's sheet.
+- **Tagging.** On every status line and list row the chat's title, subject, app id and first owner message are matched
+  against every channel of its agent (never Alerts or Daily): a listed phrase anywhere, the chat's kind, a learned
+  subject, a learned title or a parent chat's tags decide; the status line's `channel` and new `channels: [...]` are
+  hints, taken when the old subject rule (issue 520) agrees. Chat kind comes from the first owner message and the
+  source (a scheduled or cron chat is a digest, "remind me" a reminder); a build, bug, app-work or draft chat is never
+  a Reports kind. Only a chat whose evidence is weak (a learned phrase inside a longer title) goes to the owner's
+  PRIVATE fast router (the Alert rules rule), at most 30 calls an hour, and only an answer at least 0.85 sure is taken.
+  A decision is memoised per chat and covers version, and tag writes found during a list build go in one transaction
+  on the next turn, so a list rebuild costs what it did (issue 584).
+- **No silent refusals.** Every refusal or skip is a `[auto-tags]` log line with its reason, and the agent's next run
+  note in that chat says it once ("Reports refused: subject Content").
+- **The owner decides.** A removed tag is never put back (`tag_removed`). The owner's tag add teaches the channel the
+  chat's subject and title; a removal teaches the opposite (a negative entry): a chat like that one is no longer tagged
+  there unless the owner's own list names it in the title.
+- **Agent route.** `PATCH /wizard/hermes/api/sessions/<id>` (and a routed agent's own path) with `{"tags": [ids or
+  names]}` adds those tags: 200 with `{tags, added, refused}`, 409 when every one was refused (a removed tag says
+  `the owner removed this tag`). Other fields in the same PATCH still go to Hermes.
+- **Passes.** Every 10 minutes the Service checks whether today's pass ran: the first time it is on, a one-time
+  backfill over the main agent's chats of the last 30 days; after that, once a day, the chats of the last 7 days that
+  carry no tag. Chats still untagged are listed once in the main agent's next run note for its sweep.
+  `GET /wizard/v1/channels/auto-tags` shows the passes and that list; `POST` runs the pass now.
