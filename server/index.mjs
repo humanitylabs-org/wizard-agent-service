@@ -138,6 +138,8 @@ server = createWizardServer({
   // Replies into messaging-app chats (issue 427): on for everyone; WIZARD_MESSAGING_REPLIES=0 turns them off.
   messagingReplies: envChoice(process.env.WIZARD_MESSAGING_REPLIES),
   interfaceManual: envChoice(process.env.WIZARD_INTERFACE_MANUAL),
+  // Catch me up (issue 668): unset follows the owner's wizard/catch-me-up switch; 1 on, 0 off.
+  catchUp: envChoice(process.env.WIZARD_CATCH_ME_UP),
   // Undated chat titles (issue 518): unset follows the owner's wizard/plain-chat-titles switch; 1 on, 0 off.
   plainClashTitles: envChoice(process.env.WIZARD_PLAIN_CHAT_TITLES),
   // Follow main (issue 514): the status file is written by ops/wizard-agent-service-follow-main.py beside the
@@ -220,6 +222,8 @@ server = createWizardServer({
   privateMode: envChoice(process.env.WIZARD_PRIVATE_MODE),
   // Result reader (issue 630): follows the owner's `wizard/result-reader` switch; '1' forces it on, '0' off.
   resultReader: envChoice(process.env.WIZARD_RESULT_READER),
+  // Smart inbox (issue 667): follows the owner's `wizard/smart-inbox` switch; '1' forces it on, '0' off.
+  smartInbox: envChoice(process.env.WIZARD_SMART_INBOX),
   // Private routing (issue 629): follows the owner's `wizard/private-routing` switch; '1' forces it on, '0' off.
   privateRouting: envChoice(process.env.WIZARD_PRIVATE_ROUTING),
   // Five-choice first chat (issue 650): follows the owner's `wizard/first-chat-goals` switch; '1' forces it on, '0' off.

@@ -199,7 +199,7 @@ export function dumpTitle(cmd, text) {
  *  the reply rules that matched, the model's confidence. With `dump`, the owner's no-reply words and an exact earlier
  *  correction settle a take without the model; with `router: null` (none configured) only those settle it, anything
  *  else is the 404 it always was. The model's `unsure`, like an answer it could not give, opens a visible thread. */
-export async function routeUtterance({ input, settings, router, fetchImpl = fetch, now, dump = false, examples = [], correction = null, timeoutMs = 30_000, privateLabel = '' }) {
+export async function routeUtterance({ input, settings, router, fetchImpl = fetch, now, dump = false, examples = [], correction = null, timeoutMs = 30_000, privateLabel = '', catchUp = null }) {
   const text = clip(input?.text, 600)
   if (!text) throw Object.assign(new Error('empty'), { status: 400 })
   const apps = (Array.isArray(input?.apps) ? input.apps : []).map((name) => clip(name, 40)).filter(Boolean).slice(0, 60)
@@ -211,6 +211,12 @@ export async function routeUtterance({ input, settings, router, fetchImpl = fetc
   const why = { decided_by: 'model', rules: [...rules.rules], urgent: rules.urgent, tags: [...rules.tags], reminder: false }
   const at = now ? +new Date(now) : Date.now()
   const dumpCmd = (cmd = {}) => ({ route: 'dump', title: dumpTitle(cmd, text), deadline: deadlineFrom(text, timezone || settings?.clock?.timezone, at), summary: clip(cmd.summary, 200) || text })
+  // Issue 668 (switch wizard/catch-me-up): "catch me up" said on its own is always a visible turn for the agent, never a
+  // phone command or a background task; the caller passes the phrase test only while the switch is on.
+  if (typeof catchUp === 'function' && catchUp(text)) {
+    Object.assign(why, { decided_by: 'owner_words', rules: ['catch_up', ...why.rules] })
+    return { cmd: { route: 'agent', summary: text }, ms: 0, model: '', why }
+  }
   // The owner's words win before any model: a no-reply phrase is a background task. An earlier correction of exactly
   // these words routes them the way he wanted, unless a reply phrase of his says otherwise.
   if (dump && rules.intent === 'dump' && rules.rules[0]?.startsWith('no_reply:')) {

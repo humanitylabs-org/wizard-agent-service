@@ -55,6 +55,28 @@ on, `0` off), a fixed reader decides how each finished run on a linked record is
 - **Failures:** invalid JSON, an HTTP error or a 20 s timeout file the run as today, logged. One read per finished run
   however often it is polled; a Service restart mid-read reads it again on the next poll.
 
+## Smart inbox (issue 667, switch `wizard/smart-inbox`, off by default)
+
+The same owner switch as the shell's Smart inbox rule (wizard-ux issue 1883), read from the Look file; env
+`WIZARD_SMART_INBOX` `1` forces it on, `0` off. With it on:
+
+- The status contract injected into every agent's runs (main, routed, heavy relay; Wizard and Own reply styles)
+  says `needs_you` is a blocker only (a decision, approval, unclear instruction or missing input; if the agent can
+  file, build or finish, it does), and `check` is the confirm kind (try it, QA it, confirm it) that waits for catch
+  me up. No agent persona changes.
+- When a main-agent run ends: `check` writes one record (kind `confirm`, `filed: smart_inbox`, the ask) and the run
+  is quiet. A run with no owner Sent row (a watch, a schedule, a helper result) files `done` as `result`, a final
+  `fyi` as `fyi`, `check` as `confirm`, and is quiet; a `[SILENT]` answer is only quiet. The owner's first message or
+  reply is quiet when his words asked for no answer and the run ended done, fyi or check. `needs_you` and failed runs
+  are never quiet or filed. A newer filed record on a thread archives its older open one; a filed record is never the
+  thread's worker record (`linked` skips it), and a worker thread keeps reporting into its own record.
+- "Let me know when", "tell me when", "ping me once" in the owner's message set `notify_when_done` on its Sent row;
+  that thread's next finished result (done or check) is not quiet and not filed, once (`notified_run`).
+- The list row's `wizard_quiet_reply` (`quietReply` in `view=list`) reads these quiet runs; a `check` Sent row reads
+  `done`. The signal sweep counts `confirm` records under Later.
+
+Switch off: the contract, Sent rows, records and quiet marks are exactly as before.
+
 ## Routes (owner settings gate on every method)
 
 - `GET /wizard/v1/agent-inbox?state=new,running&kind=&agent=&limit=` -> `{ records, check, stay }`; `stay` lists the main agent's Daily and Alerts

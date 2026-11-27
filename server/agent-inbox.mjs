@@ -20,7 +20,11 @@ import { planSweep, composeCard, cardView, yesToAllTargets, DEFAULT_LINKS } from
 // Worker runs admitted by capture carry this idempotency-key prefix, so the nightly check can find finished worker
 // runs that have no record without reading the record first.
 export const INBOX_RUN_PREFIX = 'wizard-inbox-'
-export const INBOX_KINDS = new Set(['result', 'needs_you', 'alert', 'fyi', 'note'])
+// `confirm` (issue 667, Smart inbox): a finished thread's "check it / try it" ask that waits for catch me up.
+export const INBOX_KINDS = new Set(['result', 'needs_you', 'alert', 'fyi', 'note', 'confirm'])
+// Records the Service filed from a visible thread's finished run (Smart inbox). They are notes about that thread, never
+// its worker record: the thread's later runs never update them.
+export const SMART_FILED = 'smart_inbox'
 export const INBOX_STATES = new Set(['running', 'new', 'surfaced', 'answered', 'parked', 'archived', 'stale'])
 export const NO_SUMMARY = 'Finished without a summary. Open it to read.'
 export const STALE_NOTE = 'No news for 6 h.'
@@ -200,10 +204,28 @@ export class AgentInboxStore {
   linked(agent, thread) {
     let best = null
     for (const r of Object.values(this.data.records)) {
-      if (r.agent !== (agent || 'hermes') || r.thread_id !== thread || r.state === 'archived') continue
+      if (r.agent !== (agent || 'hermes') || r.thread_id !== thread || r.state === 'archived' || r.filed === SMART_FILED) continue
       if (!best || r.created_at > best.created_at) best = r
     }
     return best
+  }
+
+  /** Smart inbox (issue 667): file one finished run of a visible thread (`kind` confirm, result or fyi) for catch me
+   *  up. One record per run; a newer one on the same thread retires the older open ones, so a thread is one line. */
+  fileRun({ agent = 'hermes', thread = '', run_id: runId = '', kind = 'confirm', title = '', ask = '', started_by = 'owner' } = {}) {
+    if (!['confirm', 'result', 'fyi'].includes(kind) || !runId) return null
+    const dedupe = hash(`${agent}\n${SMART_FILED}\n${thread}\n${runId}`).slice(0, 32)
+    const { record, created } = this.capture({ agent, thread_id: thread, kind, title: title || ask, ask, dedupe_hash: dedupe },
+      { ready: true, fields: { filed: SMART_FILED, run_id: clip(runId, 200), started_by: started_by === 'agent' ? 'agent' : 'owner' } })
+    if (!created) return { record, created }
+    const t = this.now()
+    let retired = false
+    for (const r of Object.values(this.data.records)) {
+      if (r.id === record.id || r.filed !== SMART_FILED || r.agent !== record.agent || r.thread_id !== record.thread_id) continue
+      if (r.state === 'new' || r.state === 'surfaced') { Object.assign(r, { state: 'archived', updated_at: t }); retired = true }
+    }
+    if (retired) this.#save()
+    return { record, created }
   }
 
   /** A captured task whose worker could not be started (issue 551): it is never lost, it waits on the owner. */

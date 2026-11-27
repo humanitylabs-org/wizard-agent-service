@@ -37,7 +37,7 @@ import { upstreamError, validateRecoveryIdentity } from './hermes-compat.mjs'
 import { DismissedFailureStore, ThreadSeenStore } from './thread-seen.mjs'
 import { ThreadDispositionStore } from './thread-dispositions.mjs'
 import { sideReference, sideKey, atomicStoreWrite, withStoreLock, migrateJson, migrateJsonLines, qualifyContinuation } from './thread-reference.mjs'
-import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, fullStatusAsk, askMaxFor, withAskMax, createHeavyStatusGuard, replyAppId, projectStatusMarkers } from './thread-status.mjs'
+import { SUPERVISOR_SPELL, FINISH_REPORT_INSTRUCTIONS, finishReportInstructions, OWNED_OPEN_WORK_INSTRUCTIONS, STATUS_INSTRUCTIONS, STATUS_PROTOCOL_INSTRUCTIONS, OWN_STYLE_SOURCE, StatusBackfill, parseStatus, fullStatusAsk, withSmartInbox, SMART_INBOX_SWITCH, asksToBeTold, askMaxFor, withAskMax, createHeavyStatusGuard, replyAppId, projectStatusMarkers } from './thread-status.mjs'
 import { APP_PROVENANCE_INSTRUCTIONS, appProvenanceCatalog, appProvenanceRunNote, hasAppToolCalls, projectSessionAppProvenance } from './thread-app-provenance.mjs'
 import { PLAIN_TITLES_SWITCH, ThreadTitleStore, clashCandidates, provisionalTitleFrom, readMisspelledTitles, readSessionTitle, titleContextLine, titleKey, titleToApply, topicFor } from './thread-titles.mjs'
 import { PRODUCT_NAME, misspellsProductName, spellProductName } from './product-name.mjs'
@@ -72,6 +72,7 @@ import { APP_WAKE_CONTRACT, APP_WAKE_RUN_PREFIX, createWakeLedger, parseWakeEven
 import { AgentInboxStore, INBOX_RUN_PREFIX, CHECK_WINDOW_MS, DAILY_DOOR, START_FAILED, appDoor, recordApp } from './agent-inbox.mjs'
 import { SentLog } from './sent-log.mjs'
 import { isSweepPhrase, isScheduledSweep, withCardRow, WAITING_CAP, DONE_CAP } from './agent-sweep.mjs'
+import { createCatchUp, CATCH_UP_SWITCH, startsCatchUp } from './catch-up.mjs'
 import { AlertRulesFile, createAlertGate, privateRouter } from './agent-alerts.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
 import { replyRules, routeUtterance } from './voice-router.mjs'
@@ -397,7 +398,7 @@ export function clientViewContext(value) {
   return `${VIEW_CONTEXT_FRAME}\n${note.length > VIEW_CONTEXT_MAX ? `${note.slice(0, VIEW_CONTEXT_MAX - 1)}…` : note}`
 }
 
-function directBody(method, pathname, body, contract, osInstructions = '', noteFor = null, askMax = null) {
+function directBody(method, pathname, body, contract, osInstructions = '', noteFor = null, askMax = null, smartOn = null) {
   if (method !== 'POST') return body
   const isSessionCreate = pathname === '/api/sessions'
   const isRunCreate = pathname === '/v1/runs'
@@ -414,7 +415,7 @@ function directBody(method, pathname, body, contract, osInstructions = '', noteF
   if (!isRunCreate) return body
   return Buffer.from(JSON.stringify({
     ...value,
-    instructions: [withAskMax(runInstructions(contract), typeof askMax === 'function' ? askMax() : 140) + (typeof osInstructions === 'function' ? osInstructions(value.session_id) : osInstructions), typeof noteFor === 'function' ? noteFor(value.session_id) : '', clientViewContext(value.instructions)].filter(Boolean).join('\n\n'),
+    instructions: [withSmartInbox(withAskMax(runInstructions(contract), typeof askMax === 'function' ? askMax() : 140), typeof smartOn === 'function' && smartOn() === true) + (typeof osInstructions === 'function' ? osInstructions(value.session_id) : osInstructions), typeof noteFor === 'function' ? noteFor(value.session_id) : '', clientViewContext(value.instructions)].filter(Boolean).join('\n\n'),
     ...runContractFields(contract),
   }))
 }
@@ -3145,6 +3146,13 @@ function buildWizardServer(options, lifetime) {
   const firstChatSwitchOn = createChannelsSwitch({ id: FIRST_CHAT_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.firstChatGoalsTtlMs ?? 3000 })
   const firstChatOn = () => channelPart(options.firstChatGoals, firstChatSwitchOn)
   const firstChatNote = () => (firstChatOn() ? FIRST_CHAT_NOTE : '')
+  // Catch me up (issue 668, catch-up.mjs): the owner's `wizard/catch-me-up` switch in the Look file; option catchUp (env
+  // WIZARD_CATCH_ME_UP, '1' on / '0' off) wins. On: "catch me up" (or "signal sweep") to the main agent runs the built
+  // catch-up and the main agent gets the wizard_catch_up tool. Off: nothing is read, written or offered.
+  const catchUpSwitchOn = createChannelsSwitch({ id: CATCH_UP_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.catchUpTtlMs ?? 3000 })
+  const catchUpOn = () => channelPart(options.catchUp, catchUpSwitchOn)
+  let catchUp = null
+  const catchUpTools = agentId => (catchUp && agentId === GATEWAY_MAIN_AGENT && catchUpOn() ? catchUp.tools : null)
   let followUps = null
   // wizard_start_thread / wizard_schedule for routed agents (server/agent-reach-out.mjs); bound with the scheduler.
   let reachOut = null
@@ -3153,7 +3161,7 @@ function buildWizardServer(options, lifetime) {
   // wizard_transcribe on the gateway (server/transcribe.mjs): the box's Wizard Voice Service on loopback, for the
   // agent's own audio files. Bound with the agent registry (it resolves each agent's home).
   let transcribeTools = null
-  const builtinTools = (agentId) => [...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(reachOut?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId), ...(transcribeTools?.list(agentId) || [])]
+  const builtinTools = (agentId) => [...(catchUpTools(agentId)?.list() || []), ...(onboarding?.list(agentId) || []), ...(followUps?.list(agentId) || []), ...(reachOut?.list(agentId) || []), ...(spacesTools?.list(agentId) || []), ...deviceTools.list(agentId), ...(transcribeTools?.list(agentId) || [])]
   // System capability registry (issue 463, capabilities.mjs), on for everyone: the wizard_capabilities tool, the
   // generated kernel index line and the routed run note.
   const interfaceManualSwitchOn = createChannelsSwitch({ id: INTERFACE_MANUAL_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.interfaceManualTtlMs ?? 3000 })
@@ -3176,7 +3184,7 @@ function buildWizardServer(options, lifetime) {
     ? createAgentBridge({
       builtins: {
         list: (agentId) => [...builtinTools(agentId), ...capabilities.list(agentId)],
-        call: async (name, args, agentId) => (await capabilities.call(name, args, agentId)) ?? (await transcribeTools?.call(name, args, agentId)) ?? (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await reachOut?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
+        call: async (name, args, agentId) => (await catchUpTools(agentId)?.call(name, args)) ?? (await capabilities.call(name, args, agentId)) ?? (await transcribeTools?.call(name, args, agentId)) ?? (await deviceTools.call(name, args, agentId)) ?? (await supervisorTools?.call(name, args, agentId)) ?? (await followUps?.call(name, args, agentId)) ?? (await reachOut?.call(name, args, agentId)) ?? (await spacesTools?.call(name, args, agentId)) ?? onboarding?.call(name, args, agentId),
       },
       capabilities: (agentId) => capabilities.jobs(agentId),
       appSkillOn: (appId) => (INTERFACE_MANUAL_APPS.has(appId) ? interfaceManualOn() : true),
@@ -3207,6 +3215,11 @@ function buildWizardServer(options, lifetime) {
   const threadApps = bridge ? new ThreadAppSnapshots(options.threadAppsStatePath ? resolve(String(options.threadAppsStatePath)) : '') : null
   // The status ask's length from the owner's short-answer setting (140 unless the reply-summary view set one).
   const askMaxNow = () => askMaxFor(readUiPreferences(resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json')))
+  // Smart inbox (issue 667): the owner's `wizard/smart-inbox` switch (the shell's Inbox rule, wizard-ux issue 1883), read
+  // from the Look file; WIZARD_SMART_INBOX '1' forces it on, '0' off. Off: the contract, the Sent log and the agent
+  // inbox behave exactly as before.
+  const smartInboxSwitchOn = createChannelsSwitch({ id: SMART_INBOX_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.smartInboxTtlMs ?? 3000 })
+  const smartInboxOn = () => channelPart(options.smartInbox, smartInboxSwitchOn)
   const osInstructions = (sessionId) => {
     if (!bridge || gatewayOnly) return ''
     const apps = bridge.apps()
@@ -3623,6 +3636,7 @@ function buildWizardServer(options, lifetime) {
       return sweepRunNote(sessionId)
     },
     agentInboxNoteRun: (agent, thread, run, runId) => inboxNoteRun(agent, thread, run, runId),
+    smartInbox: () => smartInboxOn(),
     agentStatePath: agent => { const home=routedAgentMedia(agent)?.home; return home ? join(home,'state.db') : '' },
     routedPresentation,
     // An owner-dismissed failure of this agent's thread stops showing until a newer run (wizard-ux issue 1488).
@@ -4230,7 +4244,8 @@ function buildWizardServer(options, lifetime) {
     if (row.source === 'reply') {
       // A reply's state is its own run's: the outcome kept when it ended, else that turn on the queue.
       const end = row.outcome?.state
-      if (end) return end === 'failed' ? 'failed' : end === 'needs_you' || end === 'check' ? 'needs_you' : 'done'
+      // Smart inbox (issue 667): a check is a confirm ask waiting in the agent inbox, not something he must do now.
+      if (end) return end === 'failed' ? 'failed' : end === 'needs_you' || (end === 'check' && !smartInboxOn()) ? 'needs_you' : 'done'
       let turn = null
       try { turn = (inboxQueue(row.agent)?.queuedForSession('direct', row.thread_id) || []).find(t => (row.run_id && t.publicRunId === row.run_id) || (row.run_key && t.idempotencyKey === row.run_key)) || null } catch { turn = null }
       if (!turn) return row.final_state || 'unknown'
@@ -4301,6 +4316,8 @@ function buildWizardServer(options, lifetime) {
     if (row.agent_id) Object.assign(out, { agent_id: row.agent_id, agent_model: row.agent_model || '', chosen_by: row.chosen_by || null })
     // Issue 630: how the result was filed (reader, status_line or fallback), once the result reader filed its record.
     if (row.record_id) { const filed = agentInbox.get(row.record_id)?.classified_by; if (filed) out.filed_by = filed }
+    // Issue 667 (Smart inbox): his words asked to be told when it is done, and the run that told him.
+    if (row.notify_when_done) Object.assign(out, { notify_when_done: true, ...(row.notified_run ? { notified_run: row.notified_run } : {}) })
     if (row.corrected) out.corrected = row.corrected
     if (row.flag) out.flag = row.flag
     if (row.error) out.error = row.error
@@ -4362,6 +4379,8 @@ function buildWizardServer(options, lifetime) {
       if (!row) return
       const words = replyRules(text)
       if (words.tags.length || words.urgent) sentTagsApply(sentLog.update(row.id, { tags: words.tags, urgent: words.urgent }))
+      // Smart inbox (issue 667): "let me know when it's ready" in his first message: its finished result reaches Inbox once.
+      if (smartInboxOn() && asksToBeTold(text) && !row.notify_when_done) sentLog.update(row.id, { notify_when_done: true })
       if (row.source === 'typed') void lifetime.track(classifyTyped(row).catch(error => console.warn(`[sent-log] typed message not classified: ${error?.message || error}`)))
     } catch (error) { console.warn(`[sent-log] sent row not written: ${error?.message || error}`) }
   }
@@ -4378,9 +4397,12 @@ function buildWizardServer(options, lifetime) {
       if (said && typeof input === 'string' && MACHINE_INPUT.test(said)) return null
       if (!said && !voice) return null
       const words = said ? replyRules(said) : { intent: '', rules: ['voice'], tags: [], urgent: false }
-      const wants = !said || words.intent === 'agent' || said.includes('?')
+      // Smart inbox (issue 667): words that ask to be told when it is done want the finished result, once.
+      const notify = smartInboxOn() && asksToBeTold(said)
+      const wants = !said || words.intent === 'agent' || said.includes('?') || notify
       const row = sentLog.reply({ agent: MAIN_AGENT_ID, thread: sessionId, text: said || 'Voice message', run_key: runKey, wants_reply: wants,
         rules: words.rules.length ? words.rules : [wants ? 'question' : 'statement'], tags: words.tags, urgent: words.urgent, steer, run_id: runId })
+      if (notify && row && !row.notify_when_done) sentLog.update(row.id, { notify_when_done: true })
       sentTagsApply(row)
       return row
     } catch (error) { console.warn(`[sent-log] reply row not written: ${error?.message || error}`); return null }
@@ -4397,8 +4419,47 @@ function buildWizardServer(options, lifetime) {
       const state = run.status !== 'completed' ? 'failed' : status?.state || 'none'
       const answer = status?.ask || output.replace(/\[WIZARD_STATUS_V1\][\s\S]*?\[\/WIZARD_STATUS_V1\]/gu, ' ').split('\n').map(line => line.trim()).find(Boolean) || ''
       sentLog.noteRun({ agent: MAIN_AGENT_ID, thread: sessionId, run_id: publicId, run_key: key, state, answer })
+      if (smartInboxOn()) smartNoteRun(sessionId, { publicId, key, upstreamId: runId, output, state, status })
     } catch (error) { console.warn(`[sent-log] reply outcome not kept: ${error?.message || error}`) }
   }
+  // Smart inbox (issue 667): where a finished main-agent run goes. A blocker (needs_you) or a failure is for Inbox and
+  // never quiet. A check is a confirm ask: one agent-inbox record (kind confirm) and the run is quiet. A run nobody
+  // typed (a watch, a schedule, a helper result) files its done or final fyi in the agent inbox and is quiet; a silent
+  // one is just quiet. The owner's own turn (first message, reply, steer) is quiet when his words asked for no answer.
+  // Words that asked to be told when it is done make the next finished result (done or check) reach Inbox, once.
+  const smartNoteRun = (sessionId, { publicId, key, upstreamId, output, state, status }) => {
+    const runIds = [publicId, upstreamId].filter(Boolean)
+    if (!runIds.length || runIds.some(id => sentLog.quietRun(sessionId, id)) || sentLog.notifiedBy(sessionId, publicId)) return
+    if (state === 'failed' || state === 'needs_you') return
+    const owners = sentLog.ownerRowsForRun(sessionId, publicId, key)
+    // Every owner turn gets a Sent row before it is admitted, so a run with none was started by the agent or the Service.
+    const byOwner = owners.length > 0
+    const silent = isSilentResult(output)
+    if (state === 'done' || state === 'check') {
+      const asked = sentLog.pendingNotify(sessionId)
+      if (asked) { sentLog.update(asked.id, { notified_run: publicId }); return }
+    }
+    // A worker thread (an orb dump, an app note, a thread sent to the inbox) already reports into its own record.
+    if (agentInbox.linked(MAIN_AGENT_ID, sessionId)) return
+    const file = kind => {
+      const ask = status?.ask || output.replace(/\[WIZARD_STATUS_V1\][\s\S]*?\[\/WIZARD_STATUS_V1\]/gu, ' ').split('\n').map(line => line.trim()).find(Boolean) || ''
+      if (!ask) return
+      try { agentInbox.fileRun({ agent: MAIN_AGENT_ID, thread: sessionId, run_id: publicId, kind, title: status?.title || status?.subject || '', ask, started_by: byOwner ? 'owner' : 'agent' }) }
+      catch (error) { console.warn(`[smart-inbox] run not filed: ${error?.message || error}`) }
+    }
+    if (byOwner) {
+      const wanted = owners.some(row => row.wants_reply === true || (row.source !== 'reply' && ownerWordsWantReply(row.text)))
+      if (state === 'check') { file('confirm'); sentLog.markQuiet(sessionId, runIds); return }
+      if (!wanted && (state === 'done' || state === 'fyi')) sentLog.markQuiet(sessionId, runIds)
+      return
+    }
+    if (!silent && (state === 'check' || state === 'none')) file(state === 'check' ? 'confirm' : 'result')
+    else if (!silent && state === 'done') file('result')
+    else if (!silent && state === 'fyi' && !inboxContinues(MAIN_AGENT_ID, sessionId, publicId)) file('fyi')
+    sentLog.markQuiet(sessionId, runIds)
+  }
+  // A first message (typed or a new chat) asked for an answer: the same reply rules as a reply row, or a question mark.
+  const ownerWordsWantReply = text => { const said = String(text || ''); return said.includes('?') || replyRules(said).intent === 'agent' }
   // The owner's "Should have replied" / "Didn't need a reply" on a Sent row: the existing Open / Send to inbox move
   // (one route example, its id on the row). A typed row that already has its visible thread only teaches the router.
   const correctSent = async (id, shouldReply) => {
@@ -4584,7 +4645,47 @@ function buildWizardServer(options, lifetime) {
     try { text = visibleInputText(parseJsonBody(body).input) } catch { return null }
     const scheduled = principal?.kind === 'service' && typeof request.headers['x-wizard-schedule-kind'] === 'string' && isScheduledSweep(text)
     if (!scheduled && !(principal?.kind === 'owner' && isSweepPhrase(text))) return null
+    // Issue 668: while catch me up is on, the owner's own "signal sweep" is its alias (a scheduled sweep stays a card).
+    if (!scheduled && catchUpOn()) return null
     return { scheduled }
+  }
+  // Catch me up (issue 668): built before the turn is admitted (the queue may dispatch at once); its run note carries it.
+  catchUp = createCatchUp({
+    statePath: options.catchUpStatePath ? resolve(String(options.catchUpStatePath))
+      : options.agentInboxStatePath ? join(dirname(resolve(String(options.agentInboxStatePath))), 'catch-up.json') : '',
+    now: options.catchUpNow ?? Date.now,
+    inbox: agentInboxOn() ? agentInbox : null,
+    readChats: () => readCanonicalSessionsHttp((path) => hermesJson(path), { limit: 200 }),
+    readTurns: (id) => hermesJson(`/api/sessions/${encodeURIComponent(id)}/messages?order=latest&limit=12`),
+    // The shell's Archive: Hermes archived (and the snooze cleared), then a saved background result dismissed.
+    archiveChat: async (id) => {
+      await archiveHermesSession(id)
+      canonicalSessionCache.expiresAt = 0
+      try { await backgroundResults?.dismiss(id, '') } catch { /* nothing saved to dismiss */ }
+    },
+    skipThreads: () => fixedChannelThreads(resolve(bridgeOsHome || wizardOsHome(), 'channels.sqlite'), MAIN_AGENT_ID),
+  })
+  const catchUpNotes = new Map()
+  const catchUpForTurn = async (sessionId, body) => {
+    if (!sessionId || !catchUpOn()) return false
+    let text = ''
+    try { text = visibleInputText(parseJsonBody(body).input) } catch { return false }
+    if (!startsCatchUp(text.trim())) return false
+    let note = ''
+    try { note = (await catchUp.compose({ threadId: sessionId })).note }
+    catch (error) {
+      console.warn(`[catch-up] failed: ${error?.message || error}`)
+      note = 'Catch me up: the owner asked for a catch-up, but the Wizard Agent Service could not read his chats and agent inbox just now. Say so in one short line; do not make up a catch-up.'
+    }
+    catchUpNotes.set(sessionId, { note, at: Date.now() })
+    if (catchUpNotes.size > 50) catchUpNotes.delete(catchUpNotes.keys().next().value)
+    return true
+  }
+  const catchUpRunNote = sessionId => {
+    const pending = sessionId ? catchUpNotes.get(sessionId) : null
+    if (!pending) return ''
+    catchUpNotes.delete(sessionId)
+    return Date.now() - pending.at > 10 * 60_000 ? '' : pending.note
   }
   // The sweep runs before the turn is admitted, so the run note says what really happened.
   const sweepForTurn = async (sessionId, asked) => {
@@ -5016,7 +5117,7 @@ function buildWizardServer(options, lifetime) {
       require_model_lock: true,
       model_options: { reasoning_effort: 'max' },
       // The worker writes the owner-visible reply (projectOperatorMessages), so it carries the short-answer ask budget too.
-      instructions: [withAskMax(runInstructions({ join: true, response_style: readSettings(settingsPath).settings.response_style }), askMaxNow()), appProvenanceRunNote(appCatalog())].join('\n\n'),
+      instructions: [withSmartInbox(withAskMax(runInstructions({ join: true, response_style: readSettings(settingsPath).settings.response_style }), askMaxNow()), smartInboxOn()), appProvenanceRunNote(appCatalog())].join('\n\n'),
       ...runContractFields(await assertJoinedDelegationCapability()),
     })
     if (durableIdentity) workerBody = runQueue.freezeWorkerDispatchBody(durableIdentity, workerBody)
@@ -5193,7 +5294,7 @@ function buildWizardServer(options, lifetime) {
         const value = parseJsonBody(queuedBody)
         if (!isInlineOperatorRequest(value.input)) pendingWorker = await startOperatorWorker(value.session_id, value.input, record.publicRunId)
         queuedBody = operatorBody('POST', '/v1/runs', queuedBody)
-      } else queuedBody = record.dispatchBody ? Buffer.from(record.dispatchBody) : directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions, runTitleNote, askMaxNow)
+      } else queuedBody = record.dispatchBody ? Buffer.from(record.dispatchBody) : directBody('POST', '/v1/runs', queuedBody, await assertJoinedDelegationCapability(), osInstructions, runTitleNote, askMaxNow, smartInboxOn)
       const headers = new Headers({
         'Content-Type': 'application/json',
         'Idempotency-Key': record.idempotencyKey,
@@ -5402,7 +5503,7 @@ function buildWizardServer(options, lifetime) {
   // Start the queue only after the manual-Continue validator exists: a recovery record left 'launching' by a
   // restart is relaunched by the first tick and must be validated, not cancelled.
   // A routed heavy continuation is the thread's final reply: it carries the owner's short-answer ask budget too.
-  heavyWork = createHeavyIntegration({ options, queue: runQueue, registry: agents, hermesStatePath, askMax: askMaxNow,
+  heavyWork = createHeavyIntegration({ options, queue: runQueue, registry: agents, hermesStatePath, askMax: askMaxNow, smartInbox: smartInboxOn,
     fetchAgent: (agent, path, init) => routedQueues ? routedQueues.fetch(agent, path, init) : agents.fetchAgent(agent, path, init),
     isAutomaticAgentAllowed: id => agents?.read(id)?.role !== 'recovery', request: async path => {
     try { return await hermesJson(path, { signal: AbortSignal.timeout(3000) }, true) }
@@ -5647,7 +5748,7 @@ function buildWizardServer(options, lifetime) {
   const runTitleNote = (sessionId) => {
     const appNote = [appProvenanceRunNote(appCatalog()), spaceFiling.runNote('hermes')].filter(Boolean).join('\n')
     if (typeof sessionId !== 'string' || !sessionId) return [subjectCatalog.runNote(), appNote, trackerNote('hermes', ''), firstChatNote(), buttonsNote()].filter(Boolean).join('\n')
-    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId), dailyNote('hermes', sessionId), sweepRunNote(sessionId), dumpRunNote(sessionId), firstChatNote(), buttonsNote()].filter(Boolean).join('\n')
+    return [titleNote(sessionId), subjectCatalog.runNote(servedSubjects.get(sessionId) ?? ''), appNote, heavyNotices('hermes', sessionId), trackerNote('hermes', sessionId), dailyNote('hermes', sessionId), sweepRunNote(sessionId), catchUpRunNote(sessionId), dumpRunNote(sessionId), firstChatNote(), buttonsNote()].filter(Boolean).join('\n')
   }
   const patchHermesTitle = async (sessionId, title, { exact = false, datedAt = null } = {}) => {
     // A title another thread holds is dated, never numbered (James, 8 Nov: no #N). An exact patch never is.
@@ -5850,9 +5951,14 @@ function buildWizardServer(options, lifetime) {
   // (needs you, check) or a run still going never counts.
   const sentQuietReply = (session, attention) => {
     if (!agentInboxOn() || typeof session?.wizard_last_run_id !== 'string' || !session.wizard_last_run_id) return false
-    if (attention && (attention.state === 'needs_you' || attention.state === 'check')) return false
     if (ACTIVE_RUN_STATUSES.has(session.status) || session.status === 'waiting_for_approval') return false
-    try { return sentLog.quietFor(session.id, session.wizard_last_run_id) } catch { return false }
+    // Smart inbox (issue 667): a check (a confirm ask filed in the agent inbox) can be quiet too; a needs_you never is.
+    const smart = smartInboxOn()
+    if (attention && (attention.state === 'needs_you' || (attention.state === 'check' && !smart))) return false
+    try {
+      if (smart && sentLog.notifiedBy(session.id, session.wizard_last_run_id)) return false
+      return sentLog.quietFor(session.id, session.wizard_last_run_id) || (smart && sentLog.quietRun(session.id, session.wizard_last_run_id))
+    } catch { return false }
   }
   const enrichSessionListMessages = async (result, operator, sessionTruth = null, previewOffset = 0) => {
     try {
@@ -6417,7 +6523,7 @@ function buildWizardServer(options, lifetime) {
         ...(locked ? { model: locked.model, provider: locked.provider, require_model_lock: true } : {}) }))
       const prepared = await prepareRunBody(raw, resolveFiles, true)
       const body = prepared.body
-      const projected = directBody('POST', '/v1/runs', body, contract, osInstructions, runTitleNote, askMaxNow)
+      const projected = directBody('POST', '/v1/runs', body, contract, osInstructions, runTitleNote, askMaxNow, smartInboxOn)
       if (await helperSessionActive(sessionId)) {
         throw Object.assign(new Error('Agent already active'), { status: 409, code: 'helper_session_busy' })
       }
@@ -8379,7 +8485,7 @@ function buildWizardServer(options, lifetime) {
           // Issue 607: an earlier correction of exactly these words routes them the way the owner wanted.
           const correction = dump ? agentInbox.correctionFor(said) : null
           // A background task must be decided before the shell gives up waiting (it opens a visible thread at 6 s).
-          const routed = await routeUtterance({ input, settings, router: fast, fetchImpl, dump, examples, correction, ...(dump ? { timeoutMs: 5_000 } : {}) })
+          const routed = await routeUtterance({ input, settings, router: fast, fetchImpl, dump, examples, correction, ...(dump ? { timeoutMs: 5_000 } : {}), ...(catchUpOn() ? { catchUp: startsCatchUp } : {}) })
           if (routed.cmd?.route === 'dump') {
             try { routed.cmd = { ...routed.cmd, ...captureDump(input.text, routed.cmd, { urgent: routed.why?.urgent === true, tags: routed.why?.tags || [] }) } }
             catch (error) {
@@ -9199,12 +9305,17 @@ function buildWizardServer(options, lifetime) {
           // A "signal sweep" turn: the card is posted first (the queue may dispatch at once), then its run note says so.
           const sweepAsked = queuedAdmission.runtime === 'direct' ? noteSweepRequest(queuedAdmission.sessionId, body, principal, request) : null
           if (sweepAsked) await sweepForTurn(queuedAdmission.sessionId, sweepAsked)
+          // Issue 668: the owner's "catch me up" (switch on) is built here; any other owner turn may answer the last one.
+          const ownerDirect = queuedAdmission.runtime === 'direct' && principal.kind === 'owner' && !queuedAdmission.continuation
+          const catchUpAsked = ownerDirect ? await catchUpForTurn(queuedAdmission.sessionId, body) : false
+          if (ownerDirect && !catchUpAsked && catchUpOn()) { try { catchUp.ownerTurn(queuedAdmission.sessionId, visibleInputText(parseJsonBody(body).input)) } catch { /* not an answer */ } }
           // Issue 1808: any later owner turn in the thread is a reply row, written before the turn is admitted.
           const replyRow = queuedAdmission.runtime === 'direct' && principal.kind === 'owner' && !queuedAdmission.continuation && !firstOwnerTurn && agentInboxOn()
             ? sentReply(queuedAdmission.sessionId, body.toString('utf8'), queuedAdmission.idempotencyKey, audioPaths.length > 0) : null
           const admitted = await runQueue.admit({ ...queuedAdmission, body: body.toString('utf8'), trustedPaths })
           if (replyRow && admitted.record?.publicRunId) { try { if (!sentLog.get(replyRow.id)?.run_id) sentLog.update(replyRow.id, { run_id: admitted.record.publicRunId }) } catch { /* the run key still links it */ } }
           if (sweepAsked && admitted.replayed) sweepNotes.delete(queuedAdmission.sessionId)
+          if (catchUpAsked && admitted.replayed) catchUpNotes.delete(queuedAdmission.sessionId)
           if (queuedAdmission.runtime === 'direct' && principal.kind === 'owner' && !queuedAdmission.continuation) inboxOwnerTurn(MAIN_AGENT_ID, queuedAdmission.sessionId)
           if (firstOwnerTurn && !admitted.replayed) sentTurn(queuedAdmission.sessionId, body.toString('utf8'), queuedAdmission.idempotencyKey, audioPaths.length > 0)
           // A durable queue receipt is not proof that Hermes has materialized this session.
@@ -9223,7 +9334,7 @@ function buildWizardServer(options, lifetime) {
             }))
           }
         }
-        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract, osInstructions, runTitleNote, askMaxNow)
+        if (body) body = operator ? operatorBody(request.method ?? '', upstreamPath, body) : directBody(request.method ?? '', upstreamPath, body, admissionContract, osInstructions, runTitleNote, askMaxNow, smartInboxOn)
         const headers = new Headers()
         headers.set('Authorization', `Bearer ${hermesKey}`)
         if (hasBody) headers.set('Content-Type', 'application/json')
