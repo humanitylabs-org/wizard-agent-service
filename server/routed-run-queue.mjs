@@ -56,6 +56,8 @@ export function createRoutedQueues({ registry, queuedHistory, restoreOwnerTurns 
           if(record.continuation?.kind==='watch'&&record.continuation.preserve_archived===true) {
             await call(`/api/sessions/${encodeURIComponent(record.sessionId)}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({archived:true})})
           }
+          // A launch that answers already finished (an idempotent replay, a slow admission) is never looked up again.
+          if(ownerRunReturns(record,normalizeProviderPreflightFailure(payload),ownerApprovals)) await unarchiveRouted(record.sessionId)
           return {upstreamRunId:payload.run_id||payload.id,capacityStatus:payload.status,payload}
         },
         lookup:async record=>{ const payload=await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`); if(normalizeProviderPreflightFailure(payload).status==='completed') onStatus?.(agent.id,record.sessionId,payload.output); onRun?.(agent.id,record.sessionId,payload,record.publicRunId)

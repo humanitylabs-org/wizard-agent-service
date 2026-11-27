@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
+import { isOwnerRun, ownerRunReturns } from '../server/owner-run-return.mjs'
 
 // Issue 675 (James, 26 Nov 2026): archived threads came back because every scheduled wake, script-gated check
 // and report posted into them re-opened the thread at admission, before anyone knew the answer was [SILENT].
@@ -183,5 +184,24 @@ describe('the owner archives a thread while his own run works (wizard-ux issue 1
     await archive(f)
     await finish(f, runId)
     expect(f.archived()).toBe(true)
+  })
+})
+
+describe('which runs bring an archived thread back (wizard-ux issue 1997)', () => {
+  const run = (idempotencyKey: string, extra: any = {}) => ({ sessionId: 'wizard_origin', publicRunId: `p-${idempotencyKey}`, idempotencyKey, ...extra })
+  it('owner turns and agent-inbox answers count; service- and agent-started runs keep their own rules', () => {
+    for (const key of ['owner-turn-1', 'wizard-inbox-answer-1', 'wizard-not-started-requeue-1']) expect(isOwnerRun(run(key))).toBe(true)
+    for (const key of ['wizard-inbox-1', 'schedule:job:1', 'wizard-wake-1', 'wizard-helper-receipt-1', 'wizard-follow-through-1', 'wizard-heavy-1']) expect(isOwnerRun(run(key))).toBe(false)
+    expect(isOwnerRun(run('owner-turn-2', { continuation: { kind: 'watch' } }))).toBe(false)
+    expect(isOwnerRun(run('owner-turn-3', { recoveryAuthorized: true }))).toBe(false)
+  })
+  it('a visible reply or one approval wait returns; [SILENT], empty and failed runs do not', () => {
+    const approvals = new Set<string>()
+    expect(ownerRunReturns(run('a'), { status: 'completed', output: 'Done: the plan is ready.' }, approvals)).toBe(true)
+    expect(ownerRunReturns(run('b'), { status: 'completed', output: '[SILENT]' }, approvals)).toBe(false)
+    expect(ownerRunReturns(run('c'), { status: 'completed', output: '  ' }, approvals)).toBe(false)
+    expect(ownerRunReturns(run('d'), { status: 'failed' }, approvals)).toBe(false)
+    expect(ownerRunReturns(run('e'), { status: 'waiting_for_approval' }, approvals)).toBe(true)
+    expect(ownerRunReturns(run('e'), { status: 'waiting_for_approval' }, approvals)).toBe(false)
   })
 })

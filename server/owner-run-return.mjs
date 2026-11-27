@@ -6,8 +6,9 @@
 import { isSilentResult } from './scheduler.mjs'
 
 // Runs the Service or an agent started (helper receipts, follow-through, heavy results, schedules, agent inbox, app
-// wakes) keep their own issue 675 rules; only the owner's own turns come back here.
-const AGENT_STARTED = /^(?:wizard-helper-receipt-|wizard-follow-through-|wizard-heavy-|schedule:|wizard-inbox-|wizard-wake-)/u
+// wakes) keep their own issue 675 rules; only the owner's own turns come back here. A tap on an agent-inbox card
+// answer (wizard-inbox-answer-*) is the owner's next turn, as in service.mjs agentStartedRun.
+const AGENT_STARTED = /^(?:wizard-helper-receipt-|wizard-follow-through-|wizard-heavy-|schedule:|wizard-inbox-(?!answer-)|wizard-wake-)/u
 
 export const isOwnerRun = (record) => Boolean(record?.sessionId) && !record.continuation && !record.recoveryAuthorized
   && !AGENT_STARTED.test(String(record.idempotencyKey || ''))
