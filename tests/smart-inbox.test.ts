@@ -185,6 +185,27 @@ describe('issue 667: Smart inbox on the box (switch wizard/smart-inbox)', { time
     expect((await inbox(base)).filter(r => r.thread_id === 'wizard_sched_2')).toHaveLength(0)
   })
 
+  it('a copy of the 26 Nov list: the 5 confirmation threads are in the agent inbox, the 10 blockers stay for Inbox', async () => {
+    const confirms = ['Signal chat names', 'Messenger video playback', 'Forum setup', 'Chats top bar', 'Turn on two switches']
+    const blockers = Array.from({ length: 10 }, (_, n) => `Synthetic decision ${n + 1}`)
+    const reply = (input: string) => confirms.some(c => input.includes(c))
+      ? `Went through the builder and is live.\n${status('check', `${confirms.find(c => input.includes(c))} is live. Say if it looks right`)}`
+      : `Two options.\n${status('needs_you', 'Two options ready. Reply A or B')}`
+    const { base } = await box(reply, { agentInbox: true, look: true })
+    const all = [...confirms, ...blockers]
+    for (const [n, title] of all.entries()) {
+      await send(base, `wizard_list_${n}`, `${title}: work on it`, `list-${n}`)
+      await settled(base, `${title}: work on it`)
+    }
+    const records = await until(() => inbox(base), r => r.length === 5)
+    expect(records.map(r => r.kind)).toEqual(Array(5).fill('confirm'))
+    expect(new Set(records.map(r => r.thread_id))).toEqual(new Set(confirms.map((_, n) => `wizard_list_${n}`)))
+    for (const [n] of all.entries()) {
+      const row = await until(() => listRow(base, `wizard_list_${n}`), r => n < 5 ? r?.wizard_quiet_reply === true : Boolean(r))
+      expect(row?.wizard_quiet_reply === true, `wizard_list_${n}`).toBe(n < 5)
+    }
+  })
+
   it('switch off: no records, a check stays loud, the contract is unchanged (as before)', async () => {
     const { base } = await box(answers, { agentInbox: true, look: false })
     await send(base, 'wizard_off_1', 'Plan my weekend', 'o-1')
