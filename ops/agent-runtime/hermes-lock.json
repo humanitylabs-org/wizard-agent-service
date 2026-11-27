@@ -1,28 +1,64 @@
 {
   "schema": 1,
   "automatic_updates": "paused",
-  "state": "frozen",
+  "state": "approved",
   "minimum_release_age_days": 7,
   "enforce_from": "0.3.40",
   "hermes": {
-    "tag": "v2026.9.24",
-    "commit": "f97608f178d1ffeca59860195ab7da295f7c8e5f",
+    "tag": "v0.23.3",
+    "commit": "caafe5389ae585ef77387a962aee05b1bcf17029",
     "image": {
-      "ref": "docker.io/nousresearch/hermes-agent:v2026.9.24",
-      "digest": "sha256:fca358f12efd65bfaaca05884166f15c0e2788375ca30d77061ac1ebc96452b7"
+      "ref": "docker.io/nousresearch/hermes-agent:v0.23.3",
+      "digest": "sha256:3e9fe4c6ef36490f43aa0d0d80f9df64e9c92a576eee3042f1a97c8813c05355",
+      "commit": "caafe5389ae585ef77387a962aee05b1bcf17029"
     },
-    "test_record": "none: carried over from 0.3.21, pinned before Wizard stable existed",
-    "rollback": null
+    "test_record": "docs/acceptance/hermes-v0.23.3.md",
+    "rollback": {
+      "tag": "v2026.9.24",
+      "commit": "f97608f178d1ffeca59860195ab7da295f7c8e5f",
+      "image": {
+        "ref": "docker.io/nousresearch/hermes-agent:v2026.9.24",
+        "digest": "sha256:fca358f12efd65bfaaca05884166f15c0e2788375ca30d77061ac1ebc96452b7"
+      }
+    }
   },
   "agent_recipe": {
     "app": "hermes-agent",
     "repo": "oscarhenrycollins/hermes-agent",
-    "index_version": "2026.9.24-wizard2",
+    "index_version": "0.23.3-wizard1",
     "alongside": "external: host Hermes",
-    "commit": "e8ae558f26bf4b981e0cad60e387386a1ad7b869"
+    "commit": "8db4cc2aa51b9b91cd9369631b2aa47b4dc48c1d"
   },
-  "runtime_image": "ghcr.io/humanitylabs-org/hermes-agent@sha256:e8ad921a23c7a2144b9c89902cb16908b68020fcd4f301bf8a2dbe2da75f3f5f",
-  "baseline_evidence": "https://github.com/humanitylabs-org/wizard-os/blob/main/docs/acceptance/hermes-v2026.9.24.md",
-  "limitations": "Frozen existing baseline, not universally safe: compacted history visibility limitation. No automatic downgrade or update of existing installs.",
-  "promotion": null
+  "runtime_image": "ghcr.io/humanitylabs-org/hermes-agent@sha256:1353ee1e39d4fe5536050ade372cf70951fb6947eb1f192c8158a1a038f0fb8f",
+  "baseline_evidence": "https://github.com/humanitylabs-org/wizard-os/blob/main/docs/acceptance/hermes-v0.23.3.md",
+  "limitations": "Promoted for new installs and explicit updates only (WIZARD_HERMES_PROMOTION=hermes-v0.23.3-wizard1): no automatic update or downgrade of existing installs. A compacted thread sends its full history once more before the summary takes over (docs/acceptance/hermes-v0.23.3.md).",
+  "previous": {
+    "hermes": {
+      "tag": "v2026.9.24",
+      "commit": "f97608f178d1ffeca59860195ab7da295f7c8e5f",
+      "image": {
+        "ref": "docker.io/nousresearch/hermes-agent:v2026.9.24",
+        "digest": "sha256:fca358f12efd65bfaaca05884166f15c0e2788375ca30d77061ac1ebc96452b7"
+      }
+    },
+    "agent_recipe": {
+      "app": "hermes-agent",
+      "repo": "oscarhenrycollins/hermes-agent",
+      "index_version": "2026.9.24-wizard2",
+      "commit": "e8ae558f26bf4b981e0cad60e387386a1ad7b869"
+    },
+    "runtime_image": "ghcr.io/humanitylabs-org/hermes-agent@sha256:e8ad921a23c7a2144b9c89902cb16908b68020fcd4f301bf8a2dbe2da75f3f5f",
+    "why": "Stable keeps this pin until the promoted release has soaked 72h and passed the upgrade test; releases that pin it stay valid."
+  },
+  "promotion": {
+    "id": "hermes-v0.23.3-wizard1",
+    "published_at": "2026-11-20T00:34:38Z",
+    "approved_at": "2026-11-27T00:35:00Z",
+    "recommendation": "https://github.com/humanitylabs-org/wizard-app-manager/issues/856",
+    "approval": "https://github.com/humanitylabs-org/wizard-app-manager/issues/856#issuecomment-7096312096",
+    "acceptance": "https://github.com/humanitylabs-org/wizard-os/blob/main/docs/acceptance/hermes-v0.23.3.md",
+    "canary": "https://github.com/humanitylabs-org/wizard-app-manager/issues/856#issuecomment-7208627333",
+    "bug_review": "https://github.com/humanitylabs-org/wizard-os/blob/main/docs/acceptance/hermes-v0.23.3.md#bug-review",
+    "rollback": "https://github.com/humanitylabs-org/wizard-os/blob/main/docs/acceptance/hermes-v0.23.3.md#rollback"
+  }
 }
