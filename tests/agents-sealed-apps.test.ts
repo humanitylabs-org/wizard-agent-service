@@ -130,7 +130,7 @@ describe('#58 which agents can use an app', () => {
     // Main agent: standard, every current app ticked (no regression for an existing box).
     const mainAgent = (await (await fetch(`${base}/wizard/v1/agents/hermes`)).json()).agent
     expect(mainAgent).toMatchObject({ privacy: 'standard', permissions: { wizard_apps: ['notes'], agent_apps: ['scanner'] } })
-    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'scanner__scan', 'wizard_apps', 'wizard_capabilities', 'wizard_devices', 'wizard_transcribe', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'scanner__scan', 'wizard_apps', 'wizard_capabilities', 'wizard_catch_up', 'wizard_devices', 'wizard_transcribe', ...SHARED_AGENT_TOOLS].sort())
     expect(await toolNames(base, gatewayKey(dir, helper.id))).toEqual(['notes__note_add', 'wizard_apps', 'wizard_capabilities', 'wizard_devices', 'wizard_transcribe', ...SHARED_AGENT_TOOLS].sort())
     expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['wizard_apps', 'wizard_capabilities', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
     // A tool outside the agent's list is refused in plain words, and never reaches the app.
@@ -163,7 +163,7 @@ describe('#58 which agents can use an app', () => {
     // The owner narrows the main agent; a stored choice is kept from then on.
     const narrowed = await fetch(`${base}/wizard/v1/agents/hermes`, json({ permissions: { wizard_apps: ['notes'], agent_apps: [] } }, 'PATCH'))
     expect(narrowed.status).toBe(200)
-    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'wizard_apps', 'wizard_capabilities', 'wizard_devices', 'wizard_transcribe', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['notes__note_add', 'wizard_apps', 'wizard_capabilities', 'wizard_catch_up', 'wizard_devices', 'wizard_transcribe', ...SHARED_AGENT_TOOLS].sort())
     // Install a new app.
     const music = await fakeApp('play')
     writeApps(dir, [appEntry('notes', notes.url), appEntry('scanner', scanner.url, false), appEntry('music', music.url)])
@@ -211,7 +211,7 @@ describe('#58 which agents can use an app', () => {
     const privAgent = (await (await fetch(`${base}/wizard/v1/agents/private`)).json()).agent
     expect(privAgent.permissions.wizard_apps).toEqual(['notes'])
     expect(await toolNames(base, gatewayKey(dir, 'private'))).toEqual(['notes__note_add', 'wizard_apps', 'wizard_capabilities', 'wizard_devices', ...SHARED_AGENT_TOOLS].sort())
-    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['scanner__scan', 'wizard_apps', 'wizard_capabilities', 'wizard_devices', 'wizard_transcribe', ...SHARED_AGENT_TOOLS].sort())
+    expect(await toolNames(base, MAIN_TOKEN)).toEqual(['scanner__scan', 'wizard_apps', 'wizard_capabilities', 'wizard_catch_up', 'wizard_devices', 'wizard_transcribe', ...SHARED_AGENT_TOOLS].sort())
     // Ticked from the private agent's side now writes the gateway into its harness config.
     expect(readFileSync(join(dir, 'agents', 'private', 'home', 'config.yaml'), 'utf8')).toContain('/wizard/mcp')
     expect((await fetch(`${base}/wizard/v1/apps/nope/agents`)).status).toBe(404)
