@@ -13,19 +13,28 @@ This module clears such a cooldown with stock Hermes' own targeted control (`Cre
   * extra usage is enabled on that account; and
   * it is funded: purchased credits above zero, or, when the credit balance can't be read, monthly spend below
     the monthly cap.
-A grant benched credential-wide (auth, billing, dead) is never touched. Nothing changes the sign-in, the model or
-the provider. If the provider refuses again after a release, Hermes re-arms the cooldown and this module leaves it
-alone until the paid reading changes, so a real refusal is never bypassed in a loop.
+A grant benched credential-wide (auth, billing, dead) is never touched while that bench runs; a credential-wide
+status whose bench has already ended is history, and the plain 429 status stock Hermes records beside the capped
+model cooldown is that same refusal, not a separate bench. Nothing changes the sign-in, the model or the provider.
+If the provider refuses again after a release, Hermes re-arms the cooldown and the next probe (at most one per grant
+per PROBE_EVERY) may release it again. The owner can top up any minute and the usage read does not always show it
+(an unreadable credit balance and no new spend read the same before and after), so a refused release is retried at
+the probe pace instead of being held until the gateway restarts (27 Nov reopen). Each retry lets at most one request
+reach the provider, which decides; a fresh throttle, extra usage off and a readable zero balance are never released.
+
+Every outcome other than 'no_cooldown' is logged (INFO, the Hermes agent.log) when it changes, and every release,
+with the reason in plain words and never an id, token or amount.
 """
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
 import threading
 import time
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 
 USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 TICK = 60               # seconds between pool checks (a local file read; no provider call without a cooldown)
@@ -35,8 +44,25 @@ MATCH = 30 * 60         # a cooldown "is" a window's cap when it ends within 30 
 _ORG = re.compile(r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
 _LOCK = threading.Lock()
 _PROBED = {}     # grant id -> monotonic time of the last usage read
-_RELEASED = {}   # grant id -> paid signature at the last release (loop guard)
+_RELEASED = {}   # grant id -> {'signature', 'count'} of the releases since the paid reading last changed
+_LOGGED = {}     # grant id -> the last outcome logged for it (log on change, not every tick)
 _STATE: dict = {'thread': None, 'last': None}
+EXHAUSTED_TTL = 60 * 60   # stock Hermes' credential-wide bench lengths (agent/credential_pool.py), for when
+EXHAUSTED_TTL_401 = 5 * 60   # Hermes is not importable
+EXHAUSTED_TTL_SOLE = 60
+log = logging.getLogger('wizard_os.claude_cooldown_recovery')
+WHY = {
+    'short_cooldown': 'a short provider throttle; it lifts on its own',
+    'credential_benched': 'the sign-in itself is benched (auth, billing or dead), not one model',
+    'not_capped': 'the cooldown does not end at the reset of a used-up included window',
+    'extra_usage_off': 'extra usage is off for this account',
+    'extra_usage_unfunded': 'extra usage is on but has no money left',
+    'token_expired': 'the sign-in token expired and could not be renewed',
+    'usage_unreadable': 'the Claude usage read failed; trying again at the next probe',
+    'reset_failed': 'the stock reset failed',
+    'released': 'included limit used up, extra usage on and funded: cooldown cleared',
+    'released_again': 'released again: Claude refused after the last release; trying once more',
+}
 
 
 def _finite(value):
@@ -130,6 +156,59 @@ def _expired(row, now):
     return _finite(ms) and ms <= now * 1000
 
 
+def _when(value):
+    """Epoch seconds from epoch seconds, epoch ms or ISO text (what stock Hermes stores), else None."""
+    if _finite(value) and value > 0:
+        return value / 1000.0 if value > 1_000_000_000_000 else float(value)
+    if isinstance(value, str) and value.strip():
+        try:
+            return _when(float(value.strip()))
+        except ValueError:
+            return _epoch(value)
+    return None
+
+
+def _ttl(code, reason, sole):
+    """Stock Hermes' credential-wide bench length (`_exhausted_ttl`); mirrored when Hermes is not importable."""
+    try:
+        from agent.credential_pool import _exhausted_ttl
+        return _exhausted_ttl(code, sole_credential=sole, failure_reason=reason)
+    except Exception:
+        pass
+    if code == 401:
+        return EXHAUSTED_TTL_401
+    if reason == 'billing_unverified' and code != 402:
+        return min(EXHAUSTED_TTL, EXHAUSTED_TTL_SOLE)
+    if code == 402 or reason == 'billing':
+        return EXHAUSTED_TTL
+    return min(EXHAUSTED_TTL, EXHAUSTED_TTL_SOLE) if sole else EXHAUSTED_TTL
+
+
+def _benched(row, now, sole=False):
+    """Whether the sign-in itself is benched (auth, billing, dead), which this module never touches.
+
+    Stock Hermes records a capped-window 429 twice: the model cooldown and a credential-wide `exhausted` status
+    (code 429, no billing reason, no reset time). That status is the same refusal, not a separate bench: decide()
+    still requires the cooldown to end at a used-up window's reset and extra usage to be funded, and a fresh
+    throttle leaves only a short model cooldown, which is never released. A model cooldown also keeps stock Hermes
+    from ever selecting the row, so it never clears an `exhausted` status whose bench ended: that is history."""
+    status = row.get('last_status')
+    if status in (None, 'ok'):
+        return False
+    if status != 'exhausted':
+        return True   # dead or anything unknown: never touched
+    code, reason = row.get('last_error_code'), row.get('failure_reason')
+    if code == 429 and reason not in ('billing', 'billing_unverified'):
+        return False
+    until = _when(row.get('last_error_reset_at'))
+    if until is None:
+        at = _when(row.get('last_status_at'))
+        if at is None:
+            return True
+        until = at + _ttl(code, reason, sole)
+    return until > now
+
+
 def _active(row, now):
     values = row.get('model_cooldowns') or {}
     if not isinstance(values, dict):
@@ -137,12 +216,12 @@ def _active(row, now):
     return {m: u for m, u in values.items() if isinstance(m, str) and _finite(u) and u > now}
 
 
-def decide(row, payload, balance, now):
+def decide(row, payload, balance, now, sole=False):
     """Pure: 'release' or the reason a grant's cooldowns stay. Never reads or writes anything."""
     cooldowns = _active(row, now)
     if not cooldowns:
         return 'no_cooldown'
-    if row.get('last_status') not in (None, 'ok'):
+    if _benched(row, now, sole):
         return 'credential_benched'   # auth/billing/dead: not a model window
     if min(cooldowns.values()) - now < MIN_LEFT:
         return 'short_cooldown'       # a fresh throttle lifts on its own
@@ -190,17 +269,23 @@ def recover(read=None, reset=None, get=None, renew=None, now=time.time, clock=ti
     get = get or oauth_get
     t = now()
     report = []
-    for token, group in _groups(read('anthropic') or []).items():
+    seen = set()
+    rows = read('anthropic') or []
+    sole = sum(1 for x in rows if isinstance(x, dict) and x.get('last_status') != 'dead') <= 1
+    for token, group in _groups(rows).items():
         cooled = [r for r in group if _active(r, t)]
         if not cooled:
             continue
         cid = cooled[0]['id']
+        seen.add(cid)
         models = sorted({m for r in cooled for m in _active(r, t)})
         # Short cooldowns and credential-wide benches are never released: decide that before any provider call.
         if any(min(_active(r, t).values()) - t < MIN_LEFT for r in cooled):
+            _note(cid, 'short_cooldown', models)
             report.append({'outcome': 'short_cooldown', 'models': models})
             continue
-        if any(r.get('last_status') not in (None, 'ok') for r in cooled):
+        if any(_benched(r, t, sole) for r in cooled):
+            _note(cid, 'credential_benched', models)
             report.append({'outcome': 'credential_benched', 'models': models})
             continue
         with _LOCK:
@@ -222,29 +307,32 @@ def recover(read=None, reset=None, get=None, renew=None, now=time.time, clock=ti
                 fresh = next((g for g in _groups(read('anthropic') or []).values()
                               if any(r['id'] == cid for r in g)), None)
             if not fresh or any(_expired(r, t) for r in fresh):
+                _note(cid, 'token_expired', models)
                 report.append({'outcome': 'token_expired', 'models': models})
                 continue
             group = fresh
             token = group[0]['access_token']
             cooled = [r for r in group if _active(r, t)]
             if not cooled:
+                _note(cid, 'no_cooldown', models)
                 report.append({'outcome': 'no_cooldown', 'models': models})
                 continue
         try:
             payload = get('usage', token)
         except Exception:
+            _note(cid, 'usage_unreadable', models)
             report.append({'outcome': 'usage_unreadable', 'models': models})
             continue
         paid = paid_state(payload)
         balance = credit_balance(token, get) if paid is not None and paid[0] else None
         outcome = 'release'
         for r in cooled:
-            outcome = decide(r, payload, balance, t)
+            outcome = decide(r, payload, balance, t, sole)
             if outcome != 'release':
                 break
         signature = (paid, balance)
-        if outcome == 'release' and _RELEASED.get(cid) == signature:
-            outcome = 'refused_after_release'   # the provider re-armed it on the same paid reading
+        before = _RELEASED.get(cid)
+        again = outcome == 'release' and before is not None and before['signature'] == signature
         if outcome == 'release':
             ok = True
             for r in cooled:   # every row sharing this key: Hermes blocks the token if any of them is cooled
@@ -254,14 +342,40 @@ def recover(read=None, reset=None, get=None, renew=None, now=time.time, clock=ti
                     ok = False
             if ok:
                 with _LOCK:
-                    _RELEASED[cid] = signature
                     if len(_RELEASED) > 256:
                         _RELEASED.clear()
-                        _RELEASED[cid] = signature
-            outcome = 'released' if ok else 'reset_failed'
+                    _RELEASED[cid] = {'signature': signature, 'count': before['count'] + 1 if again else 1}
+            outcome = ('released_again' if again else 'released') if ok else 'reset_failed'
+        _note(cid, outcome, models, row=cooled[0], payload=payload, t=t, again=_RELEASED.get(cid))
         report.append({'outcome': outcome, 'models': models})
+    for cid in [c for c in _LOGGED if c not in seen]:
+        _LOGGED.pop(cid, None)   # its cooldown is gone: a later hold is news again
     _STATE['last'] = {'at': t, 'grants': report}
     return report
+
+
+def _note(cid, outcome, models, row=None, payload=None, t=None, again=None):
+    """Log an outcome when it changes for a grant, and every release. No ids, tokens or amounts."""
+    released = outcome in ('released', 'released_again')
+    if not released and _LOGGED.get(cid) == outcome:
+        return
+    if len(_LOGGED) > 256:
+        _LOGGED.clear()
+    _LOGGED[cid] = outcome
+    if outcome == 'no_cooldown':
+        return
+    text = 'Claude cooldown recovery: %s for %s: %s' % (outcome, ', '.join(models), WHY.get(outcome, outcome))
+    if outcome == 'released_again' and again:
+        text += ' (retry %d at the probe pace)' % again['count']
+    if outcome == 'not_capped' and row is not None and payload is not None:
+        ends = sorted({_iso(u) for u in _active(row, t).values()})
+        caps = sorted({_iso(w) for w in capped_resets(payload)}) or ['none']
+        text += ' (cooldown ends %s; used-up windows reset %s)' % (', '.join(ends), ', '.join(caps))
+    log.info(text)
+
+
+def _iso(epoch):
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
 
 
 def _loop(interval):

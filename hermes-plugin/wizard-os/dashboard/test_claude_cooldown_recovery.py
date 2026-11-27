@@ -60,6 +60,7 @@ class RecoveryTests(unittest.TestCase):
     def setUp(self):
         r._PROBED.clear()
         r._RELEASED.clear()
+        r._LOGGED.clear()
         self.resets = []
         self.tick = [0.0]
 
@@ -75,16 +76,102 @@ class RecoveryTests(unittest.TestCase):
         self.assertNotIn(TOKEN, json.dumps(report))
         self.assertNotIn('g1', json.dumps(report))
 
-    def test_provider_refusal_after_release_is_not_bypassed_again(self):
-        provider = Provider(usage())
-        self.run_pass([grant()], provider)
-        self.tick[0] += r.PROBE_EVERY + 1
-        report = self.run_pass([grant()], provider)   # Hermes re-armed it: the paid lane refused too
-        self.assertEqual(report[0]['outcome'], 'refused_after_release')
+    def test_refused_release_is_retried_at_the_probe_pace_not_held_until_restart(self):
+        # 27 Nov reopen: released, Claude refused (out of credits) and Hermes re-armed the weekly cooldown, then the
+        # owner topped up. The credit balance is unreadable and nothing was spent, so the usage read is the same as
+        # before the top-up: it must be released again at the next probe, not held until the gateway restarts.
+        provider = Provider(usage(), None)
+        self.assertEqual(self.run_pass([grant()], provider)[0]['outcome'], 'released')
+        self.assertEqual(self.run_pass([grant()], provider), [])          # same 5 min window: no provider read
         self.assertEqual(self.resets, ['g1'])
         self.tick[0] += r.PROBE_EVERY + 1
-        provider.payload = usage(used=900)            # new paid reading: requests did go through meanwhile
+        self.assertEqual(self.run_pass([grant()], provider)[0]['outcome'], 'released_again')
+        self.assertEqual(self.resets, ['g1', 'g1'])
+        self.assertEqual(r._RELEASED['g1']['count'], 2)
+        self.tick[0] += r.PROBE_EVERY + 1
+        provider.payload = usage(used=900)            # new paid reading: a fresh release, the retry count restarts
         self.assertEqual(self.run_pass([grant()], provider)[0]['outcome'], 'released')
+        self.assertEqual(r._RELEASED['g1']['count'], 1)
+
+    def test_retry_still_never_releases_a_real_hold(self):
+        # A retry only follows a release: off, readable zero balance, cap reached and fresh throttles stay held.
+        provider = Provider(usage(), 2500)
+        self.run_pass([grant()], provider)
+        for payload, balance, row, outcome in ((usage(enabled=False), 2500, grant(), 'extra_usage_off'),
+                                                (usage(), 0, grant(), 'extra_usage_unfunded'),
+                                                (usage(used=5000, limit=5000), None, grant(), 'extra_usage_unfunded'),
+                                                (usage(), 2500, grant(until=NOW + 60), 'short_cooldown')):
+            with self.subTest(outcome=outcome):
+                self.tick[0] += r.PROBE_EVERY + 1
+                self.assertEqual(self.run_pass([row], Provider(payload, balance))[0]['outcome'], outcome)
+        self.assertEqual(self.resets, ['g1'])
+
+    def test_capped_429_status_beside_the_cooldown_is_the_same_refusal(self):
+        # What stock Hermes really writes on a capped-window 429 from a chat (seen with `hermes chat` against a fake
+        # Anthropic): the model cooldown AND last_status 'exhausted', code 429, no billing reason, no reset time.
+        # Before, that status read as a credential bench and the grant was never even probed.
+        row = grant(last_status='exhausted', last_status_at=NOW - 5, last_error_code=429, last_error_reset_at=None,
+                    request_count=1)
+        report = self.run_pass([row, grant('other', token='***' + 'y' * 20, model_cooldowns={})], Provider(usage()))
+        self.assertEqual(report[0]['outcome'], 'released')
+        self.assertEqual(self.resets, ['g1'])
+        # It never turns a hold into a release: a fresh throttle, extra usage off or an empty balance still hold.
+        for row, provider, outcome in ((dict(row, model_cooldowns={MODEL: NOW + 60}), Provider(usage()), 'short_cooldown'),
+                                       (row, Provider(usage(enabled=False)), 'extra_usage_off'),
+                                       (row, Provider(usage(), 0), 'extra_usage_unfunded')):
+            with self.subTest(outcome=outcome):
+                r._PROBED.clear()
+                self.assertEqual(self.run_pass([row], provider)[0]['outcome'], outcome)
+        self.assertEqual(self.resets, ['g1'])
+
+    def test_ended_credential_wide_status_is_history_not_a_bench(self):
+        # Stock Hermes never selects a row with a model cooldown, so it never clears an `exhausted` status whose
+        # bench already ended. Running benches (billing, auth, reset time ahead, dead) stay untouched.
+        twin = grant('twin', token='***' + 'y' * 20, model_cooldowns={})   # a second live grant: no sole-credential TTL
+        ended = [[grant(last_status='exhausted', last_status_at=NOW - 2 * 3600, last_error_code=402, failure_reason='billing'), twin],
+                 [grant(last_status='exhausted', last_status_at=NOW - 600, last_error_code=401), twin],
+                 [grant(last_status='exhausted', last_status_at=NOW - 60, last_error_code=500, last_error_reset_at=NOW - 1), twin],
+                 [grant(last_status='exhausted', last_status_at=NOW - 120, last_error_code=500)]]     # sole: stock 60 s bench
+        for rows in ended:
+            with self.subTest(row=rows[0]):
+                r._PROBED.clear()
+                r._RELEASED.clear()
+                self.assertEqual(self.run_pass(rows, Provider(usage()))[0]['outcome'], 'released')
+        running = [[grant(last_status='exhausted', last_status_at=NOW - 600, last_error_code=402, failure_reason='billing')],
+                   [grant(last_status='exhausted', last_status_at=NOW - 600, last_error_code=429, failure_reason='billing')],
+                   [grant(last_status='exhausted', last_status_at=NOW - 120, last_error_code=500), twin],
+                   [grant(last_status='exhausted', last_status_at=NOW - 7200, last_error_code=401, last_error_reset_at=NOW + 600)],
+                   [grant(last_status='exhausted', last_status_at=NOW - 7200, last_error_code=500,
+                          last_error_reset_at=iso(NOW + 600))],
+                   [grant(last_status='exhausted')], [grant(last_status='dead', last_status_at=NOW - 9 * 86400)]]
+        provider = Provider(usage())
+        for rows in running:
+            with self.subTest(row=rows[0]):
+                r._PROBED.clear()
+                self.assertEqual(self.run_pass(rows, provider)[0]['outcome'], 'credential_benched')
+        self.assertEqual(provider.calls, [])
+        self.assertEqual(len(self.resets), len(ended))
+
+    def test_every_hold_is_logged_once_per_change_without_secrets(self):
+        with self.assertLogs('wizard_os.claude_cooldown_recovery', 'INFO') as logs:
+            self.run_pass([grant()], Provider(usage(weekly=80)))                       # not capped
+            self.tick[0] += r.PROBE_EVERY + 1
+            self.run_pass([grant()], Provider(usage(weekly=80)))                       # same: not logged again
+            self.tick[0] += r.PROBE_EVERY + 1
+            self.run_pass([grant()], Provider(usage(enabled=False)))
+            self.tick[0] += r.PROBE_EVERY + 1
+            self.run_pass([grant()], Provider(usage()))
+            self.tick[0] += r.PROBE_EVERY + 1
+            self.run_pass([grant()], Provider(usage()))
+            self.run_pass([grant(model_cooldowns={})], Provider(usage()))             # cooldown gone: nothing logged
+        lines = [m.split(':', 2)[2] for m in logs.output]
+        self.assertEqual([l.split(': ')[1].split(' for ')[0] for l in lines],
+                         ['not_capped', 'extra_usage_off', 'released', 'released_again'])
+        self.assertIn('cooldown ends ' + datetime.fromtimestamp(WEEK_RESET + 5, timezone.utc).strftime('%Y-%m-%dT%H:%MZ'), lines[0])
+        self.assertIn('used-up windows reset none', lines[0])
+        text = '\n'.join(logs.output)
+        for secret in (TOKEN, 'g1', ORG, '2500', '5000'):
+            self.assertNotIn(secret, text)
 
     def test_extra_usage_off_or_unfunded_keeps_the_cooldown(self):
         cases = [(usage(enabled=False), 2500, 'extra_usage_off'),
@@ -175,6 +262,7 @@ class StockHermesRehearsal(unittest.TestCase):
         os.environ.update(HERMES_HOME=self.home, HOME=self.home)
         r._PROBED.clear()
         r._RELEASED.clear()
+        r._LOGGED.clear()
 
     def tearDown(self):
         for k, v in self.env.items():
@@ -201,6 +289,28 @@ class StockHermesRehearsal(unittest.TestCase):
             return payload if path == 'usage' else {'organization': {'uuid': ORG}} if path == 'profile' else {'amount': 2500}
         report = r.recover(get=get)
         self.assertEqual(report, [{'outcome': 'released', 'models': [MODEL]}])
+        self.assertEqual(self.resolve(), TOKEN)
+
+    def test_refused_then_topped_up_is_admitted_at_the_next_probe(self):
+        # The 27 Nov sequence with stock Hermes arming each 429 itself: released, refused (out of credits) and
+        # re-armed until the weekly reset, owner tops up with an unreadable balance: admitted one probe later.
+        from agent.credential_pool import load_pool
+        reset_at = time.time() + 45155
+        payload = usage()
+        payload['seven_day']['resets_at'] = iso(reset_at)
+        self.write_pool(reset_at)
+        def get(path, token):
+            if path == 'usage':
+                return payload
+            raise OSError('credits unreadable')
+        tick = [0.0]
+        self.assertEqual(r.recover(get=get, clock=lambda: tick[0])[0]['outcome'], 'released')
+        self.assertEqual(self.resolve(), TOKEN)
+        load_pool('anthropic').mark_exhausted_and_rotate(status_code=429, model=MODEL, credential_id='abc123',
+                                                         error_context={'reset_at': reset_at})
+        self.assertIsNone(self.resolve())
+        tick[0] += r.PROBE_EVERY + 1
+        self.assertEqual(r.recover(get=get, clock=lambda: tick[0])[0]['outcome'], 'released_again')
         self.assertEqual(self.resolve(), TOKEN)
 
     def test_unfunded_stays_blocked_in_stock_hermes(self):
