@@ -231,9 +231,6 @@ server = createWizardServer({
   firstChatGoals: envChoice(process.env.WIZARD_FIRST_CHAT_GOALS),
   // New chat quick links (wizard-ux issue 1965): follows the owner's `wizard/new-chat-chips` switch; '1' forces it on, '0' off.
   quickLinks: envChoice(process.env.WIZARD_NEW_CHAT_CHIPS),
-  // Command approvals for container agents (issue 597): follows the owner's `wizard/agent-approvals` switch; '1'
-  // forces it on, '0' off.
-  agentApprovals: envChoice(process.env.WIZARD_AGENT_APPROVALS),
   // Local app routes (wizard-app-manager issue 629): on for everyone; '0' turns them off on this box.
   localAppRoutes: envChoice(process.env.WIZARD_LOCAL_APP_ROUTES),
   // Graceful restart (issue 480): /wizard/v1/restart lets a restarter hold new sends (saved, launched by the next

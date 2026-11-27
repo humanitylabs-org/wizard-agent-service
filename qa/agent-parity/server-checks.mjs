@@ -3779,7 +3779,7 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     await admit(s, { input: 'Synthetic subject follow-up' })
     assert.ok(sent(s).instructions.includes('Parity QA'), 'current subject must reach follow-up instructions')
   },
-  // Issue 597 (switch wizard/agent-approvals, scene option agentApprovals): a container agent's approval prompt says
+  // Issue 597 (on for everyone): a container agent's approval prompt says
   // when its owner-sized window (3600 s) closes; a tap inside it reaches the agent, a tap after it is refused by the
   // Service and never reaches the agent. Main and host profiles keep Hermes's own window (no stamp, no refusal).
   'agent-approvals': async s => {
