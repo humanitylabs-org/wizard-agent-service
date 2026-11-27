@@ -111,7 +111,7 @@ test('reply buttons and taps preview as plain words, main and routed (host-profi
     const base = { id: `buttons-${kind}`, title: 'Synthetic', status: 'completed', ...(agent ? { agent } : {}), wizard_last_user_at: 1700000000 }
     const reply = listRow({ ...base, latest_message: { role: 'assistant', content: `Ship desks?\n${group}`, timestamp: 1700000100 } })
     assert.equal(reply.agent, agent, kind)
-    assert.equal(reply.preview, 'Ship desks? [Go for it] [Drop this]', kind)
+    assert.equal(reply.preview, 'Ship desks?', `${kind}: the buttons are drawn in the thread, not in the one-line preview (wizard-os issue 974)`)
     assert.equal(listRow({ ...base, latest_message: { role: 'assistant', content: `Ship desks?\n${group.slice(0, 40)}`, timestamp: 1700000100 } }).preview, 'Ship desks?', `${kind}: cut off`)
     const tapped = listRow({ ...base, latest_message: { role: 'user', content: taps, timestamp: 1700000200 } })
     assert.equal(tapped.preview, 'Tapped Done · Workout', kind)
@@ -126,4 +126,15 @@ test('list rows keep Hermes\' pinned flag as hermesPinned; a row without one has
   assert.equal('hermesPinned' in listRow({ id: 'plain' }), false);
   assert.equal('hermesPinned' in listRow({ id: 'plain', pinned: false }), false);
   assert.equal('pinned' in listRow({ id: 'wizard_topics', pinned: true }), false);
+// wizard-os issue 974: the Inbox row's one-line preview is plain text: a Markdown link shows its words, bold marks go,
+// reply-button groups (drawn in the thread) never show as markers or labels, separate lines join with " · ".
+test('list preview is plain text: links as their words, no bold marks, no reply-button markers or labels', () => {
+  const MORNING = '**Morning · Fri 27 Nov.**\n[Workout](/morning/)\n[WIZARD_BUTTONS_V1]{"group":"Workout","buttons":[{"id":"done","label":"Done"}]}[/WIZARD_BUTTONS_V1]\n'
+    + '[Meditate](/meditate/)\n[WIZARD_BUTTONS_V1]{"group":"Meditate","buttons":[{"id":"done","label":"Done"}]}[/WIZARD_BUTTONS_V1]';
+  const preview = content => listRow({ id: 'm974', title: 'Morning', status: 'completed', latest_message: { role: 'assistant', content, timestamp: 2 } }).preview;
+  assert.equal(preview(MORNING), 'Morning · Fri 27 Nov. Workout · Meditate');
+  assert.equal(preview('# Plan\n- one\n- two\n\n> quoted **bold** ~~old~~ see <https://x.test/a>'), 'Plan · one · two · quoted bold old see https://x.test/a');
+  assert.equal(preview('![chart](/a.png "t") and [a (b)](https://w.test/x_(y)) end'), 'chart and a (b) end');
+  assert.equal(preview('Sunny, 18 °C, light wind from the north.'), 'Sunny, 18 °C, light wind from the north.');
+  assert.equal(preview('Tapped Done · Workout\n[WIZARD_TAPS_V1]{"taps":[]}[/WIZARD_TAPS_V1]'), 'Tapped Done · Workout');
 });

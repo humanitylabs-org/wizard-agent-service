@@ -14,22 +14,44 @@ def _exact(value, pattern):
     return isinstance(value, str) and re.fullmatch(pattern, value) is not None
 
 
+def _shape(h, recipe, runtime_image, what=''):
+    if not _exact(h.get('tag'), r'v\d+\.\d+\.\d+') or not _exact(h.get('commit'), r'[0-9a-f]{40}'):
+        raise ValueError('Hermes lock: ' + what + 'final tag and exact upstream commit required')
+    im = h.get('image') or {}
+    if im.get('ref') != 'docker.io/nousresearch/hermes-agent:' + h['tag'] or not _exact(im.get('digest'), r'sha256:[0-9a-f]{64}'):
+        raise ValueError('Hermes lock: ' + what + 'exact official image required')
+    if recipe.get('app') != 'hermes-agent' or not _exact(recipe.get('commit'), r'[0-9a-f]{40}') or not _exact(recipe.get('repo'), r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+'):
+        raise ValueError('Hermes lock: ' + what + 'exact agent recipe required')
+    if not _exact(runtime_image, r'ghcr\.io/humanitylabs-org/hermes-agent@sha256:[0-9a-f]{64}'):
+        raise ValueError('Hermes lock: ' + what + 'exact runtime image required')
+
+
+def _previous(doc):
+    """The pin a lock move replaced, kept while For everyone still runs it (wizard-app-store#92).
+
+    A release naming all of it (Hermes and recipe together) stays valid, so the stable snapshot keeps installing
+    until it is promoted onto the new pin; never a mix of the two, and never what check_pin accepts on its own.
+    """
+    prev = doc.get('previous')
+    if prev is None:
+        return None
+    if not isinstance(prev, dict) or not isinstance(prev.get('hermes'), dict) or not isinstance(prev.get('agent_recipe'), dict):
+        raise ValueError('Hermes lock: previous needs the replaced hermes pin, agent recipe and runtime image')
+    _shape(prev['hermes'], prev['agent_recipe'], prev.get('runtime_image'), 'previous: ')
+    same_pin = all(prev['hermes'].get(k) == doc['hermes'].get(k) for k in ('tag', 'commit', 'image'))
+    same_recipe = all(prev['agent_recipe'].get(k) == doc['agent_recipe'].get(k) for k in ('app', 'repo', 'commit'))
+    if same_pin and same_recipe:
+        raise ValueError('Hermes lock: previous must differ from the locked pin or recipe')
+    return prev
+
+
 def validate(doc, now=None):
     if not isinstance(doc, dict) or doc.get('schema') != 1:
         raise ValueError('Hermes lock: unsupported schema')
     if doc.get('automatic_updates') != 'paused' or doc.get('minimum_release_age_days') != 7:
         raise ValueError('Hermes lock: automatic updates must stay paused; seven-day gate required')
-    h = doc.get('hermes') or {}
-    if not _exact(h.get('tag'), r'v\d+\.\d+\.\d+') or not _exact(h.get('commit'), r'[0-9a-f]{40}'):
-        raise ValueError('Hermes lock: final tag and exact upstream commit required')
-    im = h.get('image') or {}
-    if im.get('ref') != 'docker.io/nousresearch/hermes-agent:' + h['tag'] or not _exact(im.get('digest'), r'sha256:[0-9a-f]{64}'):
-        raise ValueError('Hermes lock: exact official image required')
-    recipe = doc.get('agent_recipe') or {}
-    if recipe.get('app') != 'hermes-agent' or not _exact(recipe.get('commit'), r'[0-9a-f]{40}') or not _exact(recipe.get('repo'), r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+'):
-        raise ValueError('Hermes lock: exact agent recipe required')
-    if not _exact(doc.get('runtime_image'), r'ghcr\.io/humanitylabs-org/hermes-agent@sha256:[0-9a-f]{64}'):
-        raise ValueError('Hermes lock: exact runtime image required')
+    _shape(doc.get('hermes') or {}, doc.get('agent_recipe') or {}, doc.get('runtime_image'))
+    _previous(doc)
     p = doc.get('promotion')
     if doc.get('state') == 'frozen' and p is None:
         return doc
@@ -64,8 +86,17 @@ def check_pin(pin, doc=None):
     return pin
 
 
+def _pins(release, pin, recipe):
+    agent = (release.get('default_apps') or {}).get('agent')
+    return (isinstance(release.get('hermes'), dict) and all(release['hermes'].get(k) == pin.get(k) for k in ('tag', 'commit', 'image'))
+            and (agent is None or all(agent.get(k) == recipe.get(k) for k in ('app', 'repo', 'commit'))))
+
+
 def check_release(release, doc=None):
     doc = load() if doc is None else validate(doc)
+    prev = _previous(doc)
+    if prev and _pins(release, prev['hermes'], prev['agent_recipe']):
+        return release
     check_pin(release.get('hermes'), doc)
     recipe = (release.get('default_apps') or {}).get('agent')
     if recipe is not None and any(recipe.get(k) != doc['agent_recipe'][k] for k in ('app', 'repo', 'commit')):
