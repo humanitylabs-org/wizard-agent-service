@@ -50,6 +50,8 @@ const install = (root: string, folder: string, kind: string, url: string) => {
   agent.permissions = { ...agent.permissions, wizard_apps: ['checklist-qa'] }
   writeFileSync(path, JSON.stringify(agent))
 }
+// The main agent's gateway credential in these scenes: made per run, never a literal.
+const gatewayKey = crypto.randomUUID() + crypto.randomUUID()
 const runs = (s: any) => s.seen.filter((r: any) => r.method === 'POST' && /\/(?:v1\/runs|chat\/stream)$/.test(r.path))
 
 describe('reply actions: parsing', () => {
@@ -91,7 +93,7 @@ describe('reply actions: main and routed threads, no agent run', () => {
     const s: any = await scene(kind, ({ root, folder }: any) => {
       install(root, folder, kind, app.url)
       return { pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, replyActionsTtlMs: 0, replyButtonsTtlMs: 0,
-        agentBridge: true, bridgeWriteSkills: false, mcpToken: 'reply-actions-parity-token', replyActionsStatePath: join(root, 'reply-actions.json') }
+        agentBridge: true, bridgeWriteSkills: false, mcpToken: gatewayKey, replyActionsStatePath: join(root, 'reply-actions.json') }
     })
     try {
       const agent = kind === 'main' ? '' : s.id
@@ -121,6 +123,8 @@ describe('reply actions: main and routed threads, no agent run', () => {
       // Saved per thread: a reload and a second device read it back, also after a restart.
       await s.restart()
       expect(await listed()).toEqual([expect.objectContaining({ message: '501', group: 'Workout', button: 'done', ok: true, line: 'Workout ticked · 1 of 4' })])
+      // The main agent's threads are one store whether the shell names it ('hermes') or not.
+      if (kind === 'main') expect((await (await s.raw(`/wizard/v1/reply-actions?thread=${id}&agent=hermes`)).json()).actions).toHaveLength(1)
       // An app that is not installed is refused and saved as a failure (shown with Retry); still no run.
       const missing = await (await tap({ group: 'Water', button: 'done' })).json()
       expect(missing).toMatchObject({ ok: false, action: { ok: false, group: 'Water' } })
@@ -137,7 +141,7 @@ describe('reply actions: main and routed threads, no agent run', () => {
       expect((await tap({ message: '999', group: 'Workout', button: 'done' })).status).toBe(404)
       expect(runs(s).length).toBe(before)
       // Owner only: an agent's own gateway credential cannot press the owner's buttons.
-      const asAgent = await fetch(`${s.origin()}/wizard/v1/reply-actions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer reply-actions-parity-token' }, body: JSON.stringify({ thread: id, message: '501', group: 'Workout', button: 'done' }) })
+      const asAgent = await fetch(`${s.origin()}/wizard/v1/reply-actions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: ['Bearer', gatewayKey].join(' ') }, body: JSON.stringify({ thread: id, message: '501', group: 'Workout', button: 'done' }) })
       expect([401, 403]).toContain(asAgent.status)
     } finally { await s.close(); await app.close() }
   }, 60_000)
@@ -148,7 +152,7 @@ describe('reply actions: main and routed threads, no agent run', () => {
       install(root, folder, kind, app.url)
       look(root, { [REPLY_BUTTONS_SWITCH]: true, [REPLY_ACTIONS_SWITCH]: true })
       return { pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, replyActionsTtlMs: 0,
-        agentBridge: true, bridgeWriteSkills: false, mcpToken: 'reply-actions-parity-token', replyActionsStatePath: join(root, 'reply-actions.json') }
+        agentBridge: true, bridgeWriteSkills: false, mcpToken: gatewayKey, replyActionsStatePath: join(root, 'reply-actions.json') }
     })
     try {
       const agent = kind === 'main' ? '' : s.id, id = 'wizard_retry_1973'

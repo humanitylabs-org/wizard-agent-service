@@ -7752,17 +7752,19 @@ function buildWizardServer(options, lifetime) {
       // GET /wizard/v1/reply-actions?thread=<id>[&agent=<id>] lists the thread's saved outcomes. Owner only; off: 404.
       if (url.pathname === '/wizard/v1/reply-actions') {
         if (!replyActions || !replyActionsOn()) { sendJson(response, 404, { error: 'not_found' }); return }
+        // The main agent's threads are one store whether the shell names it ('hermes') or not ('').
+        const mainless = agent => (typeof agent === 'string' && agent !== GATEWAY_MAIN_AGENT && agent !== MAIN_AGENT_ID ? agent : '')
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (isAgentIngress(request) || !ownerLike(principalOf(request))) { sendJson(response, 403, { error: 'owner_only' }); return }
         if (!['GET', 'POST'].includes(request.method)) { sendJson(response, 405, { error: 'method_not_allowed' }, { Allow: 'GET, POST' }); return }
         if (skinOriginRefused(request)) { sendJson(response, 403, { error: 'cross_origin_request' }); return }
         try {
           if (request.method === 'GET') {
-            sendJson(response, 200, replyActions.list(url.searchParams.get('agent') || '', url.searchParams.get('thread') || ''), { 'Cache-Control': 'no-store' })
+            sendJson(response, 200, replyActions.list(mainless(url.searchParams.get('agent')), url.searchParams.get('thread') || ''), { 'Cache-Control': 'no-store' })
           } else {
             let input
             try { input = JSON.parse((await readBoundedBody(request, 4096)).toString('utf8') || '{}') } catch { sendJson(response, 400, { error: 'invalid_request' }); return }
-            const record = await replyActions.tap(input && typeof input === 'object' ? input : {})
+            const record = await replyActions.tap(input && typeof input === 'object' ? { ...input, agent: mainless(input.agent) } : {})
             sendJson(response, 200, { ok: record.ok, action: record }, { 'Cache-Control': 'no-store' })
           }
         } catch (error) {
