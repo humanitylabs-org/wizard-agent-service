@@ -227,6 +227,8 @@ server = createWizardServer({
   privateRouting: envChoice(process.env.WIZARD_PRIVATE_ROUTING),
   // Five-choice first chat (issue 650): follows the owner's `wizard/first-chat-goals` switch; '1' forces it on, '0' off.
   firstChatGoals: envChoice(process.env.WIZARD_FIRST_CHAT_GOALS),
+  // New chat quick links (wizard-ux issue 1965): follows the owner's `wizard/new-chat-chips` switch; '1' forces it on, '0' off.
+  quickLinks: envChoice(process.env.WIZARD_NEW_CHAT_CHIPS),
   // Command approvals for container agents (issue 597): follows the owner's `wizard/agent-approvals` switch; '1'
   // forces it on, '0' off.
   agentApprovals: envChoice(process.env.WIZARD_AGENT_APPROVALS),
