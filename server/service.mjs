@@ -52,7 +52,6 @@ import { projectProviderSignInHistory, providerSignInEvents } from './run-provid
 import { bootstrapPayload, readApps, readSettings, normalizeSettings, ownerLinks, recordResponseStyleSwitch, RESPONSE_STYLES, validTimeZone, resolveFastRouter, wizardOsHome } from './wizard-os-settings.mjs'
 import { readUiPreferences, updateUiPreferences, patchUiPreferences, seedUiPreferences, UI_PREFERENCES_MAX_BYTES } from './ui-preferences.mjs'
 import { createSpacesTools } from './spaces-tools.mjs'
-import { CHANNEL_AUTO_EMOJI_SWITCH } from './channel-emoji.mjs'
 import { createChannelStore, channelRequest, fixedChannelKind, fixedChannelThreads } from './channel-store.mjs'
 import { dayOf, mintDailyThreadId, dailyTitle, openerOf, dailyRunNote, validDay, DAYS_PAGE, DAYS_PAGE_MAX } from './daily-channel.mjs'
 import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigration } from './channel-spaces.mjs'
@@ -3823,10 +3822,8 @@ function buildWizardServer(options, lifetime) {
     return queue ? batchedOwnerTurnRestore(queue, (raw, view, sessionId) => routedOwnerTurns(raw, view, sessionId, agent)) : null
   }
   // The Spaces tools read Spaces or channels by the Channels switch at the time of each call (wizard-ux issue 1358).
-  // A fitting emoji for an agent's new channel (wizard-ux issue 1580): the owner's switch, off by default.
-  const channelAutoEmojiOn = createChannelsSwitch({ id: CHANNEL_AUTO_EMOJI_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.channelAutoEmojiTtlMs ?? 3000 })
   const spacesToolsFor = channels => createSpacesTools({
-    path: resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), channels, autoEmoji: channelAutoEmojiOn,
+    path: resolve(bridgeOsHome || wizardOsHome(), 'ui-preferences.json'), channels,
     agentExists: id => Boolean(agents?.read(id)),
     threadExists: (id, thread) => agentCtx.sessionExists(id, thread, { strict: true }),
     loadThreads: async id => {
