@@ -272,10 +272,10 @@ example) and counts as a miss. Anything else answers `200 {cmd: {route: agent, s
 why}}` at once with no Sent row (`why`: switch_off | not_proven | question | notify_when_done | wants_reply:… |
 greeting | unclear | not_a_task | private_routing | not_allowed), and the shell opens the visible thread as today.
 
-### Private mode edges (issue 631, switch `wizard/private-routing`)
+### Private mode edges (issue 631, on for everyone)
 
-With the owner's `wizard/private-routing` switch on (the switch of issue 629; env `WIZARD_PRIVATE_ROUTING=1` forces it
-on, `0` off), nothing from a private agent's work leaks through the box's edges (`server/private-edges.mjs`):
+On for everyone (the `wizard/private-routing` switch of issues 629 and 631 was approved and removed): nothing from a
+private agent's work leaks through the box's edges (`server/private-edges.mjs`):
 
 - **Pushes.** Every note the Service hands the notifications slot for a private agent (agent alerts, the day's
   collapsed alert, scheduled `deliver: notification` runs, phone chat-reply notes) goes out as
@@ -287,7 +287,7 @@ on, `0` off), nothing from a private agent's work leaks through the box's edges 
 - **Daily follows the default agent.** With a private default agent a Daily channel is seeded once for it (an archive
   or delete sticks); the sweep card goes into that Daily's today thread; "signal sweep" typed in its threads posts the
   card and gives the turn the same run note as on main; a scheduled sweep job (prompt `signal sweep`) runs on the
-  private agent in its Daily for each occurrence (the job keeps its own agent, so switching off puts it back). Its Daily
+  private agent in its Daily for each occurrence (the job keeps its own agent, so a standard default agent puts it back). Its Daily
   archived means no card (409 `daily_unavailable`), never the standard agent's Daily instead.
 - **Open / Send to inbox** move the private default agent's threads too, through its own Hermes (a request that names
   no agent uses the thread's pin). `GET /wizard/v1/agent-inbox` adds `private_default: <agent id>` and lists its Daily
@@ -297,5 +297,5 @@ on, `0` off), nothing from a private agent's work leaks through the box's edges 
   state.db; imported History facts first) and Markdown under `Files/Imported` (the Importer's History chats, memories
   and skills), read-only, credential-redacted, rate-limited like the other three tools. No private store is opened.
 
-Switch off, or no private default agent (for the Daily and Open / Send parts): every route, push and tool list is
-exactly as before.
+No private agent (pushes), or no private default agent (the Daily and Open / Send parts): every route, push and tool
+list is as on a box without private mode.

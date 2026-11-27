@@ -158,7 +158,7 @@ export class SentLog {
     if (thread && THREAD_ID.test(String(thread))) row.thread_id = thread
     if (error) row.error = clip(error, 80)
     else delete row.error
-    // Issue 629 (switch wizard/private-routing): the agent the take was sent to and which rule chose it.
+    // Issue 629: the agent the take was sent to and which rule chose it.
     if (validAgentId(agentId) && CHOSEN_BY.has(chosenBy)) Object.assign(row, { agent_id: agentId, chosen_by: chosenBy, agent_model: clip(agentModel, 120) })
     this.#save()
     return { ...row }

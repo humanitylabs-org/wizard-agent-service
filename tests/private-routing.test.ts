@@ -1,7 +1,7 @@
-// Issue 629: private routing. With `wizard/private-routing` on and a private default agent, the orb route names the
-// agent each take is for: a spoken agent or model name, else the private router's personal-data label (private only),
-// else the thread in front, else the default (private) agent. A non-private router is never called. Switch off, or
-// no private default: the route answers exactly as before.
+// Issue 629: private routing, on for everyone (switch wizard/private-routing removed). With a private default agent the
+// orb route names the agent each take is for: a spoken agent or model name, else the private router's personal-data
+// label (private only), else the thread in front, else the default (private) agent. A non-private router is never
+// called. No private default: the route answers exactly as before.
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { createServer, type Server } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen } from '../server/service.mjs'
 import * as routing from '../server/private-routing.mjs'
 
-const { PRIVATE_ROUTING_SWITCH, agentNames, modelWords, nameRule } = routing
+const { agentNames, modelWords, nameRule } = routing
 const routingNames = routing.routingNames as (input: any) => any
 const chooseAgent = routing.chooseAgent as (input: any) => any
 const privateLabelBlock = routing.privateLabelBlock as (input: any) => string
@@ -28,7 +28,7 @@ const OPTIONS = { provider: 'anthropic', model: 'claude-opus-5-5', providers: [
 ] }
 const PERSONAL = /Messenger|spend|Sam/u
 
-async function box({ routing = true as boolean | null, look = false, privateDefault = true, routerHost = 'loopback' as 'loopback' | 'public' | 'none' } = {}) {
+async function box({ lookOff = false, privateDefault = true, routerHost = 'loopback' as 'loopback' | 'public' | 'none' } = {}) {
   const json = (res: any, v: unknown, s = 200) => { res.writeHead(s, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(v)) }
   const main = createServer((req, res) => {
     req.resume()
@@ -67,7 +67,8 @@ async function box({ routing = true as boolean | null, look = false, privateDefa
   const endpoint = routerHost === 'public' ? 'https://router.example.invalid/v1/chat/completions' : `http://127.0.0.1:${routerAddress.port}/v1/chat/completions`
   if (routerHost !== 'none') writeFileSync(join(dir, 'settings.json'), JSON.stringify({ fast_router: { endpoint, model: 'fixture-router' } }))
   writeFileSync(join(dir, 'Pages', 'wizard-look', 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: {
-    ...(look ? { [PRIVATE_ROUTING_SWITCH]: { on: true, at: 1 } } : {}) } }))
+    // An old Look file may still hold the removed switch, saying off: it is ignored.
+    ...(lookOff ? { 'wizard/private-routing': { on: false, at: 1 } } : {}) } }))
   const fetchImpl = async (url: any, init: any) => {
     if (String(url).includes('router.example.invalid')) {
       calls.public += 1
@@ -81,8 +82,7 @@ async function box({ routing = true as boolean | null, look = false, privateDefa
     agentRuntime: { apply: async () => ({ ok: true }), start: async () => ({ ok: true }), stop: async () => ({ ok: true }) },
     schedulerStatePath: join(dir, 'schedules.sqlite'), schedulerIntervalMs: 3_600_000, followThrough: false, agentBasePort: 47990, runQueue: false,
     agentInboxStatePath: join(dir, 'state', 'agent-inbox.json'),
-    pagesRoot: join(dir, 'Pages'), pagesGitDir: join(dir, 'pages-history.git'), pagesWatch: false, privateRoutingTtlMs: 0,
-    ...(routing === null ? {} : { privateRouting: routing }),
+    pagesRoot: join(dir, 'Pages'), pagesGitDir: join(dir, 'pages-history.git'), pagesWatch: false,
   }) as Server & { scheduler?: any }
   servers.push(svc)
   schedulers.push(svc.scheduler)
@@ -210,13 +210,13 @@ describe('private routing over HTTP (issue 629)', () => {
     expect(b.prompts.at(-1)).toContain('- "Fix the Chats scroll bug" -> "personal": false')
   })
 
-  it('the Look switch turns it on', async () => {
-    const b = await box({ routing: null, look: true })
-    expect((await b.route('Fix the Chats scroll bug')).cmd).toMatchObject({ agent_id: 'private', chosen_by: 'default' })
+  it('no switch: an old Look file that says off changes nothing', async () => {
+    const b = await box({ lookOff: true })
+    expect((await b.route('Fix the Chats scroll bug')).cmd).toEqual({ route: 'agent', summary: 'Fix the Chats scroll bug', agent_id: 'private', chosen_by: 'default' })
   })
 
-  it('switch off, or no private default: the answer is exactly today\'s', async () => {
-    for (const opts of [{ routing: null }, { routing: false, look: true }, { privateDefault: false }]) {
+  it('no private default: the answer is exactly today\'s', async () => {
+    for (const opts of [{ privateDefault: false }]) {
       const b = await box(opts as any)
       for (const text of ['Philosopher, what would Heraclitus say about this', 'What did Sam say in Messenger yesterday', 'Fix the Chats scroll bug']) {
         const r = await b.route(text)
@@ -231,32 +231,32 @@ describe('private routing over HTTP (issue 629)', () => {
       // A standard default agent: today a non-private router is still used for the orb. A private default agent:
       // never (issue 626, voice follows the default agent; the next test).
       expect(pub.calls.public).toBe(opts.privateDefault === false ? 1 : 0)
-      // The agent correction exists only for privately routed rows: switch off it is today's 400 (should_reply).
+      // The agent correction exists only for privately routed rows: here it is today's 400 (should_reply).
       const sent = (await pub.route('Fix the Chats scroll bug again')).sent_id
       expect((await pub.call('POST', `/wizard/v1/sent/${sent}/correct`, { agent: 'philosopher' })).status).toBe(400)
     }
   })
 
   // owner-correction: humanitylabs-org/wizard-agent-service#626 · 2026-11-27 · "fix the voice leak first (with private mode on, an orb dump or voice router must not reach the standard agent; voice follows the default agent)"
-  it('private mode on, routing switch off: no orb dump on the standard agent and no non-private router (issue 626)', async () => {
-    for (const routing of [null, false]) {
-      const pub = await box({ routing, routerHost: 'public' } as any)
+  it('private mode on: no orb dump on the standard agent and no non-private router (issue 626)', async () => {
+    {
+      const pub = await box({ routerHost: 'public' })
       pub.setReply({ route: 'dump', title: 'Flights' })
       for (const text of ['Research flights to Lisbon', 'What did Sam say in Messenger yesterday']) {
         const r = await pub.route(text, { accept_dump: true })
-        expect(r.cmd).toEqual({ route: 'agent', summary: text })
+        expect(r.cmd).toEqual({ route: 'agent', summary: text, agent_id: 'private', chosen_by: 'rules_only', rule: 'default' })
         expect(r.model).toBe('')
         const row = (await pub.call('GET', `/wizard/v1/sent/${r.sent_id}`)).json.row
         expect(row).toMatchObject({ route: 'agent', decided_by: 'fallback' })
-        expect(row.rules_matched).toContain('private_default')
+        expect(row.rules_matched).toContain('rules_only')
       }
       expect(pub.calls.public).toBe(0)
       expect((await pub.call('GET', '/wizard/v1/agent-inbox')).json.records ?? []).toEqual([])
       // A typed message never starts the background worker either.
       const typed = await pub.route('Research flights to Lisbon', { accept_dump: true, source: 'typed' })
-      expect(typed.typed).toEqual({ background: false, why: 'private_default' })
+      expect(typed.typed).toEqual({ background: false, why: 'private_routing' })
       // A private router may still route (only it ever sees the words), but never into a dump.
-      const loop = await box({ routing })
+      const loop = await box()
       loop.setReply({ route: 'dump', title: 'Flights' })
       const r = await loop.route('Research flights to Lisbon', { accept_dump: true })
       expect(r.cmd.route).not.toBe('dump')

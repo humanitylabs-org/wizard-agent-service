@@ -299,7 +299,7 @@ export class AgentInboxStore {
     return { ...example }
   }
 
-  /** Issue 629 (switch wizard/private-routing): the owner said a take should have gone to another agent. One example;
+  /** Issue 629: the owner said a take should have gone to another agent. One example;
    *  `personal` is whether the agent he wanted is private, which is all the private router's label may learn. */
   addAgentExample({ utterance = '', chosen = '', wanted = '', personal = false } = {}) {
     const text = clip(utterance, 200)

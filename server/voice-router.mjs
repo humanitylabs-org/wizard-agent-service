@@ -76,7 +76,7 @@ export function routerSystemPrompt({ settings, apps, timezone, view, force, now,
       + ' ("yes", "go ahead", "no, wait"), corrections, follow-ups that use "this", "that", "it", and replies to a question it asked.'
       + '\nKeep {"route":"command"} for phone/UI commands. Use {"route":"agent"} only for a NEW request unrelated to that window.'
   }
-  // Issue 629 (switch wizard/private-routing): the private router's one extra label, only ever given to a private router.
+  // Issue 629: the private router's one extra label, only ever given to a private router.
   if (privateLabel) system += privateLabel
   return system
 }
