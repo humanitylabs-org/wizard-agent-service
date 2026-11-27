@@ -2588,6 +2588,27 @@
       "policy_exemptions": []
     },
     {
+      "id": "new-chat-quick-links",
+      "description": "wizard-ux issue 1965 (switch wizard/new-chat-chips, off by default; WIZARD_NEW_CHAT_CHIPS 1 forces it on, 0 off): a new, empty chat on the main agent shows quick-link chips right above the message box (Catch me up, What's waiting on me, Plan my day; data list QUICK_LINKS in wizard-ux core/chats-status.js). One tap sends the chip's prompt as the owner's message through the thread's own send path (sendChat), no draft and no confirm; the chips go once the chat has a message and step aside while the box has words. They are drawn only on the main agent's new chat because \"catch me up\" runs the built catch-up only there (catch-me-up); a routed agent's new chat shows none. While the switch is on, every main and routed run carries one note on how to answer \"What's waiting on me?\" and \"Plan my day\" (server/quick-links.mjs), so a typed ask gets the same answer on every kind.",
+      "layer": "ux",
+      "how_to_test": "In this repo run npx vitest run tests/quick-links.test.ts: the actual upstream run of main, host-profile, container and restricted threads carries the note only while the Look file switch is on (no restart). In wizard-ux run node --test tests/new-chat-chips.test.mjs (the real chip list) and the browser proof wizard-ux/tests/qa-new-chat-chips.cjs (phone and AI apps desktop, Nebula and Grove, switch off and on, each chip sends its exact prompt, chips gone after, an old chat shows none). Synthetic source-executed evidence, not live box proof.",
+      "source_refs": [
+        "wizard-ux/web/core/chats-status.js",
+        "wizard-ux/web/core/chats-threadpaint.js",
+        "wizard-ux/web/core/chats-bind.js",
+        "server/quick-links.mjs",
+        "server/service.mjs",
+        "server/index.mjs"
+      ],
+      "reference_tests": [
+        "wizard-ux/tests/new-chat-chips.test.mjs",
+        "wizard-ux/tests/qa-new-chat-chips.cjs",
+        "tests/quick-links.test.ts"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "chats-sent-tab",
       "description": "wizard-ux issue 1778 (on for everyone; the wizard/chats-inbox and wizard/agent-inbox switches are gone): the main agent's Chats list gets bottom tabs Inbox, Tags and Sent. Sent reads the Sent log (GET /wizard/v1/sent, issue 607), shows each capture's route, live state and why, opens the thread it ran in by id (a background row through its agent inbox record), and posts Should have replied / Didn't need a reply (POST /wizard/v1/sent/<id>/correct). The Sent log holds the owner's own captures to the main agent, so a routed agent's Chats list (host-profile, container, restricted) keeps today's look with no tabs; its threads and their parity are unchanged. Replies typed in a thread (wizard-ux issue 1808) are Reply rows with the agent's one-line answer and no correction; a main-agent thread the box marks quietReply (the owner's reply asked for no answer and the agent ended done or fyi) is not unread and not in Inbox / Ready, and an ask, a failure or a run still going never is. Routed agents' lists carry no such mark and are unchanged.",
       "layer": "ux",
