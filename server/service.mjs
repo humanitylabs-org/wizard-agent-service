@@ -74,7 +74,8 @@ import { isSweepPhrase, isScheduledSweep, withCardRow, WAITING_CAP, DONE_CAP } f
 import { createCatchUp, CATCH_UP_SWITCH, startsCatchUp } from './catch-up.mjs'
 import { AlertRulesFile, createAlertGate, privateRouter } from './agent-alerts.mjs'
 import { createWorkspaceStore } from './workspaces.mjs'
-import { replyRules, routeUtterance } from './voice-router.mjs'
+import { replyRules, routeUtterance, dumpTitle, deadlineFrom } from './voice-router.mjs'
+import { keepsVisible, typedMatch, TYPED_ROUTING_MIN, TYPED_ROUTING_RATE, TYPED_SETTLE_MS } from './typed-routing.mjs'
 import { createFollowMain } from './follow-main.mjs'
 import { createBackgroundResults, BACKGROUND_RECOVERY_KIND, MARKER as BACKGROUND_RECOVERY_MARKER } from './background-results.mjs'
 import { startDelegationFollowThrough, FOLLOW_THROUGH_PREFIX, resolveHelperAttempt, MAX_HELPER_ATTEMPTS } from './delegation-follow-through.mjs'
@@ -4121,14 +4122,15 @@ function buildWizardServer(options, lifetime) {
       return ''
     }
   }
-  const captureDump = (text, cmd, { urgent = false, tags = [] } = {}) => {
+  // Issue 669: a typed message that runs in the background is the same worker, source `typed:dump`.
+  const captureDump = (text, cmd, { urgent = false, tags = [], typed = false } = {}) => {
     const words = String(text ?? '').replace(/\s+/gu, ' ').trim().slice(0, 4000)
     const day = new Date().toISOString().slice(0, 10)
     const { record, created } = agentInbox.capture({
-      agent: MAIN_AGENT_ID, thread_id: mintDailyThreadId(), source: 'orb:dump', kind: 'note', title: cmd.title, ask: words,
+      agent: MAIN_AGENT_ID, thread_id: mintDailyThreadId(), source: typed ? 'typed:dump' : 'orb:dump', kind: 'note', title: cmd.title, ask: words,
       deadline: cmd.deadline || null, privacy_class: 'private',
       // The same words said twice the same day are one task (a double capture); the same chore next week is a new one.
-      dedupe_hash: createHash('sha256').update(`${MAIN_AGENT_ID}\norb\n${day}\n${words.toLowerCase()}`).digest('hex').slice(0, 32),
+      dedupe_hash: createHash('sha256').update(`${MAIN_AGENT_ID}\n${typed ? 'typed' : 'orb'}\n${day}\n${words.toLowerCase()}`).digest('hex').slice(0, 32),
       // Issue 607: "urgent" / "priority" puts it at the top of Inbox; tags said in the take ride on the record too.
     }, { fields: { worker: true, ...(urgent ? { urgent: true } : {}), ...(tags.length ? { tags } : {}) } })
     // Said again after its worker could not start: the same record starts again (same idempotency key).
@@ -4220,8 +4222,9 @@ function buildWizardServer(options, lifetime) {
     const record = agentInbox.linked(MAIN_AGENT_ID, sessionId)
     // An app door's note (issue 569) is a background task the same way, left as a note in that app.
     const app = record?.worker === true ? recordApp(record) : ''
-    if (!record || (record.source !== 'orb:dump' && !app) || record.state !== 'running') return ''
-    return `Background task: the owner handed you this ${app ? `as a note in the ${app} app` : 'by voice'} and is not watching this thread; your reply is read later, if at all. `
+    const typed = record?.source === 'typed:dump'
+    if (!record || (record.source !== 'orb:dump' && !typed && !app) || record.state !== 'running') return ''
+    return `Background task: the owner handed you this ${app ? `as a note in the ${app} app` : typed ? 'as a typed message' : 'by voice'} and is not watching this thread; your reply is read later, if at all. `
       + 'Do the whole task now without stopping to ask unless you must. End with a short reply: what you did and the result. '
       + 'If you need the owner, end with a needs_you status whose ask is one plain question, with a recommendation and short answer options.'
       // Issue 607: quiet never means acting alone.
@@ -4302,7 +4305,9 @@ function buildWizardServer(options, lifetime) {
       correction_id: row.correction_id ?? null, thread_id: row.thread_id ?? null, record_id: row.record_id ?? null, state: sentState(row),
     }
     if (row.confidence != null) out.confidence = row.confidence
-    if (row.source === 'typed') Object.assign(out, { would_route: row.would_route ?? null, would_decided_by: row.would_decided_by ?? null, would_rules: row.would_rules || [] })
+    if (row.source === 'typed') Object.assign(out, { would_route: row.would_route ?? null, would_decided_by: row.would_decided_by ?? null, would_rules: row.would_rules || [],
+      // Issue 669: how its first run ended (what the shadow guess is judged by).
+      ...(row.outcome?.state ? { outcome: row.outcome.state } : {}) })
     // A reply (issue 1808): whether his words asked for an answer, the agent's one-line answer, and quiet (the answer
     // needed nothing from him, so it stayed out of Inbox).
     if (row.source === 'reply') Object.assign(out, { wants_reply: row.wants_reply !== false, answer: row.outcome?.answer || '', outcome: row.outcome?.state || null,
@@ -4323,25 +4328,62 @@ function buildWizardServer(options, lifetime) {
   // A typed first message opened its visible thread as always; what would the router have done with it? The owner's
   // words and an earlier correction decide first; the model is asked only when it is a private router (his typed words
   // never go to any other model), within 15 s, in the background.
-  const classifyTyped = async row => {
+  // Issue 669: the same guess decides a typed message that may run in the background (`guessTyped`), so what the Sent
+  // log measures is exactly what would act. `cmd` is the dump to start when the guess is a background task.
+  const guessTyped = async (text, { timeoutMs = 15_000, timezone = '' } = {}) => {
     const { settings } = readSettings(settingsPath)
     let fast = null
     try { fast = resolveFastRouter(settings, router) } catch { fast = null }
     const usable = fast && privateRouter(fast) ? fast : null
-    const words = replyRules(row.text)
-    let fields
+    const words = replyRules(text)
     try {
-      const routed = await routeUtterance({ input: { text: row.text }, settings, router: usable, fetchImpl, dump: true,
-        correction: agentInbox.correctionFor(row.text), examples: usable ? agentInbox.routeExamples(8) : [], timeoutMs: 15_000 })
-      fields = { would_route: sentRouteOf(routed), would_decided_by: routed.why.decided_by, would_rules: routed.why.rules }
+      const routed = await routeUtterance({ input: { text, ...(timezone ? { timezone } : {}) }, settings, router: usable, fetchImpl, dump: true,
+        correction: agentInbox.correctionFor(text), examples: usable ? agentInbox.routeExamples(8) : [], timeoutMs })
+      return { fields: { would_route: sentRouteOf(routed), would_decided_by: routed.why.decided_by, would_rules: routed.why.rules },
+        cmd: routed.cmd?.route === 'dump' ? routed.cmd : null, why: routed.why, model: routed.model || '' }
     } catch (error) {
       // No private router (or it failed): the owner's words alone, else nothing to say.
       const why = error?.status === 404 ? (fast ? 'no_private_router' : 'router_not_configured') : 'router_error'
-      fields = words.intent
-        ? { would_route: words.intent === 'dump' ? (words.reminder ? 'reminder' : 'dump') : 'agent', would_decided_by: 'owner_words', would_rules: [...words.rules, why] }
-        : { would_route: null, would_decided_by: 'fallback', would_rules: [...words.rules, why] }
+      const dump = words.intent === 'dump'
+      return {
+        fields: words.intent
+          ? { would_route: dump ? (words.reminder ? 'reminder' : 'dump') : 'agent', would_decided_by: 'owner_words', would_rules: [...words.rules, why] }
+          : { would_route: null, would_decided_by: 'fallback', would_rules: [...words.rules, why] },
+        cmd: dump ? { route: 'dump', title: dumpTitle({}, text), deadline: deadlineFrom(text, timezone || settings?.clock?.timezone), summary: text } : null,
+        why: { decided_by: words.intent ? 'owner_words' : 'fallback', rules: [...words.rules, why], urgent: words.urgent, tags: words.tags, reminder: dump && words.reminder },
+        model: '',
+      }
     }
-    sentLog.update(row.id, fields)
+  }
+  const classifyTyped = async row => {
+    sentLog.update(row.id, (await guessTyped(row.text)).fields)
+  }
+  // Issue 669 (Smart inbox): how well the typed shadow guess matched what the owner did, and whether typed task
+  // messages now run in the background. A typed row is judged by its first run's outcome (kept on the row) or, once it
+  // ran in the background, by its inbox record; a reply he typed in that thread after it means he wanted it visible.
+  const typedRoutingState = () => {
+    const rows = sentLog.all()
+    const replied = new Map()
+    for (const row of rows) if (row.source === 'reply' && row.thread_id && !replied.has(`${row.agent}\n${row.thread_id}`)) replied.set(`${row.agent}\n${row.thread_id}`, row.at || 0)
+    const contextOf = row => {
+      let ended = null
+      if (row.record_id) {
+        const record = agentInbox.get(row.record_id)
+        const state = record ? sentState(row) : ''
+        if (state && state !== 'routing' && state !== 'unknown') ended = { state, at: record.updated_at || record.created_at || 0 }
+      } else if (row.outcome?.state) ended = { state: row.outcome.state, at: row.outcome.at || 0 }
+      else if (row.final_state) ended = { state: row.final_state, at: row.at || 0 }
+      const last = row.thread_id ? replied.get(`${row.agent}\n${row.thread_id}`) : 0
+      return { ended, replied: Boolean(last && last > (row.at || 0)) }
+    }
+    const match = typedMatch(rows.filter(row => row.agent === MAIN_AGENT_ID), contextOf, {
+      now: (options.agentInboxNow ?? Date.now)(),
+      min: Number(options.typedRoutingMin) > 0 ? Number(options.typedRoutingMin) : TYPED_ROUTING_MIN,
+      rate: Number(options.typedRoutingRate) > 0 && Number(options.typedRoutingRate) <= 1 ? Number(options.typedRoutingRate) : TYPED_ROUTING_RATE,
+      settleMs: Number(options.typedRoutingSettleMs) >= 0 && options.typedRoutingSettleMs != null ? Number(options.typedRoutingSettleMs) : TYPED_SETTLE_MS })
+    const smart = smartInboxOn()
+    const { verdicts, ...stats } = match
+    return { view: { on: smart && match.graduated, switch: smart, ...stats }, verdicts }
   }
   // Tags (issue 608, switch wizard/chat-tags): tags the owner said in a capture ("#philosopher", "hashtag philosopher",
   // kept on its Sent row) go on the thread it ran in once that thread is known. Only tags that already exist: a tag is
@@ -7552,13 +7594,22 @@ function buildWizardServer(options, lifetime) {
             }
             if (typeof input?.should_reply !== 'boolean') { sendJson(response, 400, { error: 'invalid_request', detail: 'should_reply must be true or false' }); return }
             sendJson(response, 200, await correctSent(one, input.should_reply), { 'Cache-Control': 'no-store' })
+          } else if (one === 'typed') {
+            // Issue 669: the typed match rate on its own (GET /wizard/v1/sent/typed).
+            sendJson(response, 200, { typed_routing: typedRoutingState().view }, { 'Cache-Control': 'no-store' })
           } else if (one) {
             const row = sentLog.get(one)
             if (!row) { sendJson(response, 404, { error: 'not_found' }); return }
             sendJson(response, 200, { row: sentView(row) }, { 'Cache-Control': 'no-store' })
           } else {
             const page = sentLog.list({ limit: url.searchParams.get('limit') || 50, before: url.searchParams.get('before') || '' })
-            sendJson(response, 200, { rows: page.rows.map(sentView), next: page.next, check: sentLog.lastCheck() }, { 'Cache-Control': 'no-store' })
+            // Issue 669: each typed row says what its guess was and whether it matched; the page carries the match rate.
+            const typed = typedRoutingState()
+            const rows = page.rows.map(row => {
+              const view = sentView(row), judged = typed.verdicts.get(row.id)
+              return judged ? { ...view, typed_guess: judged.guess, typed_verdict: judged.verdict } : view
+            })
+            sendJson(response, 200, { rows, next: page.next, check: sentLog.lastCheck(), typed_routing: typed.view }, { 'Cache-Control': 'no-store' })
           }
         } catch (error) {
           const status = [400, 404, 409].includes(error?.status) ? error.status : 503
@@ -8435,6 +8486,36 @@ function buildWizardServer(options, lifetime) {
         const dump = !privateRoute && input?.accept_dump === true && agentInboxOn() && ownerLike(principalOf(request)) && !skinOriginRefused(request)
           && /^application\/json(?:;|$)/iu.test(String(request.headers['content-type'] || ''))
         const said = typeof input?.text === 'string' ? input.text.replace(/\s+/gu, ' ').trim() : ''
+        // Issue 669 (Smart inbox, switch wizard/smart-inbox): a typed new chat the shell asks about (source typed with
+        // accept_dump). Only once the typed guess has proved right (typedRoutingState) and only for a task with no reply
+        // phrase, question or "let me know when": the same guess as the Sent log's shadow one (his words, an earlier
+        // correction, a private router only) starts the orb's background worker. Anything else answers route agent at
+        // once with no Sent row (the visible thread's own typed row is written when it opens, as today).
+        if (input?.source === 'typed' && input?.accept_dump === true) {
+          const visible = why => sendJson(response, 200, { cmd: { route: 'agent', summary: said }, ms: 0, model: '', typed: { background: false, why } })
+          if (!said) { sendJson(response, 400, { error: 'invalid_request' }); return }
+          if (!dump) { visible(privateRoute ? 'private_routing' : 'not_allowed'); return }
+          const gate = typedRoutingState().view
+          if (!gate.on) { visible(gate.switch ? 'not_proven' : 'switch_off'); return }
+          const kept = keepsVisible(said)
+          if (kept) { visible(kept); return }
+          const guess = await guessTyped(said, { timeoutMs: 5_000, timezone: typeof input.timezone === 'string' ? input.timezone : '' })
+          if (!guess.cmd) { visible(guess.fields.would_route ? 'not_a_task' : 'unclear'); return }
+          let captured
+          try { captured = captureDump(said, guess.cmd, { urgent: guess.why?.urgent === true, tags: guess.why?.tags || [], typed: true }) }
+          catch (error) { console.warn(`[agent-inbox] typed task not captured: ${error?.message || error}`); visible('capture_failed'); return }
+          let row = null
+          try {
+            row = sentLog.open({ text: said, source: 'typed', agent: MAIN_AGENT_ID,
+              idempotency_key: typeof input.idempotency_key === 'string' ? input.idempotency_key : String(request.headers['idempotency-key'] || '') }).row
+            sentLog.update(row.id, guess.fields)
+            sentTagsApply(sentLog.finish(row.id, { route: guess.why?.reminder ? 'reminder' : 'dump', decided_by: guess.why?.decided_by, rules: [...(guess.why?.rules || []), 'typed_background'],
+              model: guess.model, confidence: guess.why?.confidence, tags: guess.why?.tags, urgent: guess.why?.urgent, correction_id: guess.why?.correction_id,
+              record_id: captured.record_id, thread_id: captured.thread_id }))
+          } catch (error) { console.warn(`[sent-log] typed row not written: ${error?.message || error}`) }
+          sendJson(response, 200, { cmd: { ...guess.cmd, ...captured }, ms: 0, model: guess.model, ...(row ? { sent_id: row.id } : {}), typed: { background: true } })
+          return
+        }
         let sent = null
         if (sentOn && said) {
           try {

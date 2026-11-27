@@ -241,6 +241,37 @@ The chat list row of a thread whose newest run is a quiet reply carries `wizard_
 Inbox / Ready (wizard/chats-inbox). A question, needs_you, check or a failed run goes to Inbox as before. Switch off:
 no reply rows and no flag.
 
+### Typed messages can go quiet too (issue 669, Smart inbox switch `wizard/smart-inbox`)
+
+A typed first message's row keeps its first run's `outcome` too, and the Sent log judges its shadow guess
+(`server/typed-routing.mjs`) against what the owner did:
+
+- guess: `background` when `would_route` is dump or reminder (or the message already ran in the background), else
+  `visible`. A reply phrase, a `?` or "let me know when" is always visible, whatever the router said.
+- what he wanted: his `/correct` first (Should have replied = visible, Didn't need a reply = background); a blocker
+  (needs_you) or a failure reached Inbox either way (`neutral`, not counted); a reply row he typed in that thread after
+  it = visible; a finished answer he left alone for 24 h = background; otherwise `pending`. Opening the thread is not
+  counted (every typed thread is open at send today).
+- the gate counts the background guesses only (the ones that would change what he sees): at least 50 of the newest 200
+  judged and 90% of them right. A typed message that ran in the background counts too, so a guess that gets worse
+  closes the gate again.
+
+`GET /wizard/v1/sent` adds `typed_routing` (`on` = switch on and gate met, `switch`, `graduated`, `typed`, `pending`,
+`neutral`, `all` / `background` / `visible` `{judged, matched, rate}`, `gate {min, rate, window, settle_hours}`) and,
+on each typed row, `typed_guess` and `typed_verdict` (match | miss | neutral | pending). `GET /wizard/v1/sent/typed`
+answers `{ typed_routing }` alone. This is read-only and served with the switch off too (nothing acts on it).
+
+With the switch on and the gate met, the shell asks before it opens a typed new main-agent chat:
+`POST /wizard/v1/route {text, source: "typed", accept_dump: true, idempotency_key?}` (owner same-origin JSON). The
+box decides with the same guess as the shadow one (his words, an exact earlier correction, a private router only,
+5 s). A task answers `cmd.route: dump` with `record_id` / `thread_id` after starting the orb's hidden worker (record
+`source: typed:dump`; the worker's run note says the owner typed it and is not watching); the Sent row is `source:
+typed`, `route: dump` (or reminder), with `would_route`. It waits in Sent › Working and comes back to Inbox only for a
+blocker or a failure, as an orb dump does. "Should have replied" on it opens the thread, teaches the router (one route
+example) and counts as a miss. Anything else answers `200 {cmd: {route: agent, summary}, typed: {background: false,
+why}}` at once with no Sent row (`why`: switch_off | not_proven | question | notify_when_done | wants_reply:… |
+greeting | unclear | not_a_task | private_routing | not_allowed), and the shell opens the visible thread as today.
+
 ### Private mode edges (issue 631, switch `wizard/private-routing`)
 
 With the owner's `wizard/private-routing` switch on (the switch of issue 629; env `WIZARD_PRIVATE_ROUTING=1` forces it

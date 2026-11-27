@@ -939,6 +939,60 @@ export const serverChecks = {
       assert.notEqual((await listed())?.quietReply, true, `${s.kind}: its list keeps today's marks`)
     }
   },
+  // Issue 669 (Smart inbox, switch wizard/smart-inbox in the Look file): typed messages can go quiet too. A typed first
+  // message keeps its first run's outcome on its Sent row; the Sent log judges each shadow guess and serves the match
+  // rate (GET /wizard/v1/sent, /wizard/v1/sent/typed). Once the gate is met (this scene: 2 judged, settle 0) a typed
+  // task the shell asks about (POST /wizard/v1/route source typed + accept_dump) starts the orb's background worker; a
+  // reply phrase stays visible. Switch off or not proven: route agent, nothing captured. The Sent log is the main
+  // agent's, so other kinds' typed turns never open the gate.
+  'typed-routing': async s => {
+    const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/smart-inbox': { on, at: Date.now() } } })) }
+    const say = text => s.raw('/wizard/v1/route', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, timezone: 'UTC', source: 'typed', accept_dump: true }) })
+    const records = async () => (await (await s.raw('/wizard/v1/agent-inbox')).json()).records
+    const typedState = async () => (await (await s.raw('/wizard/v1/sent/typed')).json()).typed_routing
+    const until = async (ok, label) => {
+      let last
+      for (let n = 0; n < 120; n++) { last = await ok(); if (last) return last; await new Promise(r => setTimeout(r, 25)) }
+      assert.fail(label)
+    }
+    look(false)
+    let k = await (await say('Research synthetic flights to Lisbon')).json()
+    assert.deepEqual([k.cmd.route, k.typed?.why], ['agent', 'switch_off'], `${s.kind}: switch off keeps a typed send visible`)
+    look(true)
+    k = await (await say('Research synthetic flights to Lisbon')).json()
+    assert.deepEqual([k.cmd.route, k.typed?.why], ['agent', 'not_proven'], `${s.kind}: not proven yet, still visible`)
+    assert.deepEqual(await records(), [], `${s.kind}: nothing captured`)
+    for (const n of [1, 2]) {
+      const thread = `wizard_typed_parity_${n}`
+      assert.ok([200, 201].includes((await s.request('/api/sessions', post({ id: thread, source: 'wizard-mobile' }))).status))
+      const admitted = await s.request('/v1/runs', post({ session_id: thread, input: `Research synthetic topic ${n}` }))
+      assert.equal(admitted.status, 202)
+      const run = (await admitted.json()).run_id
+      Object.assign([...s.runs.values()].at(-1), { status: 'completed', updated_at: Date.now() / 1000, output: `Done.\n[WIZARD_STATUS_V1]${JSON.stringify({ state: 'done', ask: 'Synthetic topic researched' })}[/WIZARD_STATUS_V1]` })
+      assert.equal((await s.request(`/v1/runs/${run}`)).status, 200)
+    }
+    if (s.kind === 'main') {
+      const state = await until(async () => { const t = await typedState(); return t.graduated ? t : null }, 'two typed task guesses left alone open the gate')
+      assert.deepEqual([state.on, state.background.judged, state.background.matched], [true, 2, 2])
+      const rows = (await (await s.raw('/wizard/v1/sent')).json()).rows.filter(r => r.source === 'typed')
+      assert.ok(rows.every(r => r.outcome === 'done' && r.typed_verdict === 'match'), 'each typed row keeps its outcome and verdict')
+      k = await (await say('Research synthetic flights to Lisbon')).json()
+      assert.equal(k.cmd.route, 'dump', 'a typed task now runs in the background')
+      assert.match(k.cmd.record_id, /^inbox_[a-f0-9]{24}$/u)
+      const made = (await records()).find(r => r.id === k.cmd.record_id)
+      assert.deepEqual([made.source, made.thread_id], ['typed:dump', k.cmd.thread_id])
+      k = await (await say('Research synthetic flights to Porto and tell me what you find')).json()
+      assert.deepEqual([k.cmd.route, k.typed?.why], ['agent', 'wants_reply:tell me'], 'a reply phrase stays visible')
+      assert.equal((await records()).length, 1)
+    } else {
+      await new Promise(r => setTimeout(r, 150))
+      const state = await typedState()
+      assert.equal(state.graduated, false, `${s.kind}: the Sent log is the main agent's; its typed turns never open the gate`)
+      k = await (await say('Research synthetic flights to Lisbon')).json()
+      assert.equal(k.cmd.route, 'agent', `${s.kind}: still visible`)
+      assert.deepEqual(await records(), [], `${s.kind}: nothing captured`)
+    }
+  },
   'agent-inbox': async s => {
     const json = (method, body) => ({ method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
     const record = async id => { const r = await s.raw(`/wizard/v1/agent-inbox/${id}`); assert.equal(r.status, 200); return (await r.json()).record }
