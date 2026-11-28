@@ -101,7 +101,7 @@ test('list rows keep the chat source (telegram, slack); a row without one has no
   assert.equal(listRow({ id: 'tg', source: 'slack', status: 'failed' }).source, 'slack');
   assert.equal('source' in listRow({ id: 'plain' }), false);
 });
-// Reply buttons (wizard-ux issue 1889, switch wizard/reply-buttons): a reply's [WIZARD_BUTTONS_V1] group previews as
+// Reply buttons (wizard-ux issue 1889, on for everyone): a reply's [WIZARD_BUTTONS_V1] group previews as
 // its labels in brackets, and the owner's taps message as its "Tapped …" line, never the JSON, for every kind.
 test('reply buttons and taps preview as plain words, main and routed (host-profile, container, restricted)', () => {
   const group = '[WIZARD_BUTTONS_V1]{"group":"Ship desks","buttons":[{"id":"go","label":"Go for it"},{"id":"drop","label":"Drop this"}]}[/WIZARD_BUTTONS_V1]'

@@ -58,7 +58,7 @@ import { readWithChannels, putWithChannels, patchWithChannels, spacesForMigratio
 import { createSpaceFiling } from './thread-spaces.mjs'
 import { AUTO_TAGS_SWITCH, createAutoTagger, readRecentChats } from './auto-tags.mjs'
 import { createChannelsSwitch, channelOn, channelPart } from './channels-switch.mjs'
-import { REPLY_BUTTONS_SWITCH, replyButtonsNote } from './reply-buttons.mjs'
+import { replyButtonsNote } from './reply-buttons.mjs'
 import { REPLY_ACTIONS_SWITCH, createReplyActions, replyActionsNote } from './reply-actions.mjs'
 import { QUICK_LINKS_SWITCH, quickLinksNote } from './quick-links.mjs'
 import { createCapabilities } from './capabilities.mjs'
@@ -3166,17 +3166,13 @@ function buildWizardServer(options, lifetime) {
   // generated kernel index line and the routed run note.
   // The shell's interface manual (wizard-ux issue 1437) is on for everyone; WIZARD_INTERFACE_MANUAL=0 keeps it out.
   const interfaceManualOn = () => options.interfaceManual !== false
-  // Reply buttons (wizard-ux issue 1889, reply-buttons.mjs): while the owner's switch is on, every main and routed run
-  // is told how to write tap-to-answer buttons and what a taps message means. `options.replyButtons` forces it (tests).
-  const replyButtonsSwitchOn = createChannelsSwitch({ id: REPLY_BUTTONS_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.replyButtonsTtlMs ?? 3000 })
+  // Reply buttons (wizard-ux issue 1889, reply-buttons.mjs; on for everyone, switch wizard/reply-buttons removed):
+  // every main and routed run is told how to write tap-to-answer buttons and what a taps message means.
   // Action buttons (wizard-ux issue 1973, reply-actions.mjs; switch wizard/reply-actions, off by default): a button may
-  // act on an installed app directly with no agent turn. Its run note rides with the buttons note, only while both are on.
+  // act on an installed app directly with no agent turn. Its run note rides with the buttons note while it is on.
   const replyActionsSwitchOn = createChannelsSwitch({ id: REPLY_ACTIONS_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.replyActionsTtlMs ?? 3000 })
   const replyActionsOn = () => channelPart(options.replyActions, replyActionsSwitchOn)
-  const buttonsNote = () => {
-    const note = replyButtonsNote(() => channelPart(options.replyButtons, replyButtonsSwitchOn))
-    return note ? [note, replyActionsNote(replyActionsOn)].filter(Boolean).join('\n') : ''
-  }
+  const buttonsNote = () => [replyButtonsNote(), replyActionsNote(replyActionsOn)].filter(Boolean).join('\n')
   // New chat quick links (wizard-ux issue 1965, quick-links.mjs): the owner's `wizard/new-chat-chips` switch in the Look
   // file; option quickLinks (env WIZARD_NEW_CHAT_CHIPS, '1' on / '0' off) wins. On: one note on every run says how to answer
   // "What's waiting on me?" and "Plan my day". Off: nothing.
