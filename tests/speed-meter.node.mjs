@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createSpeedMeter, createSlowTickLogger, routeTemplate, lagLine, beginWork, trackWork, workDuring, startupLine } from '../server/speed-meter.mjs'
+import { createSpeedMeter, createSlowTickLogger, routeTemplate, lagLine, beginWork, trackWork, workDuring, startupLine, blockingStretches, createStallProfiler } from '../server/speed-meter.mjs'
 import { createHybridProjector } from '../server/session-list-cache.mjs'
 
 test('voice transcribe and POST runs expose independent bounded rolling p95 rows', t => {
@@ -203,4 +203,42 @@ test('a long-poll parked with done.idle() is left out of route time, stall attri
   time += 1; gone.idle(new Promise(() => {})); time += 25_000; gone()
   assert.equal(Object.entries(meter.stats().routes).find(([key]) => JSON.parse(key)[1] === '/wizard/v1/workspaces')[1].total_ms, 6)
   assert.match(lagLine({ window_ms: 60000, delay_p99_ms: 1, delay_max_ms: 1200, utilization: 0.1 }, new Map(), 3, { waiting: 2 }), /"waiting":2/)
+})
+
+// Issue 584: the running routes say what waited, not what held the thread. With the stall profile on, a logged window
+// names the functions that ran longest in each long busy stretch.
+function holdTheLoopForIssue584(ms) { const until = Date.now() + ms; while (Date.now() < until) { /* hold the loop */ } }
+test('a logged window names what held the thread, from the stall profile (issue 584)', async t => {
+  const logs = []
+  const meter = createSpeedMeter({ windowMs: 700, stallCheckMs: 50, stallProfile: true, log: line => logs.push(line) })
+  t.after(() => meter.close())
+  await new Promise(resolve => setTimeout(resolve, 60))
+  trackWork('label repair', () => holdTheLoopForIssue584(1200))
+  await new Promise(resolve => setTimeout(resolve, 900))
+  const line = logs.find(entry => entry.includes('"blocking"'))
+  assert(line, `expected blocking stretches in an event-loop line, got ${JSON.stringify(logs)}`)
+  const { blocking } = JSON.parse(line.slice('[event-loop] '.length))
+  assert(blocking[0].ms >= 900, JSON.stringify(blocking))
+  assert(blocking[0].self.some(frame => /holdTheLoopForIssue584|now/.test(frame)), JSON.stringify(blocking))
+  assert(blocking[0].under.some(frame => / speed-meter\.mjs:\d+$/.test(frame) && frame.includes('trackWork')), JSON.stringify(blocking))
+})
+test('one stall profiler per process; quiet windows are never summarised (issue 584)', t => {
+  const first = createStallProfiler()
+  t.after(() => first?.close())
+  assert(first)
+  assert.equal(createStallProfiler(), null)
+  holdTheLoopForIssue584(300)
+  assert.deepEqual(first.rotate(false), [])
+  holdTheLoopForIssue584(300)
+  assert(first.rotate(true)[0]?.ms >= 250)
+  first.close()
+  const again = createStallProfiler(); assert(again); again.close()
+})
+test('blocking stretches skip idle samples and keep only long busy runs (issue 584)', () => {
+  const frame = (id, functionName, url, children = []) => ({ id, callFrame: { functionName, url, lineNumber: 9 }, children })
+  const profile = { nodes: [frame(1, '(root)', '', [2, 3, 4]), frame(2, '(idle)', ''), frame(3, 'build', 'file:///app/server/service.mjs', [5]), frame(4, '(program)', ''), frame(5, 'fsync', '')],
+    samples: [2, 5, 5, 5, 3, 2, 3, 2], timeDeltas: [0, 100_000, 100_000, 100_000, 50_000, 10_000, 10_000, 10_000] }
+  assert.deepEqual(blockingStretches(profile, { minMs: 100 }), [{ ms: 350, self: ['300ms fsync (native):10', '50ms build service.mjs:10'], under: ['350ms build service.mjs:10'] }])
+  assert.deepEqual(blockingStretches(profile, { minMs: 400 }), [])
+  assert.deepEqual(blockingStretches(null), [])
 })

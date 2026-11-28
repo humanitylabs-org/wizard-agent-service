@@ -75,7 +75,7 @@ export const readNonHoldingFollowUps = (path, sessionId) => new Set(readOwnedOpe
 // exactly as before. One read-only handle serves all rows; a reopened handle empties the memo.
 export const OWNED_WORK_MEMO_MAX = 1000
 const FRESH_SECONDS = 120
-function ownedWorkRevision(db, sessionId, nowSeconds) {
+export function ownedWorkRevision(db, sessionId, nowSeconds) {
   try {
     if (!preparedRead(db, "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='messages_transcript_revision_update'").get()) return null
     const m = preparedRead(db, `SELECT COUNT(*) AS n, MAX(id) AS top, SUM(CASE WHEN COALESCE(active,1)=1 THEN 1 ELSE 0 END) AS live,

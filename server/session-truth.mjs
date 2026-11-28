@@ -7,7 +7,7 @@ import { preparedRead, createReadOnlySqlite } from './read-only-sqlite.mjs'
 import { readUndeliveredHelperReceipts, completionDelegationId, receiptConsumed, ownerGate, isHumanRequest, retainedMessagesWhere } from './delegation-receipts.mjs'
 import { parseStatus, replyAppId } from './thread-status.mjs'
 import { hasAppToolCalls } from './thread-app-provenance.mjs'
-import { readNonHoldingFollowUps } from './owned-open-work-follow-through.mjs'
+import { readNonHoldingFollowUps, ownedWorkRevision } from './owned-open-work-follow-through.mjs'
 import { allStopped, batchTaskStatuses } from './background-results.mjs'
 
 const USER_EVENT_KINDS = new Set(['async_delegation_complete', 'internal_notification', 'system'])
@@ -223,11 +223,50 @@ export function searchHermesSessionText(path, sessionIds, query) {
   const searcher=createHermesTextSearcher(path)
   try { return searcher.search(sessionIds,query) } finally { searcher.close() }
 }
+// The Chats list reads every listed thread's truth on each snapshot rebuild (every 30 s at most while a phone is
+// open). Its transcript walk reads message bodies (and, past them, every later column: tool calls, reasoning) back
+// to the newest owner request: about 0.4 MB a thread, 170-300 MB a rebuild on a large state.db, which kept the disk
+// busy and stalled every other read on the box (issue 584). The walk is a pure function of the thread's own rows,
+// so it is reused while the owned-work revision holds (append, delete, active flip, in-place rewrite and the
+// 120 s post-turn window all move or skip it) and the thread's end reason is unchanged (a compression hands
+// provenance to a continuation). No revision (no transcript trigger, a fresh thread): read as before.
+export const TRANSCRIPT_WALK_MEMO_MAX = 5000
+const WALK_FIELDS = ['activityAt', 'lastUserAt', 'lastAssistantAt', 'requestPreview', 'replies', 'status', 'appId']
+export function createTranscriptWalkMemo({ max = TRANSCRIPT_WALK_MEMO_MAX } = {}) {
+  const memo = new Map()
+  const stats = { hits: 0, walks: 0 }
+  let memoDb = null
+  return {
+    stats: () => ({ ...stats, size: memo.size }),
+    key(db, id, nowSeconds, endReason) {
+      // A reopened (replaced or restored) state.db shares nothing with the old memo.
+      if (db !== memoDb) { memo.clear(); memoDb = db }
+      const revision = ownedWorkRevision(db, id, nowSeconds)
+      return revision ? `${revision}:${endReason ?? ''}` : null
+    },
+    get(id, key) {
+      const hit = memo.get(id)
+      if (!key || hit?.key !== key) return null
+      memo.delete(id); memo.set(id, hit); stats.hits++
+      return structuredClone(hit.value)
+    },
+    set(id, key, current) {
+      stats.walks++
+      if (!key) return
+      const value = Object.fromEntries(WALK_FIELDS.filter(field => Object.hasOwn(current, field)).map(field => [field, current[field]]))
+      memo.delete(id); memo.set(id, { key, value: structuredClone(value) })
+      while (memo.size > max) memo.delete(memo.keys().next().value)
+    },
+    clear() { memo.clear() },
+  }
+}
 export function createHermesSessionTruthReader(path) {
   const connection = createReadOnlySqlite(path)
+  const walkMemo = createTranscriptWalkMemo()
   return {
-    close: connection.close,
-    read: (ids, nowSeconds = Date.now() / 1000, options = {}) => readHermesSessionTruth(path, ids, nowSeconds, { ...options, db: connection.get() }),
+    close: () => { walkMemo.clear(); connection.close() },
+    stats: walkMemo.stats,
+    read: (ids, nowSeconds = Date.now() / 1000, options = {}) => readHermesSessionTruth(path, ids, nowSeconds, { ...options, db: connection.get(), walkMemo }),
     busy(id, nowSeconds = Date.now() / 1000) {
       const db = connection.get()
       if (!db || !/^(?:wizard_|wizard-assistant-)/.test(String(id))) return false
@@ -331,7 +370,11 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
       }
       return null
     }
+    const walkMemo = options.walkMemo ?? null
     for (const [id, current] of truth) {
+      const walkKey = walkMemo ? walkMemo.key(db, id, nowSeconds, hasLineage ? lineageParent.get(id)?.end_reason : '') : null
+      const remembered = walkMemo?.get(id, walkKey)
+      if (remembered) { Object.assign(current, remembered); continue }
       let latestVisibleRole = null, provenanceAt = 0
       for (const row of recentMessages.iterate(id)) {
         const timestamp = Number(row.timestamp) || 0
@@ -390,6 +433,8 @@ export function readHermesSessionTruth(path, sessionIds, nowSeconds = Date.now()
           break
         }
       }
+      // A thread that hands provenance to a compression continuation reads that tip again next time.
+      if (walkMemo) walkMemo.set(id, tip === id ? walkKey : null, current)
     }
     // Helpers the agent dispatched in the background (stock Hermes delegate_task). While one runs, or its
     // result is saved but the agent has not answered yet, the thread is still working for the owner: the

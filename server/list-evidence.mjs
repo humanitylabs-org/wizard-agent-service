@@ -10,11 +10,25 @@ import { pendingHeavyJobs, heavyResultOwed } from './heavy-wait.mjs'
 import { readSupervisorBuildWaits, readSupervisorWaitStamps } from './supervisor-wait.mjs'
 import { readActiveHumanSessionIds, readSessionLeaseHeld } from './active-sessions.mjs'
 
+const AGENT_TRUTH_READERS_MAX = 16
 export function createListEvidenceReader(hermesStatePath) {
   const listTruthReader = createHermesSessionTruthReader(hermesStatePath)
   const ownedWork = createOwnedOpenWorkReader(hermesStatePath)
+  // A routed agent's own state.db gets the same remembered transcript walks as the main list (issue 584).
+  const agentTruthReaders = new Map()
+  const agentTruthReader = (path) => {
+    if (!path) return null
+    let reader = agentTruthReaders.get(path)
+    if (!reader) {
+      reader = createHermesSessionTruthReader(path)
+      agentTruthReaders.set(path, reader)
+      while (agentTruthReaders.size > AGENT_TRUTH_READERS_MAX) { const [oldest, old] = agentTruthReaders.entries().next().value; old.close(); agentTruthReaders.delete(oldest) }
+    }
+    return reader
+  }
   return {
-    close: () => { listTruthReader.close(); ownedWork.close() },
+    close: () => { listTruthReader.close(); ownedWork.close(); for (const reader of agentTruthReaders.values()) reader.close(); agentTruthReaders.clear() },
+    stats: () => ({ truth: listTruthReader.stats(), agents: [...agentTruthReaders.values()].map(reader => reader.stats()) }),
     read({ kind, ids, activeSessionIds, heavyJobs, supervisorStatePath, operator, now, posts, path, limit, mark, since }) {
       // Chats list reads of Hermes' state.db (issue 584). A cold read of a large state.db waits on the disk for
       // seconds; here it waits off the HTTP thread. A failure comes back as { failed } (the caller re-throws it for
@@ -43,7 +57,7 @@ export function createListEvidenceReader(hermesStatePath) {
       // A routed agent's list (issue 584): its open-ask evidence from its own state.db, 100 threads per read as
       // before. On the HTTP thread this held every route for seconds on each agent list read.
       if (kind === 'agent-evidence') {
-        try { return { value: readAgentEvidence(path, ids, supervisorStatePath, now) } }
+        try { return { value: readAgentEvidence(path, ids, supervisorStatePath, now, agentTruthReader(path)) } }
         catch (error) { return { failed: { message: String(error?.message ?? error).slice(0, 200), code: error?.errcode ?? error?.code ?? null } } }
       }
       if (kind === 'signals') return {
@@ -87,13 +101,13 @@ export function createListEvidenceReader(hermesStatePath) {
 }
 
 /** A routed agent's open-ask evidence per thread: Map id -> { truth, helperStatus, supervisorPending }. */
-export function readAgentEvidence(path, ids, supervisorStatePath, now = Date.now()) {
+export function readAgentEvidence(path, ids, supervisorStatePath, now = Date.now(), truthReader = null) {
   const wanted = [...new Set((ids ?? []).filter(id => typeof id === 'string' && id))]
   const evidence = new Map(wanted.map(id => [id, { truth: undefined, helperStatus: undefined, supervisorPending: false }]))
   // Same 100-thread batches as the main list (readers cap at 200; helper evidence caps per batch).
   for (let at = 0; at < wanted.length; at += 100) {
     const batch = wanted.slice(at, at + 100)
-    for (const [id, truth] of readHermesSessionTruth(path, batch, now / 1000)) if (evidence.has(id)) evidence.get(id).truth = truth
+    for (const [id, truth] of (truthReader ? truthReader.read(batch, now / 1000) : readHermesSessionTruth(path, batch, now / 1000))) if (evidence.has(id)) evidence.get(id).truth = truth
     for (const [id, status] of readHelperStatuses(path, batch, { now })) if (evidence.has(id)) evidence.get(id).helperStatus = status
     for (const id of readSupervisorBuildWaits(supervisorStatePath, path, batch, now, { includeOwnerGates: true }).keys()) if (evidence.has(id)) evidence.get(id).supervisorPending = true
   }

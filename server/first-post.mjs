@@ -2,9 +2,10 @@
 // first message: its words (cleaned, at most FIRST_REQUEST_MAX UTF-16 code units) and the photos it carried, as
 // file refs the authorized /wizard/files/<id>/content route serves. List rows carry them as firstRequest and
 // firstAttachments, so the shell no longer reads each post's history.
-import { existsSync } from 'node:fs'
+import { existsSync, statSync } from 'node:fs'
 import { DatabaseSync } from 'node:sqlite'
 import { retainedMessagesWhere } from './delegation-receipts.mjs'
+import { ownedWorkRevision } from './owned-open-work-follow-through.mjs'
 import { preparedRead } from './read-only-sqlite.mjs'
 import { clean, FIRST_REQUEST_MAX } from './session-list-view.mjs'
 import { visibleUserRequest } from './session-truth.mjs'
@@ -174,6 +175,25 @@ function firstPostReadInput(sessionIds, { restore, memo, now, agentFirst }) {
   return { ids, known, reach: typeof restore === 'function', agentFirst: agentFirst === true }
 }
 
+// A memo key is read from up to 50 of the thread's first user rows, and the `trim(content)` and display-kind tests
+// read every one of those message bodies (and the columns past them) on each Chats list rebuild: about 30 MB a
+// rebuild on a large state.db (issue 584). A key stays the thread's key while the thread's revision holds (the
+// owned-work revision: append, delete, active flip, in-place rewrite, and nothing within 120 s of the newest row), so a
+// thread whose revision and memo key both still match is a hit without that read. Per file, cleared when it is replaced.
+const SHAPE_KEYS_MAX = 5000, SHAPE_FILES_MAX = 16
+const shapeKeyFiles = new Map()
+function shapeKeysOf(path) {
+  let identity
+  try { const stat = statSync(path); identity = `${stat.dev}:${stat.ino}` } catch { return null }
+  let entry = shapeKeyFiles.get(path)
+  if (!entry || entry.identity !== identity) {
+    entry = { identity, keys: new Map() }
+    shapeKeyFiles.delete(path); shapeKeyFiles.set(path, entry)
+    while (shapeKeyFiles.size > SHAPE_FILES_MAX) shapeKeyFiles.delete(shapeKeyFiles.keys().next().value)
+  }
+  return entry.keys
+}
+
 /** The database part of readHermesFirstPosts: plain data only (it runs in a worker thread). `{ hits, pages }`:
  *  hits = ids whose memo key still matches, pages = the rest with their first user rows. */
 export function readFirstPostPages(path, { ids = [], known = [], reach: withReach = false, agentFirst = false } = {}) {
@@ -202,10 +222,18 @@ export function readFirstPostPages(path, { ids = [], known = [], reach: withReac
       AND ${retainedMessagesWhere(columns)} AND COALESCE(${columns.has('display_kind') ? 'display_kind' : 'NULL'},'') NOT IN ('commentary','hidden') AND trim(COALESCE(content,''))<>''
       ORDER BY timestamp ASC, id ASC LIMIT 1`) : null
     const plain = row => row ? { id: Number(row.id), role: row.role === undefined ? undefined : String(row.role), display_kind: row.display_kind ?? null, timestamp: row.timestamp } : null
+    const shapeKeys = shapeKeysOf(path), nowSeconds = Date.now() / 1000, flags = `${withReach ? 1 : 0}${agentFirst ? '|a' : ''}`
     for (const id of ids) {
       if (!exists.get(id)) continue
+      const revision = shapeKeys ? ownedWorkRevision(db, id, nowSeconds) : null
+      const kept = revision ? shapeKeys.get(`${id}|${flags}`) : null
+      if (kept && kept.revision === revision && keys.get(id) === kept.key) { out.hits.push([id, kept.key]); continue }
       const other = withReach ? plain(reach.get(id)) : null
-      const key = `${shape.all(id).map(row => `${row.id}:${row.display_kind || ''}`).join(',')}|${other ? other.id : ''}|${withReach ? 1 : 0}${agentFirst ? '|a' : ''}`
+      const key = `${shape.all(id).map(row => `${row.id}:${row.display_kind || ''}`).join(',')}|${other ? other.id : ''}|${flags}`
+      if (revision) {
+        shapeKeys.delete(`${id}|${flags}`); shapeKeys.set(`${id}|${flags}`, { revision, key })
+        while (shapeKeys.size > SHAPE_KEYS_MAX) shapeKeys.delete(shapeKeys.keys().next().value)
+      }
       if (keys.get(id) === key) { out.hits.push([id, key]); continue }
       const rows = read.all(id).map(row => ({ id: Number(row.id), session_id: id, role: 'user', content: storedContent(row.content),
         timestamp: row.timestamp, ...(row.display_kind ? { display_kind: row.display_kind } : {}) }))

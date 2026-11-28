@@ -7400,7 +7400,7 @@ function buildWizardServer(options, lifetime) {
   })
   lifetime.own(() => incognito.close(), () => incognito.close())
   const standardRetrievalRate = new Map()
-  const speedMeter = createSpeedMeter()
+  const speedMeter = createSpeedMeter({ stallProfile: options.stallProfile === true })
   lifetime.own(() => speedMeter.close(), () => speedMeter.close())
   // One looping device only slows itself (issue 513): identical writes share a result, the rest are capped per device + route.
   const clientStorm = createClientStormGuard(options.clientStorm ?? {})
