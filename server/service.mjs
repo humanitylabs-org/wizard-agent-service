@@ -139,7 +139,7 @@ import { createPrivateMode, isPersonalDataApp } from './private-mode.mjs'
 import { createResultReader, readerFacts } from './result-reader.mjs'
 import { routingNames, nameRule, chooseAgent, privateLabelBlock } from './private-routing.mjs'
 import { FIRST_CHAT_NOTE } from './first-chat.mjs'
-import { createPhoneReplyNotes, PHONE_CHAT_REPLIES_SWITCH, CHATS_APP, CHAT_REPLY_TAG } from './phone-reply-notes.mjs'
+import { createPhoneReplyNotes, CHATS_APP, CHAT_REPLY_TAG } from './phone-reply-notes.mjs'
 import { privatePushes, contentFreePing } from './private-edges.mjs'
 export { readArchivedSessions }
 
@@ -7057,11 +7057,9 @@ function buildWizardServer(options, lifetime) {
     deliver: deliverBackgroundOccurrence,
   }) : null
   if (scheduler) lifetime.own(() => scheduler.close(), () => scheduler.quiesce())
-  // Chat replies on the phone through the per-app notification path (wizard-ux issue 1619, switch
-  // wizard/phone-chat-replies, off): the phone hands an accepted send here, the box follows the run and posts the
+  // Chat replies on the phone through the per-app notification path (wizard-ux issue 1619, on for everyone; switch
+  // wizard/phone-chat-replies removed): the phone hands an accepted send here, the box follows the run and posts the
   // reply to the Notifications app under Chats, so the phone's per-app reader delivers it (no run polling there).
-  const phoneChatRepliesSwitchOn = createChannelsSwitch({ id: PHONE_CHAT_REPLIES_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.phoneChatRepliesTtlMs ?? 3000 })
-  const phoneChatRepliesOn = () => channelPart(options.phoneChatReplies, phoneChatRepliesSwitchOn)
   const phoneNotifier = bridge ? quietPushes(scheduleNotifier({ bridge, appsJsonPath })) : null
   const phoneReplyNotes = phoneNotifier && bridgeOsHome ? createPhoneReplyNotes({
     statePath: join(bridgeOsHome, 'phone-reply-notes.json'),
@@ -8601,8 +8599,9 @@ function buildWizardServer(options, lifetime) {
         return
       }
       if (url.pathname === '/wizard/v1/phone/reply-notes') {
-        // The phone's handover of one accepted chat send (wizard-ux issue 1619). 404 while the switch is off.
-        if (!phoneReplyNotes || !phoneChatRepliesOn()) { sendJson(response, 404, { error: 'not_found' }); return }
+        // The phone's handover of one accepted chat send (wizard-ux issue 1619). 404 only on a box without a
+        // Notifications bridge, so the phone keeps its own watcher there.
+        if (!phoneReplyNotes) { sendJson(response, 404, { error: 'not_found' }); return }
         if (!ownerLike(principal)) { sendJson(response, 403, { error: 'owner_required' }); return }
         if (requireAccess && !await accessVerified(request, accessVerifier)) { sendJson(response, 403, { error: 'access_required' }); return }
         if (request.method !== 'POST') { sendJson(response, 405, { error: 'method_not_allowed' }); return }

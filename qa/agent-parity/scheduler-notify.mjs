@@ -187,11 +187,11 @@ export async function checkFallbackNotification(s, jobId, priorThread) {
   assert.equal(s.sends.length, priorSends, 'unbound agent must not send as itself or main')
 }
 
-// Chat replies on the phone (wizard-ux issue 1619, switch wizard/phone-chat-replies): the phone hands an accepted send
+// Chat replies on the phone (wizard-ux issue 1619, on for everyone): the phone hands an accepted send
 // to the Service, which follows the run through its own internal read and posts the reply once to the bound
 // Notifications app under Chats, as the thread's own agent.
 export const PHONE_REPLY_SHELL = 'https://box.example.ts.net:8796/wizard-os-home/'
-export const phoneReplyScene = kind => notificationScene(kind, true, { phoneChatReplies: true, phoneReplyShellUrl: PHONE_REPLY_SHELL, phoneReplyTickMs: 25 })
+export const phoneReplyScene = kind => notificationScene(kind, true, { phoneReplyShellUrl: PHONE_REPLY_SHELL, phoneReplyTickMs: 25 })
 export async function checkPhoneReplyNote(s) {
   const thread = 'wizard_parity_phone_reply'
   assert.ok((await s.request('/api/sessions', post({ id: thread, title: 'Parity reply' }))).status < 300)
