@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path'
@@ -923,7 +923,17 @@ export async function handleSchedulesApi(request, response, url, { scheduler, re
   if (!scheduler) throw fail('scheduler state unavailable', 503)
   const suffix = url.pathname.slice('/wizard/v1/schedules'.length)
   if (request.method === 'GET' || request.method === 'PATCH') await scheduler.refreshRuns()
-  if (!suffix && request.method === 'GET') sendJson(response, 200, { schedules: scheduler.list().map(job => scheduler.project(job)) })
+  if (!suffix && request.method === 'GET') {
+    // `?kind=return` (wizard-ux issue 2055): the phone's Snooze reads only its own return jobs, not every schedule
+    // with its run history (5.4 MB on a busy box, twice per resume). An unchanged list answers 304 to its ETag.
+    const kind = url.searchParams.get('kind')
+    if (kind !== null && !KINDS.includes(kind)) throw fail(`kind must be ${KINDS.join(', ')}`)
+    const value = { schedules: scheduler.list().filter(job => kind === null || (job.kind ?? 'run') === kind).map(job => scheduler.project(job)) }
+    const etag = `"${createHash('sha256').update(JSON.stringify(value)).digest('base64url').slice(0, 27)}"`
+    const asked = String(request.headers['if-none-match'] ?? '').split(',').map(tag => tag.trim().replace(/^W\//, ''))
+    if (asked.includes(etag)) { response.writeHead(304, { ETag: etag, 'Cache-Control': 'no-store' }); response.end() }
+    else sendJson(response, 200, value, { ETag: etag })
+  }
   else if (!suffix && request.method === 'POST') sendJson(response, 201, scheduler.project(scheduler.create(await readBody(request))))
   else if (suffix === '/import-hermes' && request.method === 'POST') sendJson(response, 200, importHermesSchedules(scheduler, await readBody(request)))
   else {

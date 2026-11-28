@@ -656,6 +656,28 @@ describe('authenticated schedule routes and ordinary thread delivery', () => {
     expect((await api(f.origin, `/${created.id}/run`, 'POST')).status).toBe(404)
   })
 
+  it('?kind=return lists only Snooze returns and an unchanged list answers 304 to its ETag (wizard-ux issue 2055)', async () => {
+    const f = await fixture()
+    expect((await api(f.origin, '', 'POST', job())).status).toBe(201)
+    const ret = await (await api(f.origin, '', 'POST', { name: 'Snooze · Synthetic', kind: 'return', when: { once: '2026-10-22T09:00:00Z' }, thread: 'wizard_synthetic_t1' })).json()
+    const all = await api(f.origin)
+    expect((await all.json()).schedules).toHaveLength(2)
+    const only = await api(f.origin, '?kind=return')
+    expect(only.status).toBe(200)
+    const tag = only.headers.get('etag')
+    expect(tag).toMatch(/^"[A-Za-z0-9_-]+"$/)
+    expect(tag).not.toBe(all.headers.get('etag'))
+    expect((await only.json()).schedules.map((s: any) => s.id)).toEqual([ret.id])
+    const again = await fetch(`${f.origin}/wizard/v1/schedules?kind=return`, { headers: { 'X-Wizard-Owner-Proof': 'fixture-owner-proof-with-32-characters', 'If-None-Match': tag! } })
+    expect(again.status).toBe(304)
+    expect(await again.text()).toBe('')
+    expect((await api(f.origin, `/${ret.id}`, 'PATCH', { when: { once: '2026-10-23T09:00:00Z' } })).status).toBe(200)
+    const changed = await fetch(`${f.origin}/wizard/v1/schedules?kind=return`, { headers: { 'X-Wizard-Owner-Proof': 'fixture-owner-proof-with-32-characters', 'If-None-Match': tag! } })
+    expect(changed.status).toBe(200)
+    expect((await changed.json()).schedules[0].when.once).toBe('2026-10-23T09:00:00.000Z')
+    expect((await api(f.origin, '?kind=nonsense')).status).toBe(400)
+  })
+
   it('deliver: notification reads the unscrubbed answer through the real run route and keeps the thread and owner views silent', async () => {
     const f = await fixture({ fixtureOutput: '**Disk almost full**\nThales is at 93%.\n[SILENT]' })
     const sent: any[] = []
