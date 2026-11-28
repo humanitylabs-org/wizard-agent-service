@@ -21,6 +21,9 @@ test('a cut-off or odd file marker leaves no marker in the one-line preview', ()
   }
   assert.equal(clean('Look at this photo [WIZARD_FILES_V1]\n'+files+'\n[/WIZARD_FILES_V1]'), 'Look at this photo 🖼 Photo');
   assert.equal(clean(cutOff), 'Look at this photo');
+  // An odd-spelt opener drops the half attachment list after it too (none of its fields reach the preview).
+  assert.equal(clean('See [ wizard-files-v1 ]\n[{"filename":"x.png","trusted_path":"/synthetic/x'), 'See');
+  assert.equal(clean('cut start [/WIZARD_FILES_V1] then words'), 'cut start then words');
 });
 
 test('fields=slim answers 200 when a thread carries a cut-off file marker', {timeout:20000}, async t => {
