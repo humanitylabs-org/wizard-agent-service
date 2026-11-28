@@ -1319,6 +1319,8 @@
       "reference_tests": [
         "wizard-ux/tests/archived-working-threads.test.mjs",
         "wizard-ux/tests/archive-working-thread.test.mjs",
+        "wizard-ux/tests/archive-hold.test.mjs",
+        "wizard-ux/tests/qa-archive-hold.cjs",
         "wizard-ux/qa-stopped-done.cjs",
         "wizard-ux/qa-unified-chats.cjs",
         "qa/agent-parity/browser.mjs"
