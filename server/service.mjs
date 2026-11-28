@@ -115,7 +115,7 @@ import { createRestartGate, restartRequestRefusal } from './restart-gate.mjs'
 import { onboardingTools } from './onboarding.mjs'
 import { followUpThreadNote, followUpTool } from './follow-ups.mjs'
 import { agentReachOutTools, reachOutNote } from './agent-reach-out.mjs'
-import { ownerRunReturns } from './owner-run-return.mjs'
+import { ARCHIVE_HOLD_SWITCH, ownerRunReturns } from './owner-run-return.mjs'
 import { RETURN_RUN_PREFIX, Scheduler, handleSchedulesApi, importAgentHistorySchedules, isSilentResult, isScheduleInput, projectFollowUps, projectFollowUpsPayload, scheduledRunEvents, scheduledThreadOf } from './scheduler.mjs'
 import { createAgentSocketGateway } from './agent-sockets.mjs'
 import { handleAgentNotesApi } from './agent-notes-http.mjs'
@@ -3217,6 +3217,10 @@ function buildWizardServer(options, lifetime) {
   // '1' forces it on, '0' off. Off: the catch-up, its tool and the Sent log behave exactly as before.
   const catchUpSentSwitchOn = createChannelsSwitch({ id: CATCH_UP_SENT_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.catchUpSentTtlMs ?? 3000 })
   const catchUpSentOn = () => channelPart(options.catchUpSent, catchUpSentSwitchOn)
+  // Archive stays archived (wizard-ux issue 2063): the owner's `wizard/archive-hold` switch in the Look file;
+  // WIZARD_ARCHIVE_HOLD '1' forces it on, '0' off. Off: a thread archived mid-run comes back with its reply (issue 1997).
+  const archiveHoldSwitchOn = createChannelsSwitch({ id: ARCHIVE_HOLD_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.archiveHoldTtlMs ?? 3000 })
+  const archiveHoldOn = () => channelPart(options.archiveHold, archiveHoldSwitchOn)
   const osInstructions = (sessionId) => {
     if (!bridge || gatewayOnly) return ''
     const apps = bridge.apps()
@@ -3657,7 +3661,7 @@ function buildWizardServer(options, lifetime) {
     ...(options.gracefulRestartLeaseMs !== undefined ? { leaseMs: Number(options.gracefulRestartLeaseMs) } : {}),
   }) : null
   const launchHold = restartGate ? () => restartGate.holding() : null
-  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ launchHold, registry: agents, queuedHistory: queuedOwnerHistory, restoreOwnerTurns: routedOwnerTurns, keepOwnerTurns: ownerTurnLedger, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
+  const routedQueues = agents && options.runQueueStatePath ? createRoutedQueues({ launchHold, archiveHold: () => archiveHoldOn(), registry: agents, queuedHistory: queuedOwnerHistory, restoreOwnerTurns: routedOwnerTurns, keepOwnerTurns: ownerTurnLedger, own: dispose => lifetime.own(dispose), ...providerRecoveryOptions, pollIntervalMs: options.runQueuePollIntervalMs ?? 1500, maxActive: Number(options.runQueueMaxActive ?? 8),
     ...(options.runQueueLaunchWaitMs !== undefined ? { launchWaitMs: Number(options.runQueueLaunchWaitMs) } : {}),
     decorateDispatch: (agentId, sessionId, body) => {
       const note = heavyNotices(agentId, sessionId)
@@ -5403,7 +5407,7 @@ function buildWizardServer(options, lifetime) {
       // wizard-ux issue 1997: a thread the owner archived while his own run worked comes back with its visible reply
       // (or its approval wait); [SILENT] keeps it archived (server/owner-run-return.mjs).
       if (!started) {
-        if (ownerRunReturns(record, payload, ownerApprovalReturned)) await unarchiveForNewTurn(record.sessionId)
+        if (ownerRunReturns(record, payload, ownerApprovalReturned, { hold: archiveHoldOn() })) await unarchiveForNewTurn(record.sessionId)
         return
       }
       let restore = false

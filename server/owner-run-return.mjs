@@ -13,9 +13,15 @@ const AGENT_STARTED = /^(?:wizard-helper-receipt-|wizard-follow-through-|wizard-
 export const isOwnerRun = (record) => Boolean(record?.sessionId) && !record.continuation && !record.recoveryAuthorized
   && !AGENT_STARTED.test(String(record.idempotencyKey || ''))
 
+// Archive stays archived (wizard-ux issue 2063, the owner's `wizard/archive-hold` switch in the Look file, off by
+// default): his Archive wins, so the reply of the run that was going when he archived it no longer brings it back on
+// any device; only a wait for his approval still does. His own next send and an agent-started run keep their rules.
+export const ARCHIVE_HOLD_SWITCH = 'wizard/archive-hold'
+
 /** True once for an owner run that ended with something for the owner: a visible reply, or a wait for his approval
- * (`approvals` remembers which runs already came back for one, since the queue reads a waiting run again). */
-export function ownerRunReturns(record, payload, approvals) {
+ * (`approvals` remembers which runs already came back for one, since the queue reads a waiting run again).
+ * `hold`: the archive-hold switch is on, so only the approval wait comes back. */
+export function ownerRunReturns(record, payload, approvals, { hold = false } = {}) {
   if (!isOwnerRun(record)) return false
   if (payload?.status === 'waiting_for_approval') {
     const id = String(record.publicRunId || '')
@@ -24,7 +30,7 @@ export function ownerRunReturns(record, payload, approvals) {
     if (approvals.size > 256) approvals.delete(approvals.values().next().value)
     return true
   }
-  if (payload?.status !== 'completed') return false
+  if (payload?.status !== 'completed' || hold) return false
   const output = typeof payload.output === 'string' ? payload.output : ''
   return Boolean(output.trim()) && !isSilentResult(output)
 }
