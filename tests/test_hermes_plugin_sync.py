@@ -289,6 +289,52 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(result['plugins']['wizard-schedule'], 'refreshed')
         self.assertIn("'thread'", (target / '__init__.py').read_text())
 
+    def test_a_pinned_plugin_does_not_hide_the_next_plugins_seeds(self):
+        # Codex P1: a pinned own plugin sorted first (wizard-agents) must not change what the release is for the
+        # plugins after it, so wizard-schedule's pre-repo hand copy is still known from the seeds list.
+        hand = OLD + '# hand copy\n'
+        (self.src / 'ops').mkdir()
+        (self.src / 'ops/hermes-plugin-seeds.json').write_text(json.dumps(
+            {'plugins': {'wizard-schedule': {'__init__.py': {sync.blob_sha(hand.encode()): 'box copy'}}}}))
+        agents = self.plugins / 'wizard-agents'
+        agents.mkdir()
+        (agents / 'plugin.yaml').write_text('name: wizard-agents\n')
+        (self.plugins / '.install-metadata.json').write_text(json.dumps({'wizard-agents': {
+            'pinned': True, 'revision': self.head('HEAD~1'),
+            'source': 'humanitylabs-org/wizard-agent-service#hermes-plugin/wizard-agents'}}))
+        target = self.install(text=hand)
+        result = sync.sync(self.release, self.home, self.src)
+        self.assertEqual(result['plugins']['wizard-agents'], 'current')
+        self.assertEqual(result['plugins']['wizard-schedule'], 'refreshed')
+        self.assertEqual((target / '__init__.py').read_text(), NEW)
+        self.assertEqual(json.loads((self.plugins / '.install-metadata.json').read_text())['wizard-agents']['revision'],
+                         self.head())
+
+    def test_a_link_journal_that_cannot_be_written_keeps_the_refresh(self):
+        # Codex P2: files and Hermes' record already agree, so a journal write failure is only a note.
+        target = self.install()
+        self.pinned(self.head('HEAD~1'))
+        os_home = Path(self.temp.name) / 'wizard-os'
+        os_home.mkdir()
+        link = {'hermes_home': str(self.home), 'plugin_installed': True, 'plugin_sha256': sync.link_fingerprint(target),
+                'plugin_ref': 'r'}
+        (os_home / 'linked.json').write_text(json.dumps(link))
+        real = sync.atomic_json
+
+        def journal_fails(path, data, mode=None):
+            if path.name == 'linked.json':
+                raise OSError('read-only')
+            return real(path, data, mode)
+        with patch.dict(os.environ, {'WIZARD_OS_HOME': str(os_home)}), \
+                patch.object(sync, 'LINKED_PLUGIN', 'wizard-schedule'), \
+                patch.object(sync, 'atomic_json', journal_fails):
+            result = sync.sync(self.release, self.home, self.src)
+        self.assertEqual(result['plugins']['wizard-schedule'], 'refreshed')
+        self.assertIn('journal not updated', result['notes']['wizard-schedule'][0])
+        self.assertEqual((target / '__init__.py').read_text(), NEW)
+        self.assertEqual(self.metadata()['revision'], self.head())
+        self.assertEqual(json.loads((os_home / 'linked.json').read_text()), link)
+
     def test_the_box_hand_copy_from_before_the_repo_is_refreshed_without_history(self):
         # The exact 22 Oct bytes on the filer's box (blob f964565): ee86ac2's file with the older one-line
         # loopback check. No source checkout: the release's own seeds list is what makes it known.

@@ -212,16 +212,23 @@ def atomic_json(path: Path, data: dict, mode: int | None = None) -> None:
     """Write JSON via a temp file + rename. Hermes' metadata keeps Hermes' own layout (indent 2, sorted keys)
     and the file's mode; `mode` sets it for the link journal (0600)."""
     tmp = path.with_name(f'.{path.name}.wizard-sync-tmp')
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode if mode is not None else 0o644)
-    with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-        handle.write(json.dumps(data, indent=2, sort_keys=mode is None) + '\n')
-        handle.flush()
-        os.fsync(handle.fileno())
     try:
-        os.chmod(tmp, mode if mode is not None else path.stat().st_mode & 0o777)
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode if mode is not None else 0o644)
+        with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+            handle.write(json.dumps(data, indent=2, sort_keys=mode is None) + '\n')
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(tmp, mode if mode is not None else path.stat().st_mode & 0o777)
+        except OSError:
+            pass
+        os.replace(tmp, path)
     except OSError:
-        pass
-    os.replace(tmp, path)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def link_fingerprint(root: Path) -> str:
@@ -237,10 +244,11 @@ def link_record_path() -> Path:
 
 
 def move_pin(plugins: Path, hermes_home: Path, name: str, record: dict, release: str, before: str,
-             target: Path) -> None:
+             target: Path) -> list[str]:
     """After the swap: the install record (still the one read before) names the release commit, and
     `wizard link`'s journal follows when it attested exactly the copy just replaced. Raises OSError when the
-    record changed meanwhile, so the swap is undone."""
+    record changed meanwhile or can't be written, so the swap is undone. The journal comes after the record and
+    is best effort (a failure there is returned as a note): files and record already agree by then."""
     data = read_metadata(plugins)
     if not isinstance(data, dict) or data.get(name) != record:
         raise OSError('Hermes install record changed during the refresh')
@@ -251,12 +259,16 @@ def move_pin(plugins: Path, hermes_home: Path, name: str, record: dict, release:
         link = json.loads(path.read_text(encoding='utf-8'))
         same_home = Path(link['hermes_home']).resolve() == hermes_home.resolve()
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        return
+        return []
     if same_home and name == LINKED_PLUGIN and link.get('plugin_installed') and link.get('plugin_sha256') == before:
         link['plugin_sha256'] = link_fingerprint(target)
         if link.get('plugin_ref'):
             link['plugin_ref'] = release
-        atomic_json(path, link, mode=0o600)
+        try:
+            atomic_json(path, link, mode=0o600)
+        except OSError as exc:
+            return [f'wizard link journal not updated ({exc}); a relink will see the plugin as changed'[:200]]
+    return []
 
 
 def replace(source: Path, target: Path, stage: Path, after=None) -> None:
@@ -315,7 +327,7 @@ def _sync(release: Path, hermes_home: Path, source_git: Path | None) -> dict:
         return {'hermes_home': str(hermes_home), 'plugins': {}, 'changed': [],
                 'skipped': 'plugins/.install-metadata.json is unreadable; nothing changed'}
     ref = release_ref(release)
-    states, changed, unknown = {}, [], {}
+    states, changed, unknown, result_notes = {}, [], {}, {}
     for source in sorted(p for p in (release / 'hermes-plugin').iterdir() if (p / 'plugin.yaml').is_file()):
         name, target = source.name, plugins / source.name
         try:
@@ -327,11 +339,11 @@ def _sync(release: Path, hermes_home: Path, source_git: Path | None) -> dict:
                 continue
             pin = None
             if name in metadata:
-                kind, release = pinned_own(metadata[name], name, source_git, ref)
+                kind, release_sha = pinned_own(metadata[name], name, source_git, ref)
                 if kind != 'own' or fresh_linked(plugins, name):
                     states[name] = 'hermes-managed' if kind == 'own' else kind
                     continue
-                pin = (metadata[name], release)
+                pin = (metadata[name], str(release_sha))
             if (target / '.git').exists() or (target / '.git').is_symlink():
                 states[name] = 'git-checkout'
                 continue
@@ -348,11 +360,15 @@ def _sync(release: Path, hermes_home: Path, source_git: Path | None) -> dict:
             if pin is None:
                 replace(source, target, hermes_home / STAGE)
             else:
-                record, release = pin
+                record, release_sha = pin
                 before = link_fingerprint(target)
+                notes = []
                 with metadata_lock(plugins):
                     replace(source, target, hermes_home / STAGE,
-                            after=lambda: move_pin(plugins, hermes_home, name, record, release, before, target))
+                            after=lambda: notes.extend(move_pin(plugins, hermes_home, name, record, release_sha,
+                                                                before, target)))
+                if notes:
+                    result_notes.setdefault(name, []).extend(notes)
             states[name] = 'refreshed' if want != have else 'current'
             if want != have:
                 changed.append(name)
@@ -361,6 +377,8 @@ def _sync(release: Path, hermes_home: Path, source_git: Path | None) -> dict:
     result = {'hermes_home': str(hermes_home), 'plugins': states, 'changed': changed}
     if unknown:
         result['unknown'] = unknown
+    if result_notes:
+        result['notes'] = result_notes
     return result
 
 
