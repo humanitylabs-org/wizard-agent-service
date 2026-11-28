@@ -1,11 +1,12 @@
-// Issue 650: five-choice first chat (switch wizard/first-chat-goals, off by default).
+// Issue 650: five-choice first chat (on for everyone; the wizard/first-chat-goals switch was removed).
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Scheduler } from '../server/scheduler.mjs'
 import { TIPS, TIPS_GROUP, TIPS_THREAD_TITLE, onboardingTools, startTips } from '../server/onboarding.mjs'
-import { FIRST_CHAT_CHOICES, FIRST_CHAT_NOTE, FIRST_CHAT_SWITCH, goalShaped, normalizePick, personalTips } from '../server/first-chat.mjs'
+import * as firstChat from '../server/first-chat.mjs'
+import { FIRST_CHAT_CHOICES, FIRST_CHAT_NOTE, goalShaped, normalizePick, personalTips } from '../server/first-chat.mjs'
 
 let root: string
 let clock: number
@@ -28,11 +29,11 @@ function scheduler(deliver: any = async () => ({ run_id: 'fixture' })) {
   return s
 }
 const parse = (r: any) => JSON.parse(r.content[0].text)
-const tools = (s: any, on: boolean | (() => boolean)): any => onboardingTools({ scheduler: s, running: () => true, timezone: () => 'Asia/Bangkok', now: () => clock, mainAgent: 'hermes', firstChat: typeof on === 'function' ? on : () => on })
+const tools = (s: any): any => onboardingTools({ scheduler: s, running: () => true, timezone: () => 'Asia/Bangkok', now: () => clock, mainAgent: 'hermes' })
 
 describe('five choices and the run note', () => {
   it('names the five choices in the issue order and points the agent at wizard-guide', () => {
-    expect(FIRST_CHAT_SWITCH).toBe('wizard/first-chat-goals')
+    expect('FIRST_CHAT_SWITCH' in firstChat).toBe(false)
     expect(FIRST_CHAT_CHOICES).toEqual(['Get on top of my inbox', 'Organize my digital life', 'Grow my business', 'Find a job', 'Something else'])
     expect(FIRST_CHAT_NOTE).toContain('wizard-guide')
     expect(FIRST_CHAT_NOTE).toContain('First chat: five choices')
@@ -89,34 +90,23 @@ describe('tips built from the pick', () => {
   })
 })
 
-describe('wizard_tips follows the switch', () => {
-  it('off: a pick is ignored and the five fixed tips start exactly as before', async () => {
+describe('wizard_tips builds the tips from the pick for everyone', () => {
+  it('a pick builds the tips; no pick still starts the fixed five', async () => {
     const s = scheduler()
-    const r = parse(await tools(s, false).call('wizard_tips', { action: 'start', pick: 'Find a job', about: 'design' }, 'hermes'))
-    expect(r.started).toBe(true)
-    expect(r.pick).toBeUndefined()
-    const jobs = s.list()
-    expect(jobs).toHaveLength(5)
-    expect(jobs.some((j: any) => j.prompt.includes('Wizard tip 1 of 5 (build an app by voice)'))).toBe(true)
-    expect(jobs.some((j: any) => /design/.test(j.prompt))).toBe(false)
-  })
-
-  it('on: the pick builds the tips; no pick still starts the fixed five; a broken switch reads as off', async () => {
-    const s = scheduler()
-    const on = tools(s, true)
-    expect(parse(await on.call('wizard_tips', { action: 'start', pick: 'Grow my business', about: 'a small pottery shop' }, 'hermes')).pick).toBe('Grow my business')
+    const t = tools(s)
+    expect(parse(await t.call('wizard_tips', { action: 'start', pick: 'Grow my business', about: 'a small pottery shop' }, 'hermes')).pick).toBe('Grow my business')
     expect(s.list()).toHaveLength(4)
-    expect(parse(await on.call('wizard_tips', { action: 'stop' }, 'hermes')).stopped).toBe(4)
-    expect(parse(await on.call('wizard_tips', { action: 'start' }, 'hermes')).started).toBe(true)
+    expect(s.list().some((j: any) => /a small pottery shop/.test(j.prompt))).toBe(true)
+    expect(parse(await t.call('wizard_tips', { action: 'stop' }, 'hermes')).stopped).toBe(4)
+    const fixed = parse(await t.call('wizard_tips', { action: 'start' }, 'hermes'))
+    expect(fixed.started).toBe(true)
+    expect(fixed.pick).toBeUndefined()
     expect(s.list()).toHaveLength(5)
-    await on.call('wizard_tips', { action: 'stop' }, 'hermes')
-    const broken = tools(s, () => { throw new Error('look unreadable') })
-    expect(parse(await broken.call('wizard_tips', { action: 'start', pick: 'Find a job' }, 'hermes')).pick).toBeUndefined()
-    expect(s.list()).toHaveLength(5)
+    expect(s.list().some((j: any) => j.prompt.includes('Wizard tip 1 of 5 (build an app by voice)'))).toBe(true)
   })
 
   it('the tool offers pick and about as optional inputs', () => {
-    const tips = tools(scheduler(), false).list().find((t: any) => t.name === 'wizard_tips')
+    const tips = tools(scheduler()).list().find((t: any) => t.name === 'wizard_tips')
     expect(Object.keys(tips.inputSchema.properties)).toEqual(['action', 'pick', 'about'])
     expect(tips.inputSchema.required).toEqual(['action'])
   })

@@ -1,20 +1,19 @@
-// Five-choice first chat (issue 650; owner switch `wizard/first-chat-goals`, off by default; WIZARD_FIRST_CHAT_GOALS
-// '1' forces it on, '0' off). James, 25 Nov 2026: give a new owner examples of what Wizard is good for instead of an
+// Five-choice first chat (issue 650; on for everyone since show-and-tell, the `wizard/first-chat-goals` switch was
+// removed). James, 25 Nov 2026: give a new owner examples of what Wizard is good for instead of an
 // open prompt, without putting a goal method into the core agent (goals are context only).
 //
-// The Service's part is small and switch-gated:
-//  - FIRST_CHAT_NOTE: one run-note line that tells the agent the five-choice opening is on, so it follows the
-//    wizard-guide system skill's "First chat: five choices" section (wizard-app-manager) instead of the old one.
+// The Service's part is small:
+//  - FIRST_CHAT_NOTE: one run-note line in every run that sends a first chat to the wizard-guide system skill's
+//    "First chat: five choices" section (wizard-app-manager). Its words stay as they were: older guides key on them.
 //  - personalTips(): the day 2-5 tips built from the owner's pick and their own words (wizard_tips start
 //    {pick, about}), instead of the five fixed topics. A goal-shaped pick (business, job) may get the Goals app
 //    offered in a later tip, and only when one is installed.
-// Off: no note, and wizard_tips starts the five fixed tips exactly as before.
+// No pick: wizard_tips starts the five fixed tips.
 //
 // The tap-to-pick replies themselves are a Chats reply-button marker the agent writes,
-// [WIZARD_CHOICES_V1]{"choices":[...]}[/WIZARD_CHOICES_V1] (wizard-ux core/chat-kit.js choiceList, same switch);
+// [WIZARD_CHOICES_V1]{"choices":[...]}[/WIZARD_CHOICES_V1] (wizard-ux core/chat-kit.js choiceList);
 // session-list-view.mjs keeps it out of the list preview.
 
-export const FIRST_CHAT_SWITCH = 'wizard/first-chat-goals'
 export const FIRST_CHAT_CHOICES = Object.freeze(['Get on top of my inbox', 'Organize my digital life', 'Grow my business', 'Find a job', 'Something else'])
 export const FIRST_CHAT_NOTE = 'Five-choice first chat is on: for the owner\'s first chat, or when they ask what you can do, load `wizard-guide` and follow its "First chat: five choices" section.'
 export const PICK_MAX = 80

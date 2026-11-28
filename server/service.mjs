@@ -138,7 +138,7 @@ import { createPrivateFirst, PRIVATE_FIRST_SWITCH } from './private-first.mjs'
 import { createPrivateMode, isPersonalDataApp } from './private-mode.mjs'
 import { createResultReader, readerFacts } from './result-reader.mjs'
 import { routingNames, nameRule, chooseAgent, privateLabelBlock } from './private-routing.mjs'
-import { FIRST_CHAT_SWITCH, FIRST_CHAT_NOTE } from './first-chat.mjs'
+import { FIRST_CHAT_NOTE } from './first-chat.mjs'
 import { createPhoneReplyNotes, PHONE_CHAT_REPLIES_SWITCH, CHATS_APP, CHAT_REPLY_TAG } from './phone-reply-notes.mjs'
 import { privatePushes, contentFreePing } from './private-edges.mjs'
 export { readArchivedSessions }
@@ -3146,12 +3146,9 @@ function buildWizardServer(options, lifetime) {
   lifetime.own(() => { try { devices.flush() } catch { /* optional metadata must not block shutdown */ } })
   // wizard_remind / wizard_tips on the gateway (server/onboarding.mjs); bound once the scheduler exists below.
   let onboarding = null
-  // Five-choice first chat (issue 650, first-chat.mjs): the owner's `wizard/first-chat-goals` switch in the Look file;
-  // option firstChatGoals (env WIZARD_FIRST_CHAT_GOALS, '1' on / '0' off) wins. On: one run-note line for every agent and
-  // tips built from the owner's pick. Off: no note, the fixed tips, exactly as before.
-  const firstChatSwitchOn = createChannelsSwitch({ id: FIRST_CHAT_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.firstChatGoalsTtlMs ?? 3000 })
-  const firstChatOn = () => channelPart(options.firstChatGoals, firstChatSwitchOn)
-  const firstChatNote = () => (firstChatOn() ? FIRST_CHAT_NOTE : '')
+  // Five-choice first chat (issue 650, first-chat.mjs; on for everyone, the wizard/first-chat-goals switch was removed):
+  // one run-note line for every agent, and wizard_tips builds the tips from the owner's pick.
+  const firstChatNote = () => FIRST_CHAT_NOTE
   // Catch me up (issue 668, catch-up.mjs; on for everyone, the wizard/catch-me-up switch was removed): "catch me up" (or
   // "signal sweep") to the main agent runs the built catch-up and the main agent gets the wizard_catch_up tool.
   let catchUp = null
@@ -7149,7 +7146,7 @@ function buildWizardServer(options, lifetime) {
 
   onboarding = scheduler ? onboardingTools({ scheduler, running: () => Boolean(scheduler.timer) && !scheduler.stopped,
     timezone: () => options.schedulerTimezone || readSettings(settingsPath).settings.clock?.timezone || 'Asia/Bangkok',
-    now: options.schedulerNow ?? Date.now, mainAgent: GATEWAY_MAIN_AGENT, firstChat: firstChatOn }) : null
+    now: options.schedulerNow ?? Date.now, mainAgent: GATEWAY_MAIN_AGENT }) : null
   followUps = scheduler ? followUpTool({ scheduler, running: () => scheduler.running(), mainAgent: GATEWAY_MAIN_AGENT,
     // A routed agent watches only a thread it has accepted (its pin). Main keeps its own unpinned history.
     ownsThread: (agentId, sessionId) => agentId === GATEWAY_MAIN_AGENT || Boolean(agents?.pinnedAgents(sessionId)?.includes(agentId)) }) : null

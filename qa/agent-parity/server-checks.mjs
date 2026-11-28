@@ -3426,9 +3426,9 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     assert.doesNotMatch((await call()).content[0].text, /not allowed/u, 'on again: no restart needed')
   },
   'first-chat-goals': async s => {
-    // Issue 650 (switch wizard/first-chat-goals in the Look file, off by default). Through this kind's own Service
-    // routes: off, a first message's run carries no first-chat note and wizard_tips starts the five fixed tips even when
-    // given a pick; on, the run carries the one note line and the same call builds four tips from the pick.
+    // Issue 650 (on for everyone; the wizard/first-chat-goals switch was removed, and a stored off value changes
+    // nothing). Through this kind's own Service routes: a first message's run carries the one note line, wizard_tips
+    // start with a pick builds four tips from it, and without a pick it starts the five fixed tips.
     const look = on => { const dir = join(s.root, 'Pages', 'wizard-look'); mkdirSync(dir, { recursive: true }); writeFileSync(join(dir, 'look.json'), JSON.stringify({ version: 1, skin: null, tweaks: { 'wizard/first-chat-goals': { on, at: Date.now() } } })) }
     const NOTE = 'Five-choice first chat is on'
     const firstRun = async id => {
@@ -3454,19 +3454,15 @@ z.close(); sys.stdout.buffer.write(b.getvalue())`
     process.env.WIZARD_SCHEDULER = '1'
     try { await s.restart() } finally { if (prior === undefined) delete process.env.WIZARD_SCHEDULER; else process.env.WIZARD_SCHEDULER = prior }
     look(false)
-    const off = await firstRun('wizard_parity_first_off')
-    assert.ok(!String(off.instructions || '').includes(NOTE), 'switch off: no first-chat note')
-    const fixed = await tips({ action: 'start', pick: 'Find a job', about: 'synthetic design roles' })
-    assert.equal(fixed.started, true); assert.equal(fixed.pick, undefined, 'switch off: the pick is ignored')
-    assert.equal(fixed.tips.length, 5, 'switch off: the five fixed tips')
-    assert.equal((await tips({ action: 'stop' })).stopped, 5)
-    look(true)
     const on = await firstRun('wizard_parity_first_on')
-    assert.ok(String(on.instructions || '').includes(NOTE) && on.instructions.includes('First chat: five choices'), 'switch on: the note names the wizard-guide section')
+    assert.ok(String(on.instructions || '').includes(NOTE) && on.instructions.includes('First chat: five choices'), 'an old stored off value: the note still names the wizard-guide section')
     const personal = await tips({ action: 'start', pick: 'find a JOB', about: 'synthetic design roles' })
-    assert.equal(personal.pick, 'Find a job'); assert.equal(personal.tips.length, 4, 'switch on: four tips for days 2-5')
+    assert.equal(personal.pick, 'Find a job'); assert.equal(personal.tips.length, 4, 'four tips for days 2-5')
     assert.ok(personal.tips.every(t => t.text.includes('picked "Find a job"')), 'every tip is built from the pick')
     assert.equal((await tips({ action: 'stop' })).stopped, 4)
+    const fixed = await tips({ action: 'start' })
+    assert.equal(fixed.started, true); assert.equal(fixed.pick, undefined, 'no pick'); assert.equal(fixed.tips.length, 5, 'no pick: the five fixed tips')
+    assert.equal((await tips({ action: 'stop' })).stopped, 5)
   },
   'catch-me-up': async s => {
     // Issue 668 (on for everyone; the wizard/catch-me-up switch was removed, and a stored off value changes nothing).

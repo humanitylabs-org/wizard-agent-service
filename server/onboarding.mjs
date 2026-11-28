@@ -46,8 +46,8 @@ const brief = (scheduler, job) => {
 }
 
 /** Start the drip once per agent. Re-asking while tips are pending returns the same series (no duplicates).
- * `pick` (issue 650, only passed while the five-choice first chat switch is on): the day 2-5 tips are built from the
- * owner's first-chat pick and `about` words instead of the five fixed topics. */
+ * `pick` (issue 650, five-choice first chat, on for everyone): the day 2-5 tips are built from the owner's first-chat
+ * pick and `about` words instead of the five fixed topics. No pick: the five fixed tips. */
 export function startTips(scheduler, { agent = 'main', timezone = 'UTC', now = Date.now(), pick = '', about = '' } = {}) {
   const existing = scheduler.list().filter((job) => job.group === TIPS_GROUP && job.agent === agent)
   if (existing.some((job) => pending(scheduler, job))) return { started: false, already: true, thread: existing[0].thread, tips: existing.map((job) => brief(scheduler, job)) }
@@ -104,7 +104,7 @@ const bad = (text) => ({ content: [{ type: 'text', text }], isError: true })
  * Built-in gateway tools for createAgentBridge({ builtins }). `scheduler` may be null (no state path); `running()`
  * says whether the timer is on (WIZARD_SCHEDULER=1). Off means the tools say so rather than promise a delivery.
  */
-export function onboardingTools({ scheduler, running = () => false, timezone = () => 'UTC', now = Date.now, mainAgent = 'hermes', firstChat = () => false }) {
+export function onboardingTools({ scheduler, running = () => false, timezone = () => 'UTC', now = Date.now, mainAgent = 'hermes' }) {
   return {
     list: () => (scheduler ? TOOLS : []),
     async call(name, args = {}, agentId) {
@@ -116,10 +116,8 @@ export function onboardingTools({ scheduler, running = () => false, timezone = (
       try {
         if (name === 'wizard_tips') {
           const action = String(args.action || '')
-          // Issue 650: the pick shapes the tips only while the five-choice first chat switch is on; off, it is ignored.
-          let personal = false
-          try { personal = firstChat() === true } catch { personal = false }
-          if (action === 'start') return ok(startTips(scheduler, { agent, timezone: tz, now: now(), ...(personal ? { pick: args.pick, about: args.about } : {}) }))
+          // Issue 650 (on for everyone): the owner's first-chat pick and words shape the tips.
+          if (action === 'start') return ok(startTips(scheduler, { agent, timezone: tz, now: now(), pick: args.pick, about: args.about }))
           if (action === 'stop') return ok(stopTips(scheduler, { agent }))
           if (action === 'status') return ok({ tips: scheduler.list().filter((job) => job.group === TIPS_GROUP && job.agent === agent && pending(scheduler, job)).map((job) => brief(scheduler, job)) })
           return bad('action must be start, stop or status')
