@@ -66,9 +66,10 @@ synchronous read/merge/atomic rename as PUT and answers with the full preference
 - `{"op":"add"|"remove","key":"appFavorites"|"appRecentHidden","item":"<app id>"}` (the phone Apps panel,
   wizard-ux issue 2047): add appends when absent; on a full list (100) Favorites stay as they are and
   Recent removals drop their oldest.
-- `{"op":"move","key":"appFavorites","item":"<app id>","items":[…]}`: the app goes right before the first
-  of `items` (the apps that followed it on that device) still listed, else last; no-op when the app is no
-  longer a Favorite. Services from before these operations answer them with 400; the shell then replays
+- `{"op":"move","key":"appFavorites","item":"<app id>","items":[…],"after":[…]}`: the app goes right before
+  the first of `items` (the apps that followed it on that device) still listed, else right after the first
+  of `after` (optional: those before it, nearest first) still listed, else last; no-op when the app is no
+  longer a Favorite. With both neighbours a resent batch lands it in the same place. Services from before these operations answer them with 400; the shell then replays
   them onto a fresh read, as for 405.
 
 Every operation is idempotent, so a client may resend a batch whose response it never saw. Malformed

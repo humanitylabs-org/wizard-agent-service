@@ -138,8 +138,10 @@ export function updateUiPreferences(path, patch) {
 //   {op:'set', key:'savedWizards/<id>/name', item:<name>}  no-op when the entry is gone
 //   {op:'add'|'remove', key:'appFavorites'|'appRecentHidden', item:<app id>}  the phone Apps panel (wizard-ux issue 2047).
 //     add appends when absent; on a full list (100) Favorites stay as they are and Recent removals drop their oldest.
-//   {op:'move', key:'appFavorites', item:<app id>, items:[<app id>…]}  item goes right before the first of items still
-//     listed (the apps that followed it on that device), else last; no-op when item is not listed (removed elsewhere).
+//   {op:'move', key:'appFavorites', item:<app id>, items:[<app id>…], after?:[<app id>…]}  item goes right before the
+//     first of items still listed (the apps that followed it on that device), else right after the first of after
+//     still listed (those before it, nearest first), else last; no-op when item is not listed (removed elsewhere).
+//     Both neighbours make a resent batch land it in the same place.
 const WIZARD_KEY = /^savedWizards\/([A-Za-z0-9._:-]{1,120})\/name$/
 const opField = key => SPACE_KEY.test(key) ? 'spaces' : WIZARD_KEY.test(key) ? 'savedWizards' : key
 const SPACE_KEY = /^spaces\/([a-z0-9-]{1,48})\/(threads|name)$/
@@ -181,7 +183,8 @@ export function applyUiPreferenceOps(prefs, ops) {
   if (!Array.isArray(ops) || !ops.length || ops.length > 100) badOps()
   const next = { ...prefs }
   for (const o of ops) {
-    if (!isPlainObject(o) || Object.keys(o).some(k => !['op', 'key', 'item', 'items'].includes(k)) || typeof o.key !== 'string') badOps()
+    if (!isPlainObject(o) || Object.keys(o).some(k => !['op', 'key', 'item', 'items', 'after'].includes(k)) || typeof o.key !== 'string') badOps()
+    if (Object.hasOwn(o, 'after') && o.op !== 'move') badOps()
     const { op, key, item } = o
     const sub = SPACE_KEY.exec(key)
     if (key === 'pinnedChats' || key === 'subjectOrder') {
@@ -196,9 +199,10 @@ export function applyUiPreferenceOps(prefs, ops) {
       if ((op === 'add' || op === 'remove') && id && !Object.hasOwn(o, 'items')) {
         next[key] = op === 'remove' ? list.filter(x => x !== item) : list.includes(item) ? list
           : list.length < 100 ? list.concat(item) : key === 'appRecentHidden' ? list.slice(1).concat(item) : list
-      } else if (op === 'move' && key === 'appFavorites' && id && Array.isArray(o.items) && o.items.length <= 100 && o.items.every(PANEL_ID)) {
+      } else if (op === 'move' && key === 'appFavorites' && id && [o.items, o.after ?? []].every(l => Array.isArray(l) && l.length <= 100 && l.every(PANEL_ID))) {
         if (list.includes(item)) {
-          const rest = list.filter(x => x !== item), after = o.items.find(x => rest.includes(x)), at = after ? rest.indexOf(after) : rest.length
+          const rest = list.filter(x => x !== item), f = o.items.find(x => rest.includes(x)), p = (o.after ?? []).find(x => rest.includes(x))
+          const at = f ? rest.indexOf(f) : p ? rest.indexOf(p) + 1 : rest.length
           next[key] = [...rest.slice(0, at), item, ...rest.slice(at)]
         }
       } else badOps()
