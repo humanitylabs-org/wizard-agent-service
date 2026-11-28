@@ -279,6 +279,12 @@ describe('topic titles: the app or area, never the opener words', () => {
     expect(provisionalTitleFrom('The Notes app keeps showing dumb popups', catalog)).toBe('Notes')
     expect(provisionalTitleFrom('Fix the calendar sync bug on the phone app please', catalog)).toBe('Fix the calendar sync bug')
     expect(provisionalTitleFrom('Fix the calendar sync bug on the phone app please')).toBe('Fix the calendar sync bug')
+    // Issue 726: an app named only in passing, late in the opener, is not its topic.
+    const photos = [{ id: 'photos', name: 'Photos' }, { id: 'files', name: 'Files' }, { id: 'wizard-notes', name: 'Notes' }]
+    expect(provisionalTitleFrom('Synology or Ugreen for a NAS system for my business and family, for all of our photos, videos, files', photos)).toBe('Synology or Ugreen for')
+    expect(provisionalTitleFrom('Photos keep failing to upload from my phone', photos)).toBe('Photos')
+    expect(provisionalTitleFrom('Why does sharing an album keep failing in the Photos app', photos)).toBe('Photos')
+    expect(provisionalTitleFrom('The Notes app keeps showing dumb popups', photos)).toBe('Notes')
   })
 
   it('tells the agent a placeholder is not a label and apps are named plainly', () => {
@@ -485,6 +491,13 @@ describe('the Agent Service applies titles through Hermes', () => {
     expect(patches.map((patch) => patch.body.title)).toEqual(['Fix my chat window thing', 'Messenger'])
     const after = await list()
     expect(after.title).toBe('Messenger')
+  })
+
+  it('keeps the opener words as the placeholder when an app name is only an ordinary word late in it (issue 726)', async () => {
+    const { origin, patches } = await fixture({ title: null, startedAgo: 5, queued: true, apps: [{ id: 'photos', name: 'Photos' }, { id: 'files', name: 'Files' }] })
+    await firstSend(origin, 'first-send-726', 'Synology or Ugreen for a NAS system for my business and family, for all of our photos, videos, files')
+    await settle()
+    expect(patches.map((patch) => patch.body.title)[0]).toBe('Synology or Ugreen for')
   })
 
   it('dates a second thread on the same app instead of numbering it', async () => {

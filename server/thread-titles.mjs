@@ -45,9 +45,14 @@ export function normalizeTitle(value) {
 const FIRST_FILLER = /^(?:(?:hey|hi|hello|ok(?:ay)?|so|well|um+|uh+|right|yeah|yes|no|what\??|please|pls|can you|could you|would you|will you|i(?:'d| would)? (?:like|want|need) (?:you )?to|i want|i need|i(?:'m| am) (?:trying|going) to|let's|lets|just|also|and|then|the|a|an)\b[\s,.!?:;-]*)+/iu
 const LAST_FILLER = /[\s,.;:!?-]+(?:and|or|but|the|a|an|to|of|for|in|on|at|with|so|that|is|it|i|my|me)$/iu
 export function provisionalTitleFrom(text, catalog = null) {
-  // An app the opener names is the topic; otherwise the opener's own first words hold the place until the agent's label arrives.
-  const named = catalog ? appTopicInText(String(text ?? '').replace(/\[(WIZARD_[A-Z0-9_]+)\][\s\S]*?\[\/\1\]/gu, ' ').replace(/\[Wizard ?OS context\][\s\S]*$/u, ' '), catalog) : ''
-  if (named) return named
+  const opener = openerWordsFrom(text)
+  if (!catalog) return opener
+  // An app is the topic only when the opener is about it (issue 726): named in the opener's own first words, or
+  // written as "<Name> app" anywhere. A plain-word app name (Photos, Files) used in passing later never wins.
+  const whole = String(text ?? '').replace(/\[(WIZARD_[A-Z0-9_]+)\][\s\S]*?\[\/\1\]/gu, ' ').replace(/\[Wizard ?OS context\][\s\S]*$/u, ' ')
+  return (opener && appTopicInText(opener, catalog)) || appTopicInText(whole, catalog, { appWord: true }) || opener
+}
+function openerWordsFrom(text) {
   let line = String(text ?? '')
     .replace(/\[(WIZARD_[A-Z0-9_]+)\][\s\S]*?\[\/\1\]/gu, ' ')
     .replace(/\[Wizard ?OS context\][\s\S]*$/u, ' ')
@@ -143,8 +148,9 @@ export function appTopicName(appId, catalog = []) {
   return words.length ? normalizeTitle(words.map(titleCase).join(' ')) : ''
 }
 
-// An app (or WizardOS) the free text names, earliest mention first. Generic app words need the word "app" after them.
-export function appTopicInText(text, catalog = []) {
+// An app (or WizardOS) the free text names, earliest mention first. Generic app words need the word "app" after them;
+// with appWord every app name does (WizardOS never needs it).
+export function appTopicInText(text, catalog = [], { appWord = false } = {}) {
   const haystack = ` ${squash(text)} `
   if (haystack.trim().length < 3) return ''
   let best = { at: Infinity, name: '' }
@@ -157,7 +163,7 @@ export function appTopicInText(text, catalog = []) {
     const name = appTopicName(app?.id, catalog)
     if (name.length < 4 || name.includes(' · ')) continue
     const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
-    consider(name, new RegExp(`\\b${escaped}${GENERIC_APP_WORDS.has(name.toLocaleLowerCase()) ? '\\s+app\\b' : '\\b'}`, 'iu'))
+    consider(name, new RegExp(`\\b${escaped}${appWord || GENERIC_APP_WORDS.has(name.toLocaleLowerCase()) ? '\\s+app\\b' : '\\b'}`, 'iu'))
   }
   return best.name
 }
