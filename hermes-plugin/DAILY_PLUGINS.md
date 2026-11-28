@@ -27,8 +27,13 @@ repository does not activate them or add them to an existing home.
 Once installed as a plain copy, a plugin follows the Service: every verified deploy
 (and rollback) runs `ops/sync-hermes-plugins.py`, which replaces
 `$HERMES_HOME/plugins/<name>/` with the release's copy and asks the running gateway
-to reload its plugins (tools apply from the next chat). It leaves alone any plugin
-that is not installed, is a symlink, was installed by `hermes plugins install`, or
+to reload its plugins (tools apply from the next chat). The Service runs the same
+refresh at every start. A copy installed with `hermes plugins install` from this
+repository's own `hermes-plugin/<name>` and pinned to a commit of the release's
+history (how `wizard link` installs `wizard-os`) follows the release the same way,
+and its install record moves to the release commit. It leaves alone any plugin
+that is not installed, is a symlink, was installed by `hermes plugins install`
+from another source, unpinned or pinned past the release, or
 holds a file this repository never shipped (an owner's own edit). The deploy
 receipt's `hermes_plugins` field says what it did; `restart-needed` means the
 gateway has to be restarted by hand.
