@@ -1,5 +1,5 @@
 // Reply buttons that act on an app directly, with no agent turn (wizard-ux issue 1973, part 2; switch
-// wizard/reply-actions in the owner's Look file, off by default, on top of wizard/reply-buttons).
+// wizard/reply-actions in the owner's Look file, off by default, on top of the reply buttons, wizard-ux issue 1889).
 //
 // A button in a [WIZARD_BUTTONS_V1] line may declare an app action:
 //   {"id":"done","label":"Done","action":{"app":"<installed app id>","tool":"<tool name>","args":{...}}}

@@ -5,7 +5,6 @@ import { join } from 'node:path'
 import { scene, post, kinds } from '../qa/agent-parity/fixture.mjs'
 import { listen } from '../server/service.mjs'
 import { REPLY_ACTIONS_SWITCH, REPLY_ACTIONS_INSTRUCTIONS, actionGroups, machineLine, createReplyActions } from '../server/reply-actions.mjs'
-import { REPLY_BUTTONS_SWITCH } from '../server/reply-buttons.mjs'
 
 // Reply buttons that act on an app directly, with no agent turn (wizard-ux issue 1973, part 2; switch
 // wizard/reply-actions, off by default). The button's action is read from the thread's own history, the app is called
@@ -92,7 +91,7 @@ describe('reply actions: main and routed threads, no agent run', () => {
     const app = await fakeApp()
     const s: any = await scene(kind, ({ root, folder }: any) => {
       install(root, folder, kind, app.url)
-      return { pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, replyActionsTtlMs: 0, replyButtonsTtlMs: 0,
+      return { pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, replyActionsTtlMs: 0,
         agentBridge: true, bridgeWriteSkills: false, mcpToken: gatewayKey, replyActionsStatePath: join(root, 'reply-actions.json') }
     })
     try {
@@ -104,9 +103,9 @@ describe('reply actions: main and routed threads, no agent run', () => {
       const listed = async () => (await (await s.raw(`/wizard/v1/reply-actions?thread=${id}${agent ? `&agent=${agent}` : ''}`)).json()).actions
       // Switch off (no Look file / off): nothing new answers.
       expect((await tap({ group: 'Workout', button: 'done' })).status).toBe(404)
-      look(s.root, { [REPLY_BUTTONS_SWITCH]: true, [REPLY_ACTIONS_SWITCH]: false })
+      look(s.root, { [REPLY_ACTIONS_SWITCH]: false })
       expect((await tap({ group: 'Workout', button: 'done' })).status).toBe(404)
-      look(s.root, { [REPLY_BUTTONS_SWITCH]: true, [REPLY_ACTIONS_SWITCH]: true })
+      look(s.root, { [REPLY_ACTIONS_SWITCH]: true })
       const before = runs(s).length
       const r = await tap({ group: 'Workout', button: 'done' })
       expect(r.status).toBe(200)
@@ -150,7 +149,7 @@ describe('reply actions: main and routed threads, no agent run', () => {
     const app = await fakeApp()
     const s: any = await scene(kind, ({ root, folder }: any) => {
       install(root, folder, kind, app.url)
-      look(root, { [REPLY_BUTTONS_SWITCH]: true, [REPLY_ACTIONS_SWITCH]: true })
+      look(root, { [REPLY_ACTIONS_SWITCH]: true })
       return { pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, replyActionsTtlMs: 0,
         agentBridge: true, bridgeWriteSkills: false, mcpToken: gatewayKey, replyActionsStatePath: join(root, 'reply-actions.json') }
     })
@@ -172,8 +171,8 @@ describe('reply actions: main and routed threads, no agent run', () => {
     } finally { await s.close(); await app.close() }
   }, 60_000)
 
-  for (const kind of kinds) it(`the run note names action buttons only while both switches are on / ${kind}`, async () => {
-    const s: any = await scene(kind, ({ root }: any) => ({ pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, replyButtonsTtlMs: 0, replyActionsTtlMs: 0 }))
+  for (const kind of kinds) it(`the run note names action buttons only while their switch is on / ${kind}`, async () => {
+    const s: any = await scene(kind, ({ root }: any) => ({ pagesRoot: join(root, 'Pages'), pagesGitDir: join(root, 'pages-history.git'), pagesWatch: false, replyActionsTtlMs: 0 }))
     try {
       let n = 0
       const send = async (input: string) => {
@@ -182,12 +181,13 @@ describe('reply actions: main and routed threads, no agent run', () => {
         expect((await s.request('/v1/runs', post({ session_id: id, input }))).status).toBe(202)
         return String(runs(s).at(-1).body.instructions || '')
       }
-      look(s.root, { [REPLY_BUTTONS_SWITCH]: true })
+      look(s.root, {})
       expect(await send('buttons only')).not.toContain('Action buttons are on')
-      look(s.root, { [REPLY_BUTTONS_SWITCH]: true, [REPLY_ACTIONS_SWITCH]: true })
-      expect(await send('both')).toContain(REPLY_ACTIONS_INSTRUCTIONS)
       look(s.root, { [REPLY_ACTIONS_SWITCH]: true })
-      expect(await send('actions without buttons')).not.toContain('Action buttons are on')
+      expect(await send('both')).toContain(REPLY_ACTIONS_INSTRUCTIONS)
+      // Reply buttons are on for everyone (switch wizard/reply-buttons removed): the action switch alone decides.
+      look(s.root, { [REPLY_ACTIONS_SWITCH]: false })
+      expect(await send('actions off again')).not.toContain('Action buttons are on')
     } finally { await s.close() }
   }, 30_000)
 })
