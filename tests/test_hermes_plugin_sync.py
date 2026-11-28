@@ -107,6 +107,133 @@ class SyncTests(unittest.TestCase):
         self.assertFalse((self.plugins / 'wizard-agents').exists())
         self.assertEqual((hermes / '__init__.py').read_text(), 'anything')
 
+    def head(self, rev='HEAD'):
+        return subprocess.run(['git', 'rev-parse', rev], cwd=self.src, text=True, capture_output=True).stdout.strip()
+
+    def pinned(self, revision, source='https://github.com/humanitylabs-org/wizard-agent-service.git'
+                                      '#hermes-plugin/wizard-schedule', **extra):
+        record = {'pinned': True, 'revision': revision, 'source': source, **extra}
+        (self.plugins / '.install-metadata.json').write_text(json.dumps({'wizard-schedule': record}, indent=2))
+        return record
+
+    def metadata(self):
+        return json.loads((self.plugins / '.install-metadata.json').read_text())['wizard-schedule']
+
+    def test_pinned_hermes_install_of_our_own_plugin_follows_the_release(self):
+        """Issue 730: `wizard link` installs wizard-os with `hermes plugins install --ref <commit>`; stock Hermes
+        never moves a pinned install, so the Service's refresh must, and the record names what is there now."""
+        target = self.install()
+        record = self.pinned(self.head('HEAD~1'))
+        fingerprint = sync.link_fingerprint(target)
+        os_home = Path(self.temp.name) / 'wizard-os'
+        os_home.mkdir()
+        link = {'hermes_home': str(self.home), 'plugin_installed': True, 'plugin_sha256': fingerprint,
+                'plugin_ref': record['revision'], 'notes': []}
+        (os_home / 'linked.json').write_text(json.dumps(link))
+        with patch.dict(os.environ, {'WIZARD_OS_HOME': str(os_home)}), \
+                patch.object(sync, 'LINKED_PLUGIN', 'wizard-schedule'):
+            result = sync.sync(self.release, self.home, self.src)
+            self.assertEqual(result['plugins']['wizard-schedule'], 'refreshed')
+            self.assertEqual(result['changed'], ['wizard-schedule'])
+            self.assertEqual((target / '__init__.py').read_text(), NEW)
+            self.assertEqual(self.metadata(), {**record, 'revision': self.head()})
+            moved = json.loads((os_home / 'linked.json').read_text())
+            self.assertEqual(moved['plugin_sha256'], sync.link_fingerprint(target))
+            self.assertEqual(moved['plugin_ref'], self.head())
+            self.assertEqual(moved['notes'], [])
+            self.assertEqual(os.stat(os_home / 'linked.json').st_mode & 0o777, 0o600)
+            again = sync.sync(self.release, self.home, self.src)
+            self.assertEqual((again['plugins']['wizard-schedule'], again['changed']), ('current', []))
+
+    def test_every_source_form_of_our_repo_counts_and_others_do_not(self):
+        for source in ('humanitylabs-org/wizard-agent-service#hermes-plugin/wizard-os',
+                       'https://github.com/humanitylabs-org/wizard-agent-service.git#hermes-plugin/wizard-os',
+                       'https://github.com/Humanitylabs-org/wizard-agent-service#hermes-plugin/wizard-os/',
+                       'git@github.com:humanitylabs-org/wizard-agent-service.git#hermes-plugin/wizard-os'):
+            self.assertTrue(sync.own_source(source, 'wizard-os'), source)
+        for source in ('someone/wizard-agent-service#hermes-plugin/wizard-os',
+                       'https://github.com/humanitylabs-org/wizard-agent-service.git',
+                       'https://github.com/humanitylabs-org/wizard-agent-service#hermes-plugin/wizard-heavy',
+                       'https://evil.example/humanitylabs-org/wizard-agent-service#hermes-plugin/wizard-os', None):
+            self.assertFalse(sync.own_source(source, 'wizard-os'), source)
+
+    def test_other_hermes_installs_stay_hermes_managed(self):
+        old = self.head('HEAD~1')
+        cases = [
+            self.pinned(old, source='someone/fork#hermes-plugin/wizard-schedule'),
+            {'pinned': False, 'revision': old,
+             'source': 'humanitylabs-org/wizard-agent-service#hermes-plugin/wizard-schedule'},
+            self.pinned(old, catalog={'name': 'x', 'sha': old, 'pin': old}),
+            self.pinned('f' * 40),   # a commit the release does not know
+        ]
+        for record in cases:
+            with self.subTest(record=record):
+                if (self.plugins / 'wizard-schedule').exists():
+                    sync.shutil.rmtree(self.plugins / 'wizard-schedule')
+                target = self.install()
+                (self.plugins / '.install-metadata.json').write_text(json.dumps({'wizard-schedule': record}))
+                result = sync.sync(self.release, self.home, self.src)
+                want = 'hermes-pinned' if record['revision'] == 'f' * 40 else 'hermes-managed'
+                self.assertEqual(result['plugins']['wizard-schedule'], want)
+                self.assertEqual((target / '__init__.py').read_text(), OLD)
+                self.assertEqual(self.metadata(), record)
+        # Without the release's history nobody can tell the pin is ours.
+        self.pinned(old)
+        self.assertEqual(sync.sync(self.release, self.home, None)['plugins']['wizard-schedule'], 'hermes-managed')
+
+    def test_a_pin_ahead_of_the_release_is_never_moved_back(self):
+        target = self.install()
+        (self.src / 'hermes-plugin/wizard-schedule/__init__.py').write_text(NEW + '# later\n')
+        git(self.src, 'commit', '-qam', 'later')
+        record = self.pinned(self.head())
+        (self.src / 'RELEASE_SHA').write_text(self.head('HEAD~1') + '\n')
+        result = sync.sync(self.release, self.home, self.src)
+        self.assertEqual(result['plugins']['wizard-schedule'], 'hermes-pinned')
+        self.assertEqual((target / '__init__.py').read_text(), OLD)
+        self.assertEqual(self.metadata(), record)
+
+    def test_owner_edit_of_a_pinned_install_is_kept(self):
+        target = self.install(text=OLD + '# mine\n')
+        record = self.pinned(self.head('HEAD~1'))
+        result = sync.sync(self.release, self.home, self.src)
+        self.assertEqual(result['plugins']['wizard-schedule'], 'owner-modified')
+        self.assertIn('# mine', (target / '__init__.py').read_text())
+        self.assertEqual(self.metadata(), record)
+
+    def test_app_manager_fresh_link_copy_is_left_to_the_app_manager(self):
+        target = self.install()
+        record = self.pinned(self.head('HEAD~1'))
+        (self.plugins / '.wizard-fresh-link.json').write_text(json.dumps({
+            'source': 'humanitylabs-org/wizard-agent-service#hermes-plugin/wizard-schedule', 'ref': record['revision'],
+            'sha256': 'x'}))
+        result = sync.sync(self.release, self.home, self.src)
+        self.assertEqual(result['plugins']['wizard-schedule'], 'hermes-managed')
+        self.assertEqual((target / '__init__.py').read_text(), OLD)
+
+    def test_a_link_journal_for_another_copy_is_not_touched(self):
+        target = self.install()
+        self.pinned(self.head('HEAD~1'))
+        os_home = Path(self.temp.name) / 'wizard-os'
+        os_home.mkdir()
+        link = {'hermes_home': str(self.home), 'plugin_installed': True, 'plugin_sha256': 'other',
+                'plugin_ref': 'r'}
+        (os_home / 'linked.json').write_text(json.dumps(link))
+        with patch.dict(os.environ, {'WIZARD_OS_HOME': str(os_home)}), \
+                patch.object(sync, 'LINKED_PLUGIN', 'wizard-schedule'):
+            self.assertEqual(sync.sync(self.release, self.home, self.src)['plugins']['wizard-schedule'], 'refreshed')
+        self.assertEqual(json.loads((os_home / 'linked.json').read_text()), link)
+        self.assertEqual((target / '__init__.py').read_text(), NEW)
+
+    def test_a_failed_record_update_puts_the_old_copy_back(self):
+        target = self.install()
+        record = self.pinned(self.head('HEAD~1'))
+        with patch.object(sync, 'atomic_json', side_effect=OSError('disk full')):
+            result = sync.sync(self.release, self.home, self.src)
+        self.assertTrue(result['plugins']['wizard-schedule'].startswith('error: disk full'))
+        self.assertEqual(result['changed'], [])
+        self.assertEqual((target / '__init__.py').read_text(), OLD)
+        self.assertEqual(self.metadata(), record)
+
     def test_unreadable_hermes_metadata_touches_nothing(self):
         target = self.install()
         (self.plugins / '.install-metadata.json').write_text('{not json')
