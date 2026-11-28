@@ -78,6 +78,200 @@ Run the normal helper command with `--prepare-only` and its usual output directo
 6. Read back live release SHA, service health (legacy fields intact, max cap unchanged), plugin doctor and a **model-driven** `wizard_heavy_submit`. With one real remote job running and another queued, get a useful ordinary model answer; then verify originating continuation model locks, one logical receipt per job, steering/stop fencing and cancellation. Preserve evidence.
 7. Rollback only in a safe idle window. Disable new tool submissions first; retain all new durable tables/spools. Never delete or recycle job IDs. Rolling the service back removes automatic completion consumption, so the parent must explicitly own draining/recovery; it is not safe to erase evidence and rerun jobs.
 
+## Forum automatic future-only broad run trimming
+
+This is completion cleanup, **not historical disk cleanup**. Every preexisting
+`/srv/work` top-level name is frozen forever, even if recreated. No sweep, timer,
+grace period, startup reconciliation, process kill, or historical adoption is
+provided. Installing the worker reclaims **zero historical bytes**. Protected
+`wizard-local`, `.wizard-secure`, `AndroidBuilds`, `android-sdk`, `heavy` and agent
+namespaces are never automatically adopted. No root permissions are changed.
+
+### Future-only authority and compatible producer admission
+
+The one-time policy in `heavy/run-ownership-v1/activation.json` records the
+canonical work root, device/inode, baseline TOP-LEVEL names, nanosecond activation
+cutoff and exact worker-pair SHA256s. Adoption stays disabled until a matching
+exclusive-created `enabled.json` exists and both installed worker files match.
+Snapshotting reads only top-level names: it never walks old work trees.
+
+For an unchanged native heavy **or** light submission with cwd
+`/srv/work/<new-top-level>/...`, adoption requires an exact canonical/nonlink
+path, same-device top root, Linux `statx` birthtime strictly after the cutoff,
+and a name absent from the frozen baseline/reserved list. Unknown/unsupported
+birthtime retains. No ctime/mtime substitute and no recursive adoption inside an
+old top-level name. Original spec serialization/hashes are unchanged.
+
+The flat outside registry binds device/inode/uid/birthtime and the first exact
+job/spec. Each submission's durable admission is written BEFORE either lane's
+spool insertion. A short, bounded global registry flock fences submission and
+the final per-root seal. Slow probes/scans/unlinks happen OUTSIDE that lock.
+A second distinct job/spec or cross-lane use **succeeds normally** but permanently
+marks the root RETAINED. Exact duplicate IDs stay idempotent. Canonicalized aliases
+cannot create new authority but still pin existing ownership; argv references to
+already-registered absolute/lexical relative roots also pin them, even from another cwd. All run
+references and leases survive outside the disposable run.
+
+While a root is sealing, a new referencing submission gets an explicit transient
+`run_finalizing` refusal BEFORE spool insertion; unrelated roots continue admission.
+A crash without a final report leaves that root conservatively sealed for manual
+review, never replayed. A two-second registry-lock bound prevents an unbounded RPC.
+
+Explicit preparation remains available (Forum Linux only):
+
+```sh
+WIZARD_HEAVY_HOST=forum WIZARD_HEAVY_ROOT=/srv/work \
+  /usr/bin/python3 <release>/heavy-worker.py \
+  --root /srv/work/heavy/production/spool \
+  --lock /srv/work/heavy/production/worker.lock --prepare-run
+```
+
+NEW prepared runs default to `ephemeral` and broad classification, without slot
+flags. `--disposable build|cache|tmp|intermediates` remains compatible but is no
+longer the disposal boundary. `--run-purpose retained` and `weekly-launch` are
+sticky. All pre-v2 prepared records remain frozen/untrimmed. The in-run manifest
+is evidence, not authority. Both prepared and automatic trim require the same
+valid enabled activation policy. Every candidate file AND each ancestor needs
+descriptor-bound statx birthtime after the activation cutoff, not older than the
+owned root: moved-in historical content and unknown birthtimes stay untouched.
+
+A source tree may already have been removed before a later post-completion reuse
+submission. Such submission is allowed, but cannot resurrect inputs: **restage in
+a fresh top-level root**. Use distinct new roots per run, not shared source caches.
+For split build/test/publish workflows, declare RETAIN before the first job or
+admit all phases before the first completion. Automatic source disposal applies
+only to copied trees: any `.git` marker preserves the ENTIRE repository worktree,
+including uncommitted files, without running owner hooks or parsing Git config.
+
+### Broad disposal boundary — evidence ALWAYS wins
+
+Single-link regular files are disposable inside these explicitly classified trees:
+
+- Top-level `source`, `src`, `candidate`, `baseline`, `checkouts`, and exact
+  `source-*`, `candidate-*`, `baseline-*` names (suffix matches
+  `[A-Za-z0-9][A-Za-z0-9._-]*`). Arbitrary files inside these trees are bulk.
+- `node_modules` anywhere, except evidence paths.
+- Root `tmp`, `build`, `cache`, `intermediates`.
+- Known browser profile roots (`browser-profile`, `chrome-profile`,
+  `chromium-profile`, `firefox-profile`, `playwright-profile`,
+  `.playwright-profile`, `user-data-dir`, or a direct `profiles/<name>`), ONLY
+  with a browser marker (`Local State`, `Default/Preferences`, `Preferences`,
+  `prefs.js`, `compatibility.ini`). Generic unknown profile directories stay.
+- `.qcow2`, `.vmdk`, `.raw`, `.img` under explicit root `guests`, `vms`,
+  `disposable-vms`, or with `disposable` in the disk basename. Unknown disks and
+  owner binaries outside classified trees stay. Root source archives and runner
+  scripts stay. No directory removal, recursive rm or link following.
+
+Preserve result/evidence/report/manifest/receipt/submission/admission/preflight/
+log/screenshot/weekly-launch paths and ALL `.json`, `.jsonl`, `.log`, `.png`,
+`.jpg`, `.jpeg`, `.webp`, `.md`, `.txt`, `.html`, `.xml`, `.csv`, including inside
+node_modules/source/profile/bulk trees. Protected directory components stay.
+Packages, archives, installers and common media/report artifacts stay everywhere
+(`.apk`, `.aab`, `.ipa`, `.zip`, `.tar`, `.tgz`, `.gz`, `.bz2`, `.xz`, `.zst`,
+`.dmg`, `.iso`, `.pdf`, `.mp4`, `.mov`, `.mp3`, `.wav`, `.flac`, `.7z`, `.deb`,
+`.rpm`, `.exe`, `.msi`, `.dsym`). Hardlinks and symlinks stay; linked textual
+evidence fails the pass closed.
+
+`RETAIN`, `.retain`, a manifest `retain: true` or retained/weekly purpose retains
+the whole run. A weekly-launch argv/cwd vetoes trimming independently. `retain.json`
+`{"paths":["build/published.bin","source/shared-output"]}` preserves files/subtrees
+relative to the run root. Retained local text and the native stdout log preserve
+referenced files/subtrees (root-, document-, cwd-relative, absolute and file URLs).
+Generated identity/slot fields of our own manifest are not published links.
+Missing required/invalid/unreadable/oversized reference evidence retains the run.
+Inventories cap at 250,000 file entries. Reference scans cap at 8 MiB/authoritative
+text and 32 MiB total, failing closed. Package metadata/documentation inside bulk
+trees is retained by suffix but is NOT scanned as published-reference authority.
+Retained evidence subtrees, explicit retain targets and source README links are
+scanned. Only path-shaped references to actual inventoried files/directories pin
+bulk; bare words/basenames and an ordinary printed cwd do not retain all inputs.
+
+**Before publishing external/opaque links to nonstandard bulk, declare targets in
+retain.json or retain the whole run.** External consumers and opaque URL aliases
+cannot safely be discovered; do not pretend completion scanning can infer them.
+
+### Execution safety, accounting and immutable results
+
+Executors inherit shared per-run leases. Final trim takes a nonblocking exclusive
+lease after durable terminal receipt creation. Registry flock and durable admissions
+prevent deleting active/queued shared-job inputs across lanes. Mounts (including
+bind mounts), device crossings, special files, another process's cwd/open fd/mapped
+file or an attached loop backing inside the run veto the pass. Read-only probes:
+
+```text
+/usr/bin/sudo -n -- /usr/bin/lsof -nP -F p +D <run>
+/usr/bin/sudo -n -- /usr/sbin/losetup --list --json --output BACK-FILE
+```
+
+Any probe diagnostic/error/unknown state retains. Existing privileges must suffice;
+this feature installs no sudoers rules. No discovered PID is signalled. Symlink
+parents are never traversed during fd-relative identity-checked unlink. This is
+cooperating same-user housekeeping, not isolation from privileged hostile writers.
+
+Before unlink, fsync an exclusive-created `<run>.<job>.trim-intent.json`. Separate
+immutable trim reports record measured before/after logical and allocated
+(`st_blocks * 512`) file bytes, removed paths/sizes, skips/errors and partial failures.
+Nominal unlinked bytes are NOT a
+claim of physically recovered disk space. Receipt/result/log hashes never change
+on trim failure. No replay/retry after an intent/report or crash, no sweeping old
+terminal receipts, no new scheduling.
+
+### Sealed canary and safe parent-owned rollout
+
+Tiny local checks: `python3 tests/heavy-worker-trim.unit.py` and
+`python3 tests/heavy-run-rollout.unit.py`. Native suite/lifecycle proof is ONLY a
+parent-admitted light job: `scripts/heavy-run-trim-canary.py --stage <new-stage>`.
+Its manifest includes the fixture helper, rollout coordinator, Android helper and
+all transitive tests. It runs existing regressions then real candidate RPC heavy/
+light success/exit-7 lifecycles with at least 40 MiB combined allocated bulk per case,
+plus retained package documentation above the old 32 MiB text budget,
+automatic future admission, default prepared trimming, weekly/explicit retention,
+active cross-lane sharing, unchanged evidence/receipts and real busy/idle probes.
+The stage itself and every old /srv/work folder remain ineligible. A NEW synthetic
+runtime captures its own baseline+epoch BEFORE creating eligible fixture roots.
+No canary submit or production activation is part of this source change.
+
+`ops/rollout-heavy-run-trim.py --plan <reviewed.json>` defaults to READ-ONLY check;
+`--apply` is parent-only. The coordinator verifies ALL old host/light/agent spools
+idle first, pauses upstream admission, verifies the gate, takes existing execution/
+dispatch locks nonblocking and rechecks idleness. Then it captures the immutable
+baseline+time, stages/verifies both worker files in a NEW release, compare-and-swaps
+ONLY exact RPC/supervisor script settings, reloads and independently attests both
+effective running targets+hashes. Only after both match does it enable adoption,
+read back policy, release locks and reopen admission. Failure leaves admission
+paused, disables only its exact enable marker and rolls back only its own exact
+pointer changes; baseline, release, audit and all run/spool evidence remain.
+
+Adapter plan contract (NO shell; explicit audited executable argv):
+
+- `base`, `spool`, `lock`, `source_scripts`, `release_dir`, `audit_dir` are absolute.
+  Operational state/destinations are confined to `<base>/heavy`. `release_hashes`
+  explicitly supplies SHA256s for `heavy-worker.py` and `heavy-run-trim.py`.
+- `adapters.pause`, `.resume`, `.gate_read`: argv. Gate read returns only
+  `{"paused":true|false}`. Pause must prevent ALL upstream producers from submitting.
+- `adapters.rpc` and `.supervisor` each provide `read`, `set`, `reload`, `attest` argv.
+  Read returns `{"target":"<exact worker path>"}`. Set receives JSON stdin
+  `{"expected":"<old>","target":"<new>"}` and MUST atomically compare-and-swap only
+  that setting, preserve all unrelated bytes, and save its own exact-setting backup.
+  Reload cannot kill active jobs (idle checks/locks precede it). Attest must verify
+  the **running** RPC mapping/supervisor release, returning only
+  `{"target":"<effective path>","release_hashes":{"heavy-worker.py":"...","heavy-run-trim.py":"..."}}`.
+- No credentials or arbitrary config dumps in adapter stdout. Errors/diagnostics
+  veto activation. `--apply` is never run with guessed placeholder adapters.
+
+Concrete remaining deployment prerequisite: the authoritative persistent Forum RPC
+mapping file/service owner must be discovered and audited before authoring its gate/
+CAS/reload/attest adapters. Process environment alone does not identify its durable
+configuration. On Forum the existing USER service is `wizard-heavy-forum.service`,
+with a `20-kvm-group.conf` ExecStart wrapper: preserve the `/usr/bin/sg kvm -c`
+wrapper, spool/lock, KillMode and every unrelated setting. Do NOT edit Thales's
+unrelated legacy env. No production-ready adapter plan is claimed or activated.
+
+Rollback in an approved idle/gated window: remove only the matching enable marker,
+revert both exact release pointers and verify running hashes. Keep immutable baseline
+names forever, all registries, releases, receipts and evidence. Never sweep old roots,
+reuse IDs, delete audit, or create a timer as a workaround.
+
 ## Verification commands
 
 The lightweight worker regression fixtures run on macOS or Linux with temporary roots (no builds). For sustained suites, use the configured build host with external-storage `TMPDIR` and the worker toolchain on `PATH`:
