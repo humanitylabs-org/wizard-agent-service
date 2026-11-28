@@ -63,6 +63,13 @@ synchronous read/merge/atomic rename as PUT and answers with the full preference
   is already saved (two devices uploading the same Wizard keep one entry).
 - `{"op":"remove","key":"savedWizards","item":"<id>"}` and
   `{"op":"set","key":"savedWizards/<id>/name","item":"<name>"}`: no-op when the entry no longer exists.
+- `{"op":"add"|"remove","key":"appFavorites"|"appRecentHidden","item":"<app id>"}` (the phone Apps panel,
+  wizard-ux issue 2047): add appends when absent; on a full list (100) Favorites stay as they are and
+  Recent removals drop their oldest.
+- `{"op":"move","key":"appFavorites","item":"<app id>","items":[…]}`: the app goes right before the first
+  of `items` (the apps that followed it on that device) still listed, else last; no-op when the app is no
+  longer a Favorite. Services from before these operations answer them with 400; the shell then replays
+  them onto a fresh read, as for 405.
 
 Every operation is idempotent, so a client may resend a batch whose response it never saw. Malformed
 operations, or a result that breaks a key's limits, are a 400 and write nothing. Access, JSON and

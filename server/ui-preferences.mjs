@@ -77,7 +77,8 @@ const validators = {
   pinnedChats: v => Array.isArray(v) && v.length <= 300 && v.every(s => typeof s === 'string' && /^[A-Za-z0-9._:-]{1,180}$/.test(s)) && new Set(v).size === v.length,
 }
 const isPlainObject = v => !!v && typeof v === 'object' && !Array.isArray(v)
-function appIdList(v) { return Array.isArray(v) && v.length <= 100 && v.every(id => typeof id === 'string' && /^[A-Za-z0-9._-]{1,80}$/.test(id)) && new Set(v).size === v.length }
+const PANEL_ID = v => typeof v === 'string' && /^[A-Za-z0-9._-]{1,80}$/.test(v)
+function appIdList(v) { return Array.isArray(v) && v.length <= 100 && v.every(PANEL_ID) && new Set(v).size === v.length }
 
 // Strict: PUT bodies only. Unknown keys or invalid values are a 400.
 export function validateUiPreferences(value) {
@@ -135,6 +136,10 @@ export function updateUiPreferences(path, patch) {
 //   {op:'add', key:'savedWizards', item:{id,name,url}}  no-op when that id or that address's origin is already saved
 //   {op:'remove', key:'savedWizards', item:<id>}
 //   {op:'set', key:'savedWizards/<id>/name', item:<name>}  no-op when the entry is gone
+//   {op:'add'|'remove', key:'appFavorites'|'appRecentHidden', item:<app id>}  the phone Apps panel (wizard-ux issue 2047).
+//     add appends when absent; on a full list (100) Favorites stay as they are and Recent removals drop their oldest.
+//   {op:'move', key:'appFavorites', item:<app id>, items:[<app id>…]}  item goes right before the first of items still
+//     listed (the apps that followed it on that device), else last; no-op when item is not listed (removed elsewhere).
 const WIZARD_KEY = /^savedWizards\/([A-Za-z0-9._:-]{1,120})\/name$/
 const opField = key => SPACE_KEY.test(key) ? 'spaces' : WIZARD_KEY.test(key) ? 'savedWizards' : key
 const SPACE_KEY = /^spaces\/([a-z0-9-]{1,48})\/(threads|name)$/
@@ -186,6 +191,17 @@ export function applyUiPreferenceOps(prefs, ops) {
         next[key] = first.concat(list.filter(s => !first.includes(s))).slice(0, 60)
       } else if ((op === 'add' || op === 'remove') && str) next[key] = op === 'add' ? (list.includes(item) ? list : list.concat(item)) : list.filter(s => s !== item)
       else badOps()
+    } else if (key === 'appFavorites' || key === 'appRecentHidden') {
+      const list = Array.isArray(next[key]) ? next[key] : [], id = PANEL_ID(item)
+      if ((op === 'add' || op === 'remove') && id && !Object.hasOwn(o, 'items')) {
+        next[key] = op === 'remove' ? list.filter(x => x !== item) : list.includes(item) ? list
+          : list.length < 100 ? list.concat(item) : key === 'appRecentHidden' ? list.slice(1).concat(item) : list
+      } else if (op === 'move' && key === 'appFavorites' && id && Array.isArray(o.items) && o.items.length <= 100 && o.items.every(PANEL_ID)) {
+        if (list.includes(item)) {
+          const rest = list.filter(x => x !== item), after = o.items.find(x => rest.includes(x)), at = after ? rest.indexOf(after) : rest.length
+          next[key] = [...rest.slice(0, at), item, ...rest.slice(at)]
+        }
+      } else badOps()
     } else if (key === 'spaces') {
       if (op === 'add' && validSpace(item)) { if (!next.spaces.some(s => s.id === item.id)) next.spaces = fileInOneSpace(next.spaces.concat(item), item, item.threads) }
       else if (op === 'remove' && typeof item === 'string' && SPACE_ID.test(item)) next.spaces = next.spaces.filter(s => s.id !== item)
