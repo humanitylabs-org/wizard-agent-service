@@ -80,6 +80,16 @@
       "policy_exemptions": []
     },
     {
+      "id": "chats-slim-cut-file-marker",
+      "description": "wizard-ux issue 2055: a thread whose preview or owner turn is cut inside its attachment marker ([WIZARD_FILES_V1] with no closer, as Hermes cuts previews of a chat started with a photo) never makes the Chats title index (archive-50 window, fields=slim) answer 502; the row's one-line preview keeps the words before the marker and drops the marker and the half file list.",
+      "layer": "server",
+      "fixture": "chats-slim-cut-file-marker",
+      "how_to_test": "For main, host-profile, container and restricted: add an owner turn to the parity thread that ends in an unterminated [WIZARD_FILES_V1] with half a file list, then read /api/sessions?view=list&window=archive-50&fields=slim&limit=500 (the phone's exact title-index read), the archive-50 window and ?view=list: each answers 200 and the row's preview has the owner's words with no marker or file fields. Before the fix the routed kinds listed the marker and half file list in the preview; the main box's canonical listing answered 502 upstream_unavailable (assertNoTrustedMarker), which tests/slim-list-file-marker.node.mjs reproduces through the real proxy with Hermes-cut previews, along with the cleaner directly. Synthetic HTTP fixture evidence, not live box proof.",
+      "source_refs": ["server/session-list-view.mjs"],
+      "reference_tests": ["tests/slim-list-file-marker.node.mjs", "qa/agent-parity/server-checks.mjs"],
+      "policy_exemptions": []
+    },
+    {
       "id": "chats-helper-row-time",
       "description": "wizard-ux issue 1994: a thread whose newest turn is a helper result with no owner message since (listed running, waiting on the helper, with no assigned, request or owner clock) still has a list time: its latest activity. Its Chats row shows a time and sorts by it among the other rows; a working row with a request clock keeps that clock.",
       "layer": "server",

@@ -158,6 +158,27 @@ export const serverChecks = {
       assert.equal(item.hermesPinned, true, `the list row keeps Hermes' pin (${query})`)
     }
   },
+  // wizard-ux issue 2055: an owner turn cut inside its attachment marker (no closer) never makes the title index
+  // (fields=slim) or the other list reads fail with 502; the row's preview keeps the words before the marker.
+  'chats-slim-cut-file-marker': async s => {
+    const row = s.sessions.get('wizard_parity')
+    // Hermes' own preview of a chat started with a photo is its first 63 characters, cut inside the marker; the newest
+    // turn here is cut the same way.
+    const cut = 'Synthetic photo note [WIZARD_FILES_V1]\n[{"filename":"synthetic-photo.png","mime":"ima'
+    Object.assign(row, { hidden: false, preview: cut })
+    row.messages.push({ role: 'user', timestamp: Date.now() / 1000, content: cut })
+    for (const query of ['?view=list&window=archive-50&fields=slim&limit=500&offset=0&include_children=false&overrides=%7B%7D', '?view=list&window=archive-50&limit=100', '?view=list&limit=100']) {
+      let item, text = ''
+      for (let n = 0; n < 40 && !item; n++) {
+        const r = await s.request('/api/sessions' + query); text = await r.text()
+        assert.equal(r.status, 200, `${s.kind}: list read answers 200 (${query}): ${text.slice(0, 120)}`)
+        item = JSON.parse(text).data.find(x => x.id === 'wizard_parity' && /Synthetic photo note/.test(x.preview || ''))
+        if (!item) await new Promise(done => setTimeout(done, 50))
+      }
+      assert.ok(item, `${s.kind}: the photo thread lists with its words (${query})`)
+      assert.doesNotMatch(item.preview, /WIZARD.?FILES|filename/i, `${s.kind}: no marker or half file list in the preview (${query})`)
+    }
+  },
   // wizard-ux issue 1994: a thread whose newest turn is a helper result with no owner message since (the Service
   // lists it running, waiting on the helper, with no request clock) still has a list time: its latest activity.
   'chats-helper-row-time': async s => {

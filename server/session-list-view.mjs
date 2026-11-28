@@ -39,6 +39,10 @@ const ALIASES = { started: 'running', accepted: 'queued', pending: 'queued', wai
   const cleanText = s => s
     .replace(/\[WIZARD_FILES_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_FILES_V1\]/g, (_, j) => chipLabel(j))
     .replace(/\[WIZARD_FILE_CHIPS_V1\]\s*([\s\S]*?)\s*\[\/WIZARD_FILE_CHIPS_V1\]/g, (_, j) => chipLabel(j))
+    // A preview cut inside an attachment marker (no closer): drop the rest, and any stray or odd-spelt marker, before
+    // the steps below turn its underscores into spaces; the list's file-marker guard refuses any marker left (wizard-ux issue 2055).
+    .replace(/\[[\s_-]*WIZARD[\s_-]*FILES[\s_-]*V1[\s_-]*\][\s\S]*$/i, ' ')
+    .replace(/\[[\s_-]*\/[\s_-]*WIZARD[\s_-]*FILES[\s_-]*V1[\s_-]*\]/gi, ' ')
     .replace(/\[WIZARD_IMAGE_INTENT_V1\][\s\S]*?\[\/WIZARD_IMAGE_INTENT_V1\]/g, ' ')
     .replace(/\[WIZARD_TWEAK_V1\](?:[\s\S]*?\[\/WIZARD_TWEAK_V1\]|[\s\S]*$)/g, ' ') // a reply's tweak card (wizard-ux core/chat-kit.js tweakIds); unterminated: to the end
     .replace(/\[WIZARD_ACTION_V1\](?:[\s\S]*?\[\/WIZARD_ACTION_V1\]|[\s\S]*$)/g, ' ') // an app's action card (wizard-ux core/chat-kit.js actionIds, issue 1463)
