@@ -101,6 +101,18 @@ describe.skipIf(!threadIo)('a Chats list rebuild reads only what changed (issue 
     expect(b.stats()).toMatchObject({ hits: 0, walks: 2, size: 0 })
   })
 
+  it('a remembered walk is read again after ten minutes, whatever the revision says', async () => {
+    const { createTranscriptWalkMemo } = await import('../server/session-truth.mjs')
+    let clock = 1_000_000
+    const memo = createTranscriptWalkMemo({ now: () => clock })
+    const db = {}
+    memo.key(db, 'wizard_a', 0, '')
+    memo.set('wizard_a', 'k1', { lastUserAt: 5, replies: [] })
+    expect(memo.get('wizard_a', 'k1')).toEqual({ lastUserAt: 5, replies: [] })
+    clock += 10 * 60_000
+    expect(memo.get('wizard_a', 'k1')).toBeNull()
+  })
+
   it('a replaced state.db never answers from the old file\'s walks', () => {
     const f = stateDb(); f.thread('wizard_a')
     const reader = createHermesSessionTruthReader(f.path)

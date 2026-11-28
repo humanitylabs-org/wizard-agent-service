@@ -229,10 +229,13 @@ export function searchHermesSessionText(path, sessionIds, query) {
 // busy and stalled every other read on the box (issue 584). The walk is a pure function of the thread's own rows,
 // so it is reused while the owned-work revision holds (append, delete, active flip, in-place rewrite and the
 // 120 s post-turn window all move or skip it) and the thread's end reason is unchanged (a compression hands
-// provenance to a continuation). No revision (no transcript trigger, a fresh thread): read as before.
-export const TRANSCRIPT_WALK_MEMO_MAX = 5000
+// provenance to a continuation). No revision (no transcript trigger, a fresh thread): read as before. The trigger does
+// not cover display_kind, finish_reason, display_metadata or timestamp; Hermes rewrites those only right after a turn
+// (inside the 120 s window), and a remembered walk is read again after TRANSCRIPT_WALK_MEMO_MS whatever the revision,
+// so any other rewrite shows within minutes, not never.
+export const TRANSCRIPT_WALK_MEMO_MAX = 5000, TRANSCRIPT_WALK_MEMO_MS = 10 * 60_000
 const WALK_FIELDS = ['activityAt', 'lastUserAt', 'lastAssistantAt', 'requestPreview', 'replies', 'status', 'appId']
-export function createTranscriptWalkMemo({ max = TRANSCRIPT_WALK_MEMO_MAX } = {}) {
+export function createTranscriptWalkMemo({ max = TRANSCRIPT_WALK_MEMO_MAX, ttlMs = TRANSCRIPT_WALK_MEMO_MS, now = Date.now } = {}) {
   const memo = new Map()
   const stats = { hits: 0, walks: 0 }
   let memoDb = null
@@ -246,7 +249,7 @@ export function createTranscriptWalkMemo({ max = TRANSCRIPT_WALK_MEMO_MAX } = {}
     },
     get(id, key) {
       const hit = memo.get(id)
-      if (!key || hit?.key !== key) return null
+      if (!key || hit?.key !== key || now() - hit.at >= ttlMs) return null
       memo.delete(id); memo.set(id, hit); stats.hits++
       return structuredClone(hit.value)
     },
@@ -254,7 +257,7 @@ export function createTranscriptWalkMemo({ max = TRANSCRIPT_WALK_MEMO_MAX } = {}
       stats.walks++
       if (!key) return
       const value = Object.fromEntries(WALK_FIELDS.filter(field => Object.hasOwn(current, field)).map(field => [field, current[field]]))
-      memo.delete(id); memo.set(id, { key, value: structuredClone(value) })
+      memo.delete(id); memo.set(id, { key, value: structuredClone(value), at: now() })
       while (memo.size > max) memo.delete(memo.keys().next().value)
     },
     clear() { memo.clear() },

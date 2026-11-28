@@ -180,6 +180,7 @@ function firstPostReadInput(sessionIds, { restore, memo, now, agentFirst }) {
 // rebuild on a large state.db (issue 584). A key stays the thread's key while the thread's revision holds (the
 // owned-work revision: append, delete, active flip, in-place rewrite, and nothing within 120 s of the newest row), so a
 // thread whose revision and memo key both still match is a hit without that read. Per file, cleared when it is replaced.
+// The revision does not cover display_kind; a kept key is read again after FIRST_POST_MEMO_MS (as the post memo is).
 const SHAPE_KEYS_MAX = 5000, SHAPE_FILES_MAX = 16
 const shapeKeyFiles = new Map()
 function shapeKeysOf(path) {
@@ -227,11 +228,11 @@ export function readFirstPostPages(path, { ids = [], known = [], reach: withReac
       if (!exists.get(id)) continue
       const revision = shapeKeys ? ownedWorkRevision(db, id, nowSeconds) : null
       const kept = revision ? shapeKeys.get(`${id}|${flags}`) : null
-      if (kept && kept.revision === revision && keys.get(id) === kept.key) { out.hits.push([id, kept.key]); continue }
+      if (kept && kept.revision === revision && Date.now() - kept.at < FIRST_POST_MEMO_MS && keys.get(id) === kept.key) { out.hits.push([id, kept.key]); continue }
       const other = withReach ? plain(reach.get(id)) : null
       const key = `${shape.all(id).map(row => `${row.id}:${row.display_kind || ''}`).join(',')}|${other ? other.id : ''}|${flags}`
       if (revision) {
-        shapeKeys.delete(`${id}|${flags}`); shapeKeys.set(`${id}|${flags}`, { revision, key })
+        shapeKeys.delete(`${id}|${flags}`); shapeKeys.set(`${id}|${flags}`, { revision, key, at: Date.now() })
         while (shapeKeys.size > SHAPE_KEYS_MAX) shapeKeys.delete(shapeKeys.keys().next().value)
       }
       if (keys.get(id) === key) { out.hits.push([id, key]); continue }
