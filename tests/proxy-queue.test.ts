@@ -6,6 +6,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
 import { createWizardServer, listen, readActiveHumanSessionIds, OWN_STYLE_RUN_INSTRUCTIONS as WIZARD_RUN_INSTRUCTIONS, wizardDispatchHealthy } from '../server/service.mjs'
 import { appProvenanceRunNote } from '../server/thread-app-provenance.mjs'
+import { FIRST_CHAT_NOTE } from '../server/first-chat.mjs' // issue 650: on for everyone, in every run
 
 const servers: ReturnType<typeof createServer>[] = []
 const temporaryDirectories: string[] = []
@@ -227,7 +228,7 @@ describe('Wizard proxy capacity queue', () => {
     expect(admissions).toBe(3)
     expect(upstreamRuns.get('actual_3')?.input).toContain('Guidance added while queued:\nUse the compact implementation.')
     expect(upstreamRuns.get('actual_3')).toMatchObject({
-      instructions: `${WIZARD_RUN_INSTRUCTIONS}\n\n${appProvenanceRunNote([{ id: 'usuals', name: 'Food' }])}`,
+      instructions: `${WIZARD_RUN_INSTRUCTIONS}\n\n${appProvenanceRunNote([{ id: 'usuals', name: 'Food' }])}\n${FIRST_CHAT_NOTE}`,
       delegationDelivery: 'join',
     })
 

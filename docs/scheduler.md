@@ -170,11 +170,11 @@ agent on any box (container agents included, which never load the host-only `wiz
 - `wizard_tips` `start` / `stop` / `status`: the opt-in five-day drip. Five one-shot `remind` jobs share one
   service-chosen thread titled `Wizard · Tips` (`group: wizard-tips`): tip 1 a minute after opting in, tips 2–5
   at the next 08:30 owner-time mornings. Starting again while tips are pending is a no-op.
-  With the five-choice first chat switch on (`wizard/first-chat-goals`, issue 650, `server/first-chat.mjs`),
+  Five-choice first chat (issue 650, `server/first-chat.mjs`, on for everyone):
   `start` with `pick` (the owner's first-chat choice) and optional `about` (their words) makes four tips instead, on
   the next four mornings (days 2-5; the first chat was day 1), each built from that pick; a business or job pick may get
-  a Goals app offered in tip 4, only when one is installed. Off, a pick is ignored. The same switch adds one run-note
-  line to every agent's runs pointing a first chat at wizard-guide's "First chat: five choices", whose tap-to-pick
+  a Goals app offered in tip 4, only when one is installed. Without a pick the five fixed tips start. Every agent's runs carry one run-note
+  line pointing a first chat at wizard-guide's "First chat: five choices", whose tap-to-pick
   replies are the `[WIZARD_CHOICES_V1]{"choices":[...]}[/WIZARD_CHOICES_V1]` marker (wizard-ux draws it as reply
   buttons; the Chats list preview drops it).
 - `wizard_follow_up` `create` / `list` / `stop` (`server/follow-ups.mjs`): a `watch` job bound to the calling
