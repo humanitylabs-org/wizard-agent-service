@@ -221,8 +221,6 @@ server = createWizardServer({
   smartInbox: envChoice(process.env.WIZARD_SMART_INBOX),
   // Catch me up clears Sent (issue 710): follows the owner's `wizard/catch-up-sent` switch; '1' forces it on, '0' off.
   catchUpSent: envChoice(process.env.WIZARD_CATCH_UP_SENT),
-  // New chat quick links (wizard-ux issue 1965): follows the owner's `wizard/new-chat-chips` switch; '1' forces it on, '0' off.
-  quickLinks: envChoice(process.env.WIZARD_NEW_CHAT_CHIPS),
   // Local app routes (wizard-app-manager issue 629): on for everyone; '0' turns them off on this box.
   localAppRoutes: envChoice(process.env.WIZARD_LOCAL_APP_ROUTES),
   // Graceful restart (issue 480): /wizard/v1/restart lets a restarter hold new sends (saved, launched by the next
