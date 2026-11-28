@@ -112,6 +112,8 @@ server = createWizardServer({
   helmAttachmentsRoot: process.env.WIZARD_HELM_ATTACHMENTS_ROOT || '',
   hermesStatePath,
   canonicalSessionListing: true,
+  // Logged [event-loop] windows name what held the thread (issue 584). WIZARD_STALL_PROFILE=0 turns the sampler off.
+  stallProfile: process.env.WIZARD_STALL_PROFILE !== '0',
   helmDbPath: process.env.WIZARD_HELM_DB_PATH || (process.env.HOME ? resolve(process.env.HOME, '.hermes/data/apps/helm/helm.db') : ''),
   hermesKey: key,
   sttOrigin: process.env.WIZARD_STT_ORIGIN || 'http://127.0.0.1:8864',

@@ -1,4 +1,5 @@
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks'
+import { Session as InspectorSession } from 'node:inspector'
 
 // Only static route words survive: never retain thread/run ids, filenames or query strings.
 const identities = new Set(['sessions', 'runs', 'agents', 'threads', 'agent-heavy', 'background-results', 'attachments', 'devices'])
@@ -64,20 +65,100 @@ export const STALL_NAMES = 8
 // freeze names its own cause in the journal (issue 497) instead of needing a live CPU profile.
 export const LAG_LOG_DELAY_MS = 1000
 export const LAG_LOG_UTILIZATION = 0.9
-export function lagLine(window, windowRoutes, inFlight, { top = 5, stalls = [], waiting = 0 } = {}) {
-  if (!(window.delay_max_ms >= LAG_LOG_DELAY_MS || window.utilization >= LAG_LOG_UTILIZATION)) return ''
+export const lagWorthy = window => window.delay_max_ms >= LAG_LOG_DELAY_MS || window.utilization >= LAG_LOG_UTILIZATION
+export function lagLine(window, windowRoutes, inFlight, { top = 5, stalls = [], waiting = 0, blocking = [] } = {}) {
+  if (!lagWorthy(window)) return ''
   const busiest = [...windowRoutes].sort((a, b) => b[1].total_ms - a[1].total_ms).slice(0, top)
     .map(([key, row]) => { const [method, route] = JSON.parse(key === '[overflow]' ? '["","[overflow]"]' : key); return { method, route, count: row.count, total_ms: Math.round(row.total_ms) } })
   const round = value => Math.round(value * 10) / 10
   return `[event-loop] ${JSON.stringify({ window_ms: window.window_ms, delay_p99_ms: round(window.delay_p99_ms),
     delay_max_ms: round(window.delay_max_ms), utilization: Math.round(window.utilization * 100) / 100, in_flight: inFlight, ...(waiting > 0 ? { waiting } : {}), busiest,
-    ...(stalls.length ? { stalls: stalls.map(stall => ({ blocked_ms: Math.round(stall.blocked_ms), running: stall.running })) } : {}) })}`
+    ...(stalls.length ? { stalls: stalls.map(stall => ({ blocked_ms: Math.round(stall.blocked_ms), running: stall.running })) } : {}),
+    ...(blocking.length ? { blocking } : {}) })}`
+}
+
+// A stall's route names say what was waiting, not what held the thread: the list read is always in flight, so four
+// rounds of issue 584 fixed what a harness showed while the live box kept stalling. With the stall profile on, each
+// window is sampled every 10 ms by V8's own profiler (a blocking fsync or SQLite read is sampled in its JS caller), and
+// a logged window carries its longest busy stretches (`blocking`: ms, the functions that ran longest in it, and the
+// Service frames they ran under), so the journal names the blocker with no live CPU profile. Function names, file
+// basenames and line numbers only: never arguments or data.
+export const STALL_PROFILE_SAMPLING_US = 10_000
+export const BLOCKING_MIN_MS = 250
+const IDLE_FRAMES = new Set(['(idle)', '(program)'])
+const frameName = frame => `${frame.functionName || '(anonymous)'} ${String(frame.url || '').split('/').pop() || '(native)'}:${frame.lineNumber + 1}`
+export function blockingStretches(profile, { minMs = BLOCKING_MIN_MS, top = 3, frames = 4 } = {}) {
+  if (!profile?.nodes?.length || !profile.samples?.length) return []
+  const nodes = new Map(profile.nodes.map(node => [node.id, node])), parent = new Map()
+  for (const node of profile.nodes) for (const child of node.children || []) parent.set(child, node.id)
+  const runs = []
+  let run = null
+  profile.samples.forEach((id, index) => {
+    const node = nodes.get(id), delta = Number(profile.timeDeltas?.[index]) || 0
+    if (!node || IDLE_FRAMES.has(node.callFrame.functionName)) { if (run) runs.push(run); run = null; return }
+    if (!run) run = { ms: 0, samples: [] }
+    run.ms += delta / 1000; run.samples.push([id, delta])
+  })
+  if (run) runs.push(run)
+  return runs.filter(stretch => stretch.ms >= minMs).sort((a, b) => b.ms - a.ms).slice(0, top).map(stretch => {
+    const self = new Map(), service = new Map()
+    for (const [id, delta] of stretch.samples) {
+      const own = frameName(nodes.get(id).callFrame)
+      self.set(own, (self.get(own) || 0) + delta)
+      const seen = new Set()
+      for (let at = id; at !== undefined; at = parent.get(at)) {
+        const frame = nodes.get(at).callFrame
+        if (!/\/server\/[^/]+\.mjs$/.test(String(frame.url || ''))) continue
+        const name = frameName(frame)
+        if (!seen.has(name)) { seen.add(name); service.set(name, (service.get(name) || 0) + delta) }
+      }
+    }
+    const ranked = map => [...map].sort((a, b) => b[1] - a[1]).slice(0, frames).map(([name, us]) => `${Math.round(us / 1000)}ms ${name}`)
+    return { ms: Math.round(stretch.ms), self: ranked(self), under: ranked(service) }
+  })
+}
+let stallProfilerOwned = false
+/** One per process: the first speed meter that asks gets it, later ones get none. Never throws. */
+export function createStallProfiler({ samplingUs = STALL_PROFILE_SAMPLING_US, Session = null } = {}) {
+  if (stallProfilerOwned) return null
+  let session = null
+  const post = (method, params) => {
+    let result = null, failure = null
+    session.post(method, params, (error, value) => { failure = error; result = value })
+    if (failure) throw failure
+    return result
+  }
+  try {
+    session = new (Session ?? InspectorSession)()
+    session.connect()
+    post('Profiler.enable'); post('Profiler.setSamplingInterval', { interval: samplingUs }); post('Profiler.start')
+  } catch { try { session?.disconnect() } catch { /* never connected */ } return null }
+  stallProfilerOwned = true
+  let closed = false
+  return {
+    // Ends this window's profile and starts the next; a window worth a log line gets its busy stretches.
+    rotate(summarise) {
+      if (closed) return []
+      let stretches = []
+      try { const profile = post('Profiler.stop')?.profile; if (summarise) stretches = blockingStretches(profile) } catch { /* observational only */ }
+      try { post('Profiler.start') } catch { /* next window unprofiled */ }
+      return stretches
+    },
+    close() {
+      if (closed) return
+      closed = true; stallProfilerOwned = false
+      try { post('Profiler.stop') } catch { /* already stopped */ }
+      try { session.disconnect() } catch { /* gone */ }
+    },
+  }
 }
 
 /** Observational only; one bounded route map and one 60-second event-loop window per server. */
-export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, stallCheckMs = STALL_CHECK_MS, now = () => performance.now(), log = line => console.log(line) } = {}) {
+export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, stallCheckMs = STALL_CHECK_MS, now = () => performance.now(), log = line => console.log(line), stallProfile = false } = {}) {
   const delay = monitorEventLoopDelay({ resolution: 20 })
   delay.enable()
+  // What held the thread (issue 584): a light sampling profile per window, summarised only for a logged window.
+  const profiler = stallProfile ? createStallProfiler() : null
   const routes = new Map()
   let windowRoutes = new Map(), inFlight = 0, waiting = 0, stalls = []
   // Requests running now plus those that ended recently, kept by route name only, for stall attribution.
@@ -111,7 +192,10 @@ export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, stallChec
   }
   const timer = setInterval(() => {
     completed = sample()
-    try { const line = lagLine(completed, windowRoutes, inFlight, { stalls, waiting }); if (line) log(line) } catch { /* observational only */ }
+    try {
+      const blocking = profiler?.rotate(lagWorthy(completed)) ?? []
+      const line = lagLine(completed, windowRoutes, inFlight, { stalls, waiting, blocking }); if (line) log(line)
+    } catch { /* observational only */ }
     previous = performance.eventLoopUtilization(); started = now(); delay.reset(); windowRoutes = new Map(); stalls = []
   }, windowMs)
   timer.unref?.()
@@ -170,7 +254,7 @@ export function createSpeedMeter({ windowMs = 60_000, maxRoutes = 256, stallChec
       return [key, { count: row.count, total_ms: row.total_ms, sample_count: sorted.length, p95_ms: sorted[Math.ceil(sorted.length * 0.95) - 1] ?? 0 }]
     })) }),
     checkStall,
-    close() { clearInterval(timer); if (stallTimer) clearInterval(stallTimer); delay.disable() },
+    close() { clearInterval(timer); if (stallTimer) clearInterval(stallTimer); delay.disable(); profiler?.close() },
   }
 }
 
