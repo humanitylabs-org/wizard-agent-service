@@ -1,8 +1,8 @@
-// Chat replies on the phone through the per-app notification path (wizard-ux issue 1619, switch
-// wizard/phone-chat-replies, off by default).
+// Chat replies on the phone through the per-app notification path (wizard-ux issue 1619; on for everyone, its switch
+// wizard/phone-chat-replies was removed).
 //
 // Before this, only the phone learnt that a reply was ready: its native ReplyWatcher polled each run it had sent.
-// With the switch on, the phone hands the run to the box instead (POST /wizard/v1/phone/reply-notes). The box follows
+// Now the phone hands the run to the box instead (POST /wizard/v1/phone/reply-notes). The box follows
 // the run with its own internal read and, when the reply lands (or the run waits for the owner's approval), posts one
 // item to the Notifications app tagged `app:chats` + `chat-reply`, linked to the thread. The phone's per-app reader
 // (wizard-ux AppNotify) shows it on the Android channel for Chats, also with Wizard closed; a tap opens that thread.
@@ -12,7 +12,6 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
-export const PHONE_CHAT_REPLIES_SWITCH = 'wizard/phone-chat-replies'
 export const CHAT_REPLY_TAG = 'chat-reply'
 export const CHATS_APP = 'chats'
 const SESSION_ID = /^(?!\.{1,2}$)[A-Za-z0-9._:-]{1,180}$/u

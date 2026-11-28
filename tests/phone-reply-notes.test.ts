@@ -1,5 +1,5 @@
-// Chat replies on the phone through the per-app notification path (wizard-ux issue 1619, switch
-// wizard/phone-chat-replies). The real Service, auth, run queues, app bridge and notifier; only Hermes and the
+// Chat replies on the phone through the per-app notification path (wizard-ux issue 1619, on for
+// everyone; switch wizard/phone-chat-replies removed). The real Service, auth, run queues, app bridge and notifier; only Hermes and the
 // Notifications app's MCP are synthetic. Every agent kind: a routed thread's reply is followed through its own agent.
 import { describe, expect, it } from 'vitest'
 import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
@@ -10,7 +10,7 @@ import { notificationScene } from '../qa/agent-parity/scheduler-notify.mjs'
 import { replyExcerpt, replyNote, threadLink, nextReadMs, createPhoneReplyNotes } from '../server/phone-reply-notes.mjs'
 
 const SHELL = 'https://box.example.ts.net:8796/wizard-os-home/'
-const on = { phoneChatReplies: true, phoneReplyShellUrl: SHELL, phoneReplyTickMs: 25 }
+const on = { phoneReplyShellUrl: SHELL, phoneReplyTickMs: 25 }
 const until = async (ok: () => boolean, ms = 4000) => {
   const end = Date.now() + ms
   while (!ok()) { if (Date.now() > end) throw new Error('timed out'); await new Promise(r => setTimeout(r, 20)) }
@@ -95,19 +95,7 @@ describe('phone reply notes: pure rules', () => {
 })
 
 describe.each(kinds)('phone reply notes / %s', { timeout: 20_000 }, kind => {
-  it('switch off: the route is not there and nothing is posted', async () => {
-    const s = await notificationScene(kind, true, { phoneReplyShellUrl: SHELL, phoneReplyTickMs: 25 })
-    try {
-      const run = await send(s, 'phone-1619-off')
-      const r = await register(s, { session: 'phone-1619-off', run, ...(kind === 'main' ? {} : { agent: s.id }) })
-      expect(r.status).toBe(404)
-      Object.assign(upstream(s, 'phone-1619-off'), { status: 'completed', output: 'Here is the plan.' })
-      await new Promise(r => setTimeout(r, 200))
-      expect(notes(s)).toEqual([])
-    } finally { await s.close() }
-  })
-
-  it('switch on: only the owner can hand a run over', async () => {
+  it('only the owner can hand a run over', async () => {
     const s = await notificationScene(kind, true, on)
     try {
       const r = await fetch(`${s.origin()}/wizard/v1/phone/reply-notes`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ session: 'x', run: 'y' }) })
@@ -117,7 +105,7 @@ describe.each(kinds)('phone reply notes / %s', { timeout: 20_000 }, kind => {
     } finally { await s.close() }
   })
 
-  it('switch on: the reply is posted once to Notifications under Chats, linked to its thread', async () => {
+  it('no switch needed: the reply is posted once to Notifications under Chats, linked to its thread', async () => {
     const s = await notificationScene(kind, true, on)
     try {
       const thread = 'phone-1619-on'
@@ -135,7 +123,7 @@ describe.each(kinds)('phone reply notes / %s', { timeout: 20_000 }, kind => {
     } finally { await s.close() }
   })
 
-  it('switch on: an approval wait is told once, then the reply', async () => {
+  it('an approval wait is told once, then the reply', async () => {
     const s = await notificationScene(kind, true, on)
     try {
       const thread = 'phone-1619-ask'
@@ -154,7 +142,7 @@ describe.each(kinds)('phone reply notes / %s', { timeout: 20_000 }, kind => {
     } finally { await s.close() }
   })
 
-  it('switch on, the thread\'s agent cannot reach Notifications: refused so the phone keeps its own watcher', async () => {
+  it('the thread\'s agent cannot reach Notifications: refused so the phone keeps its own watcher', async () => {
     const s = await notificationScene(kind, false, on)
     try {
       const run = await send(s, 'phone-1619-none')
