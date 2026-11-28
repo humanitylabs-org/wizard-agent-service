@@ -159,7 +159,8 @@ export async function scene(kind, serverOptions = {}) {
           titleDb.prepare('UPDATE sessions SET model=?,model_config=? WHERE id=?').run(body.model, config, row.id)
         }
       }
-      return json(200, { session: row })
+      // Stock Hermes' session read names its message count (api_server _session_response), as its list does.
+      return json(200, { session: req.method === 'GET' ? { ...row, message_count: row.messages.length } : row })
     }
     if (path === '/v1/runs' && req.method === 'POST') {
       await heldAdmissions.get(body.session_id)

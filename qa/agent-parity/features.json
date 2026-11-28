@@ -2224,6 +2224,23 @@
       "policy_exemptions": []
     },
     {
+      "id": "saved-copy-instant-open",
+      "description": "Tapping a Ready thread paints this device's saved copy at once when that one thread's detail read (~0.1 s) says it still holds the same messages (message count and newest owner/reply times), instead of waiting for a whole Chats list read after the phone comes back to the front (wizard-ux issue 2055). A copy the detail read contradicts never paints; routed threads are never stored, so they keep waiting for their own read.",
+      "layer": "ux",
+      "how_to_test": "Main: GET /wizard/hermes/api/sessions/<id>?view=detail names wizard_last_user_at and wizard_last_assistant_at equal to the list row's lastUserAt/lastAssistantAt (tests/detail-content-clock.test.ts, synthetic HTTP fixture). Shell: wizard-ux/tests/saved-copy-instant-open.test.mjs runs live.js with a stored copy and an untrusted list: a matching detail returns the copy, a detail with a newer reply returns null, and scoped (host-profile, container, restricted, private) threads are never verified from a stored copy. Synthetic fixture evidence; the phone timing is the issue's receipt.",
+      "source_refs": [
+        "server/service.mjs",
+        "wizard-ux/web/live.js",
+        "wizard-ux/web/core/chats-outbox.js"
+      ],
+      "reference_tests": [
+        "tests/detail-content-clock.test.ts",
+        "wizard-ux/tests/saved-copy-instant-open.test.mjs"
+      ],
+      "fixture": null,
+      "policy_exemptions": []
+    },
+    {
       "id": "history-pagination",
       "description": "Load bounded newest/oldest history pages and search an older thread",
       "layer": "server",

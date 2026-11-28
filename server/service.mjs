@@ -9929,6 +9929,10 @@ function buildWizardServer(options, lifetime) {
               detailed.provider = truth.route.provider
               if (truth.routeUpdatedAt) detailed.wizard_model_lock_updated_at = truth.routeUpdatedAt
             }
+            // The same newest owner/reply times the list row carries (filterSessionList), so a phone can check the
+            // copy of this one thread it saved against this ~0.1 s read instead of the whole list (wizard-ux issue 2055).
+            if (truth?.lastUserAt) detailed.wizard_last_user_at = truth.lastUserAt
+            if (truth?.lastAssistantAt) detailed.wizard_last_assistant_at = truth.lastAssistantAt
             detailed.wizard_retry_input = saved ? queuedInputTextOf(saved.body) : ownerRetry || truth?.requestPreview || await fullRetryInput(retryPage)
             if (saved) {
               detailed.wizard_retry_run_id = saved.publicRunId
@@ -10104,8 +10108,18 @@ function buildWizardServer(options, lifetime) {
       if ([400, 403, 404, 409, 410, 413, 415, 429, 503].includes(error?.status) && !response.headersSent) {
         const names = { 400: 'invalid_request', 403: 'forbidden', 404: 'not_found', 409: 'conflict', 410: 'gone', 413: 'body_too_large', 415: 'unsupported_media_type', 429: 'rate_limited', 503: 'service_unavailable' }
         sendJson(response, error.status, { error: error.message === 'agent_sandbox_unavailable' ? 'agent_sandbox_unavailable' : names[error.status] })
-      } else if (!response.headersSent) sendJson(response, 502, { error: 'upstream_unavailable' })
-      else response.destroy()
+      } else if (!response.headersSent) {
+        // A thread-list read that fails here names its cause in the log (wizard-ux issue 2055: the search title index
+        // read answered 502 on every try on one box and nothing said why). Parameter names only, never their values.
+        if (String(request.url ?? '').startsWith('/wizard/hermes/api/sessions')) {
+          let names = ''
+          try { names = [...new URL(request.url, 'http://wizard.local').searchParams.keys()].join(',') } catch { /* names stay empty */ }
+          // The error's name and where it was thrown; its message can quote thread text, so it stays out.
+          const frames = String(error?.stack ?? '').split('\n').slice(1, 4).map(line => line.trim()).join(' | ')
+          console.log(`[sessions] ${request.method} list read failed (${names}): ${error?.name ?? typeof error} ${frames}`.slice(0, 600))
+        }
+        sendJson(response, 502, { error: 'upstream_unavailable' })
+      } else response.destroy()
     } finally {
       if (deferredListTouch && !readOnlyRunReplay) listCache.touch()
       stormLead?.release(stormRead)
