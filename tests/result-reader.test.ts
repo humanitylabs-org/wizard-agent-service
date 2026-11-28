@@ -6,8 +6,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { AgentInboxStore, NO_SUMMARY } from '../server/agent-inbox.mjs'
 import { createAlertGate, AlertRulesFile } from '../server/agent-alerts.mjs'
-import { createResultReader, examplesBlock, parseReaderReply, readerFacts, readerRouter, readResult, replyTail, statusHint, READER_REPLY_CHARS, RESULT_READER_SWITCH } from '../server/result-reader.mjs'
-import { createChannelsSwitch } from '../server/channels-switch.mjs'
+import { createResultReader, examplesBlock, parseReaderReply, readerFacts, readerRouter, readResult, replyTail, statusHint, READER_REPLY_CHARS } from '../server/result-reader.mjs'
 
 const T0 = Date.parse('2026-11-26T09:00:00Z')
 const clock = () => { const c = { at: T0, now: () => c.at++ }; return c }
@@ -81,13 +80,6 @@ describe('result reader: the model call', () => {
     expect(logs.at(-1)).toContain('read failed (timeout)')
   })
 
-  it('follows the owner switch wizard/result-reader in the Look file', () => {
-    let text = JSON.stringify({ version: 1, tweaks: { [RESULT_READER_SWITCH]: { on: true } } })
-    const on = createChannelsSwitch({ id: RESULT_READER_SWITCH, readLook: () => text, ttlMs: 0 })
-    expect(on()).toBe(true)
-    text = JSON.stringify({ version: 1, tweaks: {} })
-    expect(on()).toBe(false)
-  })
 })
 
 describe('result reader: filing', () => {

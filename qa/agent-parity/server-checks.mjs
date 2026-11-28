@@ -1100,9 +1100,8 @@ export const serverChecks = {
     await s.restart()
     assert.equal((await record(made.id)).state, 'archived', 'durable across a restart')
   },
-  // Issue 630: the result reader (switch wizard/result-reader in the Look file). Through this kind's Service routes:
-  // off, a finished worker run is filed from its status line exactly as before and the private model is never asked;
-  // on, a fake PRIVATE router on 127.0.0.1 reads each finished run once (polls share the read) and its decision files
+  // Issue 630: the result reader (on for everyone, switch wizard/result-reader removed). Through this kind's Service
+  // routes: an old Look file still saying the switch is off changes nothing; a fake PRIVATE router on 127.0.0.1 reads each finished run once (polls share the read) and its decision files
   // the record (classified_by reader, both readings kept, a disagreement counted, the ask capped at 140, the owner's
   // corrections in the prompt); an unreadable reply falls back to the status line; a router that is not private (the
   // same fake on 127.0.0.2) is never called and records file as today.
@@ -1154,12 +1153,8 @@ export const serverChecks = {
         return got
       }
       const choose = 'Two synthetic venues for Saturday. The first holds 40, the second 60. Which one should I book? Reply A or B.'
-      // Switch off: exactly today's filing, no reader call, no reader fields.
+      // No switch: an old Look file that still says off changes nothing.
       look(false)
-      const off = await file(choose)
-      assert.deepEqual([off.kind, off.last_update, off.classified_by, off.reader, calls], ['result', 'Finished without a summary. Open it to read.', undefined, undefined, 0], 'switch off: filed as before')
-      assert.equal((await (await s.raw('/wizard/v1/agent-inbox')).json()).reader, undefined, 'switch off: no reader counts')
-      look(true)
       const asks = await file(choose)
       assert.deepEqual([asks.kind, asks.state, asks.classified_by, asks.status_line, asks.options.a], ['needs_you', 'new', 'reader', null, 'Book the first venue'], 'a reply asking the owner to choose lands as needs_you')
       assert.ok(asks.ask.length <= 140 && asks.ask.startsWith('Two synthetic venues'), 'its ask is the reader\'s, within the cap')

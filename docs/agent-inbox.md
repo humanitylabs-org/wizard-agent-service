@@ -32,11 +32,11 @@ overrides it). Code: `server/agent-inbox.mjs`.
   whose idempotency key starts with `wizard-inbox-`, finished in the last 7 days) that have no record. The target is
   zero; a non-zero count is logged (`[agent-inbox] nightly check: ...`) and returned as `check` by the list route.
 
-## Result reader (issue 630, switch `wizard/result-reader`, off by default)
+## Result reader (issue 630, on for everyone with the agent inbox)
 
 After a long run the worker often forgets its reply rules, so its status line goes missing, runs long or names the
-wrong state. With the owner's `wizard/result-reader` switch on (Look file; env `WIZARD_RESULT_READER` `1` forces it
-on, `0` off), a fixed reader decides how each finished run on a linked record is filed. Code: `server/result-reader.mjs`.
+wrong state. A fixed reader decides how each finished run on a linked record is filed (its switch
+`wizard/result-reader` was removed at show-and-tell; an old Look file entry is ignored). Code: `server/result-reader.mjs`.
 
 - **Model:** only the box's private fast router (`privateRouter`: Tinfoil by host, an on-box `*-tinfoil` proxy or
   loopback), temperature 0, a fixed prompt, no memory, no tools. No private router set: never called, logged once,
@@ -50,7 +50,7 @@ on, `0` off), a fixed reader decides how each finished run on a linked record is
   (its rules, examples and 3-a-day cap) decides the alert.
 - **On the record:** `classified_by` (`reader`; `status_line` or `fallback` when the read failed), `status_line` (the
   hint), `reader` (its decision or its error), `reader_disagreed`. GET `/wizard/v1/agent-inbox` carries `reader`
-  counts (calls, reader, status_line, fallback, disagreements) while the switch is on, and a Sent row whose record the
+  counts (calls, reader, status_line, fallback, disagreements), and a Sent row whose record the
   reader filed shows `filed_by`.
 - **Failures:** invalid JSON, an HTTP error or a 20 s timeout file the run as today, logged. One read per finished run
   however often it is polled; a Service restart mid-read reads it again on the next poll.
