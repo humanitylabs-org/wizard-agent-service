@@ -1,5 +1,5 @@
-// Result reader (issue 630; owner switch `wizard/result-reader`, off by default; WIZARD_RESULT_READER '1' forces it on,
-// '0' off). A fixed, stateless reader decides how a finished background run reaches the owner, instead of the agent's
+// Result reader (issue 630; on for everyone with the agent inbox, its switch `wizard/result-reader` was removed at
+// show-and-tell). A fixed, stateless reader decides how a finished background run reaches the owner, instead of the agent's
 // own WIZARD_STATUS_V1 line (after a long run the agent often forgets its reply rules: the line is missing, too long,
 // or marks the wrong state). It is not an agent: no memory, no tools, one call to the box's PRIVATE fast router
 // (privateRouter: Tinfoil by host, or a model on this box) at temperature 0, with a fixed prompt and bounded facts.
@@ -13,7 +13,6 @@
 import { privateRouter } from './agent-alerts.mjs'
 import { normalizeStatus, parseStatusObject, stripStatus } from './thread-status.mjs'
 
-export const RESULT_READER_SWITCH = 'wizard/result-reader'
 export const READER_KINDS = new Set(['needs_you', 'result', 'fyi'])
 export const READER_REPLY_CHARS = 4000
 export const READER_ASK_MAX = 140

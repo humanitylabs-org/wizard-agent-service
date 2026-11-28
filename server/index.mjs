@@ -215,8 +215,6 @@ server = createWizardServer({
   // Private first (issue 545): a fresh install's default agent is a private Tinfoil agent; Claude/ChatGPT switch on
   // the standard agent. Follows the owner's `wizard/private-first-setup` switch; '1' forces it on, '0' off.
   privateFirst: envChoice(process.env.WIZARD_PRIVATE_FIRST),
-  // Result reader (issue 630): follows the owner's `wizard/result-reader` switch; '1' forces it on, '0' off.
-  resultReader: envChoice(process.env.WIZARD_RESULT_READER),
   // Automatic chat tags (issue 702): follows the owner's `wizard/auto-tags` switch; '1' forces it on, '0' off.
   autoTags: envChoice(process.env.WIZARD_AUTO_TAGS),
   // Smart inbox (issue 667): follows the owner's `wizard/smart-inbox` switch; '1' forces it on, '0' off.

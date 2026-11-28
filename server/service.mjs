@@ -136,7 +136,7 @@ import { createHermesStateHealth } from './hermes-state-health.mjs'
 import { createMainProviderAttach } from './main-provider-attach.mjs'
 import { createPrivateFirst, PRIVATE_FIRST_SWITCH } from './private-first.mjs'
 import { createPrivateMode, isPersonalDataApp } from './private-mode.mjs'
-import { RESULT_READER_SWITCH, createResultReader, readerFacts } from './result-reader.mjs'
+import { createResultReader, readerFacts } from './result-reader.mjs'
 import { routingNames, nameRule, chooseAgent, privateLabelBlock } from './private-routing.mjs'
 import { FIRST_CHAT_SWITCH, FIRST_CHAT_NOTE } from './first-chat.mjs'
 import { createPhoneReplyNotes, PHONE_CHAT_REPLIES_SWITCH, CHATS_APP, CHAT_REPLY_TAG } from './phone-reply-notes.mjs'
@@ -4103,12 +4103,9 @@ function buildWizardServer(options, lifetime) {
     }, 'alerts'),
   })
   const inboxQueue = agent => (agent || MAIN_AGENT_ID) === MAIN_AGENT_ID ? runQueue : routedQueues?.loaded().find(queue => queue.agentId === agent)
-  // Result reader (issue 630, result-reader.mjs): the owner's `wizard/result-reader` switch in the Look file; option
-  // resultReader (env WIZARD_RESULT_READER, '1' on / '0' off) wins. Needs the agent inbox. On, and with a PRIVATE fast
-  // router set, a fixed private model reads each finished worker run and decides how it is filed; the status line is a
-  // hint. Off, or no private router: every run is filed exactly as before.
-  const resultReaderSwitchOn = createChannelsSwitch({ id: RESULT_READER_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.resultReaderTtlMs ?? 3000 })
-  const resultReaderOn = () => agentInboxOn() && channelPart(options.resultReader, resultReaderSwitchOn)
+  // Result reader (issue 630, result-reader.mjs; on for everyone with the agent inbox, switch wizard/result-reader
+  // removed): with a PRIVATE fast router set, a fixed private model reads each finished worker run and decides how it
+  // is filed; the status line is a hint. No private router: every run is filed from its status line as before.
   // The owner's corrections, newest first: Not urgent / Should have alerted (issue 552) and Open / Send to inbox (1570).
   const readerExamples = () => {
     const out = []
@@ -4157,7 +4154,7 @@ function buildWizardServer(options, lifetime) {
     try {
       const id = agent || MAIN_AGENT_ID
       if (!agentInbox.linked(id, sessionId)) return
-      if (resultReaderOn() && readerNoteRun(id, sessionId, run, runId)) return
+      if (readerNoteRun(id, sessionId, run, runId)) return
       // More work still on its way for this thread (another queued or running turn): a fyi is progress, not the end.
       // Owed heavy work is probed through the same guard: it would hold a done back as fyi.
       const continues = inboxContinues(id, sessionId, runId)
@@ -8002,8 +7999,8 @@ function buildWizardServer(options, lifetime) {
           } else if (!one && request.method === 'GET') {
             const q = url.searchParams
             sendJson(response, 200, { records: agentInbox.list({ state: q.get('state') || '', kind: q.get('kind') || '', agent: q.get('agent') || '', limit: q.get('limit') || 200 }).map(view), check: agentInbox.lastCheck(),
-              // Issue 630: the result reader's counts (runs filed, fallbacks, disagreements), only while it is on.
-              ...(resultReaderOn() ? { reader: { on: true, private_router: Boolean(resultReader.usable()), counts: agentInbox.readerStats() } } : {}),
+              // Issue 630: the result reader's counts (runs filed, fallbacks, disagreements).
+              reader: { on: true, private_router: Boolean(resultReader.usable()), counts: agentInbox.readerStats() },
               // Main-agent Daily and Alerts threads: Send to inbox refuses them, so the shell does not offer it (issue 1569).
               // Issue 631: with a private default agent its threads move too, and its own
               // Daily days stay as well.
