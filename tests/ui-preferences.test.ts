@@ -260,3 +260,44 @@ describe('saved Wizards (box-wide switcher list)', () => {
     expect(readFileSync(join(d, 'ui-preferences.json'), 'utf8')).toBe(before)
   })
 })
+
+// wizard-ux issue 2047: the phone Apps panel edits Favorites and its Recent removals one item at a time, so a phone that
+// had not pulled (or edited at the same moment) never erases another phone's edit.
+describe('phone Apps panel lists (appFavorites, appRecentHidden) by item operation', () => {
+  it('two phones star different apps and take different apps off Recent; the box keeps every edit', async () => {
+    const d = home(), a = await start(d), b = await start(d)
+    expect((await patch(a, [{ op: 'add', key: 'appFavorites', item: 'notes' }])).status).toBe(200)
+    expect((await patch(b, [{ op: 'add', key: 'appFavorites', item: 'music' }, { op: 'add', key: 'appFavorites', item: 'notes' }])).status).toBe(200)
+    await patch(a, [{ op: 'add', key: 'appRecentHidden', item: 'wizard-music' }])
+    await patch(b, [{ op: 'add', key: 'appRecentHidden', item: 'agent.claude' }])
+    const got = await (await fetch(await start(d))).json()
+    expect(got.appFavorites).toEqual(['notes', 'music'])
+    expect(got.appRecentHidden).toEqual(['wizard-music', 'agent.claude'])
+    expect((await (await patch(a, [{ op: 'remove', key: 'appRecentHidden', item: 'wizard-music' }, { op: 'remove', key: 'appFavorites', item: 'gone' }])).json()).appRecentHidden).toEqual(['agent.claude'])
+  })
+  it('move puts an app before the first of the apps that followed it that is still listed; a removed app stays removed', async () => {
+    const d = home(), u = await start(d)
+    expect((await put(u, { appFavorites: ['calendar', 'music', 'notes'] })).status).toBe(200)
+    await patch(u, [{ op: 'remove', key: 'appFavorites', item: 'calendar' }]) // another phone
+    expect((await (await patch(u, [{ op: 'move', key: 'appFavorites', item: 'notes', items: ['calendar', 'music'] }])).json()).appFavorites).toEqual(['notes', 'music'])
+    expect((await (await patch(u, [{ op: 'move', key: 'appFavorites', item: 'notes', items: [] }])).json()).appFavorites).toEqual(['music', 'notes'])
+    expect((await (await patch(u, [{ op: 'move', key: 'appFavorites', item: 'calendar', items: ['music'] }])).json()).appFavorites).toEqual(['music', 'notes'])
+    // A batch resent after a lost answer (move to the end, then add) lands the same way twice.
+    const batch = [{ op: 'move', key: 'appFavorites', item: 'music', items: [], after: ['notes'] }, { op: 'add', key: 'appFavorites', item: 'maps' }]
+    expect((await (await patch(u, batch)).json()).appFavorites).toEqual(['notes', 'music', 'maps'])
+    expect((await (await patch(u, batch)).json()).appFavorites).toEqual(['notes', 'music', 'maps'])
+  })
+  it('full lists: Favorites stay as they are, Recent removals drop their oldest; malformed operations write nothing', async () => {
+    const d = home(), u = await start(d), ids = Array.from({ length: 100 }, (_, i) => 'app' + i)
+    expect((await put(u, { appFavorites: ids, appRecentHidden: ids })).status).toBe(200)
+    const j = await (await patch(u, [{ op: 'add', key: 'appFavorites', item: 'new' }, { op: 'add', key: 'appRecentHidden', item: 'new' }])).json()
+    expect(j.appFavorites).toEqual(ids); expect(j.appRecentHidden).toEqual([...ids.slice(1), 'new'])
+    const before = readFileSync(join(d, 'ui-preferences.json'), 'utf8')
+    for (const ops of [[{ op: 'add', key: 'appFavorites', item: 'agent:claude' }], [{ op: 'add', key: 'appFavorites', item: 1 }], [{ op: 'move', key: 'appRecentHidden', item: 'app1', items: [] }],
+      [{ op: 'move', key: 'appFavorites', item: 'app1' }], [{ op: 'move', key: 'appFavorites', item: 'app1', items: ['bad id'] }], [{ op: 'front', key: 'appFavorites', items: ['app1'] }],
+      [{ op: 'add', key: 'appFavorites', item: 'app1', items: [] }], [{ op: 'remove', key: 'appRecentHidden', item: '' }],
+      [{ op: 'move', key: 'appFavorites', item: 'app1', items: [], after: ['a:b'] }], [{ op: 'add', key: 'appFavorites', item: 'app1', after: [] }], [{ op: 'add', key: 'pinnedChats', item: 'wizard_1', after: [] }]])
+      expect((await patch(u, ops)).status).toBe(400)
+    expect(readFileSync(join(d, 'ui-preferences.json'), 'utf8')).toBe(before)
+  })
+})
