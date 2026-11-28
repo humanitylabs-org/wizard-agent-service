@@ -87,6 +87,7 @@ Tailscale source inclusion is not activation. Read [the activation and immutable
 | `WIZARD_UPLOAD_MAX_BYTES` | `0` (disk-bound only) | Optional per-file cap for resumable uploads |
 | `WIZARD_UPLOAD_STATE_PATH` / `WIZARD_UPLOAD_STAGING_DIR` | under `~/.hermes/state/wizard-mobile/` | Upload/share records; staging for the Wizard Inbox backend (a WizardOS box stages in `<media>/.wizard-uploads`) |
 | `WIZARD_*_STATE_PATH` | under `~/.hermes/state/wizard-mobile/` | Read state, dispositions, run queue, voice recovery |
+| `WIZARD_STALL_PROFILE` | on | `0` turns off the light event-loop sampler. While on, every logged `[event-loop]` line carries `blocking`: its longest busy stretches (ms), the functions that ran longest in each (`self`) and the Service frames they ran under (`under`), function names and line numbers only |
 
 Every variable is listed in `server/index.mjs`. `ops/` has a hardened systemd unit and an env template. Their `wizard-mobile` file names are kept for now so existing deployments keep matching them.
 
