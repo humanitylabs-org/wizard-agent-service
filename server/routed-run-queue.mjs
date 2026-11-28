@@ -21,7 +21,7 @@ export function withApprovalWindow(payload, windowS, nowS = Date.now() / 1000) {
   return { ...payload, approval: { ...approval, window_s: windowS, expires_at: expiresAt, ...(nowS >= expiresAt ? { expired: true } : {}) } }
 }
 const json = (status, payload) => new Response(JSON.stringify(payload),{status,headers:{'Content-Type':'application/json'}})
-export function createRoutedQueues({ registry, queuedHistory, restoreOwnerTurns = null, keepOwnerTurns = false, own, pollIntervalMs = 1500, maxActive = 8, onStatus, onRun, onDispatch, decorateDispatch, providerAccessRecovery = false, providerAccessWindowSeconds, providerFailureDismissed, providerSignInReady = null, launchWaitMs, launchHold = null }) {
+export function createRoutedQueues({ archiveHold = () => false, registry, queuedHistory, restoreOwnerTurns = null, keepOwnerTurns = false, own, pollIntervalMs = 1500, maxActive = 8, onStatus, onRun, onDispatch, decorateDispatch, providerAccessRecovery = false, providerAccessWindowSeconds, providerFailureDismissed, providerSignInReady = null, launchWaitMs, launchHold = null }) {
   const entries = new Map()
   const get = async agent => {
     if (!entries.has(agent.id)) {
@@ -57,13 +57,13 @@ export function createRoutedQueues({ registry, queuedHistory, restoreOwnerTurns 
             await call(`/api/sessions/${encodeURIComponent(record.sessionId)}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({archived:true})})
           }
           // A launch that answers already finished (an idempotent replay, a slow admission) is never looked up again.
-          if(ownerRunReturns(record,normalizeProviderPreflightFailure(payload),ownerApprovals)) await unarchiveRouted(record.sessionId)
+          if(ownerRunReturns(record,normalizeProviderPreflightFailure(payload),ownerApprovals,{hold:archiveHold()})) await unarchiveRouted(record.sessionId)
           return {upstreamRunId:payload.run_id||payload.id,capacityStatus:payload.status,payload}
         },
         lookup:async record=>{ const payload=await call(`/v1/runs/${encodeURIComponent(record.upstreamRunId)}`); if(normalizeProviderPreflightFailure(payload).status==='completed') onStatus?.(agent.id,record.sessionId,payload.output); onRun?.(agent.id,record.sessionId,payload,record.publicRunId)
           // wizard-ux issue 1997: a thread the owner archived while his own run worked comes back with its visible
           // reply (or approval wait), exactly as on main (server/owner-run-return.mjs); [SILENT] keeps it archived.
-          if(ownerRunReturns(record,normalizeProviderPreflightFailure(payload),ownerApprovals)) await unarchiveRouted(record.sessionId)
+          if(ownerRunReturns(record,normalizeProviderPreflightFailure(payload),ownerApprovals,{hold:archiveHold()})) await unarchiveRouted(record.sessionId)
           return {payload} },
         // A steer this agent accepted but never consumed is replayed once, like main; only this agent's history is read.
         steerDelivered:(record,text)=>readSteerResentHttp(path=>call(path),record.sessionId,record.createdAt,text,queuedInputTextOf(record.body)),

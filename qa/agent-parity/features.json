@@ -1304,7 +1304,7 @@
       "id": "archive-while-working",
       "description": "wizard-ux issue 1997: the owner may archive a thread while his own run still works (the shell offers Archive and Snooze there). Archive is only the session flag and never stops the run; when that owner run ends with a visible reply (or stops to wait for his approval) the thread comes back to Inbox once, and an empty or [SILENT] reply keeps it archived. Service- and agent-started runs keep their issue 675 rules.",
       "layer": "server",
-      "how_to_test": "For main, host-profile, container and restricted: send an owner run into the parity thread, archive the thread while the run is running (the run stays running), finish it with a visible reply and read the session: archived is false; repeat with a [SILENT] reply: archived stays true. tests/archived-agent-runs.test.ts covers main through the HTTP proxy, including an archive after the reply landed staying archived. Synthetic HTTP fixture evidence, not live box proof.",
+      "how_to_test": "For main, host-profile, container and restricted: send an owner run into the parity thread, archive the thread while the run is running (the run stays running), finish it with a visible reply and read the session: archived is false; repeat with a [SILENT] reply: archived stays true. tests/archived-agent-runs.test.ts covers main through the HTTP proxy, including an archive after the reply landed staying archived. wizard-ux issue 2063: with the owner's wizard/archive-hold switch on (Look file; WIZARD_ARCHIVE_HOLD forces it), the visible reply keeps the thread archived for main and every routed queue (owner-run-return.mjs hold), while an approval wait and his next owner message still bring it back; tests/archived-agent-runs.test.ts covers main on and off. Synthetic HTTP fixture evidence, not live box proof.",
       "source_refs": [
         "server/owner-run-return.mjs",
         "server/service.mjs",
@@ -1321,7 +1321,7 @@
       "id": "archive-placement",
       "description": "Keep archived stale-running threads in Archive with recovery controls and authoritative state",
       "layer": "ux",
-      "how_to_test": "Archive a synthetic thread while its stale status still says running; through main, host-profile, container and restricted chat routes, verify it appears only in Archive, opens as Archived, and offers Restore plus Snooze. wizard-ux issue 1997: a thread that is still working (its run going, or a helper finishing it) offers Snooze and Archive for main, host-profile, container and restricted rows (wizard-ux tests/archive-working-thread.test.mjs), an approval wait offers no Archive, and wizard-ux qa/scripts/qa-archive-working-thread.cjs archives a working thread on phone and desktop without stopping its run.",
+      "how_to_test": "Archive a synthetic thread while its stale status still says running; through main, host-profile, container and restricted chat routes, verify it appears only in Archive, opens as Archived, and offers Restore plus Snooze. wizard-ux issue 1997: a thread that is still working (its run going, or a helper finishing it) offers Snooze and Archive for main, host-profile, container and restricted rows (wizard-ux tests/archive-working-thread.test.mjs), an approval wait offers no Archive, and wizard-ux qa/scripts/qa-archive-working-thread.cjs archives a working thread on phone and desktop without stopping its run. wizard-ux issue 2063 (shell switch wizard/archive-hold, off by default): with it on, Archive holds the chat archived on that device for 60 s over a lagging list, the reply of the run that was going when it was archived keeps it archived (the shell writes archived again on the row's own agent), and only his own send, Restore or a new agent run brings it back (the last with a \"Back: <agent> wrote\" tag); wizard-ux tests/archive-hold.test.mjs runs the real live.js rules for main, host-profile, container and restricted rows, and tests/qa-archive-hold.cjs proves it in a browser on phone and desktop against a list that lags 15 s.",
       "source_refs": [
         "wizard-ux/web/live.js",
         "wizard-ux/web/core/chats.js"
@@ -1329,6 +1329,8 @@
       "reference_tests": [
         "wizard-ux/tests/archived-working-threads.test.mjs",
         "wizard-ux/tests/archive-working-thread.test.mjs",
+        "wizard-ux/tests/archive-hold.test.mjs",
+        "wizard-ux/tests/qa-archive-hold.cjs",
         "wizard-ux/qa-stopped-done.cjs",
         "wizard-ux/qa-unified-chats.cjs",
         "qa/agent-parity/browser.mjs"

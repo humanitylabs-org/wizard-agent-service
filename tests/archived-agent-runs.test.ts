@@ -34,7 +34,7 @@ afterEach(async () => {
 // A Hermes stand-in that, like the worst case on a box, re-opens a thread whenever a run is posted into it.
 // `status` 'running' answers the admission as running and finishes on the first run lookup (real Hermes);
 // 'completed' answers the admission already finished.
-async function fixture(output: string, status: 'running' | 'completed' = 'running') {
+async function fixture(output: string, status: 'running' | 'completed' = 'running', extra: Record<string, unknown> = {}) {
   const sessions = new Map<string, any>(), runs = new Map<string, any>(), patches: any[] = []
   const upstream = createServer(async (req, res) => {
     const path = new URL(req.url!, 'http://fixture.invalid').pathname
@@ -71,7 +71,7 @@ async function fixture(output: string, status: 'running' | 'completed' = 'runnin
   const server: any = createWizardServer({ upstreamOrigin: `http://127.0.0.1:${up.port}`, hermesKey: 'fixture-key', ownerProof: OWNER, requireAccess: false,
     requireJoinedDelegationCapability: false, followThrough: false, wizardOsHome: process.env.WIZARD_OS_HOME,
     runQueueStatePath: join(root, 'queue.sqlite3'), runQueuePollIntervalMs: 0, activeSessionReader: async () => [], dispatchHealthReader: () => true,
-    schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerHermesHome: process.env.HERMES_HOME })
+    schedulerStatePath: join(root, 'schedules.sqlite3'), schedulerHermesHome: process.env.HERMES_HOME, ...extra })
   servers.push(server)
   const address = await listen(server)
   const origin = `http://127.0.0.1:${address.port}`
@@ -203,5 +203,54 @@ describe('which runs bring an archived thread back (wizard-ux issue 1997)', () =
     expect(ownerRunReturns(run('d'), { status: 'failed' }, approvals)).toBe(false)
     expect(ownerRunReturns(run('e'), { status: 'waiting_for_approval' }, approvals)).toBe(true)
     expect(ownerRunReturns(run('e'), { status: 'waiting_for_approval' }, approvals)).toBe(false)
+  })
+})
+
+// wizard-ux issue 2063 (Miguel, 28 Nov 2026): with the owner's `wizard/archive-hold` switch on, his Archive wins: the
+// reply of the run that was going when he archived it keeps the thread archived on every device; an approval wait
+// and his own next message still bring it back. Off (the default), issue 1997's rule above is unchanged.
+describe('Archive stays archived (wizard-ux issue 2063, switch wizard/archive-hold)', () => {
+  const ownerRun = async (f: Awaited<ReturnType<typeof fixture>>, key: string, input = 'Please plan the launch week.') => {
+    const sent = await fetch(`${f.origin}/wizard/hermes/v1/runs`, { method: 'POST', headers: { ...f.headers, 'Idempotency-Key': key },
+      body: JSON.stringify({ session_id: 'wizard_origin', input }) })
+    expect(sent.status).toBe(202)
+    return (await sent.json()).run_id as string
+  }
+  const archive = async (f: Awaited<ReturnType<typeof fixture>>) => {
+    const patched = await fetch(`${f.origin}/wizard/hermes/api/sessions/wizard_origin`, { method: 'PATCH', headers: f.headers, body: JSON.stringify({ archived: true }) })
+    expect(patched.status).toBe(200)
+  }
+  const finish = async (f: Awaited<ReturnType<typeof fixture>>, runId: string) => {
+    let last: any = null
+    for (let i = 0; i < 3; i++) last = await (await fetch(`${f.origin}/wizard/hermes/v1/runs/${runId}`, { headers: f.headers })).json()
+    return last
+  }
+
+  it('switch on: a visible reply to the run that was going keeps the thread archived', async () => {
+    const f = await fixture(report('done', 'Launch week planned'), 'running', { archiveHold: true })
+    const runId = await ownerRun(f, 'owner-2063-visible')
+    await archive(f)
+    const run = await finish(f, runId)
+    expect(run.status).toBe('completed')
+    expect(f.archived()).toBe(true)
+    expect(f.patches.filter(p => p.archived === false)).toEqual([])
+  })
+
+  it('switch on: his own next message still brings it back at once', async () => {
+    const f = await fixture(report('done', 'Launch week planned'), 'running', { archiveHold: true })
+    const first = await ownerRun(f, 'owner-2063-first')
+    await archive(f)
+    await finish(f, first)
+    expect(f.archived()).toBe(true)
+    await ownerRun(f, 'owner-2063-again', 'One more thing.')
+    expect(f.archived()).toBe(false)
+  })
+
+  it('switch off (forced): the reply brings it back as before (issue 1997)', async () => {
+    const f = await fixture(report('done', 'Launch week planned'), 'running', { archiveHold: false })
+    const runId = await ownerRun(f, 'owner-2063-off')
+    await archive(f)
+    await finish(f, runId)
+    expect(f.archived()).toBe(false)
   })
 })
