@@ -4,8 +4,9 @@ import { createWizardServer, listen, OWN_STYLE_RUN_INSTRUCTIONS as WIZARD_RUN_IN
 import { appProvenanceRunNote } from '../server/thread-app-provenance.mjs'
 import { FIRST_CHAT_NOTE } from '../server/first-chat.mjs' // issue 650: on for everyone, in every run
 import { REPLY_BUTTONS_INSTRUCTIONS } from '../server/reply-buttons.mjs' // wizard-ux issue 1889: on for everyone, in every run
+import { QUICK_LINKS_INSTRUCTIONS } from '../server/quick-links.mjs' // wizard-ux issue 1965: on for everyone, in every run
 
-const instructions = `${WIZARD_RUN_INSTRUCTIONS}\n\n${appProvenanceRunNote([{ id: 'usuals', name: 'Food' }])}\n${FIRST_CHAT_NOTE}\n${REPLY_BUTTONS_INSTRUCTIONS}`
+const instructions = `${WIZARD_RUN_INSTRUCTIONS}\n\n${appProvenanceRunNote([{ id: 'usuals', name: 'Food' }])}\n${FIRST_CHAT_NOTE}\n${REPLY_BUTTONS_INSTRUCTIONS}\n${QUICK_LINKS_INSTRUCTIONS}`
 
 const servers: Server[] = []
 import { mkdtempSync, rmSync } from 'node:fs'

@@ -60,7 +60,7 @@ import { AUTO_TAGS_SWITCH, createAutoTagger, readRecentChats } from './auto-tags
 import { createChannelsSwitch, channelOn, channelPart } from './channels-switch.mjs'
 import { replyButtonsNote } from './reply-buttons.mjs'
 import { REPLY_ACTIONS_SWITCH, createReplyActions, replyActionsNote } from './reply-actions.mjs'
-import { QUICK_LINKS_SWITCH, quickLinksNote } from './quick-links.mjs'
+import { quickLinksNote } from './quick-links.mjs'
 import { createCapabilities } from './capabilities.mjs'
 // wizard-ux issue 1437: the shell app whose skill is the generated interface manual (on for everyone).
 const INTERFACE_MANUAL_APPS = new Set(['wizard-ux'])
@@ -3173,11 +3173,9 @@ function buildWizardServer(options, lifetime) {
   const replyActionsSwitchOn = createChannelsSwitch({ id: REPLY_ACTIONS_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.replyActionsTtlMs ?? 3000 })
   const replyActionsOn = () => channelPart(options.replyActions, replyActionsSwitchOn)
   const buttonsNote = () => [replyButtonsNote(), replyActionsNote(replyActionsOn)].filter(Boolean).join('\n')
-  // New chat quick links (wizard-ux issue 1965, quick-links.mjs): the owner's `wizard/new-chat-chips` switch in the Look
-  // file; option quickLinks (env WIZARD_NEW_CHAT_CHIPS, '1' on / '0' off) wins. On: one note on every run says how to answer
-  // "What's waiting on me?" and "Plan my day". Off: nothing.
-  const quickLinksSwitchOn = createChannelsSwitch({ id: QUICK_LINKS_SWITCH, readLook: () => pages?.read('wizard-look', 'look.json')?.text, ttlMs: options.quickLinksTtlMs ?? 3000 })
-  const quickNote = () => quickLinksNote(() => channelPart(options.quickLinks, quickLinksSwitchOn))
+  // New chat quick links (wizard-ux issue 1965, quick-links.mjs; on for everyone, switch wizard/new-chat-chips removed):
+  // one note on every main and routed run says how to answer "What's waiting on me?" and "Plan my day".
+  const quickNote = () => quickLinksNote()
   const capabilities = createCapabilities({
     apps: (agentId) => bridge?.apps(agentId) || [],
     allApps: () => bridge?.apps() || [],
